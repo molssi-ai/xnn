@@ -1,0 +1,5 @@
+name: schnet
+cutoff: 5.0
+n_features: 128
+n_interactions: 3
+n_rbf: 50

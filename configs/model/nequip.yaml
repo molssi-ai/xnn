@@ -1,0 +1,7 @@
+name: nequip
+cutoff: 5.0
+n_features: 128          # mul = n_features // 4
+n_interactions: 3        # number of equivariant layers
+n_rbf: 8
+species: [1, 6, 8]
+l_max: 2

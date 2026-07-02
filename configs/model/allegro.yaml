@@ -1,0 +1,8 @@
+name: allegro
+cutoff: 6.0
+n_features: 128
+n_interactions: 2        # local layers (no message passing)
+n_rbf: 8
+species: [1, 6, 8]
+l_max: 2
+latent_dim: 64

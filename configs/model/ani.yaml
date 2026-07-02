@@ -1,0 +1,9 @@
+name: ani
+cutoff: 5.2              # neighbor list uses max(radial, angular) cutoff
+n_features: 0           # unused (descriptor model)
+n_interactions: 0
+n_rbf: 0
+species: [1, 6, 7, 8]
+radial_cutoff: 5.2
+angular_cutoff: 3.5
+hidden: [128, 96, 64]
