@@ -1,0 +1,5 @@
+train_path: data/train.extxyz
+val_path: null
+batch_size: 16        # set to 1 to disable batch training
+num_workers: 0
+val_fraction: 0.1

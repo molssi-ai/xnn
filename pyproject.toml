@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xnns"
+version = "0.1.0"
+description = "Machine-learning interatomic potentials in PyTorch for molecular and periodic systems"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "pyyaml",
+    "tomli; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+ase = ["ase>=3.22"]
+# NOTE: relaxed from >=0.5 -- the example notebooks compare against ACEsuit/mace
+# (mace-torch), which pins e3nn==0.4.4. xnns runs fine on 0.4.4 (all tests pass).
+gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
+hydra = ["hydra-core>=1.3", "omegaconf>=2.3"]
+dev = ["pytest"]
+# Everything needed to build and run the example notebooks in examples/gnn/mace/,
+# including the reference ACEsuit/mace implementation the notebooks are benchmarked against.
+examples = [
+    "ase>=3.22",
+    "e3nn>=0.4.4",
+    "mace-torch==0.3.16",
+    "matplotlib>=3.8",
+    "jupyter",
+    "ipykernel",
+    "nbconvert",
+    "nbformat",
+]
+all = [
+    "ase>=3.22",
+    "e3nn>=0.4.4",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "pytest",
+    "mace-torch==0.3.16",
+    "matplotlib>=3.8",
+    "jupyter",
+    "ipykernel",
+    "nbconvert",
+    "nbformat",
+]
+
+[project.scripts]
+xnns = "xnns.common.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# uv configuration -- reproduces the .venv the notebooks were created with.
+#
+# The host has 2x A100 with CUDA driver 12.2, so torch must use the cu121 GPU
+# wheels (the default wheels are cu13x and fail on this driver). torch is pulled
+# from the PyTorch cu121 index, which resolves torch to 2.5.1+cu121.
+# ---------------------------------------------------------------------------
+[tool.uv]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
