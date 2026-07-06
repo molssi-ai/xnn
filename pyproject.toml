@@ -22,6 +22,12 @@ ase = ["ase>=3.22"]
 gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
 hydra = ["hydra-core>=1.3", "omegaconf>=2.3"]
 dev = ["pytest"]
+docs = [
+    "sphinx>=7",
+    "pydata-sphinx-theme>=0.15",
+    "sphinx-design",
+    "sphinx-copybutton",
+]
 # Everything needed to build and run the example notebooks in examples/gnn/,
 # including the reference ACEsuit/mace and mir-group/nequip implementations the
 # notebooks are benchmarked against.

@@ -1,5 +1,7 @@
 """Name -> class registry so new models are added without touching the core.
 
+For example::
+
     from xnns.common.models.registry import register_model, build_model
 
     @register_model("mymodel")

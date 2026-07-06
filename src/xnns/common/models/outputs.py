@@ -1,14 +1,15 @@
 """Differentiate energy to get conservative forces and the stress tensor.
 
-Wrap *any* registered model:
+Wrap *any* registered model::
 
     model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
     out = model(graph)   # out has energy, forces, (stress)
 
-Forces:  F = -dE/dr   (autograd w.r.t. positions)
-Stress:  symmetric-strain trick -- introduce eps (B,3,3)=0, displace positions
-         and cell by eps, then sigma = (1/V) dE/deps. This matches the
-         NequIP/MACE convention and is what ASE/LAMMPS expect.
+Forces: ``F = -dE/dr`` (autograd w.r.t. positions).
+
+Stress: symmetric-strain trick -- introduce eps (B,3,3)=0, displace positions
+and cell by eps, then sigma = (1/V) dE/deps. This matches the NequIP/MACE
+convention and is what ASE/LAMMPS expect.
 """
 from __future__ import annotations
 

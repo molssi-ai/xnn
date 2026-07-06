@@ -3,7 +3,7 @@
 A `Featurizer` turns an :class:`~xnns.common.data.AtomicGraph` into model inputs --
 either invariant per-atom descriptors (symmetry functions, AEV) or equivariant
 edge/node embeddings (spherical-harmonic edge attributes). Featurizers are
-plain ``nn.Module``s and are *independently usable*: you can instantiate one and
+plain ``nn.Module`` subclasses and are *independently usable*: you can instantiate one and
 call it on a graph without any model, e.g. to inspect descriptors or to build
 your own model on top.
 
