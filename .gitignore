@@ -1,7 +1,11 @@
 Resources/
 runs/
+docs/_build/
+docs/api/generated/
 examples/gnn/mace/runs/
 src/xnns.egg-info/
 __pycache__/
 .pytest_cache/
-examples/gnn/mace/argon_*.png
+examples/*/*/*.png
+xnns.code-workspace
+.gitignore
