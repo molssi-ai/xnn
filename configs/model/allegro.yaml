@@ -1,8 +1,18 @@
 name: allegro
-cutoff: 6.0
-n_features: 128
-n_interactions: 2        # local layers (no message passing)
-n_rbf: 8
-species: [1, 6, 8]
-l_max: 2
-latent_dim: 64
+cutoff: 6.0               # Allegro r_max
+n_features: 32            # tensor-track channels (Allegro num_tensor_features)
+n_interactions: 2         # tensor-product layers (Allegro num_layers)
+n_rbf: 8                  # Bessel basis size (Allegro num_bessels_per_basis)
+species: [1, 6, 8]        # H, C, O (Allegro chemical_symbols)
+l_max: 1
+parity: o3_full           # o3_full | o3_restricted | so3
+two_body_latent: [32, 64, 128]  # Allegro two_body_latent_mlp_latent_dimensions
+latent: [128]             # Allegro latent_mlp_latent_dimensions
+env_embed: []             # Allegro env_embed_mlp_latent_dimensions (linear)
+edge_eng: [32]            # Allegro edge_eng_mlp_latent_dimensions
+avg_num_neighbors: null   # set to the training-set average (upstream "auto")
+latent_resnet: true
+num_polynomial_cutoff: 6  # Allegro PolynomialCutoff_p
+trainable_rbf: true
+atomic_energies: null     # per-species shifts (per_species_rescale_shifts)
+atomic_scales: null       # per-species scales (per_species_rescale_scales)

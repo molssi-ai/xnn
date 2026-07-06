@@ -54,6 +54,14 @@ class SphericalHarmonicEdgeEmbedding(Featurizer):
         Radial basis to use: ``"bessel"`` for :class:`BesselRBF` or
         ``"gaussian"`` for :class:`~xnns.common.featurizers.GaussianRBF`.
         Default is ``"bessel"``.
+    trainable_rbf : bool, optional
+        Make the Bessel frequencies learnable (NequIP's ``BesselBasis``
+        default). Only meaningful for ``radial_type="bessel"``. Default is
+        ``False``.
+    rbf_prefactor : float, optional
+        Normalization prefactor of the Bessel basis. ``None`` (default) is the
+        DimeNet/MACE convention ``sqrt(2/cutoff)``; NequIP uses ``2/cutoff``.
+        Only meaningful for ``radial_type="bessel"``.
 
     Attributes
     ----------
@@ -75,7 +83,8 @@ class SphericalHarmonicEdgeEmbedding(Featurizer):
     """
 
     def __init__(self, l_max: int = 2, n_rbf: int = 8, cutoff: float = 5.0,
-                 p: int = 6, radial_type: str = "bessel"):
+                 p: int = 6, radial_type: str = "bessel",
+                 trainable_rbf: bool = False, rbf_prefactor: float | None = None):
         super().__init__()
         if not _HAS_E3NN:
             raise ImportError('e3nn is required: pip install "xnns[gnn]"')
@@ -85,7 +94,8 @@ class SphericalHarmonicEdgeEmbedding(Featurizer):
         self.sph = o3.SphericalHarmonics(
             self.irreps_sh, normalize=True, normalization="component")
         if radial_type == "bessel":
-            self.rbf = BesselRBF(n_rbf, cutoff)
+            self.rbf = BesselRBF(n_rbf, cutoff, trainable=trainable_rbf,
+                                 prefactor=rbf_prefactor)
         elif radial_type == "gaussian":
             self.rbf = GaussianRBF(n_rbf, cutoff)
         else:

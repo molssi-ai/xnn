@@ -12,7 +12,7 @@ class BesselRBF(nn.Module):
 
     Expands an interatomic distance ``r`` into a set of ``n_rbf`` invariant
     radial features using the normalized sinc/Bessel functions
-    ``sqrt(2/rc) * sin(n*pi*r/rc) / r`` for ``n = 1, ..., n_rbf``. Compared with
+    ``prefactor * sin(n*pi*r/rc) / r`` for ``n = 1, ..., n_rbf``. Compared with
     a Gaussian basis this is smoother and needs fewer functions to cover the
     cutoff sphere.
 
@@ -23,22 +23,35 @@ class BesselRBF(nn.Module):
     cutoff : float, optional
         Cutoff radius ``rc`` used to set the basis frequencies and the
         normalization. Default is 5.0.
+    trainable : bool, optional
+        If ``True``, the ``n * pi`` frequencies are a learnable
+        :class:`torch.nn.Parameter` (the NequIP ``BesselBasis`` default);
+        otherwise a fixed buffer (the MACE default). Default is ``False``.
+    prefactor : float, optional
+        Overall normalization factor. ``None`` (default) uses the
+        DimeNet/MACE convention ``sqrt(2 / cutoff)``; the original NequIP
+        uses ``2 / cutoff``.
 
     Attributes
     ----------
     freqs : Tensor
-        Registered buffer of shape ``(n_rbf,)`` holding the angular
-        frequencies ``n * pi``.
+        The angular frequencies ``n * pi`` of shape ``(n_rbf,)`` -- a
+        registered buffer, or a :class:`torch.nn.Parameter` when
+        ``trainable``.
     norm : float
-        Scalar normalization factor ``sqrt(2 / cutoff)``.
+        The scalar normalization ``prefactor``.
     """
 
-    def __init__(self, n_rbf: int = 8, cutoff: float = 5.0):
+    def __init__(self, n_rbf: int = 8, cutoff: float = 5.0,
+                 trainable: bool = False, prefactor: float | None = None):
         super().__init__()
         self.cutoff = cutoff
         freqs = math.pi * torch.arange(1, n_rbf + 1, dtype=torch.get_default_dtype())
-        self.register_buffer("freqs", freqs)
-        self.norm = math.sqrt(2.0 / cutoff)
+        if trainable:
+            self.freqs = nn.Parameter(freqs)
+        else:
+            self.register_buffer("freqs", freqs)
+        self.norm = math.sqrt(2.0 / cutoff) if prefactor is None else float(prefactor)
 
     def forward(self, r: Tensor) -> Tensor:
         """Expand distances into the Bessel radial basis.

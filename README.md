@@ -8,12 +8,14 @@ pip install -e .            # core (torch, numpy, pyyaml)
 pip install -e ".[ase]"     # + ASE calculator
 pip install -e ".[gnn]"     # + e3nn for NequIP/MACE/Allegro
 pip install -e ".[hydra]"   # + Hydra/OmegaConf config
-pip install -e ".[examples]" # + ASE, e3nn, mace-torch, jupyter (runs the notebooks)
+pip install -e ".[examples]" # + ASE, e3nn, mace-torch, nequip, jupyter (runs the notebooks)
 pip install -e ".[all]"
 ```
 
 The `examples` notebooks benchmark xnns against the reference
-[ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`), which pins
+[ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`) and
+[mir-group/nequip](https://github.com/mir-group/nequip) /
+[mir-group/allegro](https://github.com/mir-group/allegro), which pin
 `e3nn==0.4.4`; xnns runs fine on that pin. `pyproject.toml` also carries a `uv`
 setup that reproduces the GPU `.venv` the notebooks were built in (torch
 `2.5.1+cu121` from the PyTorch cu121 index, for CUDA-12.x drivers).
@@ -131,8 +133,11 @@ Pair the exported `.pt` with the matching C++ pair style (pair_nequip /
 pair_mace / pair_allegro pattern). The `LAMMPSWrapper` in
 `common/deploy/lammps.py` defines the tensor ABI. A model is exportable when it
 provides the scriptable `node_energy(atomic_numbers, edge_index, edge_vec)`
-core -- SchNet and MACE do (the scripted MACE reproduces the eager model to
-~1e-15, verified in `tests/test_mace.py`); NequIP/Allegro do not yet.
+core -- SchNet, NequIP, MACE and Allegro all do (the scripted models reproduce
+the eager ones to ~1e-15, verified in `tests/test_mace.py` /
+`tests/test_nequip.py` / `tests/test_allegro.py`). For NequIP this required a scriptable, bit-exact stand-in
+for e3nn's `Gate` (`xnns.gnn.models.nequip._Gate`), which the e3nn 0.4.4
+original cannot do on torch 2.x.
 
 ## Models and fidelity
 
@@ -141,9 +146,9 @@ core -- SchNet and MACE do (the scripted MACE reproduces the eager model to
 | SchNet | cnn | Gaussian RBF | full; trainable; TorchScript/LAMMPS-deployable |
 | HDNNP | dnn | radial symmetry functions (G2) | full; trainable |
 | ANI | dnn | AEV (radial + angular) | full; trainable |
-| NequIP | gnn | spherical-harmonic edges | full; equivariant (verified); trainable |
+| NequIP | gnn | spherical-harmonic edges | faithful; matches mir-group/nequip (see note); TorchScript/LAMMPS-deployable |
 | MACE | gnn | spherical-harmonic edges | faithful; learned symmetric contraction; matches ACEsuit/mace (see note); TorchScript/LAMMPS-deployable |
-| Allegro | gnn | spherical-harmonic edges | equivariant; strictly local (see note) |
+| Allegro | gnn | spherical-harmonic edges | faithful; matches mir-group/allegro (see note); TorchScript/LAMMPS-deployable |
 
 Equivariance is verified in `tests/test_gnn.py` and `tests/test_mace.py` (rotate
 inputs → energy invariant, forces co-rotate; errors ~1e-7).
@@ -159,9 +164,28 @@ inputs → energy invariant, forces co-rotate; errors ~1e-7).
   makes the message-passing depth fully flexible (`num_interactions` = T = 0..N,
   vs. upstream's fixed 2). The `examples/` notebooks verify it block-by-block
   and end-to-end against `mace-torch` on Argon MD data.
-- *Allegro* implements the defining property (strict locality, no message
-  passing, latent-MLP-driven equivariant edge updates) without the original's
-  two-body bootstrap / normalization details.
+- *NequIP* is a faithful, self-contained re-implementation of the upstream
+  `EnergyModel`: the real `InteractionBlock` (with upstream parameter names, so
+  state dicts transplant directly), per-layer `tp_path_exists` irreps pruning,
+  the gated nonlinearity, NequIP's radial conventions (trainable Bessel with
+  the `2/r_max` prefactor, `1/sqrt(avg_num_neighbors)` message normalization,
+  the `r_j - r_i` edge orientation) and the per-species energy scale/shift.
+  Given the same weights it reproduces `nequip` to ~1e-16 (energies, forces
+  and stress; `tests/test_nequip.py`), needing only `e3nn`. The `examples/`
+  notebooks verify it block-by-block and end-to-end on Argon MD data.
+- *Allegro* is a faithful, self-contained re-implementation of the original
+  mir-group/allegro (v0.3.0, the e3nn-era reference, default `uuulin` mode):
+  the two-body product type embedding, the per-channel weightless Wigner-3j
+  tensor products with the embedded-environment density trick, the strided
+  channel-mixing linears (same flat weight layout, so state dicts transplant
+  directly), the cumulative-softmax latent resnet, Allegro's radial
+  conventions (trainable "normalized sinc" Bessel with the `r_max/pi`
+  prefactor, `1/sqrt(avg_num_neighbors - 1)` environment and
+  `1/sqrt(avg_num_neighbors)` energy-sum normalization) and the per-species
+  scale/shift. Given the same weights it reproduces `allegro` to ~1e-15
+  (energies and forces; `tests/test_allegro.py`), needing only `e3nn`. The
+  `examples/` notebooks verify it block-by-block and end-to-end on Argon MD
+  data.
 
 Everything downstream (data, featurizers, autograd forces/stress, training,
 ASE/LAMMPS deploy) is identical across all models.
@@ -183,6 +207,25 @@ validating the faithful MACE against the reference `mace-torch`:
   the MACE architecture block by block in *both* `mace-torch` and xnns (with the
   defining equations and architecture figures in `figures/`), transplants a whole
   model, and reproduces its energy and forces to ~1e-15.
+
+The same trilogy exists for NequIP in `examples/gnn/nequip/`, validating the
+faithful NequIP against the reference `nequip` package (the Argon data is shared
+from `examples/gnn/mace/data/`):
+
+- **`01_nequip_block_by_block_vs_original.ipynb`** — every NequIP block
+  (embedding, trainable Bessel basis, spherical harmonics, interaction block,
+  gate, readout, per-species scale/shift) checked numerically against the
+  original, ending with a whole-model weight transplant (~1e-16).
+- **`02_nequip_argon_train_test.ipynb`** — the full train/test pipeline on the
+  Argon MD data, run twice (xnns vs. original NequIP) and compared at every
+  stage.
+- **`03_nequip_argon_density_md.ipynb`** — liquid-Argon mass density from NPT MD
+  through ASE, comparing xnns against `nequip` (identical weights → ~zero
+  difference, plus independently trained models).
+
+And for Allegro in `examples/gnn/allegro/`, validating the faithful Allegro
+against the reference `allegro` package (same 01 block-by-block / 02 Argon
+train-test / 03 NPT-density trilogy).
 
 `examples/quickstart.py` is the minimal toy-data train/predict loop.
 

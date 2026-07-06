@@ -47,6 +47,18 @@ class EquivariantGNN(InteratomicPotential):
         ``o3.Irreps.spherical_harmonics(l_max)``.
     n_rbf : int
         Number of radial basis functions in the edge featurizer.
+    p : int, optional
+        Polynomial degree of the cutoff envelope, by default 6 (models pass
+        their own convention, e.g. MACE's ``num_polynomial_cutoff``).
+    radial_type : str, optional
+        Radial basis of the edge featurizer (``"bessel"``/``"gaussian"``), by
+        default ``"bessel"``.
+    trainable_rbf : bool, optional
+        Learnable Bessel frequencies (the NequIP convention), by default
+        ``False``.
+    rbf_prefactor : float or None, optional
+        Bessel normalization prefactor; ``None`` (default) is the
+        MACE/DimeNet ``sqrt(2/cutoff)``, NequIP passes ``2/cutoff``.
 
     Attributes
     ----------
@@ -66,7 +78,9 @@ class EquivariantGNN(InteratomicPotential):
         initialized to zero.
     """
 
-    def __init__(self, species: list[int], cutoff: float, l_max: int, n_rbf: int):
+    def __init__(self, species: list[int], cutoff: float, l_max: int, n_rbf: int,
+                 p: int = 6, radial_type: str = "bessel",
+                 trainable_rbf: bool = False, rbf_prefactor: float | None = None):
         super().__init__()
         self.species = list(species)
         self.cutoff = cutoff
@@ -77,9 +91,33 @@ class EquivariantGNN(InteratomicPotential):
         self.register_buffer("z_to_index", z_to_index)
         self.node_attr_irreps = species_irreps(len(self.species))
         self.irreps_sh = o3.Irreps.spherical_harmonics(l_max)
-        self.edge_feat = SphericalHarmonicEdgeEmbedding(l_max, n_rbf, cutoff)
+        self.edge_feat = SphericalHarmonicEdgeEmbedding(
+            l_max, n_rbf, cutoff, p=p, radial_type=radial_type,
+            trainable_rbf=trainable_rbf, rbf_prefactor=rbf_prefactor)
         self.atom_ref = nn.Embedding(200, 1)
         nn.init.zeros_(self.atom_ref.weight)
+
+    def set_atomic_energies(self, values) -> None:
+        """Initialise the per-element reference energies ``atom_ref``.
+
+        Parameters
+        ----------
+        values : array-like
+            One reference energy per entry of ``self.species``, in order
+            (MACE ``E0s``, NequIP ``per_species_rescale_shifts``).
+
+        Raises
+        ------
+        ValueError
+            If the number of values does not match the number of species.
+        """
+        ae = torch.as_tensor(values, dtype=self.atom_ref.weight.dtype)
+        if ae.numel() != len(self.species):
+            raise ValueError(
+                f"got {ae.numel()} atomic energies for {len(self.species)} species"
+            )
+        with torch.no_grad():
+            self.atom_ref.weight[torch.tensor(self.species), 0] = ae
 
     def node_attr(self, atomic_numbers: Tensor) -> Tensor:
         """Build the one-hot species node attributes.

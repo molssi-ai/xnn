@@ -41,14 +41,15 @@ from torch.nn import functional as F
 
 from e3nn import o3
 from e3nn import nn as e3nn_nn
-from e3nn.math import normalize2mom
 
 from xnns.common.data import AtomicGraph
 from xnns.common.models.ops import scatter_sum
 from xnns.common.models.registry import register_model
-from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .base import EquivariantGNN
+from .blocks import SCALAR_ACTIVATIONS as GATES
+from .blocks import ScalarActivation as _ScalarActivation
 from .blocks import hidden_irreps as _hidden_irreps
+from .blocks import tp_out_irreps_with_instructions
 
 
 # ===========================================================================
@@ -400,49 +401,9 @@ class SymmetricContraction(nn.Module):
 
 # ===========================================================================
 # Irreps helpers + equivariant blocks
+# (the shared uvu path helper `tp_out_irreps_with_instructions` lives in
+#  .blocks; MACE uses its default sorted-instruction convention)
 # ===========================================================================
-def tp_out_irreps_with_instructions(
-    irreps1: o3.Irreps, irreps2: o3.Irreps, target_irreps: o3.Irreps
-) -> Tuple[o3.Irreps, List]:
-    """(uvu) tensor-product output irreps + instructions, keeping only target paths.
-
-    Enumerates the ``uvu`` tensor-product paths between ``irreps1`` and
-    ``irreps2``, keeping only those whose output irrep lies in
-    ``target_irreps``, then sorts the output irreps and remaps the instruction
-    indices accordingly. Used to build the convolution
-    :class:`e3nn.o3.TensorProduct` in the interaction blocks.
-
-    Parameters
-    ----------
-    irreps1 : e3nn.o3.Irreps
-        First operand irreps (node features).
-    irreps2 : e3nn.o3.Irreps
-        Second operand irreps (edge spherical-harmonic attributes).
-    target_irreps : e3nn.o3.Irreps
-        Only output irreps present in this set are retained.
-
-    Returns
-    -------
-    tuple of (e3nn.o3.Irreps, list)
-        The sorted output irreps and the corresponding list of tensor-product
-        instructions ``(i, j, k, "uvu", True)`` referencing the sorted indices.
-    """
-    irreps_out_list, instructions = [], []
-    for i, (mul, ir_in) in enumerate(irreps1):
-        for j, (_, ir_edge) in enumerate(irreps2):
-            for ir_out in ir_in * ir_edge:
-                if ir_out in target_irreps:
-                    k = len(irreps_out_list)
-                    irreps_out_list.append((mul, ir_out))
-                    instructions.append((i, j, k, "uvu", True))
-    irreps_out, permut, _ = o3.Irreps(irreps_out_list).sort()
-    instructions = [
-        (a, b, permut[c], mode, train) for a, b, c, mode, train in instructions
-    ]
-    instructions = sorted(instructions, key=lambda x: x[2])
-    return irreps_out, instructions
-
-
 class _ReshapeIrreps(nn.Module):
     """Flat ``(N, irreps.dim)`` -> ``(N, mul, sum_ir_dim)`` (uniform mul assumed).
 
@@ -754,61 +715,6 @@ class _LinearReadout(nn.Module):
         return self.linear(x)
 
 
-class _ScalarActivation(nn.Module):
-    """Scriptable stand-in for :class:`e3nn.nn.Activation` on all-scalar irreps.
-
-    ``e3nn.nn.Activation`` (0.4.4) does not compile under ``torch.jit.script``
-    on torch 2.x, but for all-scalar irreps -- the only case the MACE readout
-    uses -- it reduces to applying the second-moment-normalized activation
-    (:func:`e3nn.math.normalize2mom`) elementwise. This module does exactly
-    that, so it is numerically identical to the e3nn original while remaining
-    TorchScript-compatible. It carries no state, so swapping it in leaves the
-    ``state_dict`` layout untouched.
-
-    Parameters
-    ----------
-    irreps_in : e3nn.o3.Irreps
-        Irreps of the activated features; every entry must be ``l = 0``.
-    act : callable or None
-        Scalar activation; ``None`` means identity.
-
-    Raises
-    ------
-    ValueError
-        If ``irreps_in`` contains any ``l > 0`` irrep.
-    """
-
-    has_act: Final[bool]
-
-    def __init__(self, irreps_in: o3.Irreps, act):
-        super().__init__()
-        irreps_in = o3.Irreps(irreps_in)
-        if irreps_in.lmax > 0:
-            raise ValueError(
-                f"gate activation needs all-scalar irreps, got {irreps_in}"
-            )
-        self.has_act = act is not None
-        if act is not None:
-            self.act = normalize2mom(act)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Apply the normalized scalar activation (identity when ``act`` is None).
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            All-scalar features.
-
-        Returns
-        -------
-        torch.Tensor
-            The activated features.
-        """
-        if self.has_act:
-            return self.act(x)
-        return x
-
-
 class _NonLinearReadout(nn.Module):
     """Gated non-linear equivariant readout (linear -> gate -> linear).
 
@@ -947,7 +853,8 @@ INTERACTIONS = {
     "RealAgnosticInteractionBlock": RealAgnosticInteractionBlock,
     "RealAgnosticResidualInteractionBlock": RealAgnosticResidualInteractionBlock,
 }
-GATES = {"silu": F.silu, "tanh": torch.tanh, "abs": torch.abs, "None": None, None: None}
+# GATES is the shared SCALAR_ACTIVATIONS registry (imported above): the gate
+# options by their upstream spellings (silu/tanh/abs/ssp/None).
 
 
 # ===========================================================================
@@ -1061,17 +968,12 @@ class MACE(EquivariantGNN):
             raise NotImplementedError(
                 f"distance_transform={distance_transform!r} is not supported; use 'None'"
             )
-        # EquivariantGNN gives species/z_to_index/node_attr/atom_ref/edge_feat/irreps_sh.
-        super().__init__(species, cutoff, l_max=max_ell, n_rbf=n_rbf)
-        # reuse the xnns edge featurizer, with MACE's cutoff degree + radial type
-        self.edge_feat = SphericalHarmonicEdgeEmbedding(
-            max_ell, n_rbf, cutoff, p=num_cutoff_basis, radial_type=radial_type
-        )
-        if atomic_energies is not None:  # initialise the per-element reference energy
-            ae = torch.as_tensor(atomic_energies, dtype=self.atom_ref.weight.dtype)
-            with torch.no_grad():
-                for z, e in zip(self.species, ae):
-                    self.atom_ref.weight[z] = e
+        # EquivariantGNN gives species/z_to_index/node_attr/atom_ref/edge_feat/
+        # irreps_sh; the featurizer uses MACE's cutoff degree + radial type.
+        super().__init__(species, cutoff, l_max=max_ell, n_rbf=n_rbf,
+                         p=num_cutoff_basis, radial_type=radial_type)
+        if atomic_energies is not None:  # per-element reference energy (E0s)
+            self.set_atomic_energies(atomic_energies)
 
         num_elements = len(self.species)
         hid = (o3.Irreps(hidden_irreps) if hidden_irreps is not None
@@ -1230,26 +1132,12 @@ class MACE(EquivariantGNN):
         """
         import ast
 
+        from xnns.common.config.coerce import coerce_per_species, coerce_species
+
         extra = dict(cfg.extra or {})
-
-        species = extra.get("species") or [1, 6, 8]
-        if isinstance(species, str):
-            species = ast.literal_eval(species)
-
-        atomic_energies = extra.get("atomic_energies")
-        if isinstance(atomic_energies, str):
-            try:
-                atomic_energies = ast.literal_eval(atomic_energies)
-            except (ValueError, SyntaxError) as e:
-                raise ValueError(
-                    f"atomic_energies (MACE E0s) = {atomic_energies!r} is not supported; "
-                    "give explicit per-element values (a list aligned with species, or "
-                    "a {Z: E0} dict)"
-                ) from e
-        if isinstance(atomic_energies, dict):
-            atomic_energies = [atomic_energies[z] for z in species]
-        if atomic_energies is not None:
-            atomic_energies = torch.as_tensor(atomic_energies, dtype=torch.get_default_dtype())
+        species = coerce_species(extra.get("species"), default=[1, 6, 8])
+        atomic_energies = coerce_per_species(
+            extra.get("atomic_energies"), species, "atomic_energies (MACE E0s)")
 
         radial_MLP = extra.get("radial_MLP")
         if isinstance(radial_MLP, str):

@@ -22,12 +22,15 @@ ase = ["ase>=3.22"]
 gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
 hydra = ["hydra-core>=1.3", "omegaconf>=2.3"]
 dev = ["pytest"]
-# Everything needed to build and run the example notebooks in examples/gnn/mace/,
-# including the reference ACEsuit/mace implementation the notebooks are benchmarked against.
+# Everything needed to build and run the example notebooks in examples/gnn/,
+# including the reference ACEsuit/mace and mir-group/nequip implementations the
+# notebooks are benchmarked against.
 examples = [
     "ase>=3.22",
     "e3nn>=0.4.4",
     "mace-torch==0.3.16",
+    "nequip==0.6.2",
+    "nequip-allegro @ git+https://github.com/mir-group/allegro@v0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
@@ -41,6 +44,8 @@ all = [
     "omegaconf>=2.3",
     "pytest",
     "mace-torch==0.3.16",
+    "nequip==0.6.2",
+    "nequip-allegro @ git+https://github.com/mir-group/allegro@v0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
