@@ -8,7 +8,7 @@ Rather than teaching every ``Model.from_config`` a pile of aliases, a per-model
 translation table rewrites the foreign spellings to the canonical names once,
 inside the :func:`~xnns.common.config.loaders.from_dict` funnel -- so keys
 copied verbatim from an upstream MACE / NequIP / Allegro yaml just work, in
-every frontend (YAML / TOML / argparse / Hydra).
+every frontend (YAML / argparse / Hydra).
 
 Rules
 -----

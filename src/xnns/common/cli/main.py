@@ -98,8 +98,7 @@ def main(argv=None):
         p.add_argument("--to", choices=["lammps", "torchscript"], default="lammps")
         p.add_argument("--out", default="model_deployed.pt")
         args, _ = p.parse_known_args(rest)
-        cfg = (cfgmod.from_toml(args.config) if args.config.endswith(".toml")
-               else cfgmod.from_yaml(args.config))
+        cfg = cfgmod.from_yaml(args.config)
         from ..models import build_model, ForceStressOutput
         from ..deploy import export_to_lammps, export_torchscript
         base = build_model(cfg.model)

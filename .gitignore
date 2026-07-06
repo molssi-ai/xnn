@@ -1,7 +1,0 @@
-Resources/
-runs/
-examples/gnn/mace/runs/
-src/xnns.egg-info/
-__pycache__/
-.pytest_cache/
-examples/gnn/mace/argon_*.png

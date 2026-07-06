@@ -9,7 +9,7 @@ For example::
         @classmethod
         def from_config(cls, cfg): ...
 
-A model becomes usable from any config (YAML/TOML/Hydra/argparse) the moment
+A model becomes usable from any config (YAML/Hydra/argparse) the moment
 it is imported and registered. This is the extension point referenced in the
 README.
 """

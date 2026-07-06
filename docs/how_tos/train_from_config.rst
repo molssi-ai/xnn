@@ -5,8 +5,8 @@ Train from a Config File
 ****************************
 
 xnns has one configuration schema — the
-:class:`~xnns.common.config.schema.Config` dataclass — and four
-interchangeable frontends to fill it: YAML, TOML, argparse, and Hydra.
+:class:`~xnns.common.config.schema.Config` dataclass — and three
+interchangeable frontends to fill it: YAML, argparse, and Hydra.
 
 Write a config file
 ===================
@@ -43,18 +43,16 @@ field is folded into ``model.extra`` automatically):
    seed: 1234
    output_dir: runs/argon_mace
 
-The same schema works as TOML with ``[model]`` / ``[data]`` / ``[optim]``
-tables — see ``configs/train.toml`` in the repository. The bundled
-``configs/train.yaml`` additionally shows the Hydra-style ``defaults:`` list
-that composes per-model files from ``configs/model/`` and data settings from
-``configs/data/``.
+The bundled ``configs/train.yaml`` additionally shows the Hydra-style
+``defaults:`` list that composes per-model files from ``configs/model/`` and
+data settings from ``configs/data/``.
 
 Train from Python
 =================
 
 .. code-block:: python
 
-   from xnns.common.config import from_yaml   # or from_toml
+   from xnns.common.config import from_yaml
    from xnns.common.data import AtomicDataset
    from xnns.common.train import Trainer
 

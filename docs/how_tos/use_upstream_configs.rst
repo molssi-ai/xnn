@@ -47,4 +47,4 @@ once at import time:
    )
 
 The table is applied whenever a config with ``model.name == "mymodel"`` is
-loaded through any of the frontends (YAML, TOML, argparse, Hydra).
+loaded through any of the frontends (YAML, argparse, Hydra).
