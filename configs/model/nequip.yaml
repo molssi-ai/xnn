@@ -1,7 +1,18 @@
 name: nequip
-cutoff: 5.0
-n_features: 128          # mul = n_features // 4
-n_interactions: 3        # number of equivariant layers
-n_rbf: 8
-species: [1, 6, 8]
+cutoff: 4.0              # NequIP r_max
+n_features: 32           # channel multiplicity (NequIP num_features)
+n_interactions: 3        # number of convnet layers (NequIP num_layers)
+n_rbf: 8                 # Bessel basis size (NequIP num_basis)
+species: [1, 6, 8]       # H, C, O (NequIP chemical_symbols)
 l_max: 2
+parity: true
+num_polynomial_cutoff: 6 # NequIP PolynomialCutoff_p
+invariant_layers: 2      # radial-MLP hidden layers
+invariant_neurons: 64    # radial-MLP hidden width
+avg_num_neighbors: null  # set to the training-set average (upstream "auto")
+use_sc: true
+resnet: false
+trainable_rbf: true      # NequIP BesselBasis_trainable
+atomic_energies: null    # per-species shifts (NequIP per_species_rescale_shifts)
+atomic_scales: null      # per-species scales (NequIP per_species_rescale_scales)
+conv_to_output_hidden: null  # readout hidden width; null = num_features // 2
