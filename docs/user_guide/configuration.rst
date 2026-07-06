@@ -72,18 +72,17 @@ When loading from a file, any ``model`` key that is not a core
 ``ModelConfig`` field is folded into ``model.extra``, so model options are
 written flat.
 
-Four frontends
-==============
+Frontends
+=========
 .. code-block:: python
 
    from xnns.common.config import (
-       Config, from_dict, from_yaml, from_toml, from_argparse, from_hydra,
+       Config, from_dict, from_yaml, from_argparse, from_hydra,
        apply_overrides,
    )
 
    cfg = Config()                                   # pure Python
    cfg = from_yaml("configs/train.yaml")            # YAML
-   cfg = from_toml("configs/train.toml")            # TOML
    cfg = from_argparse(["--config", "configs/train.yaml",
                         "--set", "model.cutoff=6.0"])  # CLI-style
    cfg = from_hydra(dict_config)                    # Hydra / OmegaConf
@@ -100,7 +99,6 @@ The repository ships composable templates:
 
    configs/
      train.yaml        top-level training config (Hydra-style defaults list)
-     train.toml        same schema as TOML tables
      data/default.yaml
      model/{mace,nequip,allegro,schnet,hdnnp,ani}.yaml
 

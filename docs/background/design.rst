@@ -19,7 +19,7 @@ imported on its own.
                      AtomicDataset, batching
        featurizers/  Featurizer base + shared basis functions
                      (GaussianRBF, CosineCutoff)
-       config/       one dataclass schema; loaders for yaml/toml/argparse/hydra
+       config/       one dataclass schema; loaders for yaml/argparse/hydra
        models/       InteratomicPotential interface + registry +
                      ForceStressOutput + ops (scatter_sum)
        train/        Trainer (batch + device aware), weighted
@@ -77,13 +77,13 @@ differentiates the predicted energy with respect to positions (forces,
 strain (stress). Models never implement forces themselves — a model is just
 an energy function, and the physics of differentiation is written once.
 
-4. Extensibility via registry + one config, four frontends
-==========================================================
+4. Extensibility via registry + one config, three frontends
+===========================================================
 A model becomes available everywhere with two ingredients: the
 ``@register_model("name")`` decorator and a ``from_config`` classmethod. The
 registry (:func:`~xnns.common.models.registry.build_model`) dispatches on
 ``cfg.model.name``, and the single :class:`~xnns.common.config.schema.Config`
-dataclass is filled from any of four frontends — YAML, TOML, argparse, or
+dataclass is filled from any of three frontends — YAML, argparse, or
 Hydra — which all funnel into the same place. Upstream config spellings are
 handled by a loader-level key-translation registry, never by per-model
 aliases (see :ref:`howto-upstream-configs`).

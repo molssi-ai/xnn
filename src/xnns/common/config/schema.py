@@ -1,7 +1,7 @@
 """Typed configuration schema.
 
 A single nested dataclass tree is the *one* internal representation. Every
-frontend (YAML, TOML, argparse, Hydra) is just a different loader that produces
+frontend (YAML, argparse, Hydra) is just a different loader that produces
 this same `Config`. That is what makes the formats interchangeable -- see
 `loaders.py`.
 """
@@ -143,7 +143,7 @@ class Config:
     """Top-level experiment configuration.
 
     This nested dataclass tree is the single internal representation that every
-    frontend loader (YAML, TOML, argparse, Hydra) produces; see ``loaders.py``.
+    frontend loader (YAML, argparse, Hydra) produces; see ``loaders.py``.
 
     Attributes
     ----------

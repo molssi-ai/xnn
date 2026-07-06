@@ -17,7 +17,7 @@ Train a model from a config file:
    xnns train --config configs/train.yaml
    xnns train --config configs/train.yaml --set optim.epochs=50 model.cutoff=6.0
 
-- ``--config`` — a YAML or TOML config (see :ref:`configuration`)
+- ``--config`` — a YAML config (see :ref:`configuration`)
 - ``--set KEY=VALUE`` — dotted-key overrides, repeatable
 
 Structures are read from ``data.train_path`` / ``data.val_path`` with

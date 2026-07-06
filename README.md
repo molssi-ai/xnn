@@ -52,7 +52,7 @@ src/xnns/
   common/       shared across all families
     data/         AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, batching
     featurizers/  Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
-    config/       one dataclass schema; loaders for yaml / toml / argparse / hydra
+    config/       one dataclass schema; loaders for yaml / argparse / hydra
     models/       InteratomicPotential interface + registry + ForceStressOutput + ops (scatter_sum)
     train/        Trainer (batch + device aware), weighted energy/force/stress loss
     deploy/       ASE Calculator, LAMMPS/TorchScript export
@@ -98,15 +98,15 @@ Four ideas hold it together:
 3. **Forces/stress in one place.** `ForceStressOutput` wraps any model and
    differentiates energy w.r.t. positions (forces) and a symmetric strain
    (stress). Models never implement them.
-4. **Extensibility via registry + one config, four frontends.**
+4. **Extensibility via registry + one config, three frontends.**
    `@register_model("name")` + a `from_config` classmethod makes a model usable
-   from any of YAML / TOML / argparse / Hydra, which all funnel into one
+   from any of YAML / argparse / Hydra, which all funnel into one
    `Config` dataclass.
 
-## Config formats (interchangeable)
+## Config frontends (interchangeable)
 
 ```python
-from xnns.common.config import from_yaml, from_toml, from_argparse, from_hydra
+from xnns.common.config import from_yaml, from_argparse, from_hydra
 cfg = from_yaml("configs/train.yaml")
 cfg = from_argparse(["--config", "configs/train.yaml", "--set", "model.cutoff=6.0"])
 ```

@@ -1,4 +1,4 @@
-"""Loaders that turn YAML / TOML / argparse / Hydra into one `Config`.
+"""Loaders that turn YAML / argparse / Hydra into one `Config`.
 
 The interchangeability you asked for comes from a single rule: every frontend
 produces a plain nested dict, and `from_dict` builds the typed `Config` from it.
@@ -120,42 +120,13 @@ def from_yaml(path: str) -> Config:
         return from_dict(yaml.safe_load(f))
 
 
-def from_toml(path: str) -> Config:
-    """Load a TOML config file into a :class:`Config`.
-
-    Uses the standard-library :mod:`tomllib` on Python 3.11+ and falls back to
-    the ``tomli`` backport otherwise, then funnels the parsed data through
-    :func:`from_dict`.
-
-    Parameters
-    ----------
-    path : str
-        Path to the TOML file.
-
-    Returns
-    -------
-    Config
-        The populated configuration object.
-    """
-    try:
-        import tomllib as toml  # py3.11+
-        with open(path, "rb") as f:
-            data = toml.load(f)
-    except ModuleNotFoundError:
-        import tomli as toml     # py<3.11: pip install tomli
-        with open(path, "rb") as f:
-            data = toml.load(f)
-    return from_dict(data)
-
-
 def from_argparse(argv: list[str] | None = None) -> Config:
     """Build a :class:`Config` from command-line arguments.
 
-    Parses ``--config path.yaml`` (or ``.toml``) plus repeatable
-    ``--set a.b=c`` overrides. A ``.toml`` extension routes to
-    :func:`from_toml`; anything else is treated as YAML via :func:`from_yaml`.
-    If no config file is given, defaults are used. Overrides are then applied
-    via :func:`apply_overrides`.
+    Parses ``--config path.yaml`` plus repeatable ``--set a.b=c`` overrides.
+    The config file is loaded via :func:`from_yaml`. If no config file is
+    given, defaults are used. Overrides are then applied via
+    :func:`apply_overrides`.
 
     Parameters
     ----------
@@ -170,17 +141,12 @@ def from_argparse(argv: list[str] | None = None) -> Config:
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default=None,
-                   help="YAML or TOML config file")
+                   help="YAML config file")
     p.add_argument("--set", dest="overrides", action="append", default=[],
                    metavar="KEY=VALUE", help="dotted override, repeatable")
     args = p.parse_args(argv)
 
-    if args.config is None:
-        cfg = Config()
-    elif args.config.endswith((".toml",)):
-        cfg = from_toml(args.config)
-    else:
-        cfg = from_yaml(args.config)
+    cfg = Config() if args.config is None else from_yaml(args.config)
     return apply_overrides(cfg, args.overrides)
 
 

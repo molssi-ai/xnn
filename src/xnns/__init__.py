@@ -5,7 +5,7 @@ Organized by model family, with everything shared factored into ``common``:
     common/  abstractions used across all families
         data        -- AtomicGraph, neighbor lists, AtomicDataset, batching
         featurizers -- Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
-        config      -- one schema, loaders for yaml/toml/argparse/hydra
+        config      -- one schema, loaders for yaml/argparse/hydra
         models      -- InteratomicPotential contract + registry + ForceStressOutput + ops
         train       -- Trainer, losses (batch + device aware)
         deploy      -- ASE calculator, LAMMPS/TorchScript export

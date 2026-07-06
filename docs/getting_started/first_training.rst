@@ -84,7 +84,7 @@ model, data, and optimizer settings. Model-specific options go into
    cfg.device = "auto"
    cfg.output_dir = "runs/my_first_run"
 
-Alternatively, load the same settings from a YAML or TOML file — see
+Alternatively, load the same settings from a YAML file — see
 :ref:`configuration` — or start from the templates in ``configs/``.
 
 4. Train
