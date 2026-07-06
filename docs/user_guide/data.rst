@@ -89,9 +89,51 @@ is itself just an ``AtomicGraph``. The
 :class:`~xnns.common.train.trainer.Trainer` uses it as the ``collate_fn`` of
 its data loaders automatically.
 
+Loading ASE-native files (extxyz, CIF, VASP, ...)
+=================================================
+Any file format ASE can read loads in one line (requires the ``ase`` extra):
+
+.. code-block:: python
+
+   from xnns.common.data import AtomicDataset
+
+   ds = AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
+   ds = AtomicDataset.from_file("crystal.cif", cutoff=5.0)
+
+Energy, forces and stress targets are picked up automatically when the file
+carries them (from the frame's calculator, with ``atoms.info`` /
+``atoms.arrays`` as a fallback); stress is converted from Voigt to a full
+``(3, 3)`` matrix. Datasets that store targets under other names — e.g. the
+MACE convention ``REF_energy`` / ``REF_forces`` / ``REF_stress`` — pass the
+key names explicitly (the CLI equivalents live in ``data.energy_key`` etc.):
+
+.. code-block:: python
+
+   ds = AtomicDataset.from_file("dft.extxyz", cutoff=5.0,
+                                energy_key="REF_energy",
+                                forces_key="REF_forces",
+                                stress_key="REF_stress")
+
+``Atoms`` objects already in memory go through
+:meth:`~xnns.common.data.dataset.AtomicDataset.from_atoms`:
+
+.. code-block:: python
+
+   from ase.io import read
+   ds = AtomicDataset.from_atoms(read("relaxed.cif"), cutoff=5.0)
+
+The underlying converters are public too —
+:func:`~xnns.common.data.ase_io.load_structures` (file → list of structure
+dicts) and :func:`~xnns.common.data.ase_io.atoms_to_structure` (one ``Atoms``
+→ one dict) — and the :ref:`command line <cli>` reads ``data.train_path`` /
+``data.val_path`` through the same path. Positions do *not* need to be
+wrapped into the cell first: the neighbor-list builder handles unwrapped
+(e.g. MD trajectory) coordinates.
+
 Structure dictionaries
 ======================
-The input format is a plain dictionary per structure:
+Underneath, the input format is a plain dictionary per structure — use it
+directly for data that does not come from ASE:
 
 .. code-block:: python
 
@@ -104,12 +146,3 @@ The input format is a plain dictionary per structure:
        "forces": ...,            # (N, 3), optional target
        "stress": ...,            # (3, 3), optional target
    }
-
-The command line reads structure files (extxyz, VASP, and anything else ASE
-understands) into this form with ``ase.io.read``.
-
-.. note::
-
-   For periodic datasets, positions should lie inside the cell (wrapped);
-   apply ASE's ``atoms.wrap()`` before extracting positions if your
-   trajectory stores unwrapped coordinates.

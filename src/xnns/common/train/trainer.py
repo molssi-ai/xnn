@@ -61,6 +61,12 @@ class Trainer:
         ``cfg.data.val_fraction > 0``, a validation split is carved out of
         ``train_set`` using ``random_split`` seeded by ``cfg.seed``. When
         ``None`` and the fraction is zero, no validation is performed.
+    test_set : AtomicDataset or None, optional
+        Explicit held-out test dataset, evaluated once at the end of
+        :meth:`fit`. When ``None`` and ``cfg.data.test_fraction > 0``, a test
+        split is carved out of ``train_set`` (alongside the validation split,
+        from the same seeded permutation). When ``None`` and the fraction is
+        zero, no test evaluation is performed.
 
     Attributes
     ----------
@@ -76,6 +82,9 @@ class Trainer:
     val_loader : torch.utils.data.DataLoader or None
         Non-shuffled loader over the validation set, or ``None`` if there is
         no validation set.
+    test_loader : torch.utils.data.DataLoader or None
+        Non-shuffled loader over the test set, or ``None`` if there is no
+        test set.
     opt : torch.optim.Adam
         The Adam optimizer.
     sched : torch.optim.lr_scheduler._LRScheduler or ReduceLROnPlateau or None
@@ -83,7 +92,8 @@ class Trainer:
     """
 
     def __init__(self, cfg: Config, train_set: AtomicDataset,
-                 val_set: AtomicDataset | None = None):
+                 val_set: AtomicDataset | None = None,
+                 test_set: AtomicDataset | None = None):
         self.cfg = cfg
         self.device = resolve_device(cfg.device)
 
@@ -96,21 +106,30 @@ class Trainer:
             compute_stress=cfg.optim.stress_weight > 0,
         ).to(self.device)
 
-        if val_set is None and cfg.data.val_fraction > 0:
-            n_val = max(1, int(len(train_set) * cfg.data.val_fraction))
-            n_train = len(train_set) - n_val
-            train_set, val_set = random_split(
-                train_set, [n_train, n_val],
+        # Carve val/test splits out of the training set for whichever of the
+        # two was not given explicitly (a single seeded permutation, so the
+        # train/val split is unchanged by adding a test fraction of zero).
+        f_val = cfg.data.val_fraction if val_set is None else 0.0
+        f_test = cfg.data.test_fraction if test_set is None else 0.0
+        if f_val > 0 or f_test > 0:
+            n = len(train_set)
+            n_val = max(1, int(n * f_val)) if f_val > 0 else 0
+            n_test = max(1, int(n * f_test)) if f_test > 0 else 0
+            splits = random_split(
+                train_set, [n - n_val - n_test, n_val, n_test],
                 generator=torch.Generator().manual_seed(cfg.seed))
+            train_set = splits[0]
+            val_set = splits[1] if n_val else val_set
+            test_set = splits[2] if n_test else test_set
 
         # batch training is just batch_size > 1; set to 1 to disable.
-        self.train_loader = DataLoader(
-            train_set, batch_size=cfg.data.batch_size, shuffle=True,
-            collate_fn=collate, num_workers=cfg.data.num_workers)
-        self.val_loader = (DataLoader(
-            val_set, batch_size=cfg.data.batch_size, shuffle=False,
-            collate_fn=collate, num_workers=cfg.data.num_workers)
-            if val_set is not None else None)
+        def _loader(ds, shuffle):
+            return DataLoader(ds, batch_size=cfg.data.batch_size,
+                              shuffle=shuffle, collate_fn=collate,
+                              num_workers=cfg.data.num_workers)
+        self.train_loader = _loader(train_set, shuffle=True)
+        self.val_loader = _loader(val_set, False) if val_set is not None else None
+        self.test_loader = _loader(test_set, False) if test_set is not None else None
 
         self.opt = torch.optim.Adam(
             self.model.parameters(), lr=cfg.optim.lr,
@@ -186,13 +205,19 @@ class Trainer:
         output directory. The scheduler is stepped every epoch: a
         ``ReduceLROnPlateau`` scheduler is stepped with the current loss, while
         any other scheduler is stepped without arguments. A per-epoch summary
-        is printed. After the final epoch the model is saved to ``last.pt``.
+        is printed. After the final epoch the model is saved to ``last.pt``
+        and, if a test loader exists, evaluated once on the test set (with the
+        final-epoch weights; to test the best checkpoint instead, load
+        ``best.pt`` into ``self.model`` and call :meth:`evaluate`).
 
         Returns
         -------
-        None
+        dict
+            Final metrics: ``{"train": ..., "val": ..., "test": ...}``, each a
+            dict of averaged losses (empty when that split does not exist).
         """
         best = float("inf")
+        tr, va = {}, {}
         for epoch in range(self.cfg.optim.epochs):
             self.model.train()
             tr = self._avg(self._step(d, True) for d in self.train_loader)
@@ -214,6 +239,33 @@ class Trainer:
 
             self._log(epoch, tr, va)
         self.save(os.path.join(self.cfg.output_dir, "last.pt"))
+
+        te = {}
+        if self.test_loader is not None:
+            te = self.evaluate()
+            print(f"test loss {te.get('loss', 0):.4e}")
+        return {"train": tr, "val": va, "test": te}
+
+    def evaluate(self, loader=None):
+        """Evaluate the current model over a data loader without training.
+
+        Parameters
+        ----------
+        loader : torch.utils.data.DataLoader or None, optional
+            Loader to evaluate over. Defaults to ``self.test_loader``.
+
+        Returns
+        -------
+        dict of str to float
+            Averaged losses over the loader (as in :meth:`_step`), or an empty
+            dict when there is no loader.
+        """
+        loader = self.test_loader if loader is None else loader
+        if loader is None:
+            return {}
+        self.model.eval()
+        # forces need grad even at eval -> no torch.no_grad()
+        return self._avg(self._step(d, False) for d in loader)
 
     @staticmethod
     def _avg(logs_iter):

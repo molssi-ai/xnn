@@ -68,6 +68,12 @@ def build_neighbor_list(
     and ``src = j`` (sender), and the returned ``cell_shifts`` are negated so
     that :meth:`AtomicGraph.edge_vectors` reproduces the selecting displacement.
 
+    Positions need not lie inside the cell: along periodic axes they are
+    wrapped internally (image enumeration assumes in-cell positions) and the
+    removed integer offsets are folded back into the returned ``cell_shifts``,
+    so the shifts remain consistent with the *original* positions. Unwrapped
+    trajectories (e.g. from MD) therefore work as-is.
+
     Parameters
     ----------
     pos : Tensor
@@ -94,10 +100,17 @@ def build_neighbor_list(
     device, dtype = pos.device, pos.dtype
     n = pos.shape[0]
 
+    offsets = None
     if cell is None or pbc is None or not bool(pbc.any()):
         shifts = torch.zeros((1, 3), device=device, dtype=dtype)
         shift_idx = torch.zeros((1, 3), device=device, dtype=torch.long)
     else:
+        # Wrap positions into the cell along periodic axes; the integer image
+        # offsets removed here are added back to the returned shifts below.
+        frac = pos @ torch.linalg.inv(cell)
+        offsets = torch.floor(frac).to(torch.long)
+        offsets[:, ~pbc.to(torch.bool)] = 0
+        pos = pos - offsets.to(dtype) @ cell
         reps = _n_repeats(cell, cutoff, pbc)
         ranges = [range(-r, r + 1) for r in reps]
         combos = list(itertools.product(*ranges))
@@ -124,4 +137,8 @@ def build_neighbor_list(
     # cutoff envelope -- i.e. all cross-boundary neighbours would be dropped.
     edge_index = torch.stack([j_idx, i_idx], dim=0)                        # (2, E)
     cell_shifts = -shift_idx[s_idx]                                        # (E, 3)
+    if offsets is not None:
+        # Re-express the shifts relative to the original (unwrapped) positions:
+        # pos = wrapped + offset @ cell, so shift_unwrapped = shift + o_src - o_dst.
+        cell_shifts = cell_shifts + offsets[j_idx] - offsets[i_idx]
     return edge_index, cell_shifts

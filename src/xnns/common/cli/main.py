@@ -14,46 +14,6 @@ import sys
 import torch
 
 
-def _load_structures(path: str):
-    """Load structures into the list-of-dicts format the dataset expects.
-
-    Uses ASE (handles ``.xyz`` / ``.extxyz`` / ``.cif`` / ... and periodic
-    cells). Energy and forces are included when the frame carries a calculator
-    or an ``"energy"`` entry in its ``info`` and they can be read successfully.
-
-    Parameters
-    ----------
-    path : str
-        Path to a structure file readable by :func:`ase.io.read`. All frames in
-        the file (``index=":"``) are loaded.
-
-    Returns
-    -------
-    list of dict
-        One dict per frame with keys ``"pos"``, ``"atomic_numbers"``,
-        ``"cell"`` (``None`` for non-periodic frames), ``"pbc"``, and optionally
-        ``"energy"`` and ``"forces"`` when available.
-    """
-    from ase.io import read
-    frames = read(path, index=":")
-    out = []
-    for a in frames:
-        d = {
-            "pos": a.get_positions(),
-            "atomic_numbers": a.get_atomic_numbers(),
-            "cell": a.get_cell()[:] if a.pbc.any() else None,
-            "pbc": a.pbc,
-        }
-        if a.calc is not None or "energy" in a.info:
-            try:
-                d["energy"] = a.get_potential_energy()
-                d["forces"] = a.get_forces()
-            except Exception:
-                pass
-        out.append(d)
-    return out
-
-
 def main(argv=None):
     """Command-line entry point dispatching the ``train`` and ``export`` commands.
 
@@ -86,10 +46,14 @@ def main(argv=None):
         cfg = cfgmod.from_argparse(rest)
         from ..data import AtomicDataset
         from ..train import Trainer
-        train = AtomicDataset(_load_structures(cfg.data.train_path), cfg.data.cutoff)
-        val = (AtomicDataset(_load_structures(cfg.data.val_path), cfg.data.cutoff)
+        keys = dict(energy_key=cfg.data.energy_key, forces_key=cfg.data.forces_key,
+                    stress_key=cfg.data.stress_key)
+        train = AtomicDataset.from_file(cfg.data.train_path, cfg.data.cutoff, **keys)
+        val = (AtomicDataset.from_file(cfg.data.val_path, cfg.data.cutoff, **keys)
                if cfg.data.val_path else None)
-        Trainer(cfg, train, val).fit()
+        test = (AtomicDataset.from_file(cfg.data.test_path, cfg.data.cutoff, **keys)
+                if cfg.data.test_path else None)
+        Trainer(cfg, train, val, test).fit()
 
     elif cmd == "export":
         p = argparse.ArgumentParser()

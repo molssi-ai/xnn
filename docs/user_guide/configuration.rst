@@ -41,8 +41,9 @@ All configuration funnels into a single dataclass tree
      - ``extra``
      - dict of model-specific options (see :ref:`models`)
    * - ``DataConfig``
-     - ``train_path`` / ``val_path``
-     - structure files (read with ASE by the CLI)
+     - ``train_path`` / ``val_path`` / ``test_path``
+     - structure files (read with ASE by the CLI); ``test_path`` is optional
+       and evaluated once after training
    * -
      - ``cutoff``
      - synchronized to ``model.cutoff`` automatically
@@ -53,8 +54,13 @@ All configuration funnels into a single dataclass tree
      - ``num_workers``
      - ``0``
    * -
-     - ``val_fraction``
-     - ``0.1`` — used when no ``val_path`` is given
+     - ``val_fraction`` / ``test_fraction``
+     - ``0.1`` / ``0.0`` — fractions of the training set held out when no
+       ``val_path`` / ``test_path`` is given (``0`` disables the split)
+   * -
+     - ``energy_key`` / ``forces_key`` / ``stress_key``
+     - ``"energy"`` / ``"forces"`` / ``"stress"`` — names the targets are
+       stored under in the file (e.g. ``REF_energy`` for MACE-style datasets)
    * - ``OptimConfig``
      - ``lr`` / ``weight_decay``
      - ``1e-3`` / ``0.0`` (Adam)

@@ -40,6 +40,14 @@ cfg.device = "auto"                  # auto | cpu | cuda | cuda:0
 Trainer(cfg, AtomicDataset(structures, cfg.model.cutoff)).fit()
 ```
 
+`structures` is a list of plain dicts (`pos`, `atomic_numbers`, optionally
+`cell`/`pbc` and `energy`/`forces`/`stress` targets). Data in any ASE-readable
+format loads directly — targets included, no pre-wrapping needed:
+
+```python
+train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)  # or .cif, VASP, ...
+```
+
 ## Package layout
 
 The package is organized **by model family** (`gnn`, `cnn`, `dnn`), with

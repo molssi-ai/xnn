@@ -12,8 +12,15 @@ The Trainer
 
    from xnns.common.train import Trainer
 
-   trainer = Trainer(cfg, train_set, val_set)   # val_set optional
-   trainer.fit()
+   trainer = Trainer(cfg, train_set, val_set, test_set)   # val/test optional
+   metrics = trainer.fit()   # {"train": ..., "val": ..., "test": ...}
+
+Both a train/val and a train/val/test workflow are supported: pass the
+splits explicitly, or let the trainer carve them out of ``train_set`` —
+when ``val_set`` (``test_set``) is ``None`` and ``data.val_fraction``
+(``data.test_fraction``) is positive, that fraction is held out using a
+single ``cfg.seed``-seeded permutation. The default ``test_fraction = 0``
+means no test split unless you ask for one.
 
 Constructing a ``Trainer``:
 
@@ -37,6 +44,19 @@ a validation set is available, and writes checkpoints to
 
 A checkpoint is ``{"model": state_dict, "cfg": Config}``; load it with
 ``torch.load(path, weights_only=False)``.
+
+When a test set exists, ``fit()`` evaluates it once after the final epoch
+(with the final-epoch weights) and reports the test loss; the returned
+metrics dict carries the numbers. To test the *best* checkpoint instead,
+load it and call :meth:`~xnns.common.train.trainer.Trainer.evaluate`:
+
+.. code-block:: python
+
+   import os, torch
+
+   state = torch.load(os.path.join(cfg.output_dir, "best.pt"), weights_only=False)
+   trainer.model.load_state_dict(state["model"])
+   test_metrics = trainer.evaluate()             # uses trainer.test_loader
 
 The loss
 ========

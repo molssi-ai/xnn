@@ -84,6 +84,11 @@ class DataConfig:
     val_path : Optional[str]
         Path to the validation set. If ``None``, a validation split is carved
         out of the training set using ``val_fraction``. Defaults to ``None``.
+    test_path : Optional[str]
+        Path to a held-out test set, evaluated once after training. If
+        ``None``, a test split is carved out of the training set when
+        ``test_fraction > 0``; otherwise no test evaluation is performed.
+        Defaults to ``None``.
     cutoff : float
         Neighbor-list cutoff radius; must match ``model.cutoff`` and is kept in
         lockstep by :meth:`Config.__post_init__`. Defaults to ``4.0``.
@@ -94,14 +99,32 @@ class DataConfig:
     val_fraction : float
         Fraction of the training set held out for validation when ``val_path``
         is ``None``. Defaults to ``0.1``.
+    test_fraction : float
+        Fraction of the training set held out as a test set when ``test_path``
+        is ``None``. Defaults to ``0.0`` (no test split).
+    energy_key : str
+        Name under which the reference energy is stored in the file
+        (``atoms.info``), e.g. ``"REF_energy"`` for MACE-convention datasets.
+        Defaults to ``"energy"`` (also read from the frame's calculator).
+    forces_key : str
+        Name under which the reference forces are stored (``atoms.arrays``).
+        Defaults to ``"forces"``.
+    stress_key : str
+        Name under which the reference stress is stored (``atoms.info``).
+        Defaults to ``"stress"``.
     """
 
     train_path: Optional[str] = None   # .xyz / .extxyz / .npz / ASE-readable
     val_path: Optional[str] = None
+    test_path: Optional[str] = None    # held-out test set, evaluated after training
     cutoff: float = 4.0                # must match model.cutoff for neighbor lists
     batch_size: int = 16               # set to 1 to disable batch training
     num_workers: int = 0
     val_fraction: float = 0.1          # used if val_path is None
+    test_fraction: float = 0.0         # used if test_path is None; 0 = no test split
+    energy_key: str = "energy"         # MACE-CLI spelling; e.g. "REF_energy"
+    forces_key: str = "forces"
+    stress_key: str = "stress"
 
 
 @dataclass

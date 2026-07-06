@@ -32,9 +32,18 @@ xnns consumes structures as plain Python dictionaries. Required keys are
            }
        )
 
-If your data lives in a file format ASE can read (extxyz, VASP, ...), you can
-also let the :ref:`command line <cli>` do this for you — it reads structures
-with ``ase.io.read``.
+If your data lives in a file format ASE can read (extxyz, CIF, VASP, ...),
+skip the dictionaries entirely and load the file directly (requires the
+``ase`` extra):
+
+.. code-block:: python
+
+   from xnns.common.data import AtomicDataset
+
+   dataset = AtomicDataset.from_file("my_trajectory.extxyz", cutoff=4.0)
+
+Energy / forces / stress targets stored in the file are picked up
+automatically; see :ref:`data`.
 
 2. Build the dataset
 ====================
@@ -103,7 +112,10 @@ optimizer, scheduler, and data loaders, and runs the loop:
 
 Progress is printed per epoch; ``best.pt`` (lowest validation loss) and
 ``last.pt`` are written to ``cfg.output_dir``. A checkpoint is a dictionary
-``{"model": state_dict, "cfg": Config}``.
+``{"model": state_dict, "cfg": Config}``. A held-out test set is optional —
+pass it as a third dataset (``Trainer(cfg, train_set, val_set, test_set)``)
+or set ``cfg.data.test_fraction`` to carve one out of the training data; it
+is evaluated once after the last epoch (see :ref:`training`).
 
 5. Predict
 ==========

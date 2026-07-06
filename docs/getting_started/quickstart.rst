@@ -35,7 +35,9 @@ Here ``structures`` is a list of plain dictionaries, one per structure, with
 keys ``pos`` and ``atomic_numbers`` (and optionally ``cell``, ``pbc``,
 ``energy``, ``forces``, ``stress``). :class:`~xnns.common.data.dataset.AtomicDataset`
 converts each into an :class:`~xnns.common.data.atomic_data.AtomicGraph` — the
-single data object every xnns model consumes.
+single data object every xnns model consumes. Data in any ASE-readable file
+format (extxyz, CIF, VASP, ...) loads directly with
+``AtomicDataset.from_file("trajectory.extxyz", cutoff)``.
 
 Training writes ``best.pt`` and ``last.pt`` checkpoints to
 ``cfg.output_dir`` (default ``runs/exp``).

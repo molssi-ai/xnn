@@ -29,7 +29,8 @@ field is folded into ``model.extra`` automatically):
 
    data:
      train_path: data/argon_train.xyz
-     val_path: data/argon_test.xyz
+     val_path: data/argon_val.xyz
+     test_path: data/argon_test.xyz   # optional; evaluated once after training
      batch_size: 8
 
    optim:

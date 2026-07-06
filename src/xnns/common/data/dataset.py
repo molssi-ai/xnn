@@ -111,6 +111,65 @@ class AtomicDataset(Dataset):
         self.cutoff = cutoff
         self._cache: dict[int, AtomicGraph] = {}
 
+    @classmethod
+    def from_file(cls, path: str, cutoff: float, index: str = ":",
+                  **target_keys) -> "AtomicDataset":
+        """Build a dataset from a structure file readable by ASE.
+
+        Any ASE-readable format works (``.xyz`` / ``.extxyz`` / ``.cif`` /
+        VASP / ...); frames are converted via
+        :func:`~xnns.common.data.ase_io.load_structures`, picking up energy /
+        forces / stress targets when the file carries them. Requires the
+        ``ase`` extra.
+
+        Parameters
+        ----------
+        path : str
+            Path to the structure file.
+        cutoff : float
+            Neighbor cutoff radius used when building each graph.
+        index : str, optional
+            Frame selection passed to :func:`ase.io.read`; the default ``":"``
+            loads all frames.
+        **target_keys
+            ``energy_key`` / ``forces_key`` / ``stress_key`` overrides for
+            files that store targets under non-standard names (e.g.
+            ``energy_key="REF_energy"``); see
+            :func:`~xnns.common.data.ase_io.atoms_to_structure`.
+
+        Returns
+        -------
+        AtomicDataset
+            Dataset over all selected frames.
+        """
+        from .ase_io import load_structures
+        return cls(load_structures(path, index, **target_keys), cutoff)
+
+    @classmethod
+    def from_atoms(cls, atoms, cutoff: float, **target_keys) -> "AtomicDataset":
+        """Build a dataset from ASE ``Atoms`` object(s) already in memory.
+
+        Parameters
+        ----------
+        atoms : ase.Atoms or list of ase.Atoms
+            Structure(s) to convert, via
+            :func:`~xnns.common.data.ase_io.atoms_to_structure`.
+        cutoff : float
+            Neighbor cutoff radius used when building each graph.
+        **target_keys
+            ``energy_key`` / ``forces_key`` / ``stress_key`` overrides; see
+            :func:`~xnns.common.data.ase_io.atoms_to_structure`.
+
+        Returns
+        -------
+        AtomicDataset
+            Dataset over the given structure(s).
+        """
+        from .ase_io import atoms_to_structure
+        if not isinstance(atoms, (list, tuple)):
+            atoms = [atoms]
+        return cls([atoms_to_structure(a, **target_keys) for a in atoms], cutoff)
+
     def __len__(self) -> int:
         """Return the number of structures in the dataset.
 

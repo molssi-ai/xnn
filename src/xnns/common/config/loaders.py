@@ -142,8 +142,9 @@ def from_argparse(argv: list[str] | None = None) -> Config:
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default=None,
                    help="YAML config file")
-    p.add_argument("--set", dest="overrides", action="append", default=[],
-                   metavar="KEY=VALUE", help="dotted override, repeatable")
+    p.add_argument("--set", dest="overrides", action="extend", nargs="+",
+                   default=[], metavar="KEY=VALUE",
+                   help="dotted override(s); repeatable, several per flag")
     args = p.parse_args(argv)
 
     cfg = Config() if args.config is None else from_yaml(args.config)

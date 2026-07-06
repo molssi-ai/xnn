@@ -20,10 +20,12 @@ Train a model from a config file:
 - ``--config`` — a YAML config (see :ref:`configuration`)
 - ``--set KEY=VALUE`` — dotted-key overrides, repeatable
 
-Structures are read from ``data.train_path`` / ``data.val_path`` with
-``ase.io.read`` (any ASE-readable format: extxyz, VASP, ...); when no
-``val_path`` is given, ``data.val_fraction`` of the training set is held
-out. Checkpoints (``best.pt``, ``last.pt``) go to ``output_dir``.
+Structures are read from ``data.train_path`` / ``data.val_path`` /
+``data.test_path`` with ``ase.io.read`` (any ASE-readable format: extxyz,
+VASP, ...); when no ``val_path`` (``test_path``) is given,
+``data.val_fraction`` (``data.test_fraction``) of the training set is held
+out instead. The optional test set is evaluated once after training.
+Checkpoints (``best.pt``, ``last.pt``) go to ``output_dir``.
 
 xnns export
 ===========
