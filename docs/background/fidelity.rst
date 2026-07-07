@@ -4,11 +4,13 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-The equivariant models in xnns are not approximations or "inspired-by"
-re-implementations: they are faithful, self-contained reproductions of the
-reference codes, verified numerically block by block and end to end. Each
-needs only ``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
-``opt_einsum_fx`` at runtime.
+The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet) are not
+approximations or "inspired-by" re-implementations: they are faithful,
+self-contained reproductions of the reference codes, verified numerically
+block by block and end to end. The spherical-harmonic models need only
+``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
+``opt_einsum_fx`` at runtime; CACE and PhysNet need no extra dependency at
+all (PhysNet's original is TensorFlow — the xnns version is pure PyTorch).
 
 Equivariance itself is verified in the test suite (rotate the inputs → the
 energy is invariant and the forces co-rotate, to ~1e-7; see
@@ -99,6 +101,35 @@ harmonics or e3nn at all:
 Given the same weights it reproduces ``cace`` to ~1e-16 (relative) in
 energies and forces, molecular and periodic, for any message-type subset
 (``tests/test_cace.py``).
+
+PhysNet
+=======
+A faithful **pure-PyTorch translation** of the original TensorFlow 1.x
+implementation `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
+(Unke & Meuwly, JCTC 2019):
+
+- the exponential-Gaussian radial basis with its quintic cutoff, the
+  distance-based attention masks (zero-initialized ``k2f``), pre-activation
+  residual blocks, gated feature updates, and the zero-initialized
+  per-module ``(energy, charge)`` output heads, with per-element
+  scale/shift tables of length 95 (elements are embedded directly by
+  nuclear charge -- alchemical by construction);
+- the exact charge-correction, the switched/shielded Coulomb term
+  (``kehalf`` constant and the force-shifted long-range form included), and
+  a statement-for-statement port of the bundled Grimme D3(BJ) module with
+  its reference tables (shipped compressed in
+  ``xnns/dnn/models/d3_tables.npz``) and softplus-learnable coefficients;
+- the shifted-softplus is evaluated in its exact form
+  ``max(x, 0) + log1p(exp(-|x|))`` -- PyTorch's ``F.softplus`` goes linear
+  above its threshold and would cost ~1e-9.
+
+Given the same weights it reproduces the original TF graph to ~1e-15 in
+energies, forces, corrected charges, and the non-hierarchicality penalty
+(``tests/test_physnet.py``; the parity test needs TensorFlow and a clone of
+the upstream repo via ``PHYSNET_UPSTREAM_PATH``, and the block-by-block
+notebook documents three dtype-only harness patches that let the float32-era
+TF graph run in float64). Dropout (upstream ``keep_prob``, default off) is
+not implemented.
 
 Why this matters
 ================

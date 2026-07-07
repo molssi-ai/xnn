@@ -66,6 +66,24 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "atomic_numbers": "species",
         "l_max": "max_l",
     },
+    # PhysNet train.py argument spellings (MMunibas/PhysNet)
+    "physnet": {
+        "num_features": "n_features",
+        "num_basis": "n_rbf",
+        "num_blocks": "n_interactions",
+        "sr_cut": "cutoff",
+        "lr_cut": "lr_cutoff",
+        "use_electrostatic": "use_electrostatics",
+        "use_dispersion": "use_dispersion",
+        "grimme_s6": "s6",
+        "grimme_s8": "s8",
+        "grimme_a1": "a1",
+        "grimme_a2": "a2",
+        "Eshift": "energy_shift",
+        "Escale": "energy_scale",
+        "Qshift": "charge_shift",
+        "Qscale": "charge_scale",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

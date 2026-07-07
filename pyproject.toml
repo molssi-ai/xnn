@@ -64,6 +64,9 @@ xnns = "xnns.common.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"xnns.dnn.models" = ["*.npz"]   # Grimme D3 reference tables (PhysNet)
+
 # ---------------------------------------------------------------------------
 # uv configuration -- reproduces the .venv the notebooks were created with.
 #

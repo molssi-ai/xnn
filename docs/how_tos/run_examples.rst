@@ -45,5 +45,9 @@ step-by-step tutorial that rebuilds the MACE architecture block by block in
 figures.
 
 The Argon dataset lives in ``examples/gnn/mace/data/`` and is shared by the
-NequIP, Allegro, and CACE notebooks. The CACE series compares against the
-original ``cace`` package (``pip install git+https://github.com/BingqingCheng/cace``).
+NequIP, Allegro, CACE, and PhysNet notebooks. The CACE series compares against
+the original ``cace`` package
+(``pip install git+https://github.com/BingqingCheng/cace``); the PhysNet
+series (``examples/dnn/physnet/``) compares against the original
+**TensorFlow** implementation and needs a venv with both ``tensorflow`` and
+``torch`` (the notebooks clone MMunibas/PhysNet on demand).

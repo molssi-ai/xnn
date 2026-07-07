@@ -19,7 +19,7 @@ frontend:
 
    from xnns.common.models import available_models, build_model
 
-   available_models()          # ['schnet', 'hdnnp', 'ani', 'nequip', 'mace', 'allegro', 'cace']
+   available_models()          # ['schnet', 'hdnnp', 'ani', 'physnet', 'nequip', 'mace', 'allegro', 'cace']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -128,6 +128,30 @@ environment vectors (radial + angular AEV) with per-element networks.
 Key options: ``species``, ``radial_cutoff`` (5.2), ``angular_cutoff``
 (3.5), ``hidden`` (128, 96, 64), ``aev_kwargs``.
 
+PhysNet (``dnn``)
+=================
+:class:`xnns.dnn.models.physnet.PhysNet` — message-passing HDNN with
+explicit physics (Unke & Meuwly 2019): distance-based attention masks over
+an exponential-Gaussian radial basis, pre-activation residual blocks,
+per-module output heads predicting atomic energies *and* partial charges,
+switched/shielded electrostatics of the corrected charges, and Grimme
+D3(BJ) dispersion (tables included, coefficients learnable). A faithful
+pure-PyTorch translation of the original TensorFlow
+`MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_ (see
+:ref:`fidelity`); no species list needed — elements up to Z = 94 are
+embedded directly. ``forward`` additionally returns ``"charges"``,
+``"dipole"``, and the ``"nh_loss"`` regularizer.
+
+Key options: ``cutoff`` (10.0) — short-range ``sr_cut``, ``lr_cutoff``
+(None) — long-range cutoff for electrostatics/dispersion (also the
+neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
+``num_blocks`` = ``n_interactions`` (5), ``num_residual_atomic`` (2),
+``num_residual_interaction`` (3), ``num_residual_output`` (1),
+``use_electrostatics`` (True), ``use_dispersion`` (True),
+``s6/s8/a1/a2`` (None = learnable), ``species`` +
+``atomic_energies``/``atomic_scales`` — loaded into the per-element
+``Eshift``/``Escale`` tables.
+
 Forces and stress
 =================
 Wrap any model to get autograd forces and stress:
@@ -152,4 +176,5 @@ SchNet, NequIP, MACE, and Allegro additionally expose a scriptable
 exportable to TorchScript and LAMMPS — see :ref:`deployment`. CACE provides
 the same ``node_energy`` tensor core but is not TorchScript-exportable
 (neither is the original CACE, which has no LAMMPS interface); it deploys
-through the ASE calculator.
+through the ASE calculator, as does PhysNet (whose original is a TF1 graph
+driven through an ASE calculator as well).

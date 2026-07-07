@@ -33,7 +33,7 @@ from xnns.common.data import AtomicDataset
 from xnns.common.train import Trainer
 
 cfg = Config()
-cfg.model.name = "nequip"            # schnet | hdnnp | ani | nequip | mace | allegro | cace
+cfg.model.name = "nequip"            # schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
 cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
 cfg.data.batch_size = 16             # 1 disables batch training
 cfg.device = "auto"                  # auto | cpu | cuda | cuda:0
@@ -70,9 +70,9 @@ src/xnns/
     models/       base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
   cnn/          continuous-filter conv net
     models/       schnet
-  dnn/          descriptor + per-element networks
+  dnn/          descriptor + per-element networks, and PhysNet
     featurizers/  symmetry functions, AEV
-    models/       base (DescriptorPotential), hdnnp, ani
+    models/       base (DescriptorPotential), hdnnp, ani, physnet (+ ported Grimme D3)
 ```
 
 ```python
@@ -159,6 +159,7 @@ original cannot do on torch 2.x.
 | MACE | gnn | spherical-harmonic edges | faithful; learned symmetric contraction; matches ACEsuit/mace (see note); TorchScript/LAMMPS-deployable |
 | Allegro | gnn | spherical-harmonic edges | faithful; matches mir-group/allegro (see note); TorchScript/LAMMPS-deployable |
 | CACE | gnn | Cartesian monomial edges | faithful; matches BingqingCheng/cace (see note); no e3nn; ASE-deployable |
+| PhysNet | dnn | exp-Gaussian rbf + attention masks | faithful; matches MMunibas/PhysNet TF (see note); charges/dipoles/electrostatics/D3; ASE-deployable |
 
 Equivariance is verified in `tests/test_gnn.py` and `tests/test_mace.py` (rotate
 inputs → energy invariant, forces co-rotate; errors ~1e-7).
@@ -208,6 +209,19 @@ inputs → energy invariant, forces co-rotate; errors ~1e-7).
   `tests/test_cace.py`). Like upstream (which has no LAMMPS interface), it
   deploys through ASE rather than TorchScript. The `examples/gnn/cace/`
   notebooks verify it block-by-block and end-to-end on Argon MD data.
+- *PhysNet* is a faithful **pure-PyTorch translation of the original
+  TensorFlow 1.x implementation** (MMunibas/PhysNet): the exponential-Gaussian
+  radial basis, distance-based attention masks, pre-activation residual
+  blocks, per-module (energy, charge) output heads with per-element
+  scale/shift tables, the exact charge correction, switched/shielded
+  electrostatics, and a statement-for-statement port of the bundled Grimme
+  D3(BJ) module (tables shipped in-package, coefficients learnable). Given the
+  same weights it reproduces the original TF graph to ~1e-15 in energies,
+  forces, charges, and the non-hierarchicality penalty
+  (`tests/test_physnet.py`; TF + an upstream clone required for the parity
+  test). It also returns `"charges"`, `"dipole"`, and `"nh_loss"` from
+  `forward`. The `examples/dnn/physnet/` notebooks verify it block-by-block
+  and end-to-end on Argon MD data against the original TF graph.
 
 Everything downstream (data, featurizers, autograd forces/stress, training,
 ASE/LAMMPS deploy) is identical across all models.
@@ -249,6 +263,11 @@ And for Allegro in `examples/gnn/allegro/`, validating the faithful Allegro
 against the reference `allegro` package, and for CACE in `examples/gnn/cace/`,
 validating the faithful CACE against the reference `cace` package (same
 01 block-by-block / 02 Argon train-test / 03 NPT-density trilogy).
+
+PhysNet has its trilogy in `examples/dnn/physnet/`, validated against the
+**original TensorFlow implementation** (run with a venv that has both
+`tensorflow` and `torch`; the notebooks clone MMunibas/PhysNet on demand and
+drive its TF1 graph through `tf.compat.v1`).
 
 `examples/quickstart.py` is the minimal toy-data train/predict loop.
 
