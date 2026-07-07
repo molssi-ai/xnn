@@ -33,7 +33,7 @@ from xnns.common.data import AtomicDataset
 from xnns.common.train import Trainer
 
 cfg = Config()
-cfg.model.name = "nequip"            # schnet | hdnnp | ani | nequip | mace | allegro
+cfg.model.name = "nequip"            # schnet | hdnnp | ani | nequip | mace | allegro | cace
 cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
 cfg.data.batch_size = 16             # 1 disables batch training
 cfg.device = "auto"                  # auto | cpu | cuda | cuda:0
@@ -65,9 +65,9 @@ src/xnns/
     train/        Trainer (batch + device aware), weighted energy/force/stress loss
     deploy/       ASE Calculator, LAMMPS/TorchScript export
     cli/          the `xnns` command
-  gnn/          E(3)-equivariant GNNs (need e3nn)
-    featurizers/  SphericalHarmonicEdgeEmbedding, BesselRBF, PolynomialCutoff
-    models/       base (EquivariantGNN), blocks, nequip, mace, allegro
+  gnn/          graph potentials (package needs e3nn; CACE itself does not use it)
+    featurizers/  SphericalHarmonicEdgeEmbedding, CartesianAngularBasis, BesselRBF, PolynomialCutoff
+    models/       base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
   cnn/          continuous-filter conv net
     models/       schnet
   dnn/          descriptor + per-element networks
@@ -100,9 +100,10 @@ Four ideas hold it together:
    differentiable.
 2. **Featurizers are first-class.** A `Featurizer` (subclass of `nn.Module`)
    turns a graph into invariant descriptors (symmetry functions, AEV) or
-   equivariant edge attributes (spherical harmonics). Descriptor models (HDNNP,
-   ANI) and GNNs (NequIP/MACE/Allegro) are thin compositions over featurizers,
-   so the featurization is reusable and inspectable on its own.
+   equivariant edge attributes (spherical harmonics, Cartesian monomials).
+   Descriptor models (HDNNP, ANI) and GNNs (NequIP/MACE/Allegro/CACE) are thin
+   compositions over featurizers, so the featurization is reusable and
+   inspectable on its own.
 3. **Forces/stress in one place.** `ForceStressOutput` wraps any model and
    differentiates energy w.r.t. positions (forces) and a symmetric strain
    (stress). Models never implement them.
@@ -157,6 +158,7 @@ original cannot do on torch 2.x.
 | NequIP | gnn | spherical-harmonic edges | faithful; matches mir-group/nequip (see note); TorchScript/LAMMPS-deployable |
 | MACE | gnn | spherical-harmonic edges | faithful; learned symmetric contraction; matches ACEsuit/mace (see note); TorchScript/LAMMPS-deployable |
 | Allegro | gnn | spherical-harmonic edges | faithful; matches mir-group/allegro (see note); TorchScript/LAMMPS-deployable |
+| CACE | gnn | Cartesian monomial edges | faithful; matches BingqingCheng/cace (see note); no e3nn; ASE-deployable |
 
 Equivariance is verified in `tests/test_gnn.py` and `tests/test_mace.py` (rotate
 inputs → energy invariant, forces co-rotate; errors ~1e-7).
@@ -194,6 +196,18 @@ inputs → energy invariant, forces co-rotate; errors ~1e-7).
   (energies and forces; `tests/test_allegro.py`), needing only `e3nn`. The
   `examples/` notebooks verify it block-by-block and end-to-end on Argon MD
   data.
+- *CACE* is a faithful, self-contained re-implementation of BingqingCheng/cace
+  (the Cartesian atomic cluster expansion, Cheng 2024) — the only model here
+  that needs no spherical harmonics or e3nn at all: the Cartesian monomial
+  angular basis (`CartesianAngularBasis`, same autograd-safe recursion), the
+  exact multinomial symmetrization rules (identical B-feature ordering), the
+  tensor-product element-embedding edge type, the per-(l, c) trainable radial
+  channel coupling, all three message-passing mechanisms (`M`/`Ar`/`Bchi`),
+  and the linear + MLP readout. Given the same weights it reproduces `cace`
+  to ~1e-16 relative (energies and forces, molecular and periodic;
+  `tests/test_cace.py`). Like upstream (which has no LAMMPS interface), it
+  deploys through ASE rather than TorchScript. The `examples/gnn/cace/`
+  notebooks verify it block-by-block and end-to-end on Argon MD data.
 
 Everything downstream (data, featurizers, autograd forces/stress, training,
 ASE/LAMMPS deploy) is identical across all models.
@@ -232,8 +246,9 @@ from `examples/gnn/mace/data/`):
   difference, plus independently trained models).
 
 And for Allegro in `examples/gnn/allegro/`, validating the faithful Allegro
-against the reference `allegro` package (same 01 block-by-block / 02 Argon
-train-test / 03 NPT-density trilogy).
+against the reference `allegro` package, and for CACE in `examples/gnn/cace/`,
+validating the faithful CACE against the reference `cace` package (same
+01 block-by-block / 02 Argon train-test / 03 NPT-density trilogy).
 
 `examples/quickstart.py` is the minimal toy-data train/predict loop.
 

@@ -68,7 +68,7 @@ def test_radial_sf_rotation_invariant():
 
 # --- equivariant GNNs ---
 
-@pytest.mark.parametrize("name", ["nequip", "mace", "allegro"])
+@pytest.mark.parametrize("name", ["nequip", "mace", "allegro", "cace"])
 def test_gnn_equivariance(name):
     cfg = from_dict({"model": {"name": name, "n_features": 32, "n_interactions": 2,
                                "n_rbf": 8, "cutoff": 5.0,
@@ -87,7 +87,7 @@ def test_gnn_equivariance(name):
     assert torch.allclose(o1["forces"].detach(), o0["forces"].detach() @ Rt.T, atol=1e-4)
 
 
-@pytest.mark.parametrize("name", ["nequip", "mace"])
+@pytest.mark.parametrize("name", ["nequip", "mace", "cace"])
 def test_gnn_periodic_stress(name):
     cfg = from_dict({"model": {"name": name, "n_features": 16, "n_interactions": 1,
                                "n_rbf": 8, "cutoff": 5.0,

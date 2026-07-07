@@ -71,6 +71,35 @@ default ``uuulin`` mode):
 Given the same weights it reproduces ``allegro`` to ~1e-15 in energies and
 forces (``tests/test_allegro.py``).
 
+CACE
+====
+A faithful re-implementation of `BingqingCheng/cace
+<https://github.com/BingqingCheng/cace>`_ (Cheng, *npj Comput Mater* 2024)
+— the Cartesian atomic cluster expansion, which needs no spherical
+harmonics or e3nn at all:
+
+- the Cartesian monomial angular basis
+  (:class:`~xnns.gnn.featurizers.cartesian.CartesianAngularBasis`,
+  evaluated with the same autograd-safe multiply recursion) and the exact
+  multinomial symmetrization rules of upstream
+  ``find_combo_vectors_nu{2,3,4}``, so B-feature ordering is identical;
+- the tensor-product element-embedding edge type, the per-\ :math:`(l, c)`
+  trainable radial channel coupling (upstream's per-\ :math:`l` weight list
+  stacked into one einsum), and all three message-passing mechanisms
+  (node memory ``M``, exponential-decay filter ``Ar``, recursive edge
+  embedding ``Bchi``);
+- CACE's radial conventions: trainable Bessel with the MACE
+  :math:`\sqrt{2/r_{\max}}` prefactor, degree-6 polynomial cutoff,
+  normalized :math:`\mathbf{r}_i - \mathbf{r}_j` edge vectors, and the
+  :math:`1/\sqrt{\langle n_\text{neigh}\rangle}` message normalization;
+- the linear + MLP readout on the concatenated per-layer B features; the
+  per-species reference energy lives in the standard xnns ``atom_ref``
+  (upstream subtracts it from the training labels instead).
+
+Given the same weights it reproduces ``cace`` to ~1e-16 (relative) in
+energies and forces, molecular and periodic, for any message-type subset
+(``tests/test_cace.py``).
+
 Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,

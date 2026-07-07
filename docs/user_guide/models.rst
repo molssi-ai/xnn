@@ -19,7 +19,7 @@ frontend:
 
    from xnns.common.models import available_models, build_model
 
-   available_models()          # ['schnet', 'hdnnp', 'ani', 'nequip', 'mace', 'allegro']
+   available_models()          # ['schnet', 'hdnnp', 'ani', 'nequip', 'mace', 'allegro', 'cace']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -27,8 +27,10 @@ double as the keys accepted in ``model.extra`` of a config file.
 
 .. note::
 
-   The GNN models (NequIP, MACE, Allegro) require the ``gnn`` extra
-   (``e3nn``); they register themselves when ``xnns.gnn`` is importable.
+   The GNN models (NequIP, MACE, Allegro, CACE) register themselves when
+   ``xnns.gnn`` is importable, which requires the ``gnn`` extra (``e3nn``).
+   CACE itself works entirely in Cartesian coordinates and does not use
+   e3nn.
 
 MACE (``gnn``)
 ==============
@@ -78,6 +80,29 @@ widths, ``initial_scalar_embedding_dim``, ``avg_num_neighbors``,
 ``latent_resnet`` (True), ``num_polynomial_cutoff`` (6), ``trainable_rbf``
 (True), ``atomic_energies``, ``atomic_scales``.
 
+CACE (``gnn``)
+==============
+:class:`xnns.gnn.models.cace.CACE` — Cartesian atomic cluster expansion
+(Cheng, *npj Comput Mater* 2024): body-ordered invariant features built
+entirely in Cartesian coordinates (monomial angular basis, multinomial
+symmetrization instead of Clebsch–Gordan contraction), with a
+low-dimensional element embedding, trainable radial channel coupling and
+optional message passing. Faithful to
+`BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_, with
+transplantable weights (see :ref:`fidelity`); the only GNN model here that
+needs no spherical harmonics.
+
+Key options: ``species``, ``cutoff`` (5.5), ``n_atom_basis`` (3) — element
+embedding length (edge channels are its square), ``n_rbf`` (8),
+``n_radial_basis`` — mixed radial channels (``n_rbf``), ``max_l`` (3),
+``max_nu`` (3) — maximum body order of the invariants (1–4),
+``num_message_passing`` (1) — fully flexible T = 0..N (0 = plain Cartesian
+ACE), ``message_types`` (["M", "Ar", "Bchi"]) — node memory /
+radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
+(False), ``avg_num_neighbors`` (10.0), ``num_polynomial_cutoff`` (6),
+``trainable_rbf`` (True), ``readout_hidden`` ([32, 16]),
+``atomic_energies``.
+
 SchNet (``cnn``)
 ================
 :class:`xnns.cnn.models.schnet.SchNet` — continuous-filter convolutions over
@@ -124,4 +149,7 @@ TorchScript deployment
 ======================
 SchNet, NequIP, MACE, and Allegro additionally expose a scriptable
 ``node_energy(atomic_numbers, edge_index, edge_vec)`` core, which makes them
-exportable to TorchScript and LAMMPS — see :ref:`deployment`.
+exportable to TorchScript and LAMMPS — see :ref:`deployment`. CACE provides
+the same ``node_energy`` tensor core but is not TorchScript-exportable
+(neither is the original CACE, which has no LAMMPS interface); it deploys
+through the ASE calculator.

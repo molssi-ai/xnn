@@ -16,8 +16,8 @@ the ``examples`` extra first — it pulls in the reference packages
 
 The trilogies
 =============
-Each equivariant model has the same three-notebook validation series under
-``examples/gnn/<model>/``:
+Each GNN model (MACE, NequIP, Allegro, CACE) has the same three-notebook
+validation series under ``examples/gnn/<model>/``:
 
 .. list-table::
    :header-rows: 1
@@ -45,4 +45,5 @@ step-by-step tutorial that rebuilds the MACE architecture block by block in
 figures.
 
 The Argon dataset lives in ``examples/gnn/mace/data/`` and is shared by the
-NequIP and Allegro notebooks.
+NequIP, Allegro, and CACE notebooks. The CACE series compares against the
+original ``cace`` package (``pip install git+https://github.com/BingqingCheng/cace``).

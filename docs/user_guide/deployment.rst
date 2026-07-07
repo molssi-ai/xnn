@@ -42,7 +42,9 @@ exported ``.pt`` with the matching C++ pair style (the ``pair_nequip`` /
 A model is exportable when it provides the scriptable core
 ``node_energy(atomic_numbers, edge_index, edge_vec)`` — SchNet, NequIP,
 MACE, and Allegro all do, and the scripted models reproduce the eager ones
-to ~1e-15 (verified in the test suite).
+to ~1e-15 (verified in the test suite). CACE is the exception: like the
+original ``cace`` package (which has no LAMMPS interface) it deploys via the
+ASE calculator only.
 
 See :ref:`howto-lammps` for the step-by-step guide, including the CLI form
 (``xnns export``).

@@ -1,0 +1,16 @@
+name: cace
+cutoff: 5.5               # CACE r_cut (paper water model)
+n_interactions: 1         # message-passing layers T (CACE num_message_passing)
+n_rbf: 8                  # raw Bessel radial functions
+species: [1, 6, 8]        # H, C, O (CACE zs)
+n_atom_basis: 3           # element-embedding length (channels = n_atom_basis^2)
+n_radial_basis: null      # mixed radial channels n (null -> n_rbf)
+max_l: 3                  # max total angular momentum of the Cartesian basis
+max_nu: 3                 # max body order of the invariant B features (1-4)
+message_types: [M, Ar, Bchi]  # CACE type_message_passing
+embed_receiver_nodes: false   # separate receiver embedding table
+avg_num_neighbors: 10.0   # message normalization 1/sqrt(avg_num_neighbors)
+num_polynomial_cutoff: 6  # polynomial cutoff degree p
+trainable_rbf: true       # learnable Bessel frequencies
+readout_hidden: [32, 16]  # readout MLP hidden widths (plus a parallel linear)
+atomic_energies: null     # per-species E0 shifts (folded into atom_ref)

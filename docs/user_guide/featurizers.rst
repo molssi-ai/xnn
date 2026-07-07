@@ -39,12 +39,16 @@ Invariant per-atom descriptors for HDNNP/ANI-style models:
 
 Equivariant featurizers (``xnns.gnn.featurizers``)
 ==================================================
-Edge attributes for the E(3)-equivariant models:
+Edge attributes for the GNN models:
 
 - :class:`~xnns.gnn.featurizers.spherical.SphericalHarmonicEdgeEmbedding` —
   the standard NequIP/MACE/Allegro edge embedding: edge lengths, real
   spherical harmonics :math:`Y_{lm}(\hat r_{ij})` up to ``l_max``, and a
   radial expansion.
+- :class:`~xnns.gnn.featurizers.cartesian.CartesianAngularBasis` — the CACE
+  angular basis: the Cartesian monomials
+  :math:`x^{l_x} y^{l_y} z^{l_z}` up to ``l_max``, spanning the same space
+  as the spherical harmonics per total :math:`l` without e3nn.
 - :class:`~xnns.gnn.featurizers.radial.BesselRBF` — (trainable) Bessel radial
   basis.
 - :class:`~xnns.gnn.featurizers.cutoff.PolynomialCutoff` — the polynomial
@@ -56,6 +60,14 @@ Edge attributes for the E(3)-equivariant models:
 
    embed = SphericalHarmonicEdgeEmbedding(l_max=2)
    lengths, edge_sh, edge_radial = embed.embed(graph.edge_vectors())
+
+.. code-block:: python
+
+   from xnns.gnn.featurizers import CartesianAngularBasis
+
+   basis = CartesianAngularBasis(l_max=3)
+   unit = graph.edge_vectors()
+   angular = basis(unit / unit.norm(dim=-1, keepdim=True))   # (E, 20)
 
 Writing your own featurizer is a small task — see
 :ref:`developer-guide-extending`.

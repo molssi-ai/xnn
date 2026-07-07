@@ -56,6 +56,16 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "per_species_rescale_shifts": "atomic_energies",
         "per_species_rescale_scales": "atomic_scales",
     },
+    # CACE constructor spellings (BingqingCheng/cace `Cace(...)` kwargs),
+    # plus the MACE/NequIP "l_max" spelling of CACE's max_l
+    "cace": {
+        "r_max": "cutoff",
+        "zs": "species",
+        "num_message_passing": "n_interactions",
+        "type_message_passing": "message_types",
+        "atomic_numbers": "species",
+        "l_max": "max_l",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

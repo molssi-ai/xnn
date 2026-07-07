@@ -16,9 +16,11 @@ Adding a model
 2. **Subclass the right base.**
    :class:`~xnns.common.models.base.InteratomicPotential` is the minimal
    interface; the family bases give you more for free —
-   :class:`~xnns.gnn.models.base.EquivariantGNN` handles species bookkeeping,
-   per-element reference energies, and the spherical-harmonic edge
-   embedding; :class:`~xnns.dnn.models.base.DescriptorPotential` composes a
+   :class:`~xnns.gnn.models.base.GNNPotential` handles species bookkeeping
+   and per-element reference energies (CACE builds on it directly);
+   :class:`~xnns.gnn.models.base.EquivariantGNN` adds the spherical-harmonic
+   edge embedding on top (NequIP/MACE/Allegro);
+   :class:`~xnns.dnn.models.base.DescriptorPotential` composes a
    featurizer with per-element MLPs.
 
 3. **Implement** ``forward(data)`` taking an
