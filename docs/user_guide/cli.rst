@@ -27,6 +27,11 @@ VASP, ...); when no ``val_path`` (``test_path``) is given,
 out instead. The optional test set is evaluated once after training.
 Checkpoints (``best.pt``, ``last.pt``) go to ``output_dir``.
 
+The same command runs data-parallel on several GPUs or nodes when started
+through a distributed launcher — ``torchrun --nproc-per-node 2 -m xnns train
+--config configs/train.yaml`` — with no config changes; see
+:ref:`training`.
+
 xnns export
 ===========
 Export a trained checkpoint for deployment:

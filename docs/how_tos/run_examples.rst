@@ -51,3 +51,11 @@ the original ``cace`` package
 series (``examples/dnn/physnet/``) compares against the original
 **TensorFlow** implementation and needs a venv with both ``tensorflow`` and
 ``torch`` (the notebooks clone MMunibas/PhysNet on demand).
+
+``examples/gnn/les/`` validates the Latent Ewald Summation long-range add-on
+against the original ``cace`` ``EwaldPotential`` (notebook 01) and reproduces
+the LES paper's central experiment (notebook 02): extrapolating the binding
+curves of charged/polar molecular dimers, where short-range models fail
+qualitatively -- a CC/CP/PP subset of the BioFragment dimer set ships with
+the example. (Neutral homogeneous systems like the Argon set carry no
+long-range tail, so they are deliberately *not* used here.)

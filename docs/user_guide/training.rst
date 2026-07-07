@@ -82,6 +82,49 @@ Devices and batching
 concatenation (see :ref:`data`); ``data.batch_size = 1`` disables batch
 training entirely.
 
+Multi-GPU and multi-node training
+=================================
+Distributed data parallelism is native PyTorch DDP and needs no code or
+configuration changes — only a distributed launcher. When the trainer finds
+the launcher's ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` environment
+variables it joins the process group (NCCL on GPUs, Gloo on CPUs), pins each
+rank to ``cuda:LOCAL_RANK``, shards all loaders with ``DistributedSampler``,
+wraps the model in ``DistributedDataParallel``, and all-reduces the logged
+metrics so the best-checkpoint decision and the plateau scheduler stay in
+lockstep across ranks. Only rank 0 prints and writes checkpoints, and the
+saved state dict is that of the bare model, so checkpoints from serial and
+distributed runs are interchangeable.
+
+Single node, all (or ``N``) GPUs:
+
+.. code-block:: bash
+
+   torchrun --nproc-per-node 2 -m xnns train --config train.yaml
+
+Multi-node (one such command per node, e.g. from a Slurm step):
+
+.. code-block:: bash
+
+   torchrun --nnodes 2 --nproc-per-node 4 \
+            --rdzv-backend c10d --rdzv-endpoint "$HEAD_NODE":29500 \
+            -m xnns train --config train.yaml
+
+Hugging Face's ``accelerate launch`` works as well (it exports the same
+environment variables), e.g. ``accelerate launch --multi_gpu --num_processes 2
+-m xnns train --config train.yaml`` — but note that it acts purely as a
+process launcher here: FSDP or DeepSpeed options in an accelerate config are
+not picked up, since the trainer deliberately uses DDP only. Sharded
+strategies cannot train forces or stress anyway — those losses back-propagate
+through gradients taken with ``create_graph=True`` (a double backward), which
+DDP supports and FSDP/DeepSpeed do not.
+
+``data.batch_size`` is per process, so the effective batch is
+``batch_size × WORLD_SIZE``; scale the learning rate (or the batch size)
+accordingly. Validation and test sets are sharded too, and
+``DistributedSampler`` pads uneven shards by repeating a few samples, so
+metrics can differ negligibly from a serial run when the split size is not
+divisible by the world size.
+
 Reproducibility
 ===============
 ``cfg.seed`` seeds the run. Note that exact bit-reproducibility across

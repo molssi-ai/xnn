@@ -106,7 +106,12 @@ Four ideas hold it together:
    inspectable on its own.
 3. **Forces/stress in one place.** `ForceStressOutput` wraps any model and
    differentiates energy w.r.t. positions (forces) and a symmetric strain
-   (stress). Models never implement them.
+   (stress). Models never implement them. The same wrapper idea powers
+   `LatentEwald` (Latent Ewald Summation, Cheng 2025): every model exposes
+   invariant `"node_features"`, so long-range electrostatics/dispersion can be
+   added to *any* short-range model with `extra: {long_range: {...}}` — a
+   faithful port of the CACE-LR reference implementation (see
+   `tests/test_les.py` and `examples/gnn/les/`).
 4. **Extensibility via registry + one config, three frontends.**
    `@register_model("name")` + a `from_config` classmethod makes a model usable
    from any of YAML / argparse / Hydra, which all funnel into one

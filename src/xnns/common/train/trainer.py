@@ -2,13 +2,30 @@
 
 Keeps the moving parts explicit rather than hiding them in a framework, so the
 pipeline is easy to follow and extend.
+
+Multi-GPU / multi-node data parallelism uses native PyTorch DDP and is driven
+purely by the environment: when the process was spawned by a distributed
+launcher that sets ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` (``torchrun
+--nproc-per-node N -m xnns train ...``, Slurm + torchrun, or an
+``accelerate launch`` configured for multi-GPU), the trainer initializes the
+process group, shards the data loaders with ``DistributedSampler``, wraps the
+model in ``DistributedDataParallel``, all-reduces the logged metrics, and
+writes checkpoints from rank 0 only. A plain ``python`` / ``xnns`` invocation
+runs the unchanged single-process pipeline.
+
+Sharded strategies (FSDP, DeepSpeed ZeRO) are deliberately not used: force and
+stress losses back-propagate through gradients taken with
+``create_graph=True`` (see ``ForceStressOutput``), a double backward that DDP
+supports but sharded wrappers do not.
 """
 from __future__ import annotations
 
 import os
 
 import torch
-from torch.utils.data import DataLoader, random_split
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 from ..config import Config
 from ..data import AtomicDataset, collate
@@ -46,6 +63,13 @@ class Trainer:
     optimizer and learning-rate scheduler, then runs the full training
     pipeline via :meth:`fit`.
 
+    When spawned by a distributed launcher (``torchrun -m xnns train ...`` on
+    one or many nodes; see :meth:`_init_distributed`) the same pipeline runs
+    data-parallel: the model is wrapped in ``DistributedDataParallel``, each
+    loader is sharded with a ``DistributedSampler``, metrics are all-reduced
+    so every rank sees global averages, and only rank 0 logs and writes
+    checkpoints.
+
     Parameters
     ----------
     cfg : Config
@@ -72,10 +96,20 @@ class Trainer:
     ----------
     cfg : Config
         The configuration passed in.
+    distributed : bool
+        Whether this process is part of a distributed launch (``WORLD_SIZE``
+        in the environment is greater than one).
+    rank : int
+        This process's global rank; 0 in a single-process run.
+    is_main : bool
+        Whether this is rank 0, the only rank that logs and saves.
     device : torch.device
-        The resolved training device.
-    model : ForceStressOutput
-        The model wrapped with force/stress output heads, moved to ``device``.
+        The resolved training device (``cuda:LOCAL_RANK`` per rank when
+        distributed on GPUs).
+    model : ForceStressOutput or DistributedDataParallel
+        The model wrapped with force/stress output heads, moved to ``device``
+        (and wrapped in DDP when distributed); :attr:`module` always gives the
+        bare :class:`ForceStressOutput`.
     train_loader : torch.utils.data.DataLoader
         Shuffled loader over the training set. Batch training is simply
         ``batch_size > 1``; set the batch size to 1 to disable it.
@@ -95,7 +129,10 @@ class Trainer:
                  val_set: AtomicDataset | None = None,
                  test_set: AtomicDataset | None = None):
         self.cfg = cfg
-        self.device = resolve_device(cfg.device)
+        self.distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+        self.device = self._init_distributed(resolve_device(cfg.device))
+        self.rank = dist.get_rank() if self.distributed else 0
+        self.is_main = self.rank == 0
 
         torch.manual_seed(cfg.seed)
 
@@ -105,6 +142,11 @@ class Trainer:
             compute_forces=cfg.optim.force_weight > 0,
             compute_stress=cfg.optim.stress_weight > 0,
         ).to(self.device)
+        if self.distributed:
+            self.model = DistributedDataParallel(
+                self.model,
+                device_ids=(
+                    [self.device.index] if self.device.type == "cuda" else None))
 
         # Carve val/test splits out of the training set for whichever of the
         # two was not given explicitly (a single seeded permutation, so the
@@ -123,9 +165,14 @@ class Trainer:
             test_set = splits[2] if n_test else test_set
 
         # batch training is just batch_size > 1; set to 1 to disable.
+        # Distributed runs shard every loader across ranks; the sampler then
+        # owns the shuffling (the two DataLoader options are exclusive).
         def _loader(ds, shuffle):
+            sampler = (DistributedSampler(ds, shuffle=shuffle, seed=cfg.seed)
+                       if self.distributed else None)
             return DataLoader(ds, batch_size=cfg.data.batch_size,
-                              shuffle=shuffle, collate_fn=collate,
+                              shuffle=shuffle and sampler is None,
+                              sampler=sampler, collate_fn=collate,
                               num_workers=cfg.data.num_workers)
         self.train_loader = _loader(train_set, shuffle=True)
         self.val_loader = _loader(val_set, False) if val_set is not None else None
@@ -136,6 +183,47 @@ class Trainer:
             weight_decay=cfg.optim.weight_decay)
         self.sched = self._make_scheduler(cfg.optim.scheduler)
         os.makedirs(cfg.output_dir, exist_ok=True)
+
+    def _init_distributed(self, dev: torch.device) -> torch.device:
+        """Join the process group of a distributed launcher, if there is one.
+
+        A launcher such as ``torchrun`` (or ``accelerate launch``) exports
+        ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` into every process it
+        spawns; ``self.distributed`` reflects whether that happened. In a
+        distributed run each rank is pinned to one CUDA device selected by
+        ``LOCAL_RANK`` (the configured device only chooses cpu vs cuda), and
+        the process group is initialized with the matching backend -- NCCL on
+        GPUs, Gloo on CPUs.
+
+        Parameters
+        ----------
+        dev : torch.device
+            The device resolved from the configuration.
+
+        Returns
+        -------
+        torch.device
+            The device this rank should train on: ``dev`` unchanged in a
+            single-process run, ``cuda:LOCAL_RANK`` (or ``dev`` on CPU) in a
+            distributed one.
+        """
+        self._owns_pg = False
+        if not self.distributed:
+            return dev
+        if dev.type == "cuda":
+            dev = torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
+            torch.cuda.set_device(dev)
+        if not dist.is_initialized():
+            dist.init_process_group("nccl" if dev.type == "cuda" else "gloo")
+            self._owns_pg = True
+        return dev
+
+    @property
+    def module(self) -> ForceStressOutput:
+        """The bare model, unwrapped from ``DistributedDataParallel`` if any."""
+        if isinstance(self.model, DistributedDataParallel):
+            return self.model.module
+        return self.model
 
     def _make_scheduler(self, name: str):
         """Construct the learning-rate scheduler named in the config.
@@ -187,7 +275,10 @@ class Trainer:
         """
         data = data.to(self.device)
         o = self.cfg.optim
-        pred = self.model(data)
+        # Evaluation steps run the bare module: they are not followed by a
+        # backward pass, so the DDP wrapper's gradient sync must not be armed.
+        model = self.model if train else self.module
+        pred = model(data)
         loss, logs = weighted_loss(
             pred, data, o.energy_weight, o.force_weight, o.stress_weight)
         if train:
@@ -219,6 +310,9 @@ class Trainer:
         best = float("inf")
         tr, va = {}, {}
         for epoch in range(self.cfg.optim.epochs):
+            if self.distributed:
+                # reseed the sampler so each epoch shuffles differently
+                self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             tr = self._avg(self._step(d, True) for d in self.train_loader)
 
@@ -237,13 +331,17 @@ class Trainer:
             elif self.sched is not None:
                 self.sched.step()
 
-            self._log(epoch, tr, va)
+            if self.is_main:
+                self._log(epoch, tr, va)
         self.save(os.path.join(self.cfg.output_dir, "last.pt"))
 
         te = {}
         if self.test_loader is not None:
             te = self.evaluate()
-            print(f"test loss {te.get('loss', 0):.4e}")
+            if self.is_main:
+                print(f"test loss {te.get('loss', 0):.4e}")
+        if self._owns_pg and dist.is_initialized():
+            dist.destroy_process_group()
         return {"train": tr, "val": va, "test": te}
 
     def evaluate(self, loader=None):
@@ -267,9 +365,13 @@ class Trainer:
         # forces need grad even at eval -> no torch.no_grad()
         return self._avg(self._step(d, False) for d in loader)
 
-    @staticmethod
-    def _avg(logs_iter):
+    def _avg(self, logs_iter):
         """Average a sequence of per-batch log dictionaries.
+
+        In a distributed run the per-rank sums and batch counts are further
+        summed over all ranks with an all-reduce, so every rank returns the
+        same global averages -- the best-checkpoint decision and the plateau
+        scheduler then stay in lockstep across ranks.
 
         Parameters
         ----------
@@ -280,15 +382,24 @@ class Trainer:
         Returns
         -------
         dict of str to float
-            Each key mapped to the mean of its values across the batches. An
-            empty iterable yields an empty dictionary (division guarded so an
-            empty iterable does not raise).
+            Each key mapped to the mean of its values across the batches (and
+            across ranks when distributed). An empty iterable yields an empty
+            dictionary (division guarded so an empty iterable does not raise).
         """
         agg, n = {}, 0
         for logs in logs_iter:
             n += 1
             for k, v in logs.items():
                 agg[k] = agg.get(k, 0.0) + v
+        if self.distributed and dist.is_initialized():
+            keys = sorted(agg)
+            # NCCL reduces on the rank's GPU; Gloo reduces on CPU.
+            t = torch.tensor(
+                [float(n)] + [agg[k] for k in keys], dtype=torch.float64,
+                device=self.device if self.device.type == "cuda" else "cpu")
+            dist.all_reduce(t)
+            n = t[0].item()
+            agg = {k: t[i + 1].item() for i, k in enumerate(keys)}
         return {k: v / max(n, 1) for k, v in agg.items()}
 
     @staticmethod
@@ -317,6 +428,11 @@ class Trainer:
     def save(self, path: str):
         """Serialize the model state dict and configuration to disk.
 
+        Only rank 0 writes (in a single-process run that is the only rank);
+        the state dict is taken from the bare module, so checkpoint keys are
+        identical with and without DDP. A barrier keeps the other ranks from
+        racing ahead of the write.
+
         Parameters
         ----------
         path : str
@@ -328,4 +444,7 @@ class Trainer:
         -------
         None
         """
-        torch.save({"model": self.model.state_dict(), "cfg": self.cfg}, path)
+        if self.is_main:
+            torch.save({"model": self.module.state_dict(), "cfg": self.cfg}, path)
+        if self.distributed and dist.is_initialized():
+            dist.barrier()

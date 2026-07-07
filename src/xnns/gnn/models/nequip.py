@@ -43,7 +43,7 @@ it exactly (same sorted input layout, same ``normalize2mom`` activations).
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies the
 # class-level attribute annotations that TorchScript needs to resolve, breaking
 # `torch.jit.script`.
-from typing import Dict, Final, List, Optional
+from typing import Dict, Final, List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -607,6 +607,8 @@ class NequIP(EquivariantGNN):
             else max(1, num_features // 2)
         irreps_out_hidden = o3.Irreps([(hidden, (0, 1))])
         self.conv_to_output_hidden = o3.Linear(irreps, irreps_out_hidden)
+        # invariant features (for e.g. LES): the scalar conv-to-output layer
+        self.node_feature_dim = irreps_out_hidden.dim
         self.output_hidden_to_scalar = o3.Linear(irreps_out_hidden, o3.Irreps("1x0e"))
 
         # per-species scale/shift (upstream PerSpeciesScaleShift, deployed form)
@@ -622,15 +624,17 @@ class NequIP(EquivariantGNN):
             self.set_atomic_energies(atomic_energies)
 
     @torch.jit.export
-    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                    edge_vec: Tensor) -> Tensor:
-        """TorchScript-compatible core: tensors in, per-atom energies out.
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """TorchScript-compatible core: tensors in, features + energies out.
 
-        This is what the deploy wrappers (LAMMPS/TorchScript, see
-        :mod:`xnns.common.deploy`) call, so it avoids the
+        The single implementation reused by :meth:`node_energy` (the deploy
+        entry point) and :meth:`forward`; it avoids the
         :class:`~xnns.common.data.AtomicGraph` dataclass. Embeds the species,
-        runs the convnet layers, reads out the raw per-atom energy and applies
-        the per-species scale/shift. :meth:`forward` reuses it.
+        runs the convnet layers, and reads out both the invariant
+        conv-to-output features (what
+        :class:`~xnns.common.models.les.LatentEwald` consumes) and the
+        per-atom energy with the per-species scale/shift applied.
 
         Parameters
         ----------
@@ -645,8 +649,9 @@ class NequIP(EquivariantGNN):
 
         Returns
         -------
-        torch.Tensor
-            Per-atom energy, shape ``(N,)``.
+        tuple of torch.Tensor
+            The invariant conv-to-output features ``(N, node_feature_dim)``
+            and the per-atom energy ``(N,)``.
         """
         node_attrs = self.node_attr(atomic_numbers)
         # NequIP evaluates Y_l on r_j - r_i (neighbour minus centre); the xnns
@@ -655,9 +660,18 @@ class NequIP(EquivariantGNN):
         x = self.chemical_embedding(node_attrs)
         for layer in self.layers:
             x = layer(x, node_attrs, edge_index, edge_sh, edge_radial)
-        eps = self.output_hidden_to_scalar(self.conv_to_output_hidden(x)).squeeze(-1)
-        return (self.atom_scale[atomic_numbers] * eps
-                + self.atom_ref(atomic_numbers).squeeze(-1))
+        features = self.conv_to_output_hidden(x)
+        eps = self.output_hidden_to_scalar(features).squeeze(-1)
+        return features, (self.atom_scale[atomic_numbers] * eps
+                          + self.atom_ref(atomic_numbers).squeeze(-1))
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                    edge_vec: Tensor) -> Tensor:
+        """Per-atom energy, shape ``(N,)`` (thin wrapper over
+        :meth:`node_features_energy`; the deploy wrappers call this)."""
+        out = self.node_features_energy(atomic_numbers, edge_index, edge_vec)
+        return out[1]
 
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -679,9 +693,11 @@ class NequIP(EquivariantGNN):
             total energy).
         """
         edge_vec = data.edge_vectors()
-        node_energy = self.node_energy(data.atomic_numbers, data.edge_index, edge_vec)
+        features, node_energy = self.node_features_energy(
+            data.atomic_numbers, data.edge_index, edge_vec)
         energy = self.aggregate_energy(node_energy, data)
-        return {"node_energy": node_energy, "energy": energy}
+        return {"node_energy": node_energy, "energy": energy,
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "NequIP":

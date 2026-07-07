@@ -9,6 +9,8 @@ through ``data.edge_vectors()``, which already accounts for cell shifts.
 """
 from __future__ import annotations
 
+from typing import Tuple
+
 import torch
 from torch import Tensor, nn
 
@@ -123,6 +125,7 @@ class SchNet(InteratomicPotential):
                  n_rbf: int = 50, cutoff: float = 5.0):
         super().__init__()
         self.cutoff = cutoff
+        self.node_feature_dim = n_features  # invariant features (for e.g. LES)
         self.embedding = nn.Embedding(_MAX_Z, n_features)
         self.rbf = GaussianRBF(n_rbf, cutoff)
         self.interactions = nn.ModuleList(
@@ -137,12 +140,13 @@ class SchNet(InteratomicPotential):
         nn.init.zeros_(self.atom_ref.weight)
 
     @torch.jit.export
-    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                    edge_vec: Tensor) -> Tensor:
-        """TorchScript-compatible core: tensors in, per-atom energy out.
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """TorchScript-compatible core: tensors in, features + energy out.
 
-        This is what the deploy wrappers (LAMMPS/TorchScript) call, so it must
-        avoid the AtomicGraph dataclass and any Python-only constructs.
+        The single implementation reused by :meth:`node_energy` (the deploy
+        entry point) and :meth:`forward`, so it must avoid the AtomicGraph
+        dataclass and any Python-only constructs.
 
         Parameters
         ----------
@@ -157,17 +161,26 @@ class SchNet(InteratomicPotential):
 
         Returns
         -------
-        Tensor
-            Per-atom energy, shape ``(N,)``, including the learnable per-element
-            reference shift.
+        tuple of Tensor
+            The invariant node features before the readout
+            ``(N, node_feature_dim)`` and the per-atom energy ``(N,)``
+            (including the learnable per-element reference shift).
         """
         x = self.embedding(atomic_numbers)
         r = torch.linalg.norm(edge_vec, dim=-1)
         rbf = self.rbf(r)
         for block in self.interactions:
             x = x + block(x, edge_index, r, rbf)
-        return (self.readout(x).squeeze(-1)
-                + self.atom_ref(atomic_numbers).squeeze(-1))
+        return x, (self.readout(x).squeeze(-1)
+                   + self.atom_ref(atomic_numbers).squeeze(-1))
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                    edge_vec: Tensor) -> Tensor:
+        """Per-atom energy, shape ``(N,)`` (thin wrapper over
+        :meth:`node_features_energy`; the deploy wrappers call this)."""
+        out = self.node_features_energy(atomic_numbers, edge_index, edge_vec)
+        return out[1]
 
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -182,13 +195,15 @@ class SchNet(InteratomicPotential):
         Returns
         -------
         dict[str, Tensor]
-            Dictionary with ``"node_energy"`` (per-atom energy, shape ``(N,)``)
-            and ``"energy"`` (per-structure total energy).
+            Dictionary with ``"node_energy"`` (per-atom energy, shape ``(N,)``),
+            ``"energy"`` (per-structure total energy) and ``"node_features"``
+            (invariant per-atom features, shape ``(N, node_feature_dim)``).
         """
-        node_energy = self.node_energy(
+        features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         energy = self.aggregate_energy(node_energy, data)
-        return {"node_energy": node_energy, "energy": energy}
+        return {"node_energy": node_energy, "energy": energy,
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "SchNet":

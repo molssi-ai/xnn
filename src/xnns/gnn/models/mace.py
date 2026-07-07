@@ -988,6 +988,10 @@ class MACE(EquivariantGNN):
 
         num_features = hid.count(o3.Irrep(0, 1))
         node_feats_irreps = o3.Irreps([(num_features, (0, 1))])
+        # invariant (l=0) channels per layer, concatenated across layers (for
+        # e.g. LES latent charges); with T=0 the species embedding itself
+        self._n_scalar_features = num_features
+        self.node_feature_dim = num_features * max(1, num_interactions)
         sh_irreps = self.irreps_sh                                  # spherical_harmonics(max_ell)
         interaction_irreps = _hidden_irreps(num_features, max_ell)  # C copies of SH(max_ell)
         edge_feats_irreps = o3.Irreps(f"{n_rbf}x0e")
@@ -1029,17 +1033,19 @@ class MACE(EquivariantGNN):
                 )
 
     @torch.jit.export
-    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                    edge_vec: Tensor) -> Tensor:
-        """TorchScript-compatible core: tensors in, per-atom energies out.
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """TorchScript-compatible core: tensors in, features + energies out.
 
-        This is what the deploy wrappers (LAMMPS/TorchScript, see
-        :mod:`xnns.common.deploy`) call, so it must avoid the
+        The single implementation reused by :meth:`node_energy` (the deploy
+        entry point) and :meth:`forward`, so it must avoid the
         :class:`~xnns.common.data.AtomicGraph` dataclass and any Python-only
         constructs. Starts from the per-element reference energy, optionally
         adds the ZBL pair-repulsion term, then runs ``T`` rounds of
         interaction + product basis + readout, accumulating each readout into
-        the node energy. :meth:`forward` reuses it.
+        the node energy and collecting the invariant (``l = 0``) channels of
+        every layer's node features (what
+        :class:`~xnns.common.models.les.LatentEwald` consumes).
 
         Parameters
         ----------
@@ -1054,8 +1060,9 @@ class MACE(EquivariantGNN):
 
         Returns
         -------
-        torch.Tensor
-            Per-atom energy, shape ``(N,)``.
+        tuple of torch.Tensor
+            The concatenated invariant node features
+            ``(N, node_feature_dim)`` and the per-atom energy ``(N,)``.
         """
         node_attrs = self.node_attr(atomic_numbers)
         node_energy = self.atom_ref(atomic_numbers).squeeze(-1)
@@ -1067,18 +1074,31 @@ class MACE(EquivariantGNN):
                 lengths[:, None], atomic_numbers, edge_index, num_nodes,
             )
 
-        if len(self.interactions) > 0:
-            node_feats = self.node_embedding(node_attrs)
-            for interaction, product, readout in zip(
-                self.interactions, self.products, self.readouts
-            ):
-                node_feats, sc = interaction(
-                    node_attrs, node_feats, edge_sh, edge_radial, edge_index
-                )
-                node_feats = product(node_feats, sc, node_attrs)
-                node_energy = node_energy + readout(node_feats).squeeze(-1)
+        node_feats = self.node_embedding(node_attrs)
+        feats_list: List[Tensor] = []
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
+            node_feats, sc = interaction(
+                node_attrs, node_feats, edge_sh, edge_radial, edge_index
+            )
+            node_feats = product(node_feats, sc, node_attrs)
+            node_energy = node_energy + readout(node_feats).squeeze(-1)
+            # scalar (l=0) channels come first in the e3nn irreps layout
+            feats_list.append(node_feats[:, :self._n_scalar_features])
+        if len(feats_list) == 0:
+            feats_list.append(node_feats)
+        features = torch.cat(feats_list, dim=-1)
 
-        return node_energy
+        return features, node_energy
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                    edge_vec: Tensor) -> Tensor:
+        """Per-atom energy, shape ``(N,)`` (thin wrapper over
+        :meth:`node_features_energy`; the deploy wrappers call this)."""
+        out = self.node_features_energy(atomic_numbers, edge_index, edge_vec)
+        return out[1]
 
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -1100,9 +1120,11 @@ class MACE(EquivariantGNN):
             total energy).
         """
         edge_vec = data.edge_vectors()
-        node_energy = self.node_energy(data.atomic_numbers, data.edge_index, edge_vec)
+        features, node_energy = self.node_features_energy(
+            data.atomic_numbers, data.edge_index, edge_vec)
         energy = self.aggregate_energy(node_energy, data)
-        return {"node_energy": node_energy, "energy": energy}
+        return {"node_energy": node_energy, "energy": energy,
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "MACE":

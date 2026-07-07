@@ -85,6 +85,10 @@ def build_model(cfg):
     -------
     InteratomicPotential
         The model instance built by the selected class's ``from_config``.
+        When the config's ``extra`` carries a ``"long_range"`` entry (a dict
+        of :class:`~xnns.common.models.les.LatentEwald` options, or ``True``
+        for the defaults), the model is wrapped with the Latent Ewald
+        Summation long-range term.
 
     Raises
     ------
@@ -96,7 +100,13 @@ def build_model(cfg):
         raise KeyError(
             f"unknown model '{cfg.name}'. registered: {sorted(_MODELS)}"
         )
-    return _MODELS[key].from_config(cfg)
+    model = _MODELS[key].from_config(cfg)
+    long_range = (cfg.extra or {}).get("long_range")
+    if long_range:
+        from .les import LatentEwald
+        opts = dict(long_range) if isinstance(long_range, dict) else {}
+        model = LatentEwald(model, **opts)
+    return model
 
 
 def available_models() -> list[str]:

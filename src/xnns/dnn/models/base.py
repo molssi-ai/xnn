@@ -111,6 +111,7 @@ class DescriptorPotential(InteratomicPotential):
         super().__init__()
         self.featurizer = featurizer
         self.cutoff = featurizer.cutoff
+        self.node_feature_dim = featurizer.output_dim  # for e.g. LES
         self.species = list(species)
         self.element_nets = _ElementNetworks(species, featurizer.output_dim, hidden)
 
@@ -132,4 +133,5 @@ class DescriptorPotential(InteratomicPotential):
         desc = self.featurizer(data)
         node_energy = self.element_nets(desc, data.atomic_numbers)
         energy = self.aggregate_energy(node_energy, data)
-        return {"node_energy": node_energy, "energy": energy}
+        return {"node_energy": node_energy, "energy": energy,
+                "node_features": desc}

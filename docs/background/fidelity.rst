@@ -131,6 +131,29 @@ notebook documents three dtype-only harness patches that let the float32-era
 TF graph run in float64). Dropout (upstream ``keep_prob``, default off) is
 not implemented.
 
+Latent Ewald Summation (LES)
+============================
+The long-range add-on :class:`~xnns.common.models.les.LatentEwald` is a
+faithful port of the reference ``cace.modules.EwaldPotential`` (Cheng,
+*npj Comput Mater* 2025) and the ``cace-lr-fit`` training-script conventions:
+
+- the reciprocal-space sum with hemisphere symmetry factors, tinfoil
+  boundary conditions (no ``k = 0`` term), triclinic cells, the optional
+  Gaussian self-interaction removal, and the ``1/r^6`` dispersion kernel;
+- the ``erf``-converged real-space direct sum for non-periodic structures;
+- the reference latent-charge head (bias-free ``[24, 12]`` MLP plus a
+  parallel bias-free linear layer) on the model's invariant features.
+
+Given the same weights, ``LatentEwald(CACE)`` reproduces the upstream
+CACE-LR composition (representation + two ``Atomwise`` heads +
+``EwaldPotential`` + ``FeatureAdd``) to float32 round-off end to end, and
+each kernel matches upstream to ~1e-16 in float64 (``tests/test_les.py``).
+Documented deviations (floating-point robustness, not physics): the k-grid
+follows the input dtype (upstream hard-casts it to float32 and cannot run in
+float64), exact ties at the ``|k| = k_c`` shell resolve consistently so the
+energy is exactly rotation-invariant, and the self-interaction term is
+subtracted once (upstream subtracts it once per ``q`` channel).
+
 Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,

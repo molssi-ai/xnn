@@ -340,6 +340,7 @@ class PhysNet(InteratomicPotential):
         # vanish beyond sr_cut anyway, see module docstring)
         self.cutoff = lr_cutoff if lr_cutoff is not None else cutoff
         self.n_features = n_features
+        self.node_feature_dim = n_features  # invariant features (for e.g. LES)
         self.use_electrostatics = use_electrostatics
         self.use_dispersion = use_dispersion
         self.kehalf = KEHALF
@@ -430,9 +431,10 @@ class PhysNet(InteratomicPotential):
         Returns
         -------
         tuple of Tensor
-            ``(Ea, Qa, Dij, nh_loss)``: per-atom energies ``(N,)``, raw
-            (uncorrected) per-atom charges ``(N,)``, edge distances ``(E,)``,
-            and the scalar non-hierarchicality penalty.
+            ``(Ea, Qa, Dij, nh_loss, features)``: per-atom energies ``(N,)``,
+            raw (uncorrected) per-atom charges ``(N,)``, edge distances
+            ``(E,)``, the scalar non-hierarchicality penalty, and the final
+            per-atom feature vectors ``(N, n_features)``.
         """
         idx_j, idx_i = edge_index[0], edge_index[1]
         Dij = edge_vec.norm(dim=-1)
@@ -456,7 +458,7 @@ class PhysNet(InteratomicPotential):
 
         Ea = self.Escale[atomic_numbers] * Ea + self.Eshift[atomic_numbers]
         Qa = self.Qscale[atomic_numbers] * Qa + self.Qshift[atomic_numbers]
-        return Ea, Qa, Dij, nh_loss
+        return Ea, Qa, Dij, nh_loss, x
 
     def scaled_charges(self, Qa: Tensor, batch: Tensor, num_graphs: int,
                        total_charge: Tensor | None = None) -> Tensor:
@@ -525,7 +527,7 @@ class PhysNet(InteratomicPotential):
             (scalar regularization term).
         """
         idx_j, idx_i = data.edge_index[0], data.edge_index[1]
-        Ea, Qa, Dij, nh_loss = self.atomic_properties(
+        Ea, Qa, Dij, nh_loss, features = self.atomic_properties(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         Qa = self.scaled_charges(Qa, data.batch, data.num_graphs,
                                  getattr(data, "total_charge", None))
@@ -538,7 +540,8 @@ class PhysNet(InteratomicPotential):
                              data.num_graphs)
         return {"node_energy": Ea,
                 "energy": self.aggregate_energy(Ea, data),
-                "charges": Qa, "dipole": dipole, "nh_loss": nh_loss}
+                "charges": Qa, "dipole": dipole, "nh_loss": nh_loss,
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "PhysNet":

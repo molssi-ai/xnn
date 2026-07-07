@@ -534,6 +534,7 @@ class CACE(GNNPotential):
 
         # readout: linear + MLP on the concatenated B features (paper eq 15)
         feat_dim = n_b_flat * (num_message_passing + 1)
+        self.node_feature_dim = feat_dim  # invariant features (for e.g. LES)
         readout_hidden = list(readout_hidden or [32, 16])
         layers: list[nn.Module] = []
         widths = [feat_dim] + readout_hidden
@@ -546,9 +547,9 @@ class CACE(GNNPotential):
         if atomic_energies is not None:
             self.set_atomic_energies(atomic_energies)
 
-    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                    edge_vec: Tensor) -> Tensor:
-        """Tensor core: per-atom energies from raw graph tensors.
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> tuple[Tensor, Tensor]:
+        """Tensor core: invariant features and per-atom energies.
 
         Parameters
         ----------
@@ -562,8 +563,11 @@ class CACE(GNNPotential):
 
         Returns
         -------
-        Tensor
-            Per-atom energies, shape ``(N,)``.
+        tuple of Tensor
+            The concatenated invariant ``B`` features
+            ``(N, node_feature_dim)`` (what the readout consumes, and what
+            :class:`~xnns.common.models.les.LatentEwald` maps to latent
+            charges) and the per-atom energies ``(N,)``.
         """
         n_nodes = atomic_numbers.shape[0]
         sender, receiver = edge_index[0], edge_index[1]
@@ -597,7 +601,13 @@ class CACE(GNNPotential):
 
         features = torch.stack(node_feats, dim=-1).flatten(1)
         energy = self.readout_mlp(features) + self.readout_linear(features)
-        return energy.squeeze(-1) + self.atom_ref(atomic_numbers).squeeze(-1)
+        return features, energy.squeeze(-1) + self.atom_ref(atomic_numbers).squeeze(-1)
+
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                    edge_vec: Tensor) -> Tensor:
+        """Per-atom energies from raw graph tensors (thin wrapper over
+        :meth:`node_features_energy`)."""
+        return self.node_features_energy(atomic_numbers, edge_index, edge_vec)[1]
 
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict per-node and total energy for an atomic graph.
@@ -610,13 +620,15 @@ class CACE(GNNPotential):
         Returns
         -------
         dict of str to torch.Tensor
-            ``"node_energy"`` (per-atom energies) and ``"energy"``
-            (per-structure totals).
+            ``"node_energy"`` (per-atom energies), ``"energy"``
+            (per-structure totals) and ``"node_features"`` (the invariant
+            ``B`` features, shape ``(N, node_feature_dim)``).
         """
-        node_energy = self.node_energy(
+        features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         return {"node_energy": node_energy,
-                "energy": self.aggregate_energy(node_energy, data)}
+                "energy": self.aggregate_energy(node_energy, data),
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "CACE":

@@ -412,6 +412,9 @@ class Allegro(EquivariantGNN):
             + latent, F.silu)
         self.edge_eng = FullyConnectedNet(
             [self.final_latent.hs[-1]] + edge_eng + [1], F.silu)
+        # invariant per-atom features (for e.g. LES): the final per-edge
+        # scalar latents summed onto their centre atoms
+        self.node_feature_dim = self.final_latent.hs[-1]
 
         # cumulative-softmax resnet coefficients (default zeros -> equal weights)
         self.register_buffer("_resnet_params", torch.zeros(num_layers + 1))
@@ -428,9 +431,9 @@ class Allegro(EquivariantGNN):
             self.set_atomic_energies(atomic_energies)
 
     @torch.jit.export
-    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                    edge_vec: Tensor) -> Tensor:
-        """TorchScript-compatible core: tensors in, per-atom energies out.
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """TorchScript-compatible core: tensors in, features + energies out.
 
         Parameters
         ----------
@@ -443,8 +446,11 @@ class Allegro(EquivariantGNN):
 
         Returns
         -------
-        torch.Tensor
-            Per-atom energy, shape ``(N,)``.
+        tuple of torch.Tensor
+            The invariant node features ``(N, node_feature_dim)`` -- the
+            final per-edge scalar latents summed onto their centre atoms
+            (what :class:`~xnns.common.models.les.LatentEwald` consumes) --
+            and the per-atom energy ``(N,)``.
         """
         num_atoms = atomic_numbers.shape[0]
         center = edge_index[1]                     # xnns dst == allegro centre
@@ -500,8 +506,17 @@ class Allegro(EquivariantGNN):
 
         edge_energy = self.edge_eng(latents).squeeze(-1) * self._energy_factor
         eps = scatter_sum(edge_energy, center, num_atoms)
-        return (self.atom_scale[atomic_numbers] * eps
-                + self.atom_ref(atomic_numbers).squeeze(-1))
+        features = scatter_sum(latents, center, num_atoms)
+        return features, (self.atom_scale[atomic_numbers] * eps
+                          + self.atom_ref(atomic_numbers).squeeze(-1))
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                    edge_vec: Tensor) -> Tensor:
+        """Per-atom energy, shape ``(N,)`` (thin wrapper over
+        :meth:`node_features_energy`; the deploy wrappers call this)."""
+        out = self.node_features_energy(atomic_numbers, edge_index, edge_vec)
+        return out[1]
 
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -518,10 +533,11 @@ class Allegro(EquivariantGNN):
             ``"node_energy"`` (per-atom energies) and ``"energy"``
             (per-structure totals).
         """
-        node_energy = self.node_energy(
+        features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         return {"node_energy": node_energy,
-                "energy": self.aggregate_energy(node_energy, data)}
+                "energy": self.aggregate_energy(node_energy, data),
+                "node_features": features}
 
     @classmethod
     def from_config(cls, cfg) -> "Allegro":

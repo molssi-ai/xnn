@@ -152,6 +152,35 @@ neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
 ``atomic_energies``/``atomic_scales`` — loaded into the per-element
 ``Eshift``/``Escale`` tables.
 
+Long-range interactions: Latent Ewald Summation (LES)
+======================================================
+Short-range models miss electrostatics and dispersion beyond their receptive
+field. :class:`~xnns.common.models.les.LatentEwald` (Cheng, *npj Comput
+Mater* 2025; the CACE-LR method) fixes this for **any** registered model: a
+small MLP maps each atom's invariant features to a latent charge ``q`` and an
+Ewald summation over ``q`` (:class:`~xnns.common.models.les.EwaldSummation`)
+adds the long-range energy. Enable it from a config --
+
+.. code-block:: yaml
+
+   model:
+     name: cace            # or mace | nequip | allegro | schnet | physnet | ...
+     extra:
+       long_range: {n_channels: 4, sigma: 1.0, dl: 2.0}
+
+-- or wrap directly with ``LatentEwald(model, n_channels=4)``. Every model
+exposes the required invariant per-atom features through the
+``"node_features"`` output key (and ``node_feature_dim``): CACE's symmetrized
+B features, the scalar channels of MACE/NequIP features, Allegro's
+environment-aggregated edge latents, SchNet/PhysNet feature vectors, and the
+HDNNP/ANI descriptors. Key options: ``n_channels`` (4), ``hidden``
+([24, 12] q-MLP), ``sigma`` (1.0 -- Gaussian smearing), ``dl`` (2.0 -- the
+k-space cutoff is ``2*pi/dl``), ``exponent`` (1 for electrostatics, 6 for
+dispersion), ``remove_self_interaction`` (False). Non-periodic structures use
+the equivalent real-space direct sum; forces and stress flow through
+:class:`~xnns.common.models.outputs.ForceStressOutput` unchanged. The outputs
+gain ``"energy_sr"``, ``"energy_lr"`` and ``"latent_charges"``.
+
 Forces and stress
 =================
 Wrap any model to get autograd forces and stress:
