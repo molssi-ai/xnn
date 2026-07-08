@@ -1,7 +1,9 @@
 # xnns
 
 Machine-learning interatomic potentials in PyTorch, for **molecular and
-periodic** systems behind a single coherent `nn.Module` interface.
+periodic** systems behind a single coherent PyTorch interface.
+
+## Installation
 
 ```
 pip install -e .            # core (torch, numpy, pyyaml)
@@ -12,19 +14,25 @@ pip install -e ".[examples]" # + ASE, e3nn, mace-torch, nequip, jupyter (runs th
 pip install -e ".[all]"
 ```
 
-The `examples` notebooks benchmark xnns against the reference
-[ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`) and
-[mir-group/nequip](https://github.com/mir-group/nequip) /
-[mir-group/allegro](https://github.com/mir-group/allegro), which pin
-`e3nn==0.4.4`; xnns runs fine on that pin. `pyproject.toml` also carries a `uv`
-setup that reproduces the GPU `.venv` the notebooks were built in (torch
-`2.5.1+cu121` from the PyTorch cu121 index, for CUDA-12.x drivers).
+The `examples` notebooks benchmark xnns models against their reference
+implementations. For example, the MACE implementation in xnns is validated
+against that of [ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`),
+the NequIP implementation is validated against that of
+[mir-group/nequip](https://github.com/mir-group/nequip) and Allegro is validated
+against [mir-group/allegro](https://github.com/mir-group/allegro), which pin
+`e3nn==0.4.4`; xnns has been thoroughly tested on this pin. The `pyproject.toml`
+also carries a `uv` setup that reproduces the GPU `.venv` that was used to
+create the notebooks (we adopted `torch 2.5.1+cu121` from the PyTorch cu121
+index that are compatible with CUDA-12.x drivers).
 
 ## Quick start
 
 ```bash
-python examples/quickstart.py        # builds toy data, trains, predicts forces
-pytest tests/                        # smoke + featurizer + neighbor list + GNN/MACE equivariance
+# builds trains a model on toy data and predicts on a test set
+python examples/quickstart.py
+
+# smoke tests for all models and families
+pytest tests/
 ```
 
 ```python
@@ -33,71 +41,91 @@ from xnns.common.data import AtomicDataset
 from xnns.common.train import Trainer
 
 cfg = Config()
-cfg.model.name = "nequip"            # schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
+# e.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
+cfg.model.name = "nequip"
 cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
-cfg.data.batch_size = 16             # 1 disables batch training
-cfg.device = "auto"                  # auto | cpu | cuda | cuda:0
+# batch_size = 1 disables batch training
+cfg.data.batch_size = 16             
+# auto | cpu | cuda | cuda:0
+cfg.device = "auto"
 Trainer(cfg, AtomicDataset(structures, cfg.model.cutoff)).fit()
 ```
 
-`structures` is a list of plain dicts (`pos`, `atomic_numbers`, optionally
-`cell`/`pbc` and `energy`/`forces`/`stress` targets). Data in any ASE-readable
-format loads directly — targets included, no pre-wrapping needed:
+`structures` is a list of plain dictionaries (`pos`, `atomic_numbers`, and
+optionally, `cell`/`pbc` and `energy`/`forces`/`stress` targets). Data in any
+ASE-native format loads directly and targets can also be included. So, no
+pre-wrapping is required:
 
 ```python
-train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)  # or .cif, VASP, ...
+# works ase-io native formats such as .extxyz, .cif, VASP, ... formats
+train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 ```
 
 ## Package layout
 
-The package is organized **by model family** (`gnn`, `cnn`, `dnn`), with
-everything shared across families factored into `common`. A thing lives with the
-family that uses it, or in `common` when more than one family needs it; each
-layer still stands alone and can be imported on its own.
+The package is organized **by model family** (`gnn`, `cnn`, `dnn`), with shared
+resources factored into the `common` modules. An object (e.g., function, module
+etc.) lives with the model family that uses it, or with `common` if more than
+one family needs it. Of course, layers are designed as stand-alone entities and
+can be imported on their own.
 
 ```
 src/xnns/
-  common/       shared across all families
-    data/         AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, batching
-    featurizers/  Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
-    config/       one dataclass schema; loaders for yaml / argparse / hydra
-    models/       InteratomicPotential interface + registry + ForceStressOutput + ops (scatter_sum)
-    train/        Trainer (batch + device aware), weighted energy/force/stress loss
-    deploy/       ASE Calculator, LAMMPS/TorchScript export
-    cli/          the `xnns` command
-  gnn/          graph potentials (package needs e3nn; CACE itself does not use it)
-    featurizers/  SphericalHarmonicEdgeEmbedding, CartesianAngularBasis, BesselRBF, PolynomialCutoff
-    models/       base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
-  cnn/          continuous-filter conv net
-    models/       schnet
-  dnn/          descriptor + per-element networks, and PhysNet
-    featurizers/  symmetry functions, AEV
-    models/       base (DescriptorPotential), hdnnp, ani, physnet (+ ported Grimme D3)
+├── __main__.py                 `python -m xnns` entry point
+├── common/                     shared across all model families
+│   ├── data/                   - common data abstractions
+│   │   └── …                     + AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, ASE I/O
+│   ├── featurizers/            - common featurizers
+│   │   └── …                     + Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
+│   ├── config/                 - one dataclass schema; loaders for yaml / argparse / hydra
+│   │   └── …                     + schema, loaders, translate, coerce
+│   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum)
+│   │   └── …                     + base, registry, outputs, les, ops
+│   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
+│   │   └── …                     + trainer, losses
+│   ├── deploy/                 - ASE Calculator, and LAMMPS/TorchScript export
+│   │   └── …                     + ase_calculator, lammps
+│   └── cli/                    - the `xnns` command-line interface
+│       └── main.py
+├── gnn/                        graph potentials
+│   ├── featurizers/            - GNN featurizers
+│   │   └── …                     + spherical, cartesian, radial, cutoff
+│   └── models/                 - base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
+│       └── …                     + base, blocks, nequip, mace, allegro, cace
+├── cnn/                        continuous-filter conv net
+│   └── models/                 schnet
+└── dnn/                        descriptor + per-element networks, and PhysNet
+    ├── featurizers/            - DNN featurizers
+    │   └── …                     + symmetry functions, AEV
+    └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
+        └── …
 ```
 
 ```python
-# Data on its own
+# Data (structures dict -> AtomicGraph)
 from xnns.common.data import AtomicDataset, build_neighbor_list
 ds = AtomicDataset(structures, cutoff=5.0); graph = ds[0]
 
-# Featurizers on their own (AtomicGraph -> model inputs)
+# Featurizers (AtomicGraph -> model inputs)
 from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
 from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
-descriptor = AEV(species=[1, 6, 8])(graph)            # (N, D) invariant per-atom AEV
-edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph) # equivariant edge attributes
+# (N, D) invariant per-atom AEV
+descriptor = AEV(species=[1, 6, 8])(graph)
+# Equivariant edge attributes
+edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)
 
-# Models on their own
+# Models (model inputs -> energy)
 from xnns.common.models import build_model, ForceStressOutput, available_models
-model = ForceStressOutput(build_model(cfg.model))      # any model + autograd forces/stress
+# Any registered model + autograd forces/stress
+model = ForceStressOutput(build_model(cfg.model))
 ```
 
-Four ideas hold it together:
+Four ideas hold xnns together:
 
-1. **One data object.** Every model consumes an `AtomicGraph` and returns
-   `{"node_energy", "energy"}`. Molecular vs. periodic is invisible to models —
-   periodicity lives only in `edge_vectors()`
-   (`r_ij = pos[dst] - pos[src] + cell_shift @ cell`), keeping forces and stress
-   differentiable.
+1. **Unified data object.** Every model consumes an `AtomicGraph` and returns
+   `{"node_energy", "energy"}`. Molecular vs. periodic is invisible to models:
+   periodicity lives only in `edge_vectors()` (`r_ij = pos[dst] - pos[src] +
+   cell_shift @ cell`), keeping forces and stress differentiable.
 2. **Featurizers are first-class.** A `Featurizer` (subclass of `nn.Module`)
    turns a graph into invariant descriptors (symmetry functions, AEV) or
    equivariant edge attributes (spherical harmonics, Cartesian monomials).
