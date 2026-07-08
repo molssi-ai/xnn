@@ -41,8 +41,9 @@ from xnns.common.data import AtomicDataset
 from xnns.common.train import Trainer
 
 cfg = Config()
-# e.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
+# E.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
 cfg.model.name = "nequip"
+# Unshared model specific hyperparameters go here
 cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
 # batch_size = 1 disables batch training
 cfg.data.batch_size = 16             
@@ -57,7 +58,7 @@ ASE-native format loads directly and targets can also be included. So, no
 pre-wrapping is required:
 
 ```python
-# works ase-io native formats such as .extxyz, .cif, VASP, ... formats
+# xnns supports ase-io native formats such as .extxyz, .cif, VASP, ...
 train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 ```
 
@@ -104,7 +105,8 @@ src/xnns/
 ```python
 # Data (structures dict -> AtomicGraph)
 from xnns.common.data import AtomicDataset, build_neighbor_list
-ds = AtomicDataset(structures, cutoff=5.0); graph = ds[0]
+ds = AtomicDataset(structures, cutoff=5.0)
+graph = ds[0]
 
 # Featurizers (AtomicGraph -> model inputs)
 from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
@@ -183,140 +185,41 @@ original cannot do on torch 2.x.
 
 ## Models and fidelity
 
-| Model | Family | Featurizer | State |
+| Model | Family | Featurizers | State |
 |---|---|---|---|
-| SchNet | cnn | Gaussian RBF | full; trainable; TorchScript/LAMMPS-deployable |
-| HDNNP | dnn | radial symmetry functions (G2) | full; trainable |
-| ANI | dnn | AEV (radial + angular) | full; trainable |
-| NequIP | gnn | spherical-harmonic edges | faithful; matches mir-group/nequip (see note); TorchScript/LAMMPS-deployable |
-| MACE | gnn | spherical-harmonic edges | faithful; learned symmetric contraction; matches ACEsuit/mace (see note); TorchScript/LAMMPS-deployable |
-| Allegro | gnn | spherical-harmonic edges | faithful; matches mir-group/allegro (see note); TorchScript/LAMMPS-deployable |
-| CACE | gnn | Cartesian monomial edges | faithful; matches BingqingCheng/cace (see note); no e3nn; ASE-deployable |
-| PhysNet | dnn | exp-Gaussian rbf + attention masks | faithful; matches MMunibas/PhysNet TF (see note); charges/dipoles/electrostatics/D3; ASE-deployable |
-
-Equivariance is verified in `tests/test_gnn.py` and `tests/test_mace.py` (rotate
-inputs → energy invariant, forces co-rotate; errors ~1e-7).
-
-**Fidelity notes for the equivariant models.**
-- *MACE* is a faithful, self-contained re-implementation — the real
-  `RealAgnostic(Residual)InteractionBlock` and the paper's *learned symmetric
-  contraction* over Clebsch-Gordan paths (`correlation` order). The CG
-  coupling basis (`U_matrix_real`) is
-  bit-identical to `mace-torch` and the contraction reproduces it to ~1e-16
-  given the same weights. It needs only `e3nn` — no `mace-torch`,
-  `cuequivariance`, or `opt_einsum_fx`. It also adds ZBL `pair_repulsion` and
-  makes the message-passing depth fully flexible (`num_interactions` = T = 0..N,
-  vs. upstream's fixed 2). The `examples/` notebooks verify it block-by-block
-  and end-to-end against `mace-torch` on Argon MD data.
-- *NequIP* is a faithful, self-contained re-implementation of the upstream
-  `EnergyModel`: the real `InteractionBlock` (with upstream parameter names, so
-  state dicts transplant directly), per-layer `tp_path_exists` irreps pruning,
-  the gated nonlinearity, NequIP's radial conventions (trainable Bessel with
-  the `2/r_max` prefactor, `1/sqrt(avg_num_neighbors)` message normalization,
-  the `r_j - r_i` edge orientation) and the per-species energy scale/shift.
-  Given the same weights it reproduces `nequip` to ~1e-16 (energies, forces
-  and stress; `tests/test_nequip.py`), needing only `e3nn`. The `examples/`
-  notebooks verify it block-by-block and end-to-end on Argon MD data.
-- *Allegro* is a faithful, self-contained re-implementation of the original
-  mir-group/allegro (v0.3.0, the e3nn-era reference, default `uuulin` mode):
-  the two-body product type embedding, the per-channel weightless Wigner-3j
-  tensor products with the embedded-environment density trick, the strided
-  channel-mixing linears (same flat weight layout, so state dicts transplant
-  directly), the cumulative-softmax latent resnet, Allegro's radial
-  conventions (trainable "normalized sinc" Bessel with the `r_max/pi`
-  prefactor, `1/sqrt(avg_num_neighbors - 1)` environment and
-  `1/sqrt(avg_num_neighbors)` energy-sum normalization) and the per-species
-  scale/shift. Given the same weights it reproduces `allegro` to ~1e-15
-  (energies and forces; `tests/test_allegro.py`), needing only `e3nn`. The
-  `examples/` notebooks verify it block-by-block and end-to-end on Argon MD
-  data.
-- *CACE* is a faithful, self-contained re-implementation of BingqingCheng/cace
-  (the Cartesian atomic cluster expansion, Cheng 2024) — the only model here
-  that needs no spherical harmonics or e3nn at all: the Cartesian monomial
-  angular basis (`CartesianAngularBasis`, same autograd-safe recursion), the
-  exact multinomial symmetrization rules (identical B-feature ordering), the
-  tensor-product element-embedding edge type, the per-(l, c) trainable radial
-  channel coupling, all three message-passing mechanisms (`M`/`Ar`/`Bchi`),
-  and the linear + MLP readout. Given the same weights it reproduces `cace`
-  to ~1e-16 relative (energies and forces, molecular and periodic;
-  `tests/test_cace.py`). Like upstream (which has no LAMMPS interface), it
-  deploys through ASE rather than TorchScript. The `examples/gnn/cace/`
-  notebooks verify it block-by-block and end-to-end on Argon MD data.
-- *PhysNet* is a faithful **pure-PyTorch translation of the original
-  TensorFlow 1.x implementation** (MMunibas/PhysNet): the exponential-Gaussian
-  radial basis, distance-based attention masks, pre-activation residual
-  blocks, per-module (energy, charge) output heads with per-element
-  scale/shift tables, the exact charge correction, switched/shielded
-  electrostatics, and a statement-for-statement port of the bundled Grimme
-  D3(BJ) module (tables shipped in-package, coefficients learnable). Given the
-  same weights it reproduces the original TF graph to ~1e-15 in energies,
-  forces, charges, and the non-hierarchicality penalty
-  (`tests/test_physnet.py`; TF + an upstream clone required for the parity
-  test). It also returns `"charges"`, `"dipole"`, and `"nh_loss"` from
-  `forward`. The `examples/dnn/physnet/` notebooks verify it block-by-block
-  and end-to-end on Argon MD data against the original TF graph.
-
-Everything downstream (data, featurizers, autograd forces/stress, training,
-ASE/LAMMPS deploy) is identical across all models.
+| SchNet | cnn | Gaussian RBF | Under development |
+| PhysNet | dnn | exp-Gaussian rbf + attention masks | Complete: Training, Evaluation, Deployment (ASE only) |
+| HDNNP | dnn | radial symmetry functions (G2) | Under development |
+| ANI | dnn | AEV (radial + angular) | Under development |
+| NequIP | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
+| MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
+| CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
+| Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 
 ## Examples
 
-Runnable notebooks in `examples/gnn/mace/` (`pip install -e ".[examples]"`), each
-validating the faithful MACE against the reference `mace-torch`:
-
-- **`01_mace_block_by_block_vs_original.ipynb`** — reproduces every MACE
-  architectural block from the papers and checks each one numerically against
-  the original `mace-torch` block.
-- **`02_mace_argon_train_test.ipynb`** — a full train/test pipeline on real
-  Argon MD data, run twice (xnns vs. original MACE) and compared at every stage.
-- **`03_mace_argon_density_md.ipynb`** — liquid-Argon mass density from NPT MD
-  through ASE, comparing xnns against `mace-torch` (identical weights → ~zero
-  difference, plus independently trained models).
-- **`04_recreate_mace_architecture.ipynb`** — a step-by-step tutorial that rebuilds
-  the MACE architecture block by block in *both* `mace-torch` and xnns (with the
-  defining equations and architecture figures in `figures/`), transplants a whole
-  model, and reproduces its energy and forces to ~1e-15.
-
-The same trilogy exists for NequIP in `examples/gnn/nequip/`, validating the
-faithful NequIP against the reference `nequip` package (the Argon data is shared
-from `examples/gnn/mace/data/`):
-
-- **`01_nequip_block_by_block_vs_original.ipynb`** — every NequIP block
-  (embedding, trainable Bessel basis, spherical harmonics, interaction block,
-  gate, readout, per-species scale/shift) checked numerically against the
-  original, ending with a whole-model weight transplant (~1e-16).
-- **`02_nequip_argon_train_test.ipynb`** — the full train/test pipeline on the
-  Argon MD data, run twice (xnns vs. original NequIP) and compared at every
-  stage.
-- **`03_nequip_argon_density_md.ipynb`** — liquid-Argon mass density from NPT MD
-  through ASE, comparing xnns against `nequip` (identical weights → ~zero
-  difference, plus independently trained models).
-
-And for Allegro in `examples/gnn/allegro/`, validating the faithful Allegro
-against the reference `allegro` package, and for CACE in `examples/gnn/cace/`,
-validating the faithful CACE against the reference `cace` package (same
-01 block-by-block / 02 Argon train-test / 03 NPT-density trilogy).
-
-PhysNet has its trilogy in `examples/dnn/physnet/`, validated against the
-**original TensorFlow implementation** (run with a venv that has both
-`tensorflow` and `torch`; the notebooks clone MMunibas/PhysNet on demand and
-drive its TF1 graph through `tf.compat.v1`).
-
-`examples/quickstart.py` is the minimal toy-data train/predict loop.
+Runnable notebooks are grouped into separate directories based on model family
+types within `examples/<xnn>` (`pip install -e ".[examples]"`) where `x` refers
+to the architecture types (e.g., `g` in `gnn` for graph neural networks, `d` in
+`dnn` for deep neural networks, and `c` in `cnn` for convolutional neural
+networks). The `examples/quickstart.py` module presents a minimal train/predict
+workflow on toy-data.
 
 ## Extension points
 
-- **New model:** pick the family package (`gnn` / `cnn` / `dnn`, or add one),
-  add a module under `<family>/models/`, subclass
-  `xnns.common.models.InteratomicPotential` (or the family base, e.g.
-  `gnn.models.base.EquivariantGNN`), implement `forward(data)`, register with
-  `@register_model`, and add a `configs/model/<name>.yaml`. Import the family
-  package so the model registers. For TorchScript/LAMMPS export also expose a
-  scriptable `node_energy(atomic_numbers, edge_index, edge_vec)` core (SchNet
-  shows the pattern; e3nn models need e3nn's JIT support for this).
-- **New featurizer:** subclass `xnns.common.featurizers.Featurizer`, implement
-  `output_dim` and `forward(data)`; put it in `common/featurizers/` if shared,
-  else under the using family's `featurizers/`, and compose it into a model.
-- **Neighbor list:** the reference builder is correct but brute-force; swap in a
-  cell-list / `matscipy` for large periodic systems — the
-  `edge_index`/`cell_shifts` interface is unchanged.
+- **Implement a new model:** 
+  + Pick your model family package (`gnn` / `cnn` / `dnn`,  or add one) and add
+    a module under `<family>/models/`.
+  + Subclass `xnns.common.models.InteratomicPotential` (or the family base, e.g.,
+  `gnn.models.base.EquivariantGNN`) and implement its `forward(data)` method.
+  + register your model implementation using `@register_model` decorator.
+  + Add a YAML config file for your model `configs/model/<name>.yaml`. 
+  + Import the family package so the model registers.
+  + For TorchScript/LAMMPS export, it is important to expose a scriptable
+  `node_energy(atomic_numbers, edge_index, edge_vec)` core (SchNet shows the
+  pattern; e3nn models need e3nn's JIT support for this).
+- **Add a new featurizer:**
+  + Subclass `xnns.common.featurizers.Featurizer` and implement `output_dim` and
+  `forward(data)`. Put the resulting featurizer module in the
+  `common/featurizers/` if shared by more than one model family or under the
+  using family's `featurizers/` if it is only used by that one model family.
