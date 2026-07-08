@@ -1,0 +1,74 @@
+# Multi-model benchmark config.  Run with:
+#
+#     xnns benchmark --config configs/benchmark.yaml
+#     xnns benchmark --config configs/benchmark.yaml --set phases=['benchmark']
+#
+# It reuses the same data/optim sections a single run uses; only `models`,
+# `phases`, `metrics`, `targets` and `output` are benchmark-specific.
+
+# Which models to compare.  Entries are either a bare name (trained from that
+# model's defaults) or a mapping mixing architecture keys with the
+# benchmark-only keys `label` / `checkpoint` / `config` / `optim` / `output_dir`.
+models:
+  - schnet                                   # trained from defaults
+  - name: mace
+    cutoff: 5.0                              # architecture override
+    optim: {epochs: 50}                      # per-model training override
+  - name: nequip
+    config: configs/model/nequip.yaml        # seed architecture from a file
+  - name: schnet
+    label: schnet-pretrained
+    checkpoint: runs/schnet/best.pt          # pre-trained: skip training, load
+
+# Which phases to run: any subset of [train, evaluate, benchmark].
+#   [train, evaluate, benchmark]  train, score on val, then tabulate on test
+#   [evaluate, benchmark]         score pre-trained models on val + test
+#   [train, benchmark]            train then tabulate on test
+#   [benchmark]                   tabulate pre-trained models only
+phases: [train, evaluate, benchmark]
+
+# Error metrics applied to every target (mae / mse / rmse, or custom below).
+metrics: [mae, rmse]
+
+# Quantities to score: any subset of [energy, forces, stress].
+# Energy is scored per atom (matching the training-loss normalization).
+targets: [energy, forces]
+
+# Optional user-defined metrics, imported as `module:function` with the
+# signature fn(pred, target) -> float and registered under `name`.
+custom_metrics: []
+#   - {name: maxae, path: my_metrics:max_abs_error}
+
+# Shared dataset (same schema as a single run).  Validation/test splits are
+# carved from the training set when no val_path/test_path is given.
+data:
+  train_path: data/train.extxyz
+  val_path: null
+  test_path: null
+  batch_size: 16
+  num_workers: 0
+  val_fraction: 0.1
+  test_fraction: 0.1
+  energy_key: energy
+  forces_key: forces
+  stress_key: stress
+
+# Shared training settings for any model trained in the `train` phase (each
+# entry's `optim` block overrides these).
+optim:
+  lr: 1.0e-3
+  epochs: 100
+  energy_weight: 1.0
+  force_weight: 10.0
+  stress_weight: 0.0
+  scheduler: plateau
+
+# Results table destination and formats.  `formats` are registered writers
+# (csv / json / md, or user-registered ones).
+output:
+  dir: runs/benchmark
+  filename: results
+  formats: [csv, json, md]
+
+device: auto        # auto | cpu | cuda | cuda:0
+seed: 1234
