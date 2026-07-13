@@ -29,12 +29,12 @@ Worked examples
 The block-by-block notebooks perform full transplants and check every
 intermediate tensor:
 
-- ``examples/gnn/mace/04_recreate_mace_architecture.ipynb`` — rebuilds the
+- ``examples/gnn/mace/recreate_mace_architecture.ipynb`` — rebuilds the
   MACE architecture step by step in both ``mace-torch`` and xnns, transplants
   a whole model, and reproduces its energy and forces to ~1e-15.
-- ``examples/gnn/nequip/01_nequip_block_by_block_vs_original.ipynb`` — ends
+- ``examples/fidelity_checks/nequip_verification.ipynb`` — ends
   with a whole-model weight transplant (~1e-16 agreement).
-- ``examples/gnn/allegro/01_allegro_block_by_block_vs_original.ipynb`` — the
+- ``examples/fidelity_checks/allegro_verification.ipynb`` — the
   same for Allegro (~1e-15).
 
 Parity with upstream given identical weights is also enforced in the test

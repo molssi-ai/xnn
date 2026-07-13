@@ -1,28 +1,32 @@
-"""Configuration for a multi-model benchmark run.
+"""Configuration for a multi-model benchmark.
 
-A benchmark orchestrates several models over one dataset, so its config wraps
-the *same* building blocks a single run uses -- :class:`DataConfig`,
-:class:`OptimConfig`, :class:`ModelConfig` -- rather than inventing parallel
-ones. Each entry in ``models`` becomes a :class:`ModelEntry`, and
-:meth:`ModelEntry.to_run_config` folds it together with the shared data/optim
-sections into an ordinary :class:`Config`, so training and evaluation reuse the
-unchanged :class:`~xnns.common.train.Trainer` and model registry.
+Benchmarking scores *pre-trained* models on one dataset and tabulates their
+errors -- it does not train or otherwise produce models (train with
+``xnns train`` first). Its config therefore wraps only the building blocks a
+scoring pass needs -- :class:`DataConfig` for the dataset and
+:class:`ModelConfig` for each model's architecture -- rather than inventing
+parallel ones. Each entry in ``models`` becomes a :class:`ModelEntry` that
+pairs an architecture with the ``checkpoint`` whose weights are loaded into it,
+and :meth:`ModelEntry.to_config` folds it together with the shared ``data``
+section into an ordinary :class:`Config` so the model is built exactly as in a
+normal run.
 
 The one internal representation is :class:`BenchmarkConfig`; every frontend is
 just a loader that produces it (mirroring ``config.loaders``). :func:`from_dict`
 is the funnel, and :func:`from_yaml` reads a YAML file through it.
 
-Model entries accept either a bare string (``"mace"``) or a mapping that mixes
-architecture keys with benchmark-only keys::
+An xnns checkpoint stores the :class:`Config` it was trained with, so an entry
+usually needs only its ``checkpoint`` -- the architecture is read from the
+checkpoint. A mapping may still carry a ``label`` (the row name), an explicit
+architecture (for checkpoints that embed no config), or a ``config`` file::
 
     models:
-      - mace                                    # train from defaults
-      - name: schnet
-        cutoff: 5.0                             # architecture override
-        checkpoint: runs/schnet/best.pt         # skip training, load this
-      - name: nequip
-        config: configs/model/nequip.yaml       # architecture from a file
-        optim: {epochs: 50}                     # per-model training override
+      - checkpoint: runs/mace/best.pt           # architecture read from the checkpoint
+      - label: nequip
+        checkpoint: runs/nequip/best.pt
+      - name: schnet                            # explicit architecture (no embedded config)
+        config: configs/model/schnet.yaml
+        checkpoint: runs/schnet/best.pt
 
 Upstream key spellings inside a model entry (MACE ``r_max`` ...) are translated
 to the canonical names by the shared model-key registry, exactly as in a normal
@@ -34,17 +38,17 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ..config import Config, DataConfig, OptimConfig
+from ..config import Config, DataConfig
 from ..config.loaders import from_dict as _run_from_dict
 
 # Keys inside a model entry that steer the benchmark itself rather than the
 # model architecture; stripped out before the rest is read as a ModelConfig.
-_ENTRY_KEYS = {"label", "checkpoint", "config", "optim", "output_dir"}
+_ENTRY_KEYS = {"label", "checkpoint", "config"}
 
 
 @dataclass
 class ModelEntry:
-    """One model in a benchmark: its architecture plus how to obtain weights.
+    """One model in a benchmark: its architecture plus the weights to score.
 
     Attributes
     ----------
@@ -54,57 +58,53 @@ class ModelEntry:
     model : dict[str, Any]
         The model section as a plain dict (already merged with any ``config``
         file and with upstream key spellings translated). Turned into a
-        :class:`~xnns.common.config.ModelConfig` by :meth:`to_run_config`.
+        :class:`~xnns.common.config.ModelConfig` by :meth:`to_config`. Optional
+        when the checkpoint was written by :meth:`~xnns.common.train.Trainer.save`
+        and carries its own config: that stored architecture is used, so an
+        entry can be as small as just a ``checkpoint``. Supply the architecture
+        here only for checkpoints that do not embed one.
     checkpoint : Optional[str]
-        Path to a pre-trained checkpoint (as written by
-        :meth:`~xnns.common.train.Trainer.save`). When set, the benchmark can
-        skip training and load these weights directly. Defaults to ``None``.
-    optim : Optional[dict[str, Any]]
-        Per-model optimizer/loss overrides layered on top of the shared
-        ``optim`` section during training. Defaults to ``None``.
-    output_dir : Optional[str]
-        Directory for this model's training artifacts (checkpoints). Defaults
-        to ``<benchmark output_dir>/<label>`` when not given.
+        Path to the pre-trained checkpoint (as written by
+        :meth:`~xnns.common.train.Trainer.save`) whose weights are loaded into
+        the model before scoring. Required for the model to be benchmarked;
+        defaults to ``None``.
     """
 
     label: str
     model: dict[str, Any]
     checkpoint: Optional[str] = None
-    optim: Optional[dict[str, Any]] = None
-    output_dir: Optional[str] = None
 
-    def to_run_config(self, bench: "BenchmarkConfig") -> Config:
-        """Assemble the ordinary :class:`Config` used to train/evaluate this model.
+    def to_config(self, bench: "BenchmarkConfig",
+                  model: Optional[dict[str, Any]] = None) -> Config:
+        """Assemble the ordinary :class:`Config` used to build this model.
 
-        Folds this entry's model section and per-model optim overrides together
-        with the benchmark's shared ``data`` section, device and seed, routing
-        everything through the standard :func:`~xnns.common.config.from_dict`
-        funnel so model-key translation and ``extra`` collection behave exactly
-        as in a single run.
+        Folds a model section together with the benchmark's shared ``data``
+        section, device and seed, routing everything through the standard
+        :func:`~xnns.common.config.from_dict` funnel so model-key translation
+        and ``extra`` collection behave exactly as in a single run. The synced
+        ``data.cutoff`` (kept in lockstep with ``model.cutoff`` by
+        :class:`Config`) is what the benchmark dataset's neighbor list uses.
 
         Parameters
         ----------
         bench : BenchmarkConfig
             The parent benchmark configuration providing the shared data,
-            optim, device, seed and output directory.
+            device and seed.
+        model : dict[str, Any] or None, optional
+            The model section to build from. Defaults to this entry's
+            :attr:`model`; the runner passes the architecture read from the
+            checkpoint here so a checkpoint's own config is used.
 
         Returns
         -------
         Config
-            A fully-populated run configuration for this model, with
-            ``output_dir`` set to this entry's :attr:`output_dir` (or a
-            per-label subdirectory of the benchmark output directory).
+            A run configuration for this model (model + data + device + seed).
         """
-        optim = dataclasses.asdict(bench.optim)
-        optim.update(self.optim or {})
-        out_dir = self.output_dir or f"{bench.output_dir}/{self.label}"
         return _run_from_dict({
-            "model": dict(self.model),
+            "model": dict(self.model if model is None else model),
             "data": dataclasses.asdict(bench.data),
-            "optim": optim,
             "device": bench.device,
             "seed": bench.seed,
-            "output_dir": out_dir,
         })
 
 
@@ -115,8 +115,8 @@ class OutputConfig:
     Attributes
     ----------
     dir : str
-        Directory the results (and per-model training artifacts) are written
-        to. Defaults to ``"runs/benchmark"``.
+        Directory the results table is written to. Defaults to
+        ``"runs/benchmark"``.
     filename : str
         Base filename (without extension) for the results table; each format
         appends its own extension. Defaults to ``"results"``.
@@ -140,23 +140,43 @@ class BenchmarkConfig:
     Attributes
     ----------
     models : list[ModelEntry]
-        The models to benchmark, in table order.
+        The pre-trained models to benchmark, in table order. Each must carry a
+        ``checkpoint``; the architecture is read from the checkpoint when it
+        embeds a config.
     data : DataConfig
-        Shared dataset paths, split fractions and target-key names, reused
-        unchanged from a normal run.
-    optim : OptimConfig
-        Shared training settings, used for any model trained in the ``train``
-        phase and layered under each entry's per-model ``optim`` overrides.
-    phases : list[str]
-        Which phases to run, a subset of ``"train"``, ``"evaluate"`` and
-        ``"benchmark"`` (see :class:`~xnns.common.benchmark.runner.Benchmark`).
-        Defaults to all three.
+        The dataset to score on and its target-key names, reused unchanged from
+        a normal run. The benchmark dataset is resolved from ``test_path``,
+        falling back to ``val_path`` then ``train_path``.
     metrics : list[str]
         Registered error-metric names applied to every target (e.g.
         ``["mae", "rmse"]``). Defaults to ``["mae", "rmse"]``.
     targets : list[str]
         Quantities to score, a subset of ``"energy"``, ``"forces"`` and
         ``"stress"``. Defaults to ``["energy", "forces"]``.
+    atomic_energies : Any
+        Per-element reference energies (E0s). When set, energy is scored as the
+        atomization / interaction energy (total minus the summed atomic
+        references) -- the physically meaningful quantity. Accepts a
+        ``{Z: E0}`` / ``{symbol: E0}`` dict, a list aligned with :attr:`species`,
+        a single number, the string form of any of these, or ``"average"`` to
+        fit E0s from the benchmark dataset by least squares (see
+        :func:`~xnns.common.benchmark.energy.build_e0_lookup`). Defaults to
+        ``None`` (raw total energy).
+    species : Any
+        Atomic numbers or chemical symbols the :attr:`atomic_energies` values
+        are aligned with, needed only for the list / scalar forms. Defaults to
+        ``None``.
+    energy_per_atom : bool
+        Whether energy metrics are computed per atom (dividing by the atom
+        count). Defaults to ``True``.
+    units : dict[str, str]
+        Physical units to show next to each target's metrics in the printed
+        table, keyed by target. xnns is unit-agnostic, so these are labels
+        only; the runner fills in defaults for any target not given here --
+        ``"eV/atom"`` (or ``"eV"`` when :attr:`energy_per_atom` is off) for
+        energy, ``"eV/A"`` for forces, ``"eV/A**3"`` for stress. Set e.g.
+        ``{energy: "meV/atom"}`` to match your data. Defaults to an empty dict
+        (all defaults).
     custom_metrics : list[dict[str, str]]
         User-defined metrics to import and register before scoring, each a
         ``{"name": ..., "path": "module:function"}`` mapping (see
@@ -168,26 +188,22 @@ class BenchmarkConfig:
         Compute device (``auto`` / ``cpu`` / ``cuda`` / ``cuda:0`` ...).
         Defaults to ``"auto"``.
     seed : int
-        Random seed for reproducible data splits and training. Defaults to
-        ``1234``.
+        Random seed (kept for reproducibility of any stochastic metric).
+        Defaults to ``1234``.
     """
 
     models: list[ModelEntry] = field(default_factory=list)
     data: DataConfig = field(default_factory=DataConfig)
-    optim: OptimConfig = field(default_factory=OptimConfig)
-    phases: list[str] = field(
-        default_factory=lambda: ["train", "evaluate", "benchmark"])
     metrics: list[str] = field(default_factory=lambda: ["mae", "rmse"])
     targets: list[str] = field(default_factory=lambda: ["energy", "forces"])
+    atomic_energies: Any = None
+    species: Any = None
+    energy_per_atom: bool = True
+    units: dict[str, str] = field(default_factory=dict)
     custom_metrics: list[dict[str, str]] = field(default_factory=list)
     output: OutputConfig = field(default_factory=OutputConfig)
     device: str = "auto"
     seed: int = 1234
-
-    @property
-    def output_dir(self) -> str:
-        """Shortcut for :attr:`output.dir`, the benchmark output directory."""
-        return self.output.dir
 
 
 def _as_list(x: Any) -> list:
@@ -245,8 +261,6 @@ def _model_entry(spec: Any, seen: dict[str, int]) -> ModelEntry:
 
     spec = dict(spec)
     checkpoint = spec.pop("checkpoint", None)
-    optim = spec.pop("optim", None)
-    output_dir = spec.pop("output_dir", None)
     label = spec.pop("label", None)
 
     # A model entry may seed its architecture from a standalone model YAML,
@@ -265,18 +279,17 @@ def _model_entry(spec: Any, seen: dict[str, int]) -> ModelEntry:
     if seen[label] > 1:
         label = f"{label}#{seen[label]}"
 
-    return ModelEntry(label=label, model=model_section, checkpoint=checkpoint,
-                      optim=optim, output_dir=output_dir)
+    return ModelEntry(label=label, model=model_section, checkpoint=checkpoint)
 
 
 def from_dict(d: dict[str, Any]) -> BenchmarkConfig:
     """Build a :class:`BenchmarkConfig` from a plain nested dict.
 
     The funnel every frontend loader passes through. The ``models`` list may
-    hold strings and/or mappings (see :func:`_model_entry`); ``data`` and
-    ``optim`` reuse the dataclasses from a normal run (unknown keys ignored);
-    ``metrics``, ``targets`` and ``phases`` accept a scalar or a list; and
-    ``output`` populates :class:`OutputConfig`.
+    hold strings and/or mappings (see :func:`_model_entry`); ``data`` reuses the
+    dataclass from a normal run (unknown keys ignored); ``metrics`` and
+    ``targets`` accept a scalar or a list; and ``output`` populates
+    :class:`OutputConfig`.
 
     Parameters
     ----------
@@ -299,22 +312,19 @@ def from_dict(d: dict[str, Any]) -> BenchmarkConfig:
         return klass(**{k: v for k, v in sub.items() if k in valid})
 
     data = _sub(DataConfig, "data")
-    optim = _sub(OptimConfig, "optim")
     output = _sub(OutputConfig, "output")
     if "formats" in (d.get("output") or {}):
         output.formats = _as_list(d["output"]["formats"])
 
-    kwargs: dict[str, Any] = dict(models=models, data=data, optim=optim,
-                                  output=output)
-    if "phases" in d:
-        kwargs["phases"] = _as_list(d["phases"])
+    kwargs: dict[str, Any] = dict(models=models, data=data, output=output)
     if "metrics" in d:
         kwargs["metrics"] = _as_list(d["metrics"])
     if "targets" in d:
         kwargs["targets"] = _as_list(d["targets"])
     if "custom_metrics" in d:
         kwargs["custom_metrics"] = _as_list(d["custom_metrics"])
-    for k in ("device", "seed"):
+    for k in ("atomic_energies", "species", "energy_per_atom", "units",
+              "device", "seed"):
         if k in d:
             kwargs[k] = d[k]
 

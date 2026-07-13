@@ -74,6 +74,51 @@ def available_writers() -> list[str]:
     return sorted(_WRITERS)
 
 
+def _unit_label(col: str, units: dict[str, str] | None) -> str:
+    """Return the column's display label, suffixed with ``[unit]`` if it has one.
+
+    Parameters
+    ----------
+    col : str
+        The column name.
+    units : dict of str to str or None
+        Physical unit per column; ``col`` absent (or ``units`` empty/``None``)
+        yields the plain name.
+
+    Returns
+    -------
+    str
+        ``"col [unit]"`` when a unit is known, otherwise ``col``.
+    """
+    unit = (units or {}).get(col)
+    return f"{col} [{unit}]" if unit else col
+
+
+def apply_units(rows: list[Row], units: dict[str, str] | None) -> list[Row]:
+    """Relabel row keys with their units, for unit-annotated file output.
+
+    Each key that has a unit becomes ``"key [unit]"`` (see :func:`_unit_label`),
+    so writers emit the unit in the header / field names exactly as the printed
+    table shows it. Rows without any unitful column are returned unchanged.
+
+    Parameters
+    ----------
+    rows : list of dict
+        Result rows with plain keys.
+    units : dict of str to str or None
+        Physical unit per column.
+
+    Returns
+    -------
+    list of dict
+        New rows with unit-annotated keys (order preserved), or ``rows``
+        unchanged when ``units`` is empty.
+    """
+    if not units:
+        return rows
+    return [{_unit_label(k, units): v for k, v in r.items()} for r in rows]
+
+
 def columns(rows: list[Row]) -> list[str]:
     """Derive the ordered column list spanning all result rows.
 
@@ -243,13 +288,18 @@ def write_all(rows: list[Row], formats: list[str], out_dir: str,
     return paths
 
 
-def format_table(rows: list[Row]) -> str:
+def format_table(rows: list[Row], units: dict[str, str] | None = None) -> str:
     """Render results as an aligned monospaced table for printing.
 
     Parameters
     ----------
     rows : list of dict
         Result rows.
+    units : dict of str to str or None, optional
+        Physical unit for any column, keyed by column name. When a column has a
+        unit its header cell is suffixed with ``[unit]`` (e.g.
+        ``energy_mae [eV/atom]``). Columns absent from the mapping keep a plain
+        header.
 
     Returns
     -------
@@ -260,11 +310,12 @@ def format_table(rows: list[Row]) -> str:
     if not rows:
         return "(no results)"
     cols = columns(rows)
+    headers = [_unit_label(c, units) for c in cols]
     cells = [[_fmt(r.get(c, "")) for c in cols] for r in rows]
-    widths = [max(len(cols[i]), *(len(row[i]) for row in cells))
+    widths = [max(len(headers[i]), *(len(row[i]) for row in cells))
               for i in range(len(cols))]
     def line(vals):
         return "  ".join(v.ljust(w) for v, w in zip(vals, widths))
-    out = [line(cols), line(["-" * w for w in widths])]
+    out = [line(headers), line(["-" * w for w in widths])]
     out += [line(row) for row in cells]
     return "\n".join(out)

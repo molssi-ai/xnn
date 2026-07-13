@@ -1,5 +1,7 @@
 # Default Hydra-style config. `defaults` lets Hydra compose model/data groups;
-# plain YAML/argparse users can ignore it and edit the sections directly.
+# plain YAML/argparse users can ignore it and edit the sections directly. Keep
+# the `_self_` entry at the end of the defaults list to allow overriding any
+# config values by those in this file
 defaults:
   - model: schnet
   - data: default

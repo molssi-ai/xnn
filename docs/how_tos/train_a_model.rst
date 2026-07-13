@@ -1,7 +1,7 @@
-.. _howto-train-config:
+.. _howto-train-a-model:
 
 ****************************
-Train from a Config File
+Train a Model
 ****************************
 
 xnns has one configuration schema — the

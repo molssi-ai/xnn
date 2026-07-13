@@ -14,7 +14,7 @@ pip install -e ".[examples]" # + ASE, e3nn, mace-torch, nequip, jupyter (runs th
 pip install -e ".[all]"
 ```
 
-The `examples` notebooks benchmark xnns models against their reference
+The `examples` notebooks validate xnns models against their reference
 implementations. For example, the MACE implementation in xnns is validated
 against that of [ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`),
 the NequIP implementation is validated against that of
@@ -84,6 +84,8 @@ src/xnns/
 │   │   └── …                     + base, registry, outputs, les, ops
 │   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
 │   │   └── …                     + trainer, losses
+│   ├── benchmark/              - score pre-trained models on a dataset (metrics, atomization energy, report writers)
+│   │   └── …                     + config, runner, metrics, energy, report
 │   ├── deploy/                 - ASE Calculator, and LAMMPS/TorchScript export
 │   │   └── …                     + ase_calculator, lammps
 │   └── cli/                    - the `xnns` command-line interface
@@ -156,7 +158,8 @@ cfg = from_argparse(["--config", "configs/train.yaml", "--set", "model.cutoff=6.
 ```
 
 CLI: `xnns train --config configs/train.yaml --set optim.epochs=50`
-(also `xnns export --config ... --ckpt ... --to lammps|torchscript`).
+(also `xnns benchmark --config configs/benchmark.yaml` and
+`xnns export --config ... --ckpt ... --to lammps|torchscript`).
 
 Model keys copied verbatim from an upstream code's yaml also work: a per-model
 key-translation registry (`xnns.common.config.translate`) rewrites the foreign
@@ -183,6 +186,31 @@ the eager ones to ~1e-15, verified in `tests/test_mace.py` /
 for e3nn's `Gate` (`xnns.gnn.models.nequip._Gate`), which the e3nn 0.4.4
 original cannot do on torch 2.x.
 
+## Benchmarking
+
+Score a set of **pre-trained** models on one dataset with
+`xnns.common.benchmark` and tabulate their errors. A single config lists the
+`models` (each an architecture plus the `checkpoint` to load), the error
+`metrics` (`mae` / `mse` / `rmse`, or custom callables), and the `targets` to
+score (`energy` / `forces` / `stress`). Results are tabulated per model and
+written to CSV / JSON / Markdown (or a user-registered format). Energy can be
+scored per atom or, with `atomic_energies` (a `{Z: E0}` map or `average` to fit
+from data), as the physically meaningful atomization (interaction) energy.
+Benchmarking does not train — produce the checkpoints first with `xnns train`.
+
+```bash
+xnns benchmark --config configs/benchmark.yaml
+```
+
+```python
+from xnns.common.benchmark import from_yaml, run_benchmark
+rows = run_benchmark(from_yaml("configs/benchmark.yaml"))
+```
+
+The benchmark builds models with the same `Config` and model registry as a
+single run; new metrics and output formats plug in via `@register_metric` and
+`@register_writer`, mirroring `@register_model`.
+
 ## Models and fidelity
 
 | Model | Family | Featurizers | State |
@@ -202,8 +230,12 @@ Runnable notebooks are grouped into separate directories based on model family
 types within `examples/<xnn>` (`pip install -e ".[examples]"`) where `x` refers
 to the architecture types (e.g., `g` in `gnn` for graph neural networks, `d` in
 `dnn` for deep neural networks, and `c` in `cnn` for convolutional neural
-networks). The `examples/quickstart.py` module presents a minimal train/predict
-workflow on toy-data.
+networks): each holds a `<model>_argon_train_test.ipynb` and a
+`<model>_argon_density_md.ipynb` (LES has `les_molecular_dimers.ipynb`). The
+block-by-block numerical verifications against the upstream codes are collected
+under `examples/fidelity_checks/` as `<model>_verification.ipynb`. The
+`examples/quickstart.py` module presents a minimal train/predict workflow on
+toy-data.
 
 ## Extension points
 

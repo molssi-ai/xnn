@@ -1,5 +1,8 @@
-"""Benchmarking feature: config parsing, metrics, report writers, phase driver."""
-import copy
+"""Benchmarking feature: config parsing, metrics, report writers, scoring driver.
+
+Benchmarking scores *pre-trained* models, so the end-to-end tests build a
+checkpoint directly (a wrapped model's ``state_dict``) rather than training.
+"""
 import csv
 import json
 
@@ -14,10 +17,15 @@ from xnns.common.benchmark import (
 )
 from xnns.common.benchmark.metrics import mae, mse, rmse, collect_predictions
 from xnns.common.benchmark.report import columns
+from xnns.common.benchmark.energy import (
+    build_e0_lookup, fit_atomic_energies, dataset_structures,
+)
+from xnns.common.config import from_dict as cfg_from_dict
+from xnns.common.models import build_model, ForceStressOutput
 
 
 # --------------------------------------------------------------------------- #
-# data helpers
+# helpers
 # --------------------------------------------------------------------------- #
 def _write_dataset(path, n=12):
     """Write a tiny extxyz file with per-frame energy and forces."""
@@ -44,15 +52,26 @@ def _model_spec(label=None, **over):
     return spec
 
 
-def _base_dict(train_path, **over):
+def _make_checkpoint(path, spec=None):
+    """Build the model for ``spec`` and save its (random) weights as a checkpoint.
+
+    Mirrors what ``xnns train`` writes (``{"model": state_dict}``) without the
+    training cost -- benchmarking only needs weights to load and score.
+    """
+    spec = spec or _model_spec()
+    cfg = cfg_from_dict({"model": {k: v for k, v in spec.items()
+                                   if k != "label"}})
+    wrapped = ForceStressOutput(build_model(cfg.model))
+    torch.save({"model": wrapped.state_dict(), "cfg": cfg}, str(path))
+    return str(path)
+
+
+def _bench_dict(data_path, models, **over):
     d = {
-        "models": [_model_spec()],
-        "phases": ["train", "evaluate", "benchmark"],
+        "models": models,
         "metrics": ["mae", "rmse"],
         "targets": ["energy", "forces"],
-        "data": {"train_path": train_path, "batch_size": 4,
-                 "val_fraction": 0.25, "test_fraction": 0.25},
-        "optim": {"epochs": 1, "scheduler": "none"},
+        "data": {"test_path": data_path, "batch_size": 4},
         "device": "cpu",
         "seed": 0,
     }
@@ -81,12 +100,13 @@ def test_duplicate_labels_are_disambiguated():
 
 def test_entry_keys_split_from_model_section():
     cfg = from_dict({"models": [{"name": "mace", "checkpoint": "a/best.pt",
-                                 "optim": {"epochs": 5}, "output_dir": "o"}]})
+                                 "label": "m1"}]})
     e = cfg.models[0]
+    assert e.label == "m1"
     assert e.checkpoint == "a/best.pt"
-    assert e.optim == {"epochs": 5}
-    assert e.output_dir == "o"
-    assert "checkpoint" not in e.model and "optim" not in e.model
+    assert e.model == {"name": "mace"}        # entry keys stripped out
+    # benchmarking-only: no training-oriented fields on the entry
+    assert not hasattr(e, "optim") and not hasattr(e, "output_dir")
 
 
 def test_model_config_from_file(tmp_path):
@@ -95,34 +115,34 @@ def test_model_config_from_file(tmp_path):
     p.write_text(yaml.safe_dump({"name": "schnet", "cutoff": 6.0,
                                  "n_features": 8}))
     # inline keys override the file
-    cfg = from_dict({"models": [{"config": str(p), "n_features": 32}]})
+    cfg = from_dict({"models": [{"config": str(p), "n_features": 32,
+                                 "checkpoint": "c.pt"}]})
     assert cfg.models[0].model["cutoff"] == 6.0
     assert cfg.models[0].model["n_features"] == 32
+    assert cfg.models[0].checkpoint == "c.pt"
 
 
-def test_to_run_config_merges_shared_and_per_model():
+def test_to_config_folds_model_and_shared_data():
     cfg = from_dict({
-        "models": [{"name": "schnet", "cutoff": 5.0, "optim": {"epochs": 7}}],
-        "optim": {"epochs": 100, "lr": 1e-3},
+        "models": [{"name": "schnet", "cutoff": 5.0, "checkpoint": "c.pt"}],
         "data": {"batch_size": 8},
-        "output": {"dir": "runs/b"},
         "seed": 42, "device": "cpu",
     })
-    rc = cfg.models[0].to_run_config(cfg)
+    rc = cfg.models[0].to_config(cfg)
     assert rc.model.name == "schnet"
     assert rc.model.cutoff == 5.0
     assert rc.data.cutoff == 5.0           # kept in lockstep by Config
-    assert rc.data.batch_size == 8
-    assert rc.optim.epochs == 7            # per-model override wins
-    assert rc.optim.lr == 1e-3             # shared value preserved
-    assert rc.output_dir == "runs/b/schnet"
     assert rc.seed == 42 and rc.device == "cpu"
 
 
+def test_config_has_no_phases_or_optim():
+    cfg = from_dict({"models": ["schnet"]})
+    assert not hasattr(cfg, "phases")
+    assert not hasattr(cfg, "optim")
+
+
 def test_scalar_fields_accept_scalar_or_list():
-    cfg = from_dict({"phases": "benchmark", "metrics": "mae",
-                     "targets": "energy"})
-    assert cfg.phases == ["benchmark"]
+    cfg = from_dict({"metrics": "mae", "targets": "energy"})
     assert cfg.metrics == ["mae"]
     assert cfg.targets == ["energy"]
 
@@ -158,17 +178,111 @@ def test_custom_metric_registration_via_decorator():
 
 
 # --------------------------------------------------------------------------- #
+# atomization / interaction energy
+# --------------------------------------------------------------------------- #
+def test_e0_lookup_from_dict():
+    e0 = build_e0_lookup({1: -13.6, 8: -2042.0})
+    assert e0[1] == pytest.approx(-13.6)
+    assert e0[8] == pytest.approx(-2042.0)
+    assert e0[6] == 0.0            # unspecified elements stay zero
+
+
+def test_e0_lookup_from_symbols():
+    e0 = build_e0_lookup({"H": -13.6, "O": -2042.0})
+    assert e0[1] == pytest.approx(-13.6) and e0[8] == pytest.approx(-2042.0)
+
+
+def test_e0_lookup_from_list_needs_species():
+    e0 = build_e0_lookup([-13.6, -1029.0, -2042.0], species=[1, 6, 8])
+    assert e0[6] == pytest.approx(-1029.0)
+    with pytest.raises(ValueError, match="species"):
+        build_e0_lookup([-13.6, -1029.0])         # no species alignment
+
+
+def test_e0_lookup_none_disables():
+    assert build_e0_lookup(None) is None
+
+
+def test_e0_average_requires_dataset():
+    with pytest.raises(ValueError, match="dataset"):
+        build_e0_lookup("average")
+
+
+def test_fit_atomic_energies_recovers_known_e0s():
+    # Energies built exactly as sum of known per-element E0s -> lstsq recovers them.
+    rng = np.random.default_rng(1)
+    true = {1: -13.6, 6: -1029.0, 8: -2042.0}
+    structs = []
+    for _ in range(20):
+        counts = {1: int(rng.integers(1, 5)), 6: int(rng.integers(1, 5)),
+                  8: int(rng.integers(1, 5))}
+        zs = [z for z, c in counts.items() for _ in range(c)]
+        e = sum(true[z] for z in zs)
+        structs.append({"atomic_numbers": zs, "energy": e})
+    species, values = fit_atomic_energies(structs)
+    assert species == [1, 6, 8]
+    for z, v in zip(species, values):
+        # float32 lstsq on ~2000-magnitude E0s -> ~1e-4 relative precision
+        assert v == pytest.approx(true[z], rel=1e-3)
+
+
+def test_dataset_structures_reads_atomicdataset(tmp_path):
+    from xnns.common.data import AtomicDataset
+    ds = AtomicDataset.from_file(_write_dataset(tmp_path / "d.extxyz"), 4.0)
+    structs = dataset_structures(ds)
+    assert len(structs) == 12
+    assert all("atomic_numbers" in s for s in structs)
+
+
+def test_atomization_leaves_difference_metrics_invariant():
+    """Subtracting the same E0 offset from pred and ref cannot change MAE/RMSE."""
+    from xnns.common.data import AtomicDataset, collate
+    from torch.utils.data import DataLoader
+
+    structs = [{"pos": np.random.default_rng(i).uniform(0, 4, (4, 3)),
+                "atomic_numbers": [1, 6, 8, 1],
+                "energy": float(i), "forces": np.zeros((4, 3))}
+               for i in range(6)]
+    ds = AtomicDataset(structs, 4.0)
+    loader = DataLoader(ds, batch_size=3, collate_fn=collate)
+    cfg = cfg_from_dict({"model": {"name": "schnet", "n_features": 16,
+                                   "n_interactions": 1, "cutoff": 4.0}})
+    model = ForceStressOutput(build_model(cfg.model))
+    dev = torch.device("cpu")
+
+    e0 = build_e0_lookup({1: -13.6, 6: -1029.0, 8: -2042.0})
+    plain = score(collect_predictions(model, loader, dev, ["energy"],
+                                      atomic_energies=None), ["mae", "rmse"])
+    atomz = score(collect_predictions(model, loader, dev, ["energy"],
+                                      atomic_energies=e0), ["mae", "rmse"])
+    # Exact in real arithmetic; float32 cancellation of the large E0 offset
+    # leaves a tiny residual, so compare with a relative tolerance.
+    assert plain["energy_mae"] == pytest.approx(atomz["energy_mae"], rel=1e-4)
+    assert plain["energy_rmse"] == pytest.approx(atomz["energy_rmse"], rel=1e-4)
+
+
+def test_atomization_average_end_to_end(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    cfg = from_dict(_bench_dict(
+        data, [_model_spec(checkpoint=ckpt)], atomic_energies="average",
+        output={"dir": str(tmp_path / "bavg"), "formats": ["json"]}))
+    rows = run_benchmark(cfg)
+    assert any("energy_mae" in r for r in rows)
+
+
+# --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
-def test_columns_lead_with_model_and_split():
-    rows = [{"model": "a", "split": "test", "energy_mae": 1.0, "n_params": 5}]
-    assert columns(rows)[:2] == ["model", "split"]
-    assert set(columns(rows)) == {"model", "split", "energy_mae", "n_params"}
+def test_columns_lead_with_model():
+    rows = [{"model": "a", "energy_mae": 1.0, "n_params": 5}]
+    assert columns(rows)[0] == "model"
+    assert set(columns(rows)) == {"model", "energy_mae", "n_params"}
 
 
 def test_write_all_csv_json_md(tmp_path):
-    rows = [{"model": "a", "split": "test", "energy_mae": 0.5, "n_params": 3},
-            {"model": "b", "split": "test", "energy_mae": 1.5, "n_params": 9}]
+    rows = [{"model": "a", "n_params": 3, "energy_mae": 0.5},
+            {"model": "b", "n_params": 9, "energy_mae": 1.5}]
     paths = write_all(rows, ["csv", "json", "md"], str(tmp_path), "res")
     assert {p.rsplit(".", 1)[1] for p in paths} == {"csv", "json", "md"}
 
@@ -182,7 +296,7 @@ def test_write_all_csv_json_md(tmp_path):
     assert float(rowsback[1]["energy_mae"]) == 1.5
 
     md = (tmp_path / "res.md").read_text()
-    assert md.startswith("| model | split |")
+    assert md.startswith("| model |")
 
 
 def test_custom_writer_registration(tmp_path):
@@ -193,98 +307,156 @@ def test_custom_writer_registration(tmp_path):
             for r in rows:
                 f.write("\t".join(str(r.get(c, "")) for c in cols) + "\n")
     assert "tsv" in available_writers()
-    rows = [{"model": "a", "split": "test", "energy_mae": 0.5}]
+    rows = [{"model": "a", "energy_mae": 0.5}]
     (path,) = write_all(rows, ["tsv"], str(tmp_path), "res")
     assert "\t" in open(path).read()
 
 
 def test_format_table_renders_header_and_rows():
-    rows = [{"model": "a", "split": "test", "energy_mae": 0.5}]
+    rows = [{"model": "a", "energy_mae": 0.5}]
     txt = format_table(rows)
     assert "model" in txt and "a" in txt
     assert format_table([]) == "(no results)"
 
 
+def test_format_table_shows_units_in_front():
+    rows = [{"model": "a", "energy_mae": 0.5, "n_params": 3}]
+    txt = format_table(rows, {"energy_mae": "eV/atom"})
+    assert "energy_mae [eV/atom]" in txt
+    assert "\nn_params" not in txt        # unitless columns unchanged
+
+
+def test_column_units_defaults_and_override():
+    cfg = from_dict({"targets": ["energy", "forces"], "energy_per_atom": True,
+                     "units": {"forces": "meV/A"}})
+    b = Benchmark(cfg)
+    b.rows = [{"model": "m", "n_params": 1, "energy_mae": 0.1,
+               "forces_rmse": 0.2}]
+    u = b._column_units()
+    assert u["energy_mae"] == "eV/atom"     # default
+    assert u["forces_rmse"] == "meV/A"      # overridden
+    assert "n_params" not in u              # unitless
+
+
+def test_column_units_energy_total_when_not_per_atom():
+    cfg = from_dict({"targets": ["energy"], "energy_per_atom": False})
+    b = Benchmark(cfg)
+    b.rows = [{"model": "m", "energy_mae": 0.1}]
+    assert b._column_units()["energy_mae"] == "eV"
+
+
 # --------------------------------------------------------------------------- #
-# end-to-end phase driver
+# end-to-end scoring driver
 # --------------------------------------------------------------------------- #
-def test_train_evaluate_benchmark(tmp_path):
-    train_path = _write_dataset(tmp_path / "data.extxyz")
+def test_benchmark_scores_pretrained_models(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ck1 = _make_checkpoint(tmp_path / "m1.pt")
+    ck2 = _make_checkpoint(tmp_path / "m2.pt")
     out_dir = tmp_path / "bench"
-    cfg = from_dict(_base_dict(
-        train_path, output={"dir": str(out_dir), "filename": "results",
-                             "formats": ["csv", "json"]}))
+    cfg = from_dict(_bench_dict(
+        data,
+        [_model_spec(label="a", checkpoint=ck1),
+         _model_spec(label="b", checkpoint=ck2)],
+        output={"dir": str(out_dir), "filename": "results",
+                "formats": ["csv", "json"]}))
     rows = run_benchmark(cfg)
 
-    # one val row (evaluate) + one test row (benchmark)
-    splits = sorted(r["split"] for r in rows)
-    assert splits == ["test", "val"]
+    assert [r["model"] for r in rows] == ["a", "b"]
     for r in rows:
         assert {"energy_mae", "energy_rmse", "forces_mae", "forces_rmse"} <= set(r)
         assert r["n_params"] > 0
+        assert "split" not in r          # benchmarking-only: single dataset
     assert (out_dir / "results.csv").exists()
     assert (out_dir / "results.json").exists()
-    # a checkpoint was trained
-    assert (out_dir / "schnet" / "last.pt").exists()
 
 
-def test_benchmark_only_on_pretrained_checkpoint(tmp_path):
-    # First train + save a checkpoint via a full run.
-    train_path = _write_dataset(tmp_path / "data.extxyz")
-    first = from_dict(_base_dict(
-        train_path, models=[_model_spec()],
-        output={"dir": str(tmp_path / "b1"), "formats": ["json"]}))
-    run_benchmark(first)
-    ckpt = tmp_path / "b1" / "schnet" / "last.pt"
-    assert ckpt.exists()
-
-    # Now benchmark ONLY, loading the pre-trained checkpoint (no training).
-    cfg = from_dict(_base_dict(
-        train_path,
-        models=[_model_spec(label="pretrained", checkpoint=str(ckpt))],
-        phases=["benchmark"],
-        output={"dir": str(tmp_path / "b2"), "formats": ["csv"]}))
-    b = Benchmark(cfg)
-    rows = b.run()
-    assert len(rows) == 1
-    assert rows[0]["model"] == "pretrained"
-    assert rows[0]["split"] == "test"
-    # no training happened for b2 -> no checkpoints written under its out dir
-    assert not (tmp_path / "b2" / "pretrained").exists()
-    assert (tmp_path / "b2" / "results.csv").exists()
-
-
-def test_evaluate_benchmark_on_pretrained(tmp_path):
-    train_path = _write_dataset(tmp_path / "data.extxyz")
-    first = from_dict(_base_dict(train_path,
-                                 output={"dir": str(tmp_path / "b1")}))
-    run_benchmark(first)
-    ckpt = tmp_path / "b1" / "schnet" / "last.pt"
-
-    cfg = from_dict(_base_dict(
-        train_path,
-        models=[_model_spec(checkpoint=str(ckpt))],
-        phases=["evaluate", "benchmark"],
-        output={"dir": str(tmp_path / "b3"), "formats": ["json"]}))
+def test_architecture_read_from_checkpoint(tmp_path):
+    # A checkpoint written by xnns embeds its Config, so the entry needs no
+    # architecture -- just the checkpoint (and an optional label).
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt", _model_spec())
+    cfg = from_dict(_bench_dict(
+        data, [{"label": "fromckpt", "checkpoint": ckpt}],
+        output={"dir": str(tmp_path / "b"), "formats": ["json"]}))
+    assert cfg.models[0].model == {}          # no architecture declared
     rows = run_benchmark(cfg)
-    assert sorted(r["split"] for r in rows) == ["test", "val"]
+    assert rows[0]["model"] == "fromckpt"
+    assert rows[0]["n_params"] > 0
+    assert "energy_mae" in rows[0]
 
 
-def test_no_checkpoint_without_train_phase_raises(tmp_path):
-    train_path = _write_dataset(tmp_path / "data.extxyz")
-    cfg = from_dict(_base_dict(
-        train_path, phases=["benchmark"],
-        output={"dir": str(tmp_path / "b4")}))
-    with pytest.raises(ValueError, match="no checkpoint"):
+def test_units_in_written_files_but_rows_stay_plain(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    out_dir = tmp_path / "out"
+    cfg = from_dict(_bench_dict(
+        data, [_model_spec(label="a", checkpoint=ckpt)],
+        units={"energy": "eV/atom", "forces": "eV/A"},
+        output={"dir": str(out_dir), "formats": ["csv", "json", "md"]}))
+    rows = run_benchmark(cfg)
+
+    # returned rows keep plain keys for programmatic use
+    assert "energy_mae" in rows[0] and "energy_mae [eV/atom]" not in rows[0]
+
+    # written files carry unit-annotated headers
+    loaded = json.load(open(out_dir / "results.json"))
+    assert "energy_mae [eV/atom]" in loaded[0]
+    assert "forces_mae [eV/A]" in loaded[0]
+    assert "energy_mae" not in loaded[0]        # relabeled, not duplicated
+
+    header = open(out_dir / "results.csv").readline()
+    assert "energy_mae [eV/atom]" in header
+    assert "model" in header and "n_params" in header   # unitless cols plain
+
+    md = (out_dir / "results.md").read_text()
+    assert "forces_mae [eV/A]" in md
+
+
+def test_missing_checkpoint_raises(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    cfg = from_dict(_bench_dict(data, [_model_spec()]))   # no checkpoint
+    with pytest.raises(ValueError, match="checkpoint"):
         run_benchmark(cfg)
 
 
-def test_splits_are_shared_per_cutoff(tmp_path):
-    train_path = _write_dataset(tmp_path / "data.extxyz")
-    cfg = from_dict(_base_dict(
-        train_path, models=[_model_spec(), _model_spec()],
-        output={"dir": str(tmp_path / "b5")}))
+def test_checkpoint_not_found_raises(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    cfg = from_dict(_bench_dict(
+        data, [_model_spec(checkpoint=str(tmp_path / "nope.pt"))]))
+    with pytest.raises(FileNotFoundError, match="checkpoint not found"):
+        run_benchmark(cfg)
+
+
+def test_no_dataset_path_raises(tmp_path):
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    cfg = from_dict({"models": [_model_spec(checkpoint=ckpt)],
+                     "data": {}, "device": "cpu"})
+    with pytest.raises(ValueError, match="dataset"):
+        run_benchmark(cfg)
+
+
+def test_dataset_shared_per_cutoff(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    cfg = from_dict(_bench_dict(
+        data, [_model_spec(checkpoint=ckpt), _model_spec(checkpoint=ckpt)]))
     b = Benchmark(cfg)
-    s1 = b._splits_for(4.0)
-    s2 = b._splits_for(4.0)
-    assert s1 is s2      # cached, identical objects
+    assert b._dataset(4.0) is b._dataset(4.0)      # cached, identical object
+
+
+def test_cli_benchmark(tmp_path):
+    import yaml
+    from xnns.common.cli import main
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    out_dir = tmp_path / "out"
+    cfg_yaml = tmp_path / "bench.yaml"
+    cfg_yaml.write_text(yaml.safe_dump(_bench_dict(
+        data, [_model_spec(checkpoint=ckpt)],
+        output={"dir": str(out_dir), "formats": ["json"]})))
+    main(["benchmark", "--config", str(cfg_yaml), "--set", "targets=['energy']"])
+    assert (out_dir / "results.json").exists()
+    rows = json.load(open(out_dir / "results.json"))
+    keys = list(rows[0])            # unit-annotated in files (e.g. "energy_mae [eV/atom]")
+    assert any("energy_mae" in k for k in keys)
+    assert not any("forces_mae" in k for k in keys)

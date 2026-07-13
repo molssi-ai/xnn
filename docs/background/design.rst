@@ -24,16 +24,19 @@ imported on its own.
                      ForceStressOutput + ops (scatter_sum)
        train/        Trainer (batch + device aware), weighted
                      energy/force/stress loss
+       benchmark/    score pre-trained models on a dataset (metrics,
+                     atomization energy, report writers)
        deploy/       ASE Calculator, LAMMPS/TorchScript export
        cli/          the `xnns` command
      gnn/          E(3)-equivariant GNNs (need e3nn)
        featurizers/  SphericalHarmonicEdgeEmbedding, BesselRBF, PolynomialCutoff
-       models/       base (EquivariantGNN), blocks, nequip, mace, allegro
+       models/       base (EquivariantGNN, GNNPotential), blocks,
+                     nequip, mace, allegro, cace
      cnn/          continuous-filter conv net
        models/       schnet
      dnn/          descriptor + per-element networks
        featurizers/  symmetry functions, AEV
-       models/       base (DescriptorPotential), hdnnp, ani
+       models/       base (DescriptorPotential), hdnnp, ani, physnet, d3
 
 Four ideas hold the package together.
 

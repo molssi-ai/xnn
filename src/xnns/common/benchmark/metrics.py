@@ -21,6 +21,7 @@ import torch
 from torch import Tensor
 
 from ..data import AtomicGraph
+from ..models import scatter_sum
 
 Metric = Callable[[Tensor, Tensor], float]
 
@@ -148,8 +149,10 @@ def rmse(pred: Tensor, target: Tensor) -> float:
     return float(((pred - target) ** 2).mean().sqrt())
 
 
-def collect_predictions(model, loader, device,
-                        targets: list[str]) -> dict[str, tuple[Tensor, Tensor]]:
+def collect_predictions(model, loader, device, targets: list[str],
+                        atomic_energies: Tensor | None = None,
+                        energy_per_atom: bool = True,
+                        ) -> dict[str, tuple[Tensor, Tensor]]:
     """Run ``model`` over ``loader`` once, pairing predictions with targets.
 
     The model is put in eval mode but gradients are left enabled, because
@@ -157,10 +160,17 @@ def collect_predictions(model, loader, device,
     same reason :meth:`Trainer.evaluate` avoids ``torch.no_grad``). Each
     prediction/target pair is detached and moved to CPU before being stacked.
 
-    Energy is collected *per atom* (total energy divided by the per-structure
-    atom count), matching the size-extensive normalization used by the
-    training loss, so energy metrics are directly comparable across structures
-    of different sizes.
+    Energy handling is controlled by ``atomic_energies`` and
+    ``energy_per_atom``. When ``atomic_energies`` is given, the per-element
+    reference energy of every atom is subtracted from both the predicted and
+    reference total energy, turning them into *atomization* (interaction)
+    energies -- the physically meaningful quantity to report (see
+    :mod:`~xnns.common.benchmark.energy`). When ``energy_per_atom`` is set, the
+    energy is then divided by the per-structure atom count, the size-extensive
+    normalization the training loss uses, so energy metrics are comparable
+    across differently sized structures. Both are applied identically to the
+    prediction and the reference, so difference metrics (MAE/MSE/RMSE) are
+    invariant to the E0 offset while their reported values become meaningful.
 
     Parameters
     ----------
@@ -176,6 +186,14 @@ def collect_predictions(model, loader, device,
         Which quantities to collect; a subset of ``"energy"``, ``"forces"``
         and ``"stress"``. A target is skipped for a batch that lacks the
         reference value or the corresponding prediction.
+    atomic_energies : torch.Tensor or None, optional
+        A ``Z``-indexed lookup of per-element reference energies (as built by
+        :func:`~xnns.common.benchmark.energy.build_e0_lookup`). When given,
+        energies are scored on an atomization basis. Defaults to ``None`` (raw
+        total energy).
+    energy_per_atom : bool, optional
+        Whether to divide the (atomization) energy by the atom count before
+        scoring. Defaults to ``True``.
 
     Returns
     -------
@@ -192,9 +210,19 @@ def collect_predictions(model, loader, device,
         data = data.to(device)
         out = model(data)
         if "energy" in targets and data.energy is not None and "energy" in out:
-            n = data.n_atoms.to(out["energy"].dtype)
-            preds["energy"].append((out["energy"] / n).detach().cpu())
-            refs["energy"].append((data.energy / n).detach().cpu())
+            e_pred, e_ref = out["energy"], data.energy
+            if atomic_energies is not None:
+                e0 = atomic_energies.to(e_pred.device, e_pred.dtype)
+                e0_sum = scatter_sum(
+                    e0[data.atomic_numbers], data.batch, data.num_graphs)
+                e_pred = e_pred - e0_sum
+                e_ref = e_ref - e0_sum
+            if energy_per_atom:
+                n = data.n_atoms.to(e_pred.dtype)
+                e_pred = e_pred / n
+                e_ref = e_ref / n
+            preds["energy"].append(e_pred.detach().cpu())
+            refs["energy"].append(e_ref.detach().cpu())
         if "forces" in targets and data.forces is not None and "forces" in out:
             preds["forces"].append(out["forces"].detach().reshape(-1).cpu())
             refs["forces"].append(data.forces.detach().reshape(-1).cpu())

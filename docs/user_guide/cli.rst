@@ -5,7 +5,7 @@ The Command Line
 ****************
 
 Installing xnns provides the ``xnns`` command (entry point
-``xnns.common.cli:main``) with two subcommands. Reading structure files
+``xnns.common.cli:main``) with three subcommands. Reading structure files
 requires the ``ase`` extra.
 
 xnns train
@@ -31,6 +31,25 @@ The same command runs data-parallel on several GPUs or nodes when started
 through a distributed launcher — ``torchrun --nproc-per-node 2 -m xnns train
 --config configs/train.yaml`` — with no config changes; see
 :ref:`training`.
+
+xnns benchmark
+==============
+Score several **pre-trained** models on one dataset and write a results table:
+
+.. code-block:: bash
+
+   xnns benchmark --config configs/benchmark.yaml
+   xnns benchmark --config configs/benchmark.yaml --set "targets=['energy']"
+
+- ``--config`` — a YAML benchmark config (see :ref:`howto-benchmark`)
+- ``--set KEY=VALUE`` — dotted-key overrides applied to the config, repeatable
+
+Each model listed in ``models`` is built from its architecture, loaded from its
+``checkpoint`` (benchmarking does not train — produce checkpoints with
+``xnns train`` first), and scored with the configured ``metrics`` (MAE / MSE /
+RMSE or custom) on the dataset. The comparison table is printed and written to
+``output.dir`` in every configured format (CSV / JSON / Markdown). See
+:ref:`howto-benchmark` for the full config.
 
 xnns export
 ===========

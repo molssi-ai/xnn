@@ -160,5 +160,5 @@ Fidelity means results published with the reference codes can be reproduced,
 weights can be transplanted in either direction (see
 :ref:`howto-transplant`), and the xnns implementations can serve as readable,
 single-dependency references for how these architectures actually work — the
-``01_*_block_by_block_vs_original.ipynb`` notebooks double as annotated tours
-of each architecture.
+``examples/fidelity_checks/<model>_verification.ipynb`` notebooks double as
+annotated tours of each architecture.

@@ -1,0 +1,59 @@
+# Benchmark NequIP, Allegro, MACE and PhysNet on the Argon test set.
+#
+# Paths are relative to the repository root -- run it from there:
+#
+#     xnns benchmark --config examples/benchmark/argon_benchmark.yaml
+#
+# or from Python (also from the repository root):
+#
+#     from xnns.common.benchmark import from_yaml, run_benchmark
+#     run_benchmark(from_yaml("examples/benchmark/argon_benchmark.yaml"))
+#
+# These are the checkpoints trained by the example notebooks
+# (examples/<family>/<model>_argon_train_test.ipynb). Each xnns checkpoint
+# embeds the Config it was trained with, so an entry needs only its checkpoint
+# path -- the architecture is read back from the checkpoint. Run the notebooks
+# first if a checkpoint is missing.
+models:
+  - label: nequip
+    checkpoint: examples/gnn/nequip/runs/argon_xnns/best.pt
+  - label: allegro
+    checkpoint: examples/gnn/allegro/runs/argon_xnns/best.pt
+  - label: mace
+    checkpoint: examples/gnn/mace/runs/argon_xnns/best.pt
+  - label: physnet
+    checkpoint: examples/dnn/physnet/runs/argon_xnns/best.pt
+
+# Score energy and forces with MAE and RMSE.
+metrics: [mae, rmse]
+targets: [energy, forces]
+
+# Units shown after each metric name in the tables (labels only -- xnns
+# is unit-agnostic). These are the defaults for this eV/Angstrom dataset, shown
+# here explicitly; override per target to match your data (e.g. meV/atom).
+units:
+  energy: eV/atom
+  forces: eV/A
+
+# Argon is a single species, so per-atom energy is the natural report; set
+# `atomic_energies: average` to instead report the atomization energy (here it
+# just removes the per-atom Ar reference fitted from the data).
+energy_per_atom: true
+atomic_energies: null
+
+# The Argon test set. The MACE-convention target keys (REF_energy / REF_forces)
+# are how these frames store their references.
+data:
+  test_path: datasets/argon_md/argon_test.xyz
+  batch_size: 16
+  energy_key: REF_energy
+  forces_key: REF_forces
+  stress_key: REF_stress
+
+output:
+  dir: examples/benchmark/runs/argon_benchmark
+  filename: results
+  formats: [csv, json, md]
+
+device: auto
+seed: 1234

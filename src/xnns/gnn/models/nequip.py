@@ -19,7 +19,7 @@ Given the same weights this reproduces the original ``nequip`` package
 (mir-group/nequip) to machine precision -- the interaction blocks even share
 the upstream parameter names (``linear_1``/``fc``/``tp``/``linear_2``/``sc``)
 so ``load_state_dict`` transplants work directly (see ``tests/test_nequip.py``
-and ``examples/gnn/nequip/01_nequip_block_by_block_vs_original.ipynb``).
+and ``examples/fidelity_checks/nequip_verification.ipynb``).
 Only ``e3nn`` is required -- no ``nequip`` / ``torch_runstats``.
 
 Upstream conventions preserved here:

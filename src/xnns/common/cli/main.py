@@ -31,7 +31,7 @@ def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
         The config dict to mutate in place.
     overrides : list of str
         Override strings of the form ``"output.dir=runs/bench"`` or
-        ``"phases=['benchmark']"``.
+        ``"targets=['energy']"``.
 
     Returns
     -------
@@ -56,16 +56,16 @@ def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
 
 
 def main(argv=None):
-    """Command-line entry point dispatching the ``train`` and ``export`` commands.
+    """Command-line entry point dispatching the ``train``, ``benchmark`` and ``export`` commands.
 
     The first argument selects the command; the rest are that command's options.
     ``train`` builds a :class:`Config` from the arguments, constructs the
     training/validation datasets, and runs the trainer. ``benchmark`` loads a
-    :class:`~xnns.common.benchmark.BenchmarkConfig` and runs several models
-    through the train/evaluate/benchmark phases, writing a comparison table.
-    ``export`` loads a checkpoint into a :class:`ForceStressOutput`-wrapped
-    model and writes it out for LAMMPS or as TorchScript. With no arguments a
-    usage line is printed; an unknown command prints an error message.
+    :class:`~xnns.common.benchmark.BenchmarkConfig` and scores the listed
+    pre-trained models on the dataset, writing a comparison table. ``export``
+    loads a checkpoint into a :class:`ForceStressOutput`-wrapped model and
+    writes it out for LAMMPS or as TorchScript. With no arguments a usage line
+    is printed; an unknown command prints an error message.
 
     Parameters
     ----------
