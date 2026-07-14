@@ -28,6 +28,7 @@ from .base import (
 
 # Import builder modules for their registration side effects.
 from . import rmd17  # noqa: F401
+from . import lode_dimers  # noqa: F401
 
 __all__ = [
     "load_dataset",

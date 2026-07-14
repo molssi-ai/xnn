@@ -84,6 +84,13 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "Qshift": "charge_shift",
         "Qscale": "charge_scale",
     },
+    # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
+    "bamboo": {
+        "rcut": "cutoff",
+        "dim": "n_features",
+        "num_rbf": "n_rbf",
+        "n_layers": "n_interactions",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

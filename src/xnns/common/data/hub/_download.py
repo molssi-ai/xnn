@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+from tqdm.auto import tqdm
 
 
 def _repo_datasets_dir() -> Path:
@@ -77,28 +78,6 @@ def md5sum(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def _progress(read: int, total: int, name: str) -> None:
-    """Render a single-line download progress bar to stderr.
-
-    Parameters
-    ----------
-    read : int
-        Bytes transferred so far.
-    total : int
-        Total bytes expected (``0`` if unknown).
-    name : str
-        File name shown in the bar.
-    """
-    mb = read / 1e6
-    if total:
-        pct = 100 * read / total
-        bar = "#" * int(pct // 5)
-        sys.stderr.write(f"\r  {name}: {bar:<20} {pct:5.1f}%  ({mb:.1f} MB)")
-    else:
-        sys.stderr.write(f"\r  {name}: {mb:.1f} MB")
-    sys.stderr.flush()
-
-
 def download_file(url: str, dest: Path, md5: Optional[str] = None,
                   quiet: bool = False, chunk: int = 1 << 20) -> Path:
     """Download ``url`` to ``dest``, caching and verifying by MD5.
@@ -138,22 +117,19 @@ def download_file(url: str, dest: Path, md5: Optional[str] = None,
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
-    if not quiet:
-        sys.stderr.write(f"Downloading {dest.name} ...\n")
     req = urllib.request.Request(url, headers={"User-Agent": "xnns"})
     with urllib.request.urlopen(req) as resp, open(tmp, "wb") as f:
         total = int(resp.headers.get("Content-Length", 0))
-        read = 0
-        while True:
-            block = resp.read(chunk)
-            if not block:
-                break
-            f.write(block)
-            read += len(block)
-            if not quiet:
-                _progress(read, total, dest.name)
-    if not quiet:
-        sys.stderr.write("\n")
+        bar = tqdm(total=total or None, unit="B", unit_scale=True,
+                   unit_divisor=1024, desc=dest.name, disable=quiet,
+                   leave=False)
+        with bar:
+            while True:
+                block = resp.read(chunk)
+                if not block:
+                    break
+                f.write(block)
+                bar.update(len(block))
 
     if md5 is not None:
         got = md5sum(tmp)

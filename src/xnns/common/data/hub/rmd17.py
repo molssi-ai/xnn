@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from ._download import download_file
 from .base import DatasetBuilder, register_dataset
@@ -146,7 +147,7 @@ class RMD17Builder(DatasetBuilder):
 
         scale = 1.0 if units in ("kcal/mol", "kcal") else _KCAL_MOL_TO_EV
 
-        def build(indices) -> list[dict]:
+        def build(indices, desc: str) -> list[dict]:
             """Materialize structure dicts for the given conformation indices."""
             return [
                 {
@@ -155,11 +156,12 @@ class RMD17Builder(DatasetBuilder):
                     "energy": float(energies[i]) * scale,
                     "forces": forces[i] * scale,
                 }
-                for i in indices
+                for i in tqdm(indices, desc=desc, unit=" struct",
+                              disable=quiet, leave=False)
             ]
 
         if split == "all":
-            return build(range(len(energies)))
+            return build(range(len(energies)), f"rmd17:{mol} all")
 
         train_idx = self._read_split(root, "train", fold, quiet)
         test_idx = self._read_split(root, "test", fold, quiet)
@@ -168,7 +170,8 @@ class RMD17Builder(DatasetBuilder):
         if n_test is not None:
             test_idx = test_idx[:n_test]
 
-        splits = {"train": build(train_idx), "test": build(test_idx)}
+        splits = {"train": build(train_idx, f"rmd17:{mol} train"),
+                  "test": build(test_idx, f"rmd17:{mol} test")}
         if split is None:
             return splits
         if split not in splits:
