@@ -4,13 +4,14 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet) are not
-approximations or "inspired-by" re-implementations: they are faithful,
+The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO)
+are not approximations or "inspired-by" re-implementations: they are faithful,
 self-contained reproductions of the reference codes, verified numerically
 block by block and end to end. The spherical-harmonic models need only
 ``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
-``opt_einsum_fx`` at runtime; CACE and PhysNet need no extra dependency at
-all (PhysNet's original is TensorFlow — the xnns version is pure PyTorch).
+``opt_einsum_fx`` at runtime; CACE, PhysNet, and BAMBOO need no extra
+dependency at all (PhysNet's original is TensorFlow — the xnns version is pure
+PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn).
 
 Equivariance itself is verified in the test suite (rotate the inputs → the
 energy is invariant and the forces co-rotate, to ~1e-7; see
@@ -130,6 +131,42 @@ the upstream repo via ``PHYSNET_UPSTREAM_PATH``, and the block-by-block
 notebook documents three dtype-only harness patches that let the float32-era
 TF graph run in float64). Dropout (upstream ``keep_prob``, default off) is
 not implemented.
+
+BAMBOO
+======
+A faithful, from-scratch re-implementation of `bytedance/bamboo
+<https://github.com/bytedance/bamboo>`_ (Gong *et al.* 2024) — the graph
+equivariant transformer with a physics energy split — built on the xnns
+abstractions with no upstream code vendored:
+
+- the multi-head QKV edge attention (the reusable
+  :class:`~xnns.transformer.attention.EdgeMultiheadAttention`), the
+  scalar/vector GET layers with their inner-product coupling (first / middle /
+  last variants), and the exponential-normal radial basis
+  (:class:`~xnns.transformer.featurizers.ExpNormalSmearing`);
+- the charge-equilibrium electrostatics: per-atom electronegativity/hardness
+  energies from the initial embedding, charges squashed by ``tanh`` and
+  conserved to the total charge, and the damped all-pairs Coulomb sum (whose
+  short-range softplus damping differentiates exactly to the paper's sigmoid
+  force damping);
+- BAMBOO's native kcal/mol / Å units and its ``ele_factor`` constant; elements
+  are embedded directly by atomic number.
+
+Given the same weights, and driven from the same geometry, it reproduces the
+original model to machine precision — every GET layer, the partial charges,
+the dipole, and the component energies match to ~1e-15, block by block
+(``examples/fidelity_checks/bamboo_verification.ipynb``,
+``tests/test_bamboo.py`` with a clone of the upstream repo via
+``BAMBOO_UPSTREAM_PATH``). The one deliberate difference is the force
+convention: xnns returns the full conservative ``-dE/dr`` through
+:class:`~xnns.common.models.outputs.ForceStressOutput`, which equals the
+upstream ``forces + qeq_force`` to ~1e-14 — upstream reports only ``forces``
+(``nn + coul`` with charges held fixed) and regularises the
+charge-equilibrium residual ``qeq_force`` toward zero during training
+(Supplementary Theorem A.2). The optional D3(CSO) dispersion (off by default,
+as in the paper's DFT training) reuses xnns's standard Grimme-D3 reference
+tables with the CSO damping and is therefore not on the machine-precision
+path.
 
 Latent Ewald Summation (LES)
 ============================

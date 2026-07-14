@@ -54,6 +54,18 @@ series (``examples/dnn/physnet/``) compares against the original
 **TensorFlow** implementation and needs a venv with both ``tensorflow`` and
 ``torch`` (the notebooks clone MMunibas/PhysNet on demand).
 
+BAMBOO (the ``hybrid`` family) has its block-by-block fidelity check in
+``examples/fidelity_checks/bamboo_verification.ipynb`` (it clones
+bytedance/bamboo on demand and transplants the weights, matching every GET
+layer and the charge/energy outputs to machine precision). Its usage examples
+live in ``examples/hybrid/``:
+``bamboo_charge_analysis.ipynb`` tours the predicted partial charges, the
+``energy_nn``/``energy_elec`` split, the dipole, the symmetries, and ASE
+deployment; ``bamboo_dimer_electrostatics.ipynb`` shows BAMBOO's built-in
+charge-equilibrium electrostatics binding the charged/polar dimers beyond the
+GET cutoff (electrostatics on vs. off), reusing the same CC/CP/PP dimer set as
+the LES example.
+
 The Latent Ewald Summation long-range add-on is validated against the original
 ``cace`` ``EwaldPotential`` in ``examples/fidelity_checks/les_verification.ipynb``;
 ``examples/gnn/les/les_molecular_dimers.ipynb`` reproduces

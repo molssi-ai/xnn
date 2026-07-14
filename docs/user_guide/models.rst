@@ -19,7 +19,7 @@ frontend:
 
    from xnns.common.models import available_models, build_model
 
-   available_models()          # ['schnet', 'hdnnp', 'ani', 'physnet', 'nequip', 'mace', 'allegro', 'cace']
+   available_models()          # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'schnet']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -30,7 +30,8 @@ double as the keys accepted in ``model.extra`` of a config file.
    The GNN models (NequIP, MACE, Allegro, CACE) register themselves when
    ``xnns.gnn`` is importable, which requires the ``gnn`` extra (``e3nn``).
    CACE itself works entirely in Cartesian coordinates and does not use
-   e3nn.
+   e3nn. The hybrid model (BAMBOO) and the shared building blocks in
+   ``xnns.transformer`` likewise need no e3nn and are always available.
 
 MACE (``gnn``)
 ==============
@@ -152,6 +153,47 @@ neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
 ``atomic_energies``/``atomic_scales`` — loaded into the per-element
 ``Eshift``/``Escale`` tables.
 
+BAMBOO (``hybrid``)
+===================
+:class:`xnns.hybrid.models.bamboo.BAMBOO` — a graph equivariant transformer
+with a physics energy split (Gong *et al.* 2024). Each message-passing layer
+is a multi-head QKV attention on the neighbour graph that couples a scalar and
+a Cartesian **vector** node channel (so equivariance comes from vectors, not
+spherical harmonics — no e3nn), and the atomic energy is split into a
+semi-local neural-network term, a **charge-equilibrium electrostatic** term
+(a per-atom electronegativity/hardness energy plus a damped Coulomb summed over
+*all* pairs, so it is genuinely long-range), and an optional D3(CSO) dispersion
+term. ``forward`` additionally returns ``"charges"`` (per-atom partial charges,
+conserved to the total charge), ``"dipole"``, and the component energies
+``"energy_nn"`` / ``"energy_elec"``. Faithful to
+`bytedance/bamboo <https://github.com/bytedance/bamboo>`_, with directly
+transplantable weights (see :ref:`fidelity`). BAMBOO works in kcal/mol and Å,
+and embeds elements directly by atomic number (no species list required).
+
+The shared transformer pieces live in :mod:`xnns.transformer`
+(:class:`~xnns.transformer.featurizers.ExpNormalSmearing` radial basis,
+:class:`~xnns.transformer.attention.EdgeMultiheadAttention`) so future
+attention-based models can reuse them.
+
+Key options (defaults in parentheses): ``cutoff`` (5.0) — the semi-local GET
+cutoff, ``n_features`` (64) — the ``dim`` node width (divisible by
+``num_heads``), ``n_interactions`` (3) — GET layers (``n_layers``, ≥ 2),
+``n_rbf`` (32), ``num_heads`` (16), ``charge_ub`` (2.0) — ``tanh`` bound on the
+partial charge, ``charge_mlp_layers`` / ``energy_mlp_layers`` (2),
+``n_elements`` (87), ``act_fn`` ("silu") / ``attn_act_fn`` ("gelu"),
+``use_electrostatics`` (True), ``coul_damping_beta`` (18.7) /
+``coul_damping_r0`` (2.2), ``use_dispersion`` (False) — optional D3(CSO), and
+``disp_cutoff`` (10.0).
+
+.. note::
+
+   xnns returns the **full conservative force** ``-dE/dr`` uniformly via
+   :class:`~xnns.common.models.outputs.ForceStressOutput`. The original BAMBOO
+   instead reports ``nn_forces + coul_forces`` (charges held fixed) and
+   regularises the charge–position-derivative ``qeq_force`` toward zero during
+   training; the xnns force equals the upstream ``forces + qeq_force`` to
+   machine precision (see :ref:`fidelity`).
+
 Long-range interactions: Latent Ewald Summation (LES)
 ======================================================
 Short-range models miss electrostatics and dispersion beyond their receptive
@@ -206,4 +248,7 @@ exportable to TorchScript and LAMMPS — see :ref:`deployment`. CACE provides
 the same ``node_energy`` tensor core but is not TorchScript-exportable
 (neither is the original CACE, which has no LAMMPS interface); it deploys
 through the ASE calculator, as does PhysNet (whose original is a TF1 graph
-driven through an ASE calculator as well).
+driven through an ASE calculator as well). BAMBOO likewise deploys through the
+ASE calculator (its all-pairs electrostatics and charge-equilibrium physics
+match the paper's cluster-training setup; the original couples to LAMMPS
+through a separate Ewald interface).

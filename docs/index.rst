@@ -10,7 +10,8 @@ Machine-Learning Interatomic Potentials in PyTorch
 molecular and periodic systems, implemented in PyTorch behind a single coherent
 ``nn.Module`` interface. It provides faithful and self-contained implementations
 of state-of-the-art equivariant open-source models such as NequIP, MACE,
-Allegro, and CACE, alongside SchNet, HDNNP, ANI, and PhysNet. The key strengths
+Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, and the BAMBOO graph
+equivariant transformer. The key strengths
 of xnns are
 
 - all models share one data object, module interface, training loop, and
@@ -140,6 +141,10 @@ Models at a glance
      - gnn
      - spherical-harmonic edges
      - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); matches `mir-group/allegro <https://github.com/mir-group/allegro>`_
+   * - BAMBOO
+     - hybrid
+     - exp-normal RBF + edge attention
+     - Complete: training, evaluation, deployment (ASE only); matches `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
 
 xnns is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository
