@@ -20,7 +20,9 @@ against that of [ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`),
 the NequIP implementation is validated against that of
 [mir-group/nequip](https://github.com/mir-group/nequip) and Allegro is validated
 against [mir-group/allegro](https://github.com/mir-group/allegro), which pin
-`e3nn==0.4.4`; xnns has been thoroughly tested on this pin. The `pyproject.toml`
+`e3nn==0.4.4`; xnns has been thoroughly tested on this pin. The BAMBOO graph
+equivariant transformer is validated block-by-block against
+[bytedance/bamboo](https://github.com/bytedance/bamboo). The `pyproject.toml`
 also carries a `uv` setup that reproduces the GPU `.venv` that was used to
 create the notebooks (we adopted `torch 2.5.1+cu121` from the PyTorch cu121
 index that are compatible with CUDA-12.x drivers).
@@ -64,8 +66,9 @@ train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 
 ## Package layout
 
-The package is organized **by model family** (`gnn`, `cnn`, `dnn`), with shared
-resources factored into the `common` modules. An object (e.g., function, module
+The package is organized **by model family** (`gnn`, `cnn`, `dnn`, `hybrid`),
+with shared resources factored into the `common` modules and reusable
+transformer building blocks in `transformer`. An object (e.g., function, module
 etc.) lives with the model family that uses it, or with `common` if more than
 one family needs it. Of course, layers are designed as stand-alone entities and
 can be imported on their own.
@@ -97,10 +100,16 @@ src/xnns/
 │       └── …                     + base, blocks, nequip, mace, allegro, cace
 ├── cnn/                        continuous-filter conv net
 │   └── models/                 schnet
-└── dnn/                        descriptor + per-element networks, and PhysNet
-    ├── featurizers/            - DNN featurizers
-    │   └── …                     + symmetry functions, AEV
-    └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
+├── dnn/                        descriptor + per-element networks, and PhysNet
+│   ├── featurizers/            - DNN featurizers
+│   │   └── …                     + symmetry functions, AEV
+│   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
+│       └── …
+├── transformer/                shared graph-transformer building blocks
+│   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
+│   └── featurizers/            - ExpNormalSmearing radial basis
+└── hybrid/                     GNN + transformer potentials with a physics energy split
+    └── models/                 - bamboo (BAMBOO graph equivariant transformer), dispersion (D3(CSO))
         └── …
 ```
 
@@ -223,6 +232,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
 | Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
+| BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
 
 ## Examples
 
