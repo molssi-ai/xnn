@@ -24,7 +24,7 @@ dataclass, one dataset class, and one trainer:
    from xnns.common.train import Trainer
 
    cfg = Config()
-   cfg.model.name = "nequip"            # schnet | hdnnp | ani | nequip | mace | allegro
+   cfg.model.name = "nequip"            # schnet|hdnnp|ani|physnet|nequip|mace|allegro|cace|bamboo
    cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
    cfg.data.batch_size = 16             # 1 disables batch training
    cfg.device = "auto"                  # auto | cpu | cuda | cuda:0
@@ -37,7 +37,10 @@ keys ``pos`` and ``atomic_numbers`` (and optionally ``cell``, ``pbc``,
 converts each into an :class:`~xnns.common.data.atomic_data.AtomicGraph` — the
 single data object every xnns model consumes. Data in any ASE-readable file
 format (extxyz, CIF, VASP, ...) loads directly with
-``AtomicDataset.from_file("trajectory.extxyz", cutoff)``.
+``AtomicDataset.from_file("trajectory.extxyz", cutoff)``, and standard benchmark
+datasets download in one line with
+:func:`~xnns.common.data.hub.base.load_dataset` (e.g.
+``load_dataset("rmd17", molecule="aspirin", cutoff=5.0)``) — see :ref:`data`.
 
 Training writes ``best.pt`` and ``last.pt`` checkpoints to
 ``cfg.output_dir`` (default ``runs/exp``).

@@ -130,6 +130,64 @@ dicts) and :func:`~xnns.common.data.ase_io.atoms_to_structure` (one ``Atoms``
 wrapped into the cell first: the neighbor-list builder handles unwrapped
 (e.g. MD trajectory) coordinates.
 
+Downloading upstream datasets — ``load_dataset``
+================================================
+The dataset *hub* downloads and preprocesses standard benchmark datasets in one
+call, HuggingFace ``load_dataset()``-style — no manual downloading, unpacking, or
+unit conversion:
+
+.. code-block:: python
+
+   from xnns.common.data import load_dataset, list_datasets
+
+   list_datasets()                                        # ['lode_dimers', 'rmd17']
+
+   # all splits, as lists of structure dictionaries
+   splits = load_dataset("rmd17", molecule="aspirin")     # {"train": [...], "test": [...]}
+
+   # one split, wrapped as a ready-to-train AtomicDataset
+   train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)
+
+:func:`~xnns.common.data.hub.base.load_dataset` returns lists of
+:ref:`structure dictionaries <structure-dicts>` — a mapping of splits when
+``split`` is omitted, a single list otherwise. Pass ``cutoff=`` to get
+:class:`~xnns.common.data.dataset.AtomicDataset` objects instead, ready for a
+``DataLoader``. Downloaded files are cached and MD5-verified under
+``datasets/<name>/`` in the repository by default (override with ``cache_dir=``
+or the ``XNNS_DATASETS`` / ``XNNS_CACHE`` environment variable), and a tqdm
+progress bar tracks both downloading and preprocessing.
+:func:`~xnns.common.data.hub.base.list_datasets` names what is registered:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 22 62
+
+   * - Name
+     - Key options
+     - Contents
+   * - ``rmd17``
+     - ``molecule``, ``fold`` (1–5), ``split`` (``train`` / ``test`` /
+       ``all``), ``units`` (``eV`` / ``kcal/mol``), ``n_train`` / ``n_test``
+     - Revised MD17: ten small molecules with PBE/def2-SVP energies and forces
+       and five official 1000-structure train/test splits (converted to eV by
+       default).
+   * - ``lode_dimers``
+     - ``subset`` (``bio`` / ``monomers`` / ``point_charges_coulomb`` /
+       ``point_charges_dispersion`` / ``xenon``), ``label`` (``CC`` / ``CP`` /
+       ``PP`` / …), ``return_info``
+     - LODE non-bonded interactions: biomolecular sidechain dimers (energies and
+       forces, tagged by fragment polarity) plus monomers, point-charge toy
+       systems, and Xe clusters. ``return_info=True`` attaches per-frame
+       metadata (labels, distances, monomer energies) — enough to build
+       binding-energy curves.
+
+A runnable, end-to-end walkthrough lives in
+``examples/data/load_dataset_tutorial.ipynb``. To add your own dataset, register
+a :class:`~xnns.common.data.hub.base.DatasetBuilder` — see
+:ref:`developer-guide-extending`.
+
+.. _structure-dicts:
+
 Structure dictionaries
 ======================
 Underneath, the input format is a plain dictionary per structure — use it

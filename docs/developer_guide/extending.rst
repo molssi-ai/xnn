@@ -56,6 +56,41 @@ key-translation table with
 :func:`~xnns.common.config.translate.register_key_translation` rather than
 adding aliases in ``from_config`` — translations live at the loader level.
 
+Adding a dataset
+================
+The dataset hub (:func:`~xnns.common.data.hub.base.load_dataset`) is extensible
+in the same register-by-name way as models. Subclass
+:class:`~xnns.common.data.hub.base.DatasetBuilder`, set its ``name``, and
+implement ``load`` to download (via
+:func:`~xnns.common.data.hub._download.download_file`, which caches and verifies
+by MD5) and return xnns :ref:`structure dictionaries <structure-dicts>` —
+``{split: [structure_dict, ...]}`` when ``split`` is ``None``, else a single
+list:
+
+.. code-block:: python
+
+   from xnns.common.data.hub import DatasetBuilder, register_dataset
+
+   class MyDataset(DatasetBuilder):
+       name = "mydataset"
+       description = "One-line summary shown by list_datasets()."
+
+       def load(self, *, split=None, cache_dir, **kwargs):
+           # download_file(url, cache_dir / self.name / "raw" / fname, md5)
+           structures = [...]                       # list of structure dicts
+           splits = {"train": structures}
+           return splits if split is None else splits[split]
+
+   register_dataset(MyDataset())
+
+Put the builder module under ``src/xnns/common/data/hub/`` and import it from
+``hub/__init__.py`` so the registration runs on import (as ``rmd17`` and
+``lode_dimers`` do). ``load_dataset`` then handles the ``cutoff=`` wrapping into
+an :class:`~xnns.common.data.dataset.AtomicDataset` for you, so builders only
+produce structure dicts. Reuse :func:`~xnns.common.data.ase_io.atoms_to_structure`
+for any ASE-readable source, and show progress with ``tqdm`` (respect a
+``quiet`` flag).
+
 Adding a featurizer
 ===================
 Subclass :class:`~xnns.common.featurizers.base.Featurizer`, implement the

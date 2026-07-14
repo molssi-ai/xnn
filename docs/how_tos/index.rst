@@ -13,6 +13,7 @@ see :ref:`background`, and for complete reference information see the
    :maxdepth: 2
    :titlesonly:
 
+   load_datasets
    train_a_model
    benchmark_models
    use_upstream_configs

@@ -24,6 +24,9 @@ of xnns are
 - a single configuration file and command-line command enables benchmarking of a
   wide range of models on a variety of datasets
 
+- upstream benchmark datasets download and preprocess in one line with a
+  HuggingFace-style ``load_dataset()``, ready to train
+
 - the library is accompanied by extensive documentation, tutorials, examples and
   a complete hands-on course focusing on developing and training MLIPs (see the
   `Equivariant Graph Neural Networks with e3nn: A Hands-On Course
