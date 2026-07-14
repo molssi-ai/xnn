@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from xnns.common.data import AtomicDataset, list_datasets, load_dataset
-from xnns.common.data.hub import default_cache_dir, rmd17
+from xnns.common.data.hub import default_cache_dir, lode_dimers, rmd17
 
 # eV per kcal/mol, matching rmd17._KCAL_MOL_TO_EV.
 KCAL = 0.0433641153087705
@@ -165,3 +165,118 @@ def test_live_download(tmp_path):
     s = splits["train"][0]
     assert set(np.unique(s["atomic_numbers"])).issubset({1, 6, 8})
     assert abs(s["energy"]) < 1e5  # eV, converted from kcal/mol
+
+
+# --------------------------------------------------------------------------- #
+# lode_dimers (Materials Cloud extxyz)                                         #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_lode(monkeypatch):
+    """Patch the lode_dimers downloader to emit a small synthetic extxyz.
+
+    Six frames span three fragment-polarity labels (CC/CP/PP), each carrying an
+    energy and forces, so label filtering and preprocessing can be checked
+    offline. Returns the ordered list of (label, energy) written.
+    """
+    pytest.importorskip("ase")
+    from ase import Atoms
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import write
+
+    rng = np.random.default_rng(0)
+    written = []
+
+    def make_frame(label, e):
+        atoms = Atoms(numbers=[6, 8, 1], positions=rng.uniform(0, 5, (3, 3)),
+                      cell=np.eye(3) * 30.0, pbc=True)
+        atoms.calc = SinglePointCalculator(atoms, energy=e,
+                                           forces=rng.normal(size=(3, 3)))
+        atoms.info["label"] = label
+        written.append((label, e))
+        return atoms
+
+    frames = [make_frame(lab, float(i))
+              for i, lab in enumerate(["CC", "CC", "CP", "CP", "PP", "PP"])]
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            write(str(dest), frames)
+        return dest
+
+    monkeypatch.setattr(lode_dimers, "download_file", fake_download)
+    return written
+
+
+def test_lode_registered():
+    """lode_dimers is discoverable through the registry."""
+    assert "lode_dimers" in list_datasets()
+
+
+def test_lode_default_load(fake_lode, tmp_path):
+    """Default load returns all frames under an 'all' split, with targets."""
+    torch.set_default_dtype(torch.float64)
+    out = load_dataset("lode_dimers", cache_dir=tmp_path, quiet=True)
+    assert set(out) == {"all"}
+    assert len(out["all"]) == 6
+    s = out["all"][0]
+    assert np.array_equal(s["atomic_numbers"], [6, 8, 1])
+    assert s["forces"].shape == (3, 3)
+    assert s["cell"].shape == (3, 3)  # large-box periodic
+
+
+def test_lode_label_filter(fake_lode, tmp_path):
+    """label= keeps only the requested fragment-polarity class."""
+    cc = load_dataset("lode_dimers", subset="bio", label="CC",
+                      split="all", cache_dir=tmp_path, quiet=True)
+    assert isinstance(cc, list) and len(cc) == 2
+
+
+def test_lode_alias_and_cutoff(fake_lode, tmp_path):
+    """A subset alias resolves, and cutoff wraps an AtomicDataset."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("lode_dimers", subset="dimers", cutoff=6.0,
+                      cache_dir=tmp_path, quiet=True)
+    assert isinstance(ds["all"], AtomicDataset)
+    assert ds["all"][0].num_nodes == 3
+
+
+def test_lode_return_info(fake_lode, tmp_path):
+    """return_info attaches each frame's info dict and survives cutoff wrapping."""
+    torch.set_default_dtype(torch.float64)
+    d = load_dataset("lode_dimers", subset="bio", split="all",
+                     return_info=True, cache_dir=tmp_path, quiet=True)
+    assert d[0]["info"]["label"] == "CC"
+    # info is ignored by graph building but preserved on the source dicts
+    ds = load_dataset("lode_dimers", subset="bio", cutoff=6.0,
+                      return_info=True, cache_dir=tmp_path, quiet=True)["all"]
+    assert ds[0].num_nodes == 3
+    assert "info" in ds.structures[0]
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"subset": "nope"}, "unknown lode_dimers subset"),
+    ({"subset": "bio", "label": "ZZ"}, "unknown label"),
+    ({"subset": "xenon", "label": "CC"}, "only supported for subset='bio'"),
+    ({"split": "train"}, "no train/test split"),
+])
+def test_lode_invalid_args(fake_lode, tmp_path, kwargs, match):
+    """Bad subset / label / split arguments raise clear ValueErrors."""
+    with pytest.raises(ValueError, match=match):
+        load_dataset("lode_dimers", cache_dir=tmp_path, quiet=True, **kwargs)
+
+
+@pytest.mark.skipif(os.environ.get("XNNS_TEST_NETWORK") != "1",
+                    reason="set XNNS_TEST_NETWORK=1 to download from Materials Cloud")
+def test_lode_live_download(tmp_path):
+    """End-to-end: really fetch the Xenon subset from Materials Cloud."""
+    torch.set_default_dtype(torch.float64)
+    xe = load_dataset("lode_dimers", subset="xenon", split="all",
+                      cache_dir=tmp_path)
+    assert len(xe) > 0
+    s = xe[0]
+    assert set(np.unique(s["atomic_numbers"])) == {54}  # Xe
+    assert s["forces"].shape[0] == len(s["atomic_numbers"])
