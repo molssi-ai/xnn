@@ -138,7 +138,7 @@ Load the checkpoint and evaluate on new structures:
 
 6. Where to go from here
 ========================
-- Drive the same run from a config file and the CLI: :ref:`howto-train-config`
+- Drive the same run from a config file and the CLI: :ref:`howto-train-a-model`
 - Attach the model to ASE for molecular dynamics: :ref:`howto-ase`
 - Export it for production LAMMPS runs: :ref:`howto-lammps`
 - The example notebooks in ``examples/gnn/`` repeat this workflow on real

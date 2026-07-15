@@ -7,7 +7,7 @@ Benchmark Several Models
 The :mod:`xnns.common.benchmark` package scores any set of **pre-trained**
 models on one dataset and writes a table of error metrics. It does one thing --
 benchmarking -- and does not train: produce the checkpoints first (for example
-with ``xnns train``; see :ref:`howto-train-config`), then point each model at
+with ``xnns train``; see :ref:`howto-train-a-model`), then point each model at
 its checkpoint. Models are built with the same model registry and
 :class:`~xnns.common.models.ForceStressOutput` a single run uses.
 
