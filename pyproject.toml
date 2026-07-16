@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 ase = ["ase>=3.22"]
+# HDF5 reader for the ANI-1 dataset hub builder (pyanitools .h5 files).
+hub = ["h5py>=3.0"]
 # NOTE: relaxed from >=0.5 -- the example notebooks compare against ACEsuit/mace
 # (mace-torch), which pins e3nn==0.4.4. xnns runs fine on 0.4.4 (all tests pass).
 gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
@@ -34,6 +36,7 @@ docs = [
 examples = [
     "ase>=3.22",
     "e3nn>=0.4.4",
+    "h5py>=3.0",
     "mace-torch==0.3.16",
     "nequip==0.6.2",
     "nequip-allegro @ git+https://github.com/mir-group/allegro@v0.3.0",
@@ -43,6 +46,8 @@ examples = [
     "nbconvert",
     "nbformat",
 ]
+# The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
+ani = ["torchani==2.2.4", "h5py>=3.0"]
 all = [
     "ase>=3.22",
     "e3nn>=0.4.4",

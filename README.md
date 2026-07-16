@@ -227,7 +227,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | SchNet | cnn | Gaussian RBF | Under development |
 | PhysNet | dnn | exp-Gaussian rbf + attention masks | Complete: Training, Evaluation, Deployment (ASE only) |
 | HDNNP | dnn | radial symmetry functions (G2) | Under development |
-| ANI | dnn | AEV (radial + angular) | Under development |
+| ANI | dnn | AEV (radial + angular symmetry functions) | Complete: Training, Evaluation, Deployment (ASE only) |
 | NequIP | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
@@ -241,9 +241,13 @@ types within `examples/<xnn>` (`pip install -e ".[examples]"`) where `x` refers
 to the architecture types (e.g., `g` in `gnn` for graph neural networks, `d` in
 `dnn` for deep neural networks, and `c` in `cnn` for convolutional neural
 networks): each holds a `<model>_argon_train_test.ipynb` and a
-`<model>_argon_density_md.ipynb` (LES has `les_molecular_dimers.ipynb`). The
-block-by-block numerical verifications against the upstream codes are collected
-under `examples/fidelity_checks/` as `<model>_verification.ipynb`. The
+`<model>_argon_density_md.ipynb` (LES has `les_molecular_dimers.ipynb`; ANI has
+`examples/dnn/ani/ani_rmd17_train.ipynb` and `ani1_dataset.ipynb`). Every
+training/MD notebook pulls its data through the one-line dataset hub
+(`load_dataset("argon_md")`, `load_dataset("rmd17", ...)`,
+`load_dataset("ani1", ...)`, `load_dataset("lode_dimers", subset="bio_scan")`).
+The block-by-block numerical verifications against the upstream codes are
+collected under `examples/fidelity_checks/` as `<model>_verification.ipynb`. The
 `examples/quickstart.py` module presents a minimal train/predict workflow on
 toy-data.
 
