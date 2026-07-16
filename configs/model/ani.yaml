@@ -1,12 +1,18 @@
 name: ani
-cutoff: 5.2              # neighbor list uses max(radial, angular) cutoff
+cutoff: 5.2             # neighbor list uses max(radial, angular) cutoff
 n_features: 0           # unused (descriptor model)
 n_interactions: 0
 n_rbf: 0
 species: [1, 6, 7, 8]   # H, C, N, O
-# preset: ani-1x        # optional: "ani-1" (paper, 768 AEV) or "ani-1x" (384 AEV)
-radial_cutoff: 5.2      # ANI-1x radial cutoff Rcr
-angular_cutoff: 3.5     # ANI-1x angular cutoff Rca
+# preset: ani-1x        # pick a published model and ignore the keys below:
+                        #   ani-1    = original ANI-1 (Smith 2017): 768 AEV, 4.6/3.1 A,
+                        #              768:128:128:64:1 net, gaussian activation
+                        #   ani-1x   = ANI-1x (active learning): 384 AEV, 5.2/3.5 A,
+                        #              per-element widths, celu, torchani self energies
+                        #   ani-1ccx = ANI-1ccx (transfer learning to CCSD(T)*/CBS):
+                        #              same architecture as ani-1x, ccx self energies
+radial_cutoff: 5.2      # ANI-1x radial cutoff Rcr   (ignored when preset is set)
+angular_cutoff: 3.5     # ANI-1x angular cutoff Rca  (ignored when preset is set)
 hidden: [128, 128, 64]  # per-element MLP widths (or a {Z: [...]} mapping)
 activation: celu        # celu (ANI) | gaussian (paper ANI-1) | silu | tanh | relu
 atomic_energies: null   # per-species self energies added to each atom (SAE)
