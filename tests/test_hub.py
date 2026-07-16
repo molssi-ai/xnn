@@ -260,7 +260,7 @@ def test_lode_return_info(fake_lode, tmp_path):
 @pytest.mark.parametrize("kwargs,match", [
     ({"subset": "nope"}, "unknown lode_dimers subset"),
     ({"subset": "bio", "label": "ZZ"}, "unknown label"),
-    ({"subset": "xenon", "label": "CC"}, "only supported for subset='bio'"),
+    ({"subset": "xenon", "label": "CC"}, "only supported for the biomolecular"),
     ({"split": "train"}, "no train/test split"),
 ])
 def test_lode_invalid_args(fake_lode, tmp_path, kwargs, match):
@@ -280,3 +280,229 @@ def test_lode_live_download(tmp_path):
     s = xe[0]
     assert set(np.unique(s["atomic_numbers"])) == {54}  # Xe
     assert s["forces"].shape[0] == len(s["atomic_numbers"])
+
+
+# --------------------------------------------------------------------------- #
+# ani1 (pyanitools HDF5)                                                       #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_ani1(tmp_path):
+    """Write a synthetic pyanitools-shaped archive layout under tmp_path.
+
+    Two heavy-atom subsets (s02, s03), each with a couple of molecules and a
+    few conformations, so subset selection / capping / splitting / unit
+    conversion can be checked offline (no 4.8 GB download).
+    """
+    h5py = pytest.importorskip("h5py")
+    rng = np.random.default_rng(0)
+    root = tmp_path / "ani1" / "raw" / "ANI-1_release"
+    root.mkdir(parents=True)
+
+    layout = {
+        2: [[b"C", b"O", b"H", b"H"], [b"N", b"H", b"H", b"H"]],
+        3: [[b"C", b"C", b"N", b"H", b"H"]],
+    }
+    per_mol = 4
+    for x, mols in layout.items():
+        with h5py.File(root / f"ani_gdb_s{x:02d}.h5", "w") as f:
+            top = f.create_group(f"gdb11_s{x:02d}")
+            for m, sym in enumerate(mols):
+                natoms = len(sym)
+                g = top.create_group(f"mol{m}")
+                g["coordinates"] = rng.standard_normal((per_mol, natoms, 3)).astype(np.float32)
+                g["energies"] = (rng.standard_normal(per_mol) - 40.0).astype(np.float64)
+                g["species"] = np.array(sym)
+                g["smiles"] = np.array([b"C", b"O"])
+    return tmp_path
+
+
+def test_ani1_registered():
+    """ani1 is discoverable through the registry."""
+    assert "ani1" in list_datasets()
+
+
+def test_ani1_load_subset_and_units(fake_ani1):
+    """Loading a heavy-atom subset returns Hartree->eV converted structures."""
+    torch.set_default_dtype(torch.float64)
+    out = load_dataset("ani1", heavy_atoms=2, cache_dir=fake_ani1, quiet=True)
+    assert set(out) == {"all"}
+    assert len(out["all"]) == 2 * 4       # 2 molecules * per_mol conformations
+    s = out["all"][0]
+    assert set(sorted(s)) >= {"pos", "atomic_numbers", "energy", "smiles"}
+    assert set(np.unique(s["atomic_numbers"])).issubset({1, 6, 7, 8})
+
+    raw = load_dataset("ani1", heavy_atoms=2, units="hartree",
+                       cache_dir=fake_ani1, quiet=True)["all"]
+    assert np.isclose(out["all"][0]["energy"],
+                      raw[0]["energy"] * 27.211386245988)
+
+
+def test_ani1_caps_and_multisubset(fake_ani1):
+    """max_molecules / max_conformations and multi-subset selection apply."""
+    out = load_dataset("ani1", heavy_atoms=[2, 3], max_molecules=1,
+                       max_conformations=2, cache_dir=fake_ani1, quiet=True)["all"]
+    # 1 molecule from each of s02, s03 * 2 conformations each
+    assert len(out) == 2 * 2
+
+
+def test_ani1_splits(fake_ani1):
+    """train/val/test partitions are disjoint and cover the whole subset."""
+    kw = dict(heavy_atoms=2, cache_dir=fake_ani1, quiet=True)
+    tr = load_dataset("ani1", split="train", **kw)
+    va = load_dataset("ani1", split="val", **kw)
+    te = load_dataset("ani1", split="test", **kw)
+    assert len(tr) + len(va) + len(te) == 2 * 4
+    assert len(tr) > len(va) and len(tr) > len(te)
+
+
+def test_ani1_cutoff_wraps_dataset(fake_ani1):
+    """cutoff wraps an AtomicDataset; ANI-1 is force-free."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("ani1", heavy_atoms=2, cutoff=5.2,
+                      cache_dir=fake_ani1, quiet=True)["all"]
+    assert isinstance(ds, AtomicDataset)
+    g = ds[0]
+    assert g.forces is None and g.energy is not None
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"heavy_atoms": 9}, "heavy_atoms entries must be 1-8"),
+    ({"units": "hartree/2"}, "units must be"),
+    ({"split": "trian"}, "unknown split"),
+])
+def test_ani1_invalid_args(fake_ani1, kwargs, match):
+    """Bad heavy_atoms / units / split raise clear ValueErrors."""
+    base = dict(heavy_atoms=2, cache_dir=fake_ani1, quiet=True)
+    base.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        load_dataset("ani1", **base)
+
+
+# --------------------------------------------------------------------------- #
+# argon_md (bundled extxyz)                                                    #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_argon(tmp_path):
+    """Write a synthetic argon_md-shaped extxyz layout under tmp_path.
+
+    One IsolatedAtom reference frame (E0) plus two periodic Ar frames with
+    REF_energy / REF_forces / REF_stress, so the builder's E0 filtering and
+    MACE-key parsing can be checked offline.
+    """
+    ase = pytest.importorskip("ase")
+    from ase import Atoms
+    from ase.io import write
+
+    root = tmp_path / "argon_md"
+    root.mkdir()
+    rng = np.random.default_rng(0)
+
+    def frame(n, energy, iso=False):
+        a = Atoms("Ar" * n, positions=rng.uniform(0, 10, (n, 3)),
+                  cell=np.eye(3) * 12.0, pbc=True)
+        a.info["REF_energy"] = energy
+        a.arrays["REF_forces"] = rng.normal(size=(n, 3))
+        a.info["REF_stress"] = rng.normal(size=6)
+        if iso:
+            a.info["config_type"] = "IsolatedAtom"
+        return a
+
+    write(str(root / "argon_train.xyz"),
+          [frame(1, 0.0, iso=True), frame(8, -6.3), frame(8, -6.1)])
+    write(str(root / "argon_test.xyz"), [frame(8, -6.2)])
+    return tmp_path
+
+
+def test_argon_registered():
+    """argon_md is discoverable through the registry."""
+    assert "argon_md" in list_datasets()
+
+
+def test_argon_default_load_drops_isolated(fake_argon):
+    """Default load returns train/test with the IsolatedAtom frame removed."""
+    torch.set_default_dtype(torch.float64)
+    out = load_dataset("argon_md", cache_dir=fake_argon, quiet=True)
+    assert set(out) == {"train", "test"}
+    assert len(out["train"]) == 2 and len(out["test"]) == 1  # E0 frame dropped
+    s = out["train"][0]
+    assert np.array_equal(np.unique(s["atomic_numbers"]), [18])
+    assert s["cell"].shape == (3, 3)
+    assert s["forces"].shape == (8, 3)
+    assert "stress" in s and "energy" in s
+
+
+def test_argon_split_and_all(fake_argon):
+    """Named split returns a list; 'all' concatenates train + test."""
+    tr = load_dataset("argon_md", split="train", cache_dir=fake_argon, quiet=True)
+    assert isinstance(tr, list) and len(tr) == 2
+    allc = load_dataset("argon_md", split="all", cache_dir=fake_argon, quiet=True)
+    assert len(allc) == 3
+
+
+def test_argon_cutoff_wraps_dataset(fake_argon):
+    """cutoff wraps a periodic AtomicDataset with energy + forces."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("argon_md", split="train", cutoff=6.0,
+                      cache_dir=fake_argon, quiet=True)
+    assert isinstance(ds, AtomicDataset)
+    g = ds[0]
+    assert g.cell is not None and g.forces.shape == (8, 3)
+
+
+def test_argon_bad_split(fake_argon):
+    """An unknown split raises a clear ValueError."""
+    with pytest.raises(ValueError, match="unknown split"):
+        load_dataset("argon_md", split="valid", cache_dir=fake_argon, quiet=True)
+
+
+# --------------------------------------------------------------------------- #
+# lode_dimers bundled bio_scan subset                                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_bio_scan(tmp_path):
+    """Write a synthetic bundled bio_scan file under tmp_path/lode_dimers/."""
+    ase = pytest.importorskip("ase")
+    from ase import Atoms
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import write
+
+    root = tmp_path / "lode_dimers"
+    root.mkdir()
+    rng = np.random.default_rng(0)
+    frames = []
+    for label in ["CC", "CP", "PP"]:
+        for k in range(3):
+            a = Atoms("CO", positions=rng.uniform(0, 5, (2, 3)),
+                      cell=np.eye(3) * 30.0, pbc=True)
+            a.calc = SinglePointCalculator(a, energy=float(-100 - k),
+                                           forces=rng.normal(size=(2, 3)))
+            a.info.update(label=label, distance=5.0 + k, energyA=-40.0, energyB=-59.0)
+            frames.append(a)
+    write(str(root / "bio_dimers_CC_CP_PP.xyz"), frames)
+    return tmp_path
+
+
+def test_bio_scan_bundled(fake_bio_scan):
+    """The bundled bio_scan subset loads offline with info + label filtering."""
+    torch.set_default_dtype(torch.float64)
+    allc = load_dataset("lode_dimers", subset="bio_scan", split="all",
+                        return_info=True, cache_dir=fake_bio_scan, quiet=True)
+    assert len(allc) == 9
+    d = allc[0]
+    assert {"energyA", "energyB", "distance", "label"} <= set(d["info"])
+    assert "forces" in d and "energy" in d
+
+    cc = load_dataset("lode_dimers", subset="bio_scan", label="CC", split="all",
+                      cache_dir=fake_bio_scan, quiet=True)
+    assert len(cc) == 3
+
+
+def test_bio_scan_missing_file(tmp_path):
+    """A missing bundled file gives a clear FileNotFoundError."""
+    pytest.importorskip("ase")
+    with pytest.raises(FileNotFoundError, match="bundled file"):
+        load_dataset("lode_dimers", subset="bio_scan", split="all",
+                     cache_dir=tmp_path, quiet=True)
