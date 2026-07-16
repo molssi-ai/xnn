@@ -48,7 +48,7 @@ to ~1e-15/1e-16 with transplanted weights.
 Conventions
 ===========
 - New models should get, at minimum: a registration test, an equivariance
-  or invariance test, a periodic-stress test, and — if deployable — a
+  or invariance test, a periodic-stress test, and, if deployable, a
   script-vs-eager parity test.
 - Faithful re-implementations should additionally pin down parity with the
   upstream code under transplanted weights, guarded by an import check so

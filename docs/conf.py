@@ -26,6 +26,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "sphinx_design",
     "sphinx_copybutton",
+    "myst_nb",
 ]
 
 templates_path = ["_templates"]
@@ -60,6 +61,40 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable/", None),
     "torch": ("https://pytorch.org/docs/stable/", None),
 }
+
+# -- Example notebooks (myst-nb) ----------------------------------------
+
+# The example notebooks are committed fully executed, so the docs build only
+# renders them -- it never runs them (no GPU, datasets, or extra venvs needed).
+nb_execution_mode = "off"
+myst_enable_extensions = ["dollarmath", "amsmath", "html_image", "colon_fence"]
+
+# Sphinx only reads sources inside docs/, while the notebooks live in
+# examples/ at the repository root. Mirror them (plus the figures/ images some
+# markdown cells reference) into docs/examples/nb/ when the build starts; the
+# mirror is gitignored, and docs/examples/index.rst holds the gallery toctree.
+def _mirror_example_notebooks():
+    import shutil
+
+    src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
+    dst = os.path.join(os.path.dirname(__file__), "examples", "nb")
+
+    def ignore(directory, names):
+        drop = set()
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isdir(path):
+                if name in ("runs", "bamboo_upstream", ".ipynb_checkpoints"):
+                    drop.add(name)
+            elif not (name.endswith(".ipynb")
+                      or os.path.basename(directory) == "figures"):
+                drop.add(name)
+        return drop
+
+    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
+
+
+_mirror_example_notebooks()
 
 # -- Copy button --------------------------------------------------------
 

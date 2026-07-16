@@ -16,7 +16,7 @@ The Trainer
    metrics = trainer.fit()   # {"train": ..., "val": ..., "test": ...}
 
 Both a train/val and a train/val/test workflow are supported: pass the
-splits explicitly, or let the trainer carve them out of ``train_set`` —
+splits explicitly, or let the trainer carve them out of ``train_set``:
 when ``val_set`` (``test_set``) is ``None`` and ``data.val_fraction``
 (``data.test_fraction``) is positive, that fraction is held out using a
 single ``cfg.seed``-seeded permutation. The default ``test_fraction = 0``
@@ -39,8 +39,8 @@ Constructing a ``Trainer``:
 a validation set is available, and writes checkpoints to
 ``cfg.output_dir``:
 
-- ``best.pt`` — lowest validation loss so far
-- ``last.pt`` — most recent epoch
+- ``best.pt``: lowest validation loss so far
+- ``last.pt``: most recent epoch
 
 A checkpoint is ``{"model": state_dict, "cfg": Config}``; load it with
 ``torch.load(path, weights_only=False)``.
@@ -73,11 +73,11 @@ with the weights from ``OptimConfig`` (defaults
 :math:`w_E = 1`, :math:`w_F = 10`, :math:`w_\sigma = 0`). A property enters
 the loss only when the dataset provides the target and its weight is
 nonzero. Force training is strongly recommended whenever forces are
-available — it is dramatically more data-efficient than energies alone.
+available; it is dramatically more data-efficient than energies alone.
 
 Devices and batching
 ====================
-``cfg.device = "auto" | "cpu" | "cuda" | "cuda:0"`` — resolved by
+``cfg.device = "auto" | "cpu" | "cuda" | "cuda:0"`` is resolved by
 :func:`~xnns.common.train.trainer.resolve_device`. Batching is by graph
 concatenation (see :ref:`data`); ``data.batch_size = 1`` disables batch
 training entirely.
@@ -85,7 +85,7 @@ training entirely.
 Multi-GPU and multi-node training
 =================================
 Distributed data parallelism is native PyTorch DDP and needs no code or
-configuration changes — only a distributed launcher. When the trainer finds
+configuration changes, only a distributed launcher. When the trainer finds
 the launcher's ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` environment
 variables it joins the process group (NCCL on GPUs, Gloo on CPUs), pins each
 rank to ``cuda:LOCAL_RANK``, shards all loaders with ``DistributedSampler``,
@@ -111,10 +111,10 @@ Multi-node (one such command per node, e.g. from a Slurm step):
 
 Hugging Face's ``accelerate launch`` works as well (it exports the same
 environment variables), e.g. ``accelerate launch --multi_gpu --num_processes 2
--m xnns train --config train.yaml`` — but note that it acts purely as a
+-m xnns train --config train.yaml``, but note that it acts purely as a
 process launcher here: FSDP or DeepSpeed options in an accelerate config are
 not picked up, since the trainer deliberately uses DDP only. Sharded
-strategies cannot train forces or stress anyway — those losses back-propagate
+strategies cannot train forces or stress anyway: those losses back-propagate
 through gradients taken with ``create_graph=True`` (a double backward), which
 DDP supports and FSDP/DeepSpeed do not.
 

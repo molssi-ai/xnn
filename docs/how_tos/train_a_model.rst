@@ -4,8 +4,8 @@
 Train a Model
 ****************************
 
-xnns has one configuration schema — the
-:class:`~xnns.common.config.schema.Config` dataclass — and three
+xnns has one configuration schema (the
+:class:`~xnns.common.config.schema.Config` dataclass) and three
 interchangeable frontends to fill it: YAML, argparse, and Hydra.
 
 Write a config file

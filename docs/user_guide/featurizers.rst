@@ -6,28 +6,28 @@ Featurizers
 
 A featurizer turns an :class:`~xnns.common.data.atomic_data.AtomicGraph` into
 model inputs. All featurizers subclass
-:class:`~xnns.common.featurizers.base.Featurizer` — an ``nn.Module`` with an
-``output_dim`` property and a ``forward(data)`` method — so they can be
+:class:`~xnns.common.featurizers.base.Featurizer` (an ``nn.Module`` with an
+``output_dim`` property and a ``forward(data)`` method), so they can be
 trained, scripted, and composed like any other module, and used standalone
 for analysis.
 
 Shared basis functions (``xnns.common.featurizers``)
 ====================================================
-- :class:`~xnns.common.featurizers.radial.GaussianRBF` — Gaussian radial
+- :class:`~xnns.common.featurizers.radial.GaussianRBF`: Gaussian radial
   basis expansion of distances (used by SchNet).
-- :class:`~xnns.common.featurizers.cutoff.CosineCutoff` — smooth cosine
+- :class:`~xnns.common.featurizers.cutoff.CosineCutoff`: smooth cosine
   cutoff envelope.
 
 Descriptor featurizers (``xnns.dnn.featurizers``)
 =================================================
 Invariant per-atom descriptors for HDNNP/ANI-style models:
 
-- :class:`~xnns.dnn.featurizers.symmetry_functions.RadialSymmetryFunctions` —
+- :class:`~xnns.dnn.featurizers.symmetry_functions.RadialSymmetryFunctions`:
   Behler–Parrinello G2 radial symmetry functions.
-- :class:`~xnns.dnn.featurizers.symmetry_functions.AngularSymmetryFunctions` —
+- :class:`~xnns.dnn.featurizers.symmetry_functions.AngularSymmetryFunctions`:
   angular symmetry functions over atomic triplets (built with
   :func:`~xnns.dnn.featurizers.symmetry_functions.build_triplets`).
-- :class:`~xnns.dnn.featurizers.aev.AEV` — the ANI atomic environment vector
+- :class:`~xnns.dnn.featurizers.aev.AEV`: the ANI atomic environment vector
   (radial + angular parts, per species pair).
 
 .. code-block:: python
@@ -41,17 +41,17 @@ Equivariant featurizers (``xnns.gnn.featurizers``)
 ==================================================
 Edge attributes for the GNN models:
 
-- :class:`~xnns.gnn.featurizers.spherical.SphericalHarmonicEdgeEmbedding` —
-  the standard NequIP/MACE/Allegro edge embedding: edge lengths, real
+- :class:`~xnns.gnn.featurizers.spherical.SphericalHarmonicEdgeEmbedding`:
+  the standard NequIP/MACE/Allegro edge embedding, with edge lengths, real
   spherical harmonics :math:`Y_{lm}(\hat r_{ij})` up to ``l_max``, and a
   radial expansion.
-- :class:`~xnns.gnn.featurizers.cartesian.CartesianAngularBasis` — the CACE
-  angular basis: the Cartesian monomials
+- :class:`~xnns.gnn.featurizers.cartesian.CartesianAngularBasis`: the CACE
+  angular basis, i.e. the Cartesian monomials
   :math:`x^{l_x} y^{l_y} z^{l_z}` up to ``l_max``, spanning the same space
   as the spherical harmonics per total :math:`l` without e3nn.
-- :class:`~xnns.gnn.featurizers.radial.BesselRBF` — (trainable) Bessel radial
+- :class:`~xnns.gnn.featurizers.radial.BesselRBF`: (trainable) Bessel radial
   basis.
-- :class:`~xnns.gnn.featurizers.cutoff.PolynomialCutoff` — the polynomial
+- :class:`~xnns.gnn.featurizers.cutoff.PolynomialCutoff`: the polynomial
   cutoff envelope of NequIP/MACE.
 
 .. code-block:: python
@@ -69,5 +69,5 @@ Edge attributes for the GNN models:
    unit = graph.edge_vectors()
    angular = basis(unit / unit.norm(dim=-1, keepdim=True))   # (E, 20)
 
-Writing your own featurizer is a small task — see
+Writing your own featurizer is a small task; see
 :ref:`developer-guide-extending`.

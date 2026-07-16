@@ -44,13 +44,13 @@ Using the exported model in LAMMPS
 Pair the exported ``.pt`` file with the matching C++ pair style, following
 the `pair_nequip <https://github.com/mir-group/pair_nequip>`_ /
 `pair_allegro <https://github.com/mir-group/pair_allegro>`_ /
-pair_mace pattern. The tensor interface is defined in one place —
-``src/xnns/common/deploy/lammps.py`` — so a single pair style covers every
+pair_mace pattern. The tensor interface is defined in one place
+(``src/xnns/common/deploy/lammps.py``), so a single pair style covers every
 exportable xnns model.
 
 .. note::
 
    For NequIP, TorchScript export required a scriptable, bit-exact stand-in
    for e3nn's ``Gate`` (``xnns.gnn.models.nequip._Gate``); the e3nn 0.4.4
-   original cannot be scripted on torch 2.x. This is transparent to users —
+   original cannot be scripted on torch 2.x. This is transparent to users:
    the substitution is numerically identical.

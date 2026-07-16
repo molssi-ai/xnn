@@ -9,7 +9,7 @@ All models subclass
 :class:`~xnns.common.data.atomic_data.AtomicGraph` and return a dictionary
 with ``node_energy`` (per atom) and ``energy`` (per structure). Forces and
 stress are added uniformly by
-:class:`~xnns.common.models.outputs.ForceStressOutput` — no model implements
+:class:`~xnns.common.models.outputs.ForceStressOutput`; no model implements
 them itself.
 
 Models are registered by name, so they can be built from any config
@@ -35,25 +35,26 @@ double as the keys accepted in ``model.extra`` of a config file.
 
 MACE (``gnn``)
 ==============
-:class:`xnns.gnn.models.mace.MACE` — higher-order equivariant message
+:class:`xnns.gnn.models.mace.MACE`: higher-order equivariant message
 passing with the learned symmetric contraction of Batatia *et al.*
 Faithful to `ACEsuit/mace <https://github.com/ACEsuit/mace>`_ (see
 :ref:`fidelity`).
 
 Key options (defaults in parentheses): ``species``, ``cutoff`` (4.0),
-``max_ell`` (3) — spherical-harmonic order of the edges, ``max_L`` (0) —
-order of the message irreps, ``num_channels`` (32), ``n_rbf`` (8),
-``num_interactions`` (2) — fully flexible T = 0..N, ``correlation`` (3) —
-order of the symmetric contraction, ``MLP_irreps`` ("16x0e"),
+``max_ell`` (3), the spherical-harmonic order of the edges, ``max_L`` (0),
+the order of the message irreps, ``num_channels`` (32), ``n_rbf`` (8),
+``num_interactions`` (2), fully flexible T = 0..N, ``correlation`` (3),
+the order of the symmetric contraction, ``MLP_irreps`` ("16x0e"),
 ``radial_MLP``, ``interaction`` ("RealAgnosticResidualInteractionBlock"),
 ``interaction_first``, ``gate`` ("silu"), ``avg_num_neighbors`` (1.0),
 ``hidden_irreps``, ``num_cutoff_basis`` (5), ``radial_type`` ("bessel"),
-``distance_transform``, ``pair_repulsion`` (False) — adds ZBL core
-repulsion, ``atomic_energies`` — per-species reference energies (E0s).
+``distance_transform``, ``pair_repulsion`` (False), which adds ZBL core
+repulsion, and ``atomic_energies``, the per-species reference energies
+(E0s).
 
 NequIP (``gnn``)
 ================
-:class:`xnns.gnn.models.nequip.NequIP` — E(3)-equivariant message passing
+:class:`xnns.gnn.models.nequip.NequIP`: E(3)-equivariant message passing
 with gated nonlinearities (Batzner *et al.*). Faithful to
 `mir-group/nequip <https://github.com/mir-group/nequip>`_, with directly
 transplantable state dicts.
@@ -61,29 +62,29 @@ transplantable state dicts.
 Key options: ``species``, ``cutoff`` (4.0), ``l_max`` (2), ``parity``
 (True), ``n_rbf`` (8), ``n_layers`` (3), ``num_features`` (32),
 ``invariant_layers`` (2), ``invariant_neurons`` (64),
-``avg_num_neighbors``, ``use_sc`` (True) — self-connection, ``resnet``
+``avg_num_neighbors``, ``use_sc`` (True), the self-connection, ``resnet``
 (False), ``nonlinearity_scalars`` / ``nonlinearity_gates``,
 ``num_polynomial_cutoff`` (6), ``trainable_rbf`` (True),
-``conv_to_output_hidden``, ``atomic_energies``, ``atomic_scales`` —
+``conv_to_output_hidden``, ``atomic_energies``, and ``atomic_scales``, the
 per-species energy scale/shift.
 
 Allegro (``gnn``)
 =================
-:class:`xnns.gnn.models.allegro.Allegro` — strictly local equivariant
+:class:`xnns.gnn.models.allegro.Allegro`: strictly local equivariant
 many-body potential (Musaelian *et al.*), without message passing between
 atoms. Faithful to `mir-group/allegro <https://github.com/mir-group/allegro>`_
 v0.3.0 (``uuulin`` mode), with directly transplantable state dicts.
 
 Key options: ``species``, ``cutoff`` (4.0), ``l_max`` (1), ``parity``
 ("o3_full"), ``n_rbf``, ``num_layers``, ``num_tensor_features``,
-``two_body_latent`` / ``latent`` / ``env_embed`` / ``edge_eng`` — the MLP
+``two_body_latent`` / ``latent`` / ``env_embed`` / ``edge_eng``, the MLP
 widths, ``initial_scalar_embedding_dim``, ``avg_num_neighbors``,
 ``latent_resnet`` (True), ``num_polynomial_cutoff`` (6), ``trainable_rbf``
 (True), ``atomic_energies``, ``atomic_scales``.
 
 CACE (``gnn``)
 ==============
-:class:`xnns.gnn.models.cace.CACE` — Cartesian atomic cluster expansion
+:class:`xnns.gnn.models.cace.CACE`: Cartesian atomic cluster expansion
 (Cheng, *npj Comput Mater* 2024): body-ordered invariant features built
 entirely in Cartesian coordinates (monomial angular basis, multinomial
 symmetrization instead of Clebsch–Gordan contraction), with a
@@ -93,12 +94,12 @@ optional message passing. Faithful to
 transplantable weights (see :ref:`fidelity`); the only GNN model here that
 needs no spherical harmonics.
 
-Key options: ``species``, ``cutoff`` (5.5), ``n_atom_basis`` (3) — element
-embedding length (edge channels are its square), ``n_rbf`` (8),
-``n_radial_basis`` — mixed radial channels (``n_rbf``), ``max_l`` (3),
-``max_nu`` (3) — maximum body order of the invariants (1–4),
-``num_message_passing`` (1) — fully flexible T = 0..N (0 = plain Cartesian
-ACE), ``message_types`` (["M", "Ar", "Bchi"]) — node memory /
+Key options: ``species``, ``cutoff`` (5.5), ``n_atom_basis`` (3), the
+element embedding length (edge channels are its square), ``n_rbf`` (8),
+``n_radial_basis``, the mixed radial channels (``n_rbf``), ``max_l`` (3),
+``max_nu`` (3), the maximum body order of the invariants (1–4),
+``num_message_passing`` (1), fully flexible T = 0..N (0 = plain Cartesian
+ACE), ``message_types`` (["M", "Ar", "Bchi"]), i.e. node memory /
 radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
 (False), ``avg_num_neighbors`` (10.0), ``num_polynomial_cutoff`` (6),
 ``trainable_rbf`` (True), ``readout_hidden`` ([32, 16]),
@@ -106,7 +107,7 @@ radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
 
 SchNet (``cnn``)
 ================
-:class:`xnns.cnn.models.schnet.SchNet` — continuous-filter convolutions over
+:class:`xnns.cnn.models.schnet.SchNet`: continuous-filter convolutions over
 a Gaussian radial basis (Schütt *et al.*).
 
 Key options: ``n_features`` (128), ``n_interactions`` (3), ``n_rbf`` (50),
@@ -114,7 +115,7 @@ Key options: ``n_features`` (128), ``n_interactions`` (3), ``n_rbf`` (50),
 
 HDNNP (``dnn``)
 ===============
-:class:`xnns.dnn.models.hdnnp.HDNNP` — Behler–Parrinello high-dimensional
+:class:`xnns.dnn.models.hdnnp.HDNNP`: Behler–Parrinello high-dimensional
 neural network potential: radial (G2) symmetry-function descriptors feeding
 one MLP per element.
 
@@ -123,24 +124,120 @@ Key options: ``species``, ``cutoff`` (6.0), ``etas`` (0.05, 0.5, 2.0, 8.0),
 
 ANI (``dnn``)
 =============
-:class:`xnns.dnn.models.ani.ANI` — the ANI potential (Smith *et al.* 2017):
+:class:`xnns.dnn.models.ani.ANI`: the ANI potential (Smith *et al.* 2017),
 per-element networks over the Atomic Environment Vector (radial + angular
 symmetry functions), verified element-for-element against ``aiqm/torchani``.
-Use the classmethods :meth:`~xnns.dnn.models.ani.ANI.ani1` (the paper's
-768-length AEV, ``768:128:128:64:1`` networks, Gaussian activation) and
-:meth:`~xnns.dnn.models.ani.ANI.ani1x` (the 384-length ANI-1x grid with
-torchani's per-element widths and ``CELU``); the ``preset`` config key
-(``"ani-1"`` / ``"ani-1x"``) selects them from YAML.
 
-Key options: ``species`` ([1, 6, 7, 8]), ``radial_cutoff`` (5.2),
-``angular_cutoff`` (3.5), ``hidden`` (128, 128, 64), ``activation``
-(``"celu"``), ``atomic_energies``, ``aev_kwargs`` (symmetry-function grids,
-``radial_prefactor``, ``angular_cos_factor``). The original ANI-1 training set
-is available via ``load_dataset("ani1")``.
+ANI-1 vs. ANI-1x vs. ANI-1ccx: choosing a preset
+------------------------------------------------
+There are **three published ANI parameterisations for H/C/N/O**, and in ``xnns``
+each one is a *preset*: a classmethod that fills in the AEV grid, the
+per-element network shapes, the activation, and the self atomic energies so you
+do not have to. Pick the preset, not the individual knobs.
+
+- **ANI-1** (Smith *et al.*, *Chem. Sci.* 2017): the original model, trained on
+  the ~20 M-conformation ANI-1 dataset (dense normal-mode sampling of GDB-11
+  molecules). Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1`.
+- **ANI-1x** (Smith *et al.*, *J. Chem. Phys.* 2018, *"Less is more"*): the
+  later model built by **active learning**: it iteratively adds only the
+  conformations where an ensemble disagrees, giving a smaller (~5 M) but more
+  diverse and more transferable training set. It also uses a *different, leaner*
+  AEV grid. Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1x`.
+- **ANI-1ccx** (Smith *et al.*, *Nat. Commun.* 2019): the ANI-1x architecture
+  retrained by **transfer learning** to ~500 k coupled-cluster (CCSD(T)*/CBS)
+  energies, holding 65,280 of the 325,248 network weights fixed (the matrix
+  joining each element network's first two hidden layers) to avoid overfitting
+  the smaller coupled-cluster set. The descriptor and networks are *identical*
+  to ANI-1x; only the training data, self atomic energies, and resulting
+  weights differ. Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1ccx`.
+
+ANI-1 and ANI-1x differ in both the descriptor geometry *and* the network body
+(ANI-1ccx shares the ``ani1x`` column, with its own coupled-cluster self
+energies):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * - Setting
+     - ``ani1`` (ANI-1)
+     - ``ani1x`` (ANI-1x)
+   * - Radial cutoff (Å)
+     - 4.6
+     - 5.2
+   * - Angular cutoff (Å)
+     - 3.1
+     - 3.5
+   * - Radial shifts / angular radial shifts
+     - 32 / 8
+     - 16 / 4
+   * - Angular ``zeta``
+     - 8
+     - 32
+   * - AEV length
+     - 768
+     - 384
+   * - Network widths
+     - uniform ``768:128:128:64:1``
+     - per-element (H ``160:128:96``, C ``144:112:96``, N/O ``128:112:96``)
+   * - Activation
+     - Gaussian
+     - ``CELU``
+   * - Self atomic energies
+     - none by default
+     - torchani ANI-1x SAE (``atomic_energies="torchani"``)
+
+Note that ANI-1x uses the *larger* cutoff but the *shorter* AEV: the
+active-learning data lets it do more with a leaner descriptor.
+
+Select a preset in Python:
+
+.. code-block:: python
+
+   from xnns.dnn.models.ani import ANI
+
+   ani1    = ANI.ani1(species=[1, 6, 7, 8])                        # original ANI-1
+   ani1x   = ANI.ani1x(species=[1, 6, 7, 8], atomic_energies="torchani")  # ANI-1x
+   ani1ccx = ANI.ani1ccx(species=[1, 6, 7, 8])                     # ANI-1ccx (CC)
+
+...or from a config file with the ``preset`` key, which
+:meth:`~xnns.dnn.models.ani.ANI.from_config` routes to the matching classmethod
+(accepts ``"ani-1"``/``"ani1"``, ``"ani-1x"``/``"ani1x"``, and
+``"ani-1ccx"``/``"ani1ccx"``):
+
+.. code-block:: yaml
+
+   model:
+     name: ani
+     preset: ani-1x        # or ani-1 / ani-1ccx
+
+Any key under ``model`` that is not a core config field (like ``preset``) is
+collected into ``model.extra`` and forwarded to
+:meth:`~xnns.dnn.models.ani.ANI.from_config`. Omit ``preset`` to build a bare
+``ANI`` from the individual keys below instead.
+
+.. note::
+
+   The preset fixes the model *architecture*; the matching training data lives
+   in the hub. Each preset has its own dataset builder: the original ANI-1 set
+   as ``load_dataset("ani1")``, the active-learning ANI-1x set (with forces) as
+   ``load_dataset("ani1x")``, and the coupled-cluster ANI-1ccx set (energy-only)
+   as ``load_dataset("ani1ccx")``. So ``ani-1`` + ``load_dataset("ani1")``,
+   ``ani-1x`` + ``load_dataset("ani1x")``, and ``ani-1ccx`` +
+   ``load_dataset("ani1ccx")`` each reproduce a published model end-to-end
+   (the published ANI-1ccx was *transfer-learned*: pre-trained on ANI-1x DFT
+   data, then fine-tuned on the ANI-1ccx coupled-cluster energies). To load
+   torchani's **pretrained** ANI-1x/ANI-1ccx weights instead of training, see
+   :ref:`fidelity`.
+
+Key options (for the bare constructor, when not using a preset): ``species``
+([1, 6, 7, 8]), ``radial_cutoff`` (5.2), ``angular_cutoff`` (3.5), ``hidden``
+(128, 128, 64), ``activation`` (``"celu"``), ``atomic_energies``, ``aev_kwargs``
+(symmetry-function grids, ``radial_prefactor``, ``angular_cos_factor``).
 
 PhysNet (``dnn``)
 =================
-:class:`xnns.dnn.models.physnet.PhysNet` — message-passing HDNN with
+:class:`xnns.dnn.models.physnet.PhysNet`: message-passing HDNN with
 explicit physics (Unke & Meuwly 2019): distance-based attention masks over
 an exponential-Gaussian radial basis, pre-activation residual blocks,
 per-module output heads predicting atomic energies *and* partial charges,
@@ -148,27 +245,27 @@ switched/shielded electrostatics of the corrected charges, and Grimme
 D3(BJ) dispersion (tables included, coefficients learnable). A faithful
 pure-PyTorch translation of the original TensorFlow
 `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_ (see
-:ref:`fidelity`); no species list needed — elements up to Z = 94 are
+:ref:`fidelity`); no species list needed, as elements up to Z = 94 are
 embedded directly. ``forward`` additionally returns ``"charges"``,
 ``"dipole"``, and the ``"nh_loss"`` regularizer.
 
-Key options: ``cutoff`` (10.0) — short-range ``sr_cut``, ``lr_cutoff``
-(None) — long-range cutoff for electrostatics/dispersion (also the
+Key options: ``cutoff`` (10.0), the short-range ``sr_cut``, ``lr_cutoff``
+(None), the long-range cutoff for electrostatics/dispersion (also the
 neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
 ``num_blocks`` = ``n_interactions`` (5), ``num_residual_atomic`` (2),
 ``num_residual_interaction`` (3), ``num_residual_output`` (1),
 ``use_electrostatics`` (True), ``use_dispersion`` (True),
-``s6/s8/a1/a2`` (None = learnable), ``species`` +
-``atomic_energies``/``atomic_scales`` — loaded into the per-element
+``s6/s8/a1/a2`` (None = learnable), and ``species`` +
+``atomic_energies``/``atomic_scales``, loaded into the per-element
 ``Eshift``/``Escale`` tables.
 
 BAMBOO (``hybrid``)
 ===================
-:class:`xnns.hybrid.models.bamboo.BAMBOO` — a graph equivariant transformer
+:class:`xnns.hybrid.models.bamboo.BAMBOO`: a graph equivariant transformer
 with a physics energy split (Gong *et al.* 2024). Each message-passing layer
 is a multi-head QKV attention on the neighbour graph that couples a scalar and
 a Cartesian **vector** node channel (so equivariance comes from vectors, not
-spherical harmonics — no e3nn), and the atomic energy is split into a
+spherical harmonics; no e3nn), and the atomic energy is split into a
 semi-local neural-network term, a **charge-equilibrium electrostatic** term
 (a per-atom electronegativity/hardness energy plus a damped Coulomb summed over
 *all* pairs, so it is genuinely long-range), and an optional D3(CSO) dispersion
@@ -184,15 +281,15 @@ The shared transformer pieces live in :mod:`xnns.transformer`
 :class:`~xnns.transformer.attention.EdgeMultiheadAttention`) so future
 attention-based models can reuse them.
 
-Key options (defaults in parentheses): ``cutoff`` (5.0) — the semi-local GET
-cutoff, ``n_features`` (64) — the ``dim`` node width (divisible by
-``num_heads``), ``n_interactions`` (3) — GET layers (``n_layers``, ≥ 2),
-``n_rbf`` (32), ``num_heads`` (16), ``charge_ub`` (2.0) — ``tanh`` bound on the
-partial charge, ``charge_mlp_layers`` / ``energy_mlp_layers`` (2),
+Key options (defaults in parentheses): ``cutoff`` (5.0), the semi-local GET
+cutoff, ``n_features`` (64), the ``dim`` node width (divisible by
+``num_heads``), ``n_interactions`` (3), the GET layers (``n_layers``, ≥ 2),
+``n_rbf`` (32), ``num_heads`` (16), ``charge_ub`` (2.0), the ``tanh`` bound on
+the partial charge, ``charge_mlp_layers`` / ``energy_mlp_layers`` (2),
 ``n_elements`` (87), ``act_fn`` ("silu") / ``attn_act_fn`` ("gelu"),
 ``use_electrostatics`` (True), ``coul_damping_beta`` (18.7) /
-``coul_damping_r0`` (2.2), ``use_dispersion`` (False) — optional D3(CSO), and
-``disp_cutoff`` (10.0).
+``coul_damping_r0`` (2.2), ``use_dispersion`` (False) for the optional
+D3(CSO), and ``disp_cutoff`` (10.0).
 
 .. note::
 
@@ -253,7 +350,7 @@ TorchScript deployment
 ======================
 SchNet, NequIP, MACE, and Allegro additionally expose a scriptable
 ``node_energy(atomic_numbers, edge_index, edge_vec)`` core, which makes them
-exportable to TorchScript and LAMMPS — see :ref:`deployment`. CACE provides
+exportable to TorchScript and LAMMPS; see :ref:`deployment`. CACE provides
 the same ``node_energy`` tensor core but is not TorchScript-exportable
 (neither is the original CACE, which has no LAMMPS interface); it deploys
 through the ASE calculator, as does PhysNet (whose original is a TF1 graph

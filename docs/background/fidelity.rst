@@ -8,11 +8,11 @@ The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
 ANI) are not approximations or "inspired-by" re-implementations: they are
 faithful, self-contained reproductions of the reference codes, verified
 numerically block by block and end to end. The spherical-harmonic models need
-only ``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
+only ``e3nn``: no ``mace-torch``, ``nequip``, ``cuequivariance``, or
 ``opt_einsum_fx`` at runtime; CACE, PhysNet, BAMBOO, and ANI need no extra
-dependency at all (PhysNet's original is TensorFlow — the xnns version is pure
-PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn; ANI is
-pure PyTorch symmetry functions).
+dependency at all (PhysNet's original is TensorFlow, while the xnns version
+is pure PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn;
+ANI is pure PyTorch symmetry functions).
 
 Equivariance itself is verified in the test suite (rotate the inputs → the
 energy is invariant and the forces co-rotate, to ~1e-7; see
@@ -78,8 +78,8 @@ forces (``tests/test_allegro.py``).
 CACE
 ====
 A faithful re-implementation of `BingqingCheng/cace
-<https://github.com/BingqingCheng/cace>`_ (Cheng, *npj Comput Mater* 2024)
-— the Cartesian atomic cluster expansion, which needs no spherical
+<https://github.com/BingqingCheng/cace>`_ (Cheng, *npj Comput Mater* 2024),
+the Cartesian atomic cluster expansion, which needs no spherical
 harmonics or e3nn at all:
 
 - the Cartesian monomial angular basis
@@ -137,8 +137,8 @@ ANI
 ===
 A faithful, from-scratch re-implementation of the ANI method (Smith, Isayev &
 Roitberg, *Chem. Sci.* 2017), verified against `aiqm/torchani
-<https://github.com/aiqm/torchani>`_ — pure-PyTorch symmetry functions, no extra
-dependency:
+<https://github.com/aiqm/torchani>`_ (pure-PyTorch symmetry functions, no
+extra dependency):
 
 - the Atomic Environment Vector
   (:class:`~xnns.dnn.featurizers.AEV`): element-resolved radial (Behler
@@ -148,29 +148,35 @@ dependency:
   ``(EtaA, Zeta, ShfA, ShfZ)`` orderings;
 - the ANI / NeuroChem conventions torchani follows over the paper as written:
   the ``0.25`` radial prefactor and the ``0.95`` scaling of :math:`\cos\theta`
-  inside ``acos`` (both configurable — set to ``1.0`` for the literal
+  inside ``acos`` (both configurable; set to ``1.0`` for the literal
   Behler-Parrinello form);
 - per-element neural networks with per-element architectures (:meth:`ANI.ani1x`
   uses torchani's H ``160:128:96``, C ``144:112:96``, N/O ``128:112:96`` widths
   and the ``CELU`` activation), and per-element self atomic energies;
-- the two published parameterisations as presets: :meth:`ANI.ani1` (the
+- the published parameterisations as presets: :meth:`ANI.ani1` (the
   paper's 768-length AEV, 4.6/3.1 Å cutoffs, ``768:128:128:64:1`` networks with
-  a Gaussian activation) and :meth:`ANI.ani1x` (the 384-length ANI-1x grid,
-  5.2/3.5 Å cutoffs).
+  a Gaussian activation), :meth:`ANI.ani1x` (the 384-length ANI-1x grid,
+  5.2/3.5 Å cutoffs), and :meth:`ANI.ani1ccx` (Smith *et al.* 2019: identical
+  architecture to ANI-1x, transfer-learned to CCSD(T)*/CBS coupled-cluster
+  data; the preset reuses :meth:`ANI.ani1x` and swaps in the coupled-cluster
+  self atomic energies).
 
 The AEV matches ``torchani.AEVComputer`` element-for-element to ~1e-16 (for both
 the ANI-1x and ANI-1 grids), and transplanting torchani's **pretrained** ANI-1x
-weights reproduces its energies to ~1e-9 Ha and forces to ~1e-8 Ha/Å, for a
-single network and the full 8-model ensemble
+or ANI-1ccx weights reproduces their energies to ~1e-9 Ha and forces to
+~1e-8 Ha/Å, for a single network and the full 8-model ensemble
 (``examples/fidelity_checks/ani_verification.ipynb``, ``tests/test_ani.py``; the
-parity tests need ``torchani`` — the ``[ani]`` extra). The original ANI-1
-training set is in the hub as ``load_dataset("ani1")``.
+parity tests need ``torchani``, the ``[ani]`` extra). All three training sets
+are in the hub: the original ANI-1 data as ``load_dataset("ani1")``, the
+active-learning ANI-1x data (energies and forces) as ``load_dataset("ani1x")``,
+and its coupled-cluster subset (CCSD(T)*/CBS energies, shared release file) as
+``load_dataset("ani1ccx")``.
 
 BAMBOO
 ======
 A faithful, from-scratch re-implementation of `bytedance/bamboo
-<https://github.com/bytedance/bamboo>`_ (Gong *et al.* 2024) — the graph
-equivariant transformer with a physics energy split — built on the xnns
+<https://github.com/bytedance/bamboo>`_ (Gong *et al.* 2024), the graph
+equivariant transformer with a physics energy split, built on the xnns
 abstractions with no upstream code vendored:
 
 - the multi-head QKV edge attention (the reusable
@@ -187,14 +193,14 @@ abstractions with no upstream code vendored:
   are embedded directly by atomic number.
 
 Given the same weights, and driven from the same geometry, it reproduces the
-original model to machine precision — every GET layer, the partial charges,
+original model to machine precision: every GET layer, the partial charges,
 the dipole, and the component energies match to ~1e-15, block by block
 (``examples/fidelity_checks/bamboo_verification.ipynb``,
 ``tests/test_bamboo.py`` with a clone of the upstream repo via
 ``BAMBOO_UPSTREAM_PATH``). The one deliberate difference is the force
 convention: xnns returns the full conservative ``-dE/dr`` through
 :class:`~xnns.common.models.outputs.ForceStressOutput`, which equals the
-upstream ``forces + qeq_force`` to ~1e-14 — upstream reports only ``forces``
+upstream ``forces + qeq_force`` to ~1e-14; upstream reports only ``forces``
 (``nn + coul`` with charges held fixed) and regularises the
 charge-equilibrium residual ``qeq_force`` toward zero during training
 (Supplementary Theorem A.2). The optional D3(CSO) dispersion (off by default,
@@ -230,6 +236,6 @@ Why this matters
 Fidelity means results published with the reference codes can be reproduced,
 weights can be transplanted in either direction (see
 :ref:`howto-transplant`), and the xnns implementations can serve as readable,
-single-dependency references for how these architectures actually work — the
+single-dependency references for how these architectures actually work: the
 ``examples/fidelity_checks/<model>_verification.ipynb`` notebooks double as
 annotated tours of each architecture.

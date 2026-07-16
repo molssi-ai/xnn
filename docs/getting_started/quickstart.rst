@@ -34,13 +34,13 @@ dataclass, one dataset class, and one trainer:
 Here ``structures`` is a list of plain dictionaries, one per structure, with
 keys ``pos`` and ``atomic_numbers`` (and optionally ``cell``, ``pbc``,
 ``energy``, ``forces``, ``stress``). :class:`~xnns.common.data.dataset.AtomicDataset`
-converts each into an :class:`~xnns.common.data.atomic_data.AtomicGraph` — the
+converts each into an :class:`~xnns.common.data.atomic_data.AtomicGraph`, the
 single data object every xnns model consumes. Data in any ASE-readable file
 format (extxyz, CIF, VASP, ...) loads directly with
 ``AtomicDataset.from_file("trajectory.extxyz", cutoff)``, and standard benchmark
 datasets download in one line with
 :func:`~xnns.common.data.hub.base.load_dataset` (e.g.
-``load_dataset("rmd17", molecule="aspirin", cutoff=5.0)``) — see :ref:`data`.
+``load_dataset("rmd17", molecule="aspirin", cutoff=5.0)``); see :ref:`data`.
 
 Training writes ``best.pt`` and ``last.pt`` checkpoints to
 ``cfg.output_dir`` (default ``runs/exp``).
@@ -65,7 +65,7 @@ optionally stress) by automatic differentiation of the predicted energy:
 
 The pieces also work on their own
 =================================
-Each layer of xnns is independently importable — data, featurizers, and
+Each layer of xnns is independently importable: data, featurizers, and
 models compose but do not require each other:
 
 .. code-block:: python
@@ -96,6 +96,6 @@ The same workflow is available through the ``xnns`` command:
 
 Next steps
 ==========
-- :ref:`first-training` — a complete, annotated training walk-through
-- :ref:`how-tos` — training from config files, deploying to ASE and LAMMPS
-- :ref:`user-guide` — full reference for data, models, configs, and training
+- :ref:`first-training`: a complete, annotated training walk-through
+- :ref:`how-tos`: training from config files, deploying to ASE and LAMMPS
+- :ref:`user-guide`: full reference for data, models, configs, and training

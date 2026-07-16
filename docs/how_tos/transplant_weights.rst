@@ -8,7 +8,7 @@ Because the xnns NequIP and Allegro implementations use the upstream
 parameter names and weight layouts, a state dict trained with the reference
 code loads directly into the xnns model (and vice versa). The MACE
 implementation reproduces upstream block-by-block, so whole models transplant
-as well — the example notebooks do exactly this and reproduce upstream
+as well; the example notebooks do exactly this and reproduce upstream
 energies and forces to ~1e-15/1e-16.
 
 The pattern
@@ -29,12 +29,12 @@ Worked examples
 The block-by-block notebooks perform full transplants and check every
 intermediate tensor:
 
-- ``examples/gnn/mace/recreate_mace_architecture.ipynb`` — rebuilds the
+- ``examples/gnn/mace/recreate_mace_architecture.ipynb``: rebuilds the
   MACE architecture step by step in both ``mace-torch`` and xnns, transplants
   a whole model, and reproduces its energy and forces to ~1e-15.
-- ``examples/fidelity_checks/nequip_verification.ipynb`` — ends
+- ``examples/fidelity_checks/nequip_verification.ipynb``: ends
   with a whole-model weight transplant (~1e-16 agreement).
-- ``examples/fidelity_checks/allegro_verification.ipynb`` — the
+- ``examples/fidelity_checks/allegro_verification.ipynb``: the
   same for Allegro (~1e-15).
 
 Parity with upstream given identical weights is also enforced in the test

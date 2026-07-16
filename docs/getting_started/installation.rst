@@ -62,8 +62,8 @@ you need:
 .. note::
 
    The ``examples`` extra pins ``mace-torch==0.3.16`` and ``nequip==0.6.2``,
-   which in turn pin ``e3nn==0.4.4``. xnns itself runs fine on that pin — all
-   tests pass — so the extras can coexist in one environment.
+   which in turn pin ``e3nn==0.4.4``. xnns itself runs fine on that pin (all
+   tests pass), so the extras can coexist in one environment.
 
 GPU installation with uv
 ========================

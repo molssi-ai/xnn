@@ -57,6 +57,17 @@ of xnns are
 
          To the How-To Guides
 
+   .. grid-item-card:: Examples
+      :margin: 0 3 0 0
+
+      Executed example notebooks, rendered with their outputs
+
+      .. button-link:: ./examples/index.html
+         :color: primary
+         :expand:
+
+         To the Examples
+
    .. grid-item-card:: User Guide
       :margin: 0 3 0 0
 
@@ -160,6 +171,7 @@ xnns is developed by `The Molecular Sciences Software Institute (MolSSI)
 
    getting_started/index
    how_tos/index
+   examples/index
    user_guide/index
    developer_guide/index
    background/index

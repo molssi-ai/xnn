@@ -4,9 +4,9 @@
 Design of xnns
 ***************
 
-xnns is organized **by model family** — ``gnn`` (E(3)-equivariant graph
-networks), ``cnn`` (continuous-filter convolutions), ``dnn`` (descriptor +
-per-element networks) — with everything shared across families factored into
+xnns is organized **by model family** (``gnn``, E(3)-equivariant graph
+networks; ``cnn``, continuous-filter convolutions; ``dnn``, descriptor +
+per-element networks), with everything shared across families factored into
 ``common``. A component lives with the family that uses it, or in ``common``
 when more than one family needs it; each layer still stands alone and can be
 imported on its own.
@@ -44,7 +44,7 @@ Four ideas hold the package together.
 ==================
 Every model consumes an :class:`~xnns.common.data.atomic_data.AtomicGraph`
 and returns ``{"node_energy", "energy"}``. Molecular vs. periodic is
-invisible to models — periodicity lives only in
+invisible to models; periodicity lives only in
 :meth:`~xnns.common.data.atomic_data.AtomicGraph.edge_vectors`:
 
 .. math::
@@ -77,7 +77,7 @@ featurizers, so the featurization is reusable and inspectable on its own:
 :class:`~xnns.common.models.outputs.ForceStressOutput` wraps any model and
 differentiates the predicted energy with respect to positions (forces,
 :math:`\mathbf{F}_i = -\partial E / \partial \mathbf{r}_i`) and a symmetric
-strain (stress). Models never implement forces themselves — a model is just
+strain (stress). Models never implement forces themselves: a model is just
 an energy function, and the physics of differentiation is written once.
 
 4. Extensibility via registry + one config, three frontends
@@ -86,10 +86,10 @@ A model becomes available everywhere with two ingredients: the
 ``@register_model("name")`` decorator and a ``from_config`` classmethod. The
 registry (:func:`~xnns.common.models.registry.build_model`) dispatches on
 ``cfg.model.name``, and the single :class:`~xnns.common.config.schema.Config`
-dataclass is filled from any of three frontends — YAML, argparse, or
-Hydra — which all funnel into the same place. Upstream config spellings are
+dataclass is filled from any of three frontends (YAML, argparse, or
+Hydra), which all funnel into the same place. Upstream config spellings are
 handled by a loader-level key-translation registry, never by per-model
 aliases (see :ref:`howto-upstream-configs`).
 
-Everything downstream — data, featurizers, autograd forces/stress, training,
-ASE/LAMMPS deployment — is identical across all models.
+Everything downstream (data, featurizers, autograd forces/stress, training,
+ASE/LAMMPS deployment) is identical across all models.

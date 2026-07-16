@@ -7,16 +7,16 @@ API Reference
 Complete reference documentation, generated from the docstrings in
 ``src/xnns``. Start from the subpackage matching what you need:
 
-- :mod:`xnns.common` — data pipeline, featurizer base, configuration,
+- :mod:`xnns.common`: data pipeline, featurizer base, configuration,
   model registry and outputs, training, benchmarking, deployment, CLI
-- :mod:`xnns.gnn` — E(3)-equivariant models (NequIP, MACE, Allegro, CACE) and
+- :mod:`xnns.gnn`: E(3)-equivariant models (NequIP, MACE, Allegro, CACE) and
   featurizers (requires ``e3nn``)
-- :mod:`xnns.cnn` — continuous-filter convolution models (SchNet)
-- :mod:`xnns.dnn` — descriptor models (HDNNP, ANI, PhysNet) and
+- :mod:`xnns.cnn`: continuous-filter convolution models (SchNet)
+- :mod:`xnns.dnn`: descriptor models (HDNNP, ANI, PhysNet) and
   symmetry-function / AEV featurizers
-- :mod:`xnns.transformer` — shared graph-transformer building blocks
+- :mod:`xnns.transformer`: shared graph-transformer building blocks
   (multi-head edge attention, exponential-normal radial basis)
-- :mod:`xnns.hybrid` — GNN + transformer models with a physics energy split
+- :mod:`xnns.hybrid`: GNN + transformer models with a physics energy split
   (BAMBOO)
 
 .. autosummary::

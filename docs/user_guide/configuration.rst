@@ -21,22 +21,22 @@ All configuration funnels into a single dataclass tree
      - the three sections below
    * -
      - ``device``
-     - ``"auto"`` — ``auto | cpu | cuda | cuda:0 ...``
+     - ``"auto"``: ``auto | cpu | cuda | cuda:0 ...``
    * -
      - ``seed``
      - ``1234``
    * -
      - ``output_dir``
-     - ``"runs/exp"`` — where checkpoints are written
+     - ``"runs/exp"``: where checkpoints are written
    * - ``ModelConfig``
      - ``name``
-     - ``"mace"`` — any registered model name
+     - ``"mace"``: any registered model name
    * -
      - ``cutoff``
      - ``4.0`` Å
    * -
      - ``n_features`` / ``n_interactions`` / ``n_rbf``
-     - ``32`` / ``2`` / ``8`` — shared core sizes
+     - ``32`` / ``2`` / ``8``: shared core sizes
    * -
      - ``extra``
      - dict of model-specific options (see :ref:`models`)
@@ -55,11 +55,11 @@ All configuration funnels into a single dataclass tree
      - ``0``
    * -
      - ``val_fraction`` / ``test_fraction``
-     - ``0.1`` / ``0.0`` — fractions of the training set held out when no
+     - ``0.1`` / ``0.0``: fractions of the training set held out when no
        ``val_path`` / ``test_path`` is given (``0`` disables the split)
    * -
      - ``energy_key`` / ``forces_key`` / ``stress_key``
-     - ``"energy"`` / ``"forces"`` / ``"stress"`` — names the targets are
+     - ``"energy"`` / ``"forces"`` / ``"stress"``: names the targets are
        stored under in the file (e.g. ``REF_energy`` for MACE-style datasets)
    * - ``OptimConfig``
      - ``lr`` / ``weight_decay``
@@ -69,10 +69,10 @@ All configuration funnels into a single dataclass tree
      - ``100``
    * -
      - ``energy_weight`` / ``force_weight`` / ``stress_weight``
-     - ``1.0`` / ``10.0`` / ``0.0`` — loss weights; nonzero enables the head
+     - ``1.0`` / ``10.0`` / ``0.0``: loss weights; nonzero enables the head
    * -
      - ``scheduler``
-     - ``"plateau"`` — ``cosine | plateau |`` none
+     - ``"plateau"``: ``cosine | plateau |`` none
 
 When loading from a file, any ``model`` key that is not a core
 ``ModelConfig`` field is folded into ``model.extra``, so model options are
@@ -112,7 +112,7 @@ Upstream key translation
 ========================
 Model keys copied verbatim from an upstream code's YAML also work: a
 per-model key-translation registry
-(:mod:`xnns.common.config.translate`) rewrites foreign spellings — MACE-CLI
+(:mod:`xnns.common.config.translate`) rewrites foreign spellings (MACE-CLI
 ``r_max`` / ``num_radial_basis`` / ``atomic_numbers`` / ``E0s``, NequIP
-``num_layers``, ... — to the xnns canonical names at load time. The xnns
+``num_layers``, ...) to the xnns canonical names at load time. The xnns
 spelling wins if both are given. See :ref:`howto-upstream-configs`.

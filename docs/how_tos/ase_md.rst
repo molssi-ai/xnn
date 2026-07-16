@@ -27,7 +27,7 @@ Attach the calculator
 
    print(atoms.get_potential_energy(), atoms.get_forces().shape)
 
-The calculator handles molecular and periodic cells alike — it builds the
+The calculator handles molecular and periodic cells alike: it builds the
 same PBC-aware neighbor list used in training, so energies, forces, and
 stresses are consistent with the training setup.
 
@@ -59,5 +59,5 @@ For example, liquid-argon NPT (the workflow of the
 
    The notebooks ``examples/gnn/{mace,nequip,allegro}/03_*_argon_density_md.ipynb``
    run this exact pipeline with both xnns and the corresponding reference
-   implementation and compare the resulting mass densities — with identical
+   implementation and compare the resulting mass densities; with identical
    weights the difference is essentially zero.

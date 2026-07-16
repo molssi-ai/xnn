@@ -5,7 +5,7 @@ Download an Upstream Dataset
 ******************************
 
 The dataset hub downloads and preprocesses standard benchmark datasets in a
-single line — HuggingFace ``load_dataset()``-style. It handles the download,
+single line, HuggingFace ``load_dataset()``-style. It handles the download,
 caching, MD5 verification, unit conversion, and conversion into xnns structure
 dictionaries, so you can go straight to training. See :ref:`data` for the full
 reference and ``examples/data/load_dataset_tutorial.ipynb`` for a runnable
@@ -18,7 +18,7 @@ List what is available
 
    from xnns.common.data import load_dataset, list_datasets
 
-   list_datasets()          # ['ani1', 'argon_md', 'lode_dimers', 'rmd17']
+   list_datasets()          # ['ani1', 'ani1ccx', 'ani1x', 'argon_md', 'lode_dimers', 'rmd17']
 
 Load a dataset
 ==============
@@ -66,6 +66,31 @@ per-molecule 80/10/10 partition:
    data = load_dataset("ani1", heavy_atoms=[2, 3, 4],
                        max_molecules=60, max_conformations=60)   # {"all": [...]}
    train = load_dataset("ani1", heavy_atoms=2, split="train")
+
+The ``ani1x`` set is the active-learning training data behind the
+:meth:`~xnns.dnn.models.ani.ANI.ani1x` preset (Smith *et al.* 2018/2020): ~5 M
+conformations with wB97X **energies and forces** in one 5.6 GB HDF5 file.
+``level`` selects the level of theory (``wb97x_dz`` by default -- what the model
+was trained on), and per-conformation NaN entries are dropped automatically:
+
+.. code-block:: python
+
+   # capped demo subset with forces, energies converted to eV
+   data = load_dataset("ani1x", max_molecules=50)               # {"all": [...]}
+   train = load_dataset("ani1x", split="train")                 # 80/10/10 split
+   ccx = load_dataset("ani1x", level="ccsd(t)_cbs", forces=False)  # energy-only
+
+The ``ani1ccx`` set is the coupled-cluster companion behind the
+:meth:`~xnns.dnn.models.ani.ANI.ani1ccx` preset (Smith *et al.* 2019/2020):
+the ~500 k-conformation subset of ANI-1x recomputed at the CCSD(T)*/CBS level
+(energy-only; no coupled-cluster forces). It lives inside the same release
+file as ``ani1x``, so the download and cache are shared; loading it is
+equivalent to the ``level="ccsd(t)_cbs"`` call above, under its own name:
+
+.. code-block:: python
+
+   data = load_dataset("ani1ccx", max_molecules=50)             # {"all": [...]}
+   train = load_dataset("ani1ccx", split="train")               # 80/10/10 split
 
 The ``argon_md`` set (periodic argon configurations with energies, forces and
 stress, bundled with the repository and used by the ``*_argon_*`` example

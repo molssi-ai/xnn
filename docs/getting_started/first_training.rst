@@ -59,7 +59,7 @@ building the (PBC-aware) neighbor list at the given cutoff:
    train_set = AtomicDataset(structures[:800], cutoff)
    val_set = AtomicDataset(structures[800:], cutoff)
 
-Molecular and periodic systems go through the same class — periodicity is
+Molecular and periodic systems go through the same class; periodicity is
 handled entirely inside the neighbor list and edge vectors, and models never
 see the difference.
 
@@ -93,8 +93,8 @@ model, data, and optimizer settings. Model-specific options go into
    cfg.device = "auto"
    cfg.output_dir = "runs/my_first_run"
 
-Alternatively, load the same settings from a YAML file — see
-:ref:`configuration` — or start from the templates in ``configs/``.
+Alternatively, load the same settings from a YAML file (see
+:ref:`configuration`), or start from the templates in ``configs/``.
 
 4. Train
 ========
@@ -112,7 +112,7 @@ optimizer, scheduler, and data loaders, and runs the loop:
 
 Progress is printed per epoch; ``best.pt`` (lowest validation loss) and
 ``last.pt`` are written to ``cfg.output_dir``. A checkpoint is a dictionary
-``{"model": state_dict, "cfg": Config}``. A held-out test set is optional —
+``{"model": state_dict, "cfg": Config}``. A held-out test set is optional:
 pass it as a third dataset (``Trainer(cfg, train_set, val_set, test_set)``)
 or set ``cfg.data.test_fraction`` to carve one out of the training data; it
 is evaluated once after the last epoch (see :ref:`training`).
