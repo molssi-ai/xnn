@@ -18,7 +18,7 @@ List what is available
 
    from xnns.common.data import load_dataset, list_datasets
 
-   list_datasets()          # ['lode_dimers', 'rmd17']
+   list_datasets()          # ['ani1', 'argon_md', 'lode_dimers', 'rmd17']
 
 Load a dataset
 ==============
@@ -54,6 +54,29 @@ rMD17 ships five official folds and is converted to eV by default:
    train = load_dataset("rmd17", molecule="ethanol", split="train",
                         fold=3, units="kcal/mol", n_train=500)
 
+The ``ani1`` set (the 20 M-conformation ANI-1 training data, Smith *et al.*
+2017) is distributed as one 4.8 GB pyanitools archive; select heavy-atom
+subsets ``ani_gdb_s0X.h5`` and cap the amount materialised for tractable
+experiments. ``split`` in ``{"train", "val", "test"}`` gives the paper's
+per-molecule 80/10/10 partition:
+
+.. code-block:: python
+
+   # molecules with 2-4 heavy atoms, capped; energies converted to eV
+   data = load_dataset("ani1", heavy_atoms=[2, 3, 4],
+                       max_molecules=60, max_conformations=60)   # {"all": [...]}
+   train = load_dataset("ani1", heavy_atoms=2, split="train")
+
+The ``argon_md`` set (periodic argon configurations with energies, forces and
+stress, bundled with the repository and used by the ``*_argon_*`` example
+notebooks) needs no download; the ``config_type=IsolatedAtom`` reference frame is
+dropped automatically:
+
+.. code-block:: python
+
+   splits = load_dataset("argon_md")                         # {"train", "test"}
+   train = load_dataset("argon_md", split="train", cutoff=6.0)
+
 The ``lode_dimers`` set (molecular dimers for long-range interactions) selects a
 ``subset`` and, for the biomolecular dimers, filters by fragment-polarity
 ``label``; ``return_info=True`` attaches per-frame metadata for binding-energy
@@ -64,6 +87,15 @@ analysis:
    cc = load_dataset("lode_dimers", subset="bio", label="CC",
                      split="all", return_info=True)
    binding = cc[0]["energy"] - cc[0]["info"]["energyA"] - cc[0]["info"]["energyB"]
+
+The bundled ``subset="bio_scan"`` (a curated charged/polar dimer distance scan
+used by the long-range example notebooks) loads offline with the same
+``label`` / ``return_info`` options:
+
+.. code-block:: python
+
+   scan = load_dataset("lode_dimers", subset="bio_scan", split="all",
+                       return_info=True)
 
 Where files are cached
 ======================

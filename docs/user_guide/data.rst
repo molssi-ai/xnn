@@ -140,7 +140,7 @@ unit conversion:
 
    from xnns.common.data import load_dataset, list_datasets
 
-   list_datasets()                                        # ['lode_dimers', 'rmd17']
+   list_datasets()                          # ['ani1', 'argon_md', 'lode_dimers', 'rmd17']
 
    # all splits, as lists of structure dictionaries
    splits = load_dataset("rmd17", molecule="aspirin")     # {"train": [...], "test": [...]}
@@ -171,15 +171,30 @@ progress bar tracks both downloading and preprocessing.
      - Revised MD17: ten small molecules with PBE/def2-SVP energies and forces
        and five official 1000-structure train/test splits (converted to eV by
        default).
+   * - ``ani1``
+     - ``heavy_atoms`` (1–8), ``max_molecules``, ``max_conformations``,
+       ``split`` (``train`` / ``val`` / ``test``), ``units`` (``eV`` /
+       ``hartree``)
+     - The ANI-1 training set (Smith *et al.* 2017): ~20 M off-equilibrium
+       conformations and wB97X energies for H/C/N/O organic molecules from
+       GDB-11 (pyanitools HDF5). One 4.8 GB archive is downloaded once; select
+       heavy-atom subsets and cap the amount materialised.
+   * - ``argon_md``
+     - ``split`` (``train`` / ``test`` / ``all``)
+     - Periodic argon configurations with reference energies, forces and stress
+       (bundled with the repository, MACE convention). Used by the
+       ``*_argon_*`` example notebooks; no download.
    * - ``lode_dimers``
-     - ``subset`` (``bio`` / ``monomers`` / ``point_charges_coulomb`` /
-       ``point_charges_dispersion`` / ``xenon``), ``label`` (``CC`` / ``CP`` /
-       ``PP`` / …), ``return_info``
+     - ``subset`` (``bio`` / ``bio_scan`` / ``monomers`` /
+       ``point_charges_coulomb`` / ``point_charges_dispersion`` / ``xenon``),
+       ``label`` (``CC`` / ``CP`` / ``PP`` / …), ``return_info``
      - LODE non-bonded interactions: biomolecular sidechain dimers (energies and
        forces, tagged by fragment polarity) plus monomers, point-charge toy
        systems, and Xe clusters. ``return_info=True`` attaches per-frame
        metadata (labels, distances, monomer energies) — enough to build
-       binding-energy curves.
+       binding-energy curves. The bundled ``bio_scan`` subset (a curated
+       charged/polar dimer distance scan, no download) drives the long-range
+       example notebooks.
 
 A runnable, end-to-end walkthrough lives in
 ``examples/data/load_dataset_tutorial.ipynb``. To add your own dataset, register

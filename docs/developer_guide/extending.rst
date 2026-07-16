@@ -84,12 +84,15 @@ list:
    register_dataset(MyDataset())
 
 Put the builder module under ``src/xnns/common/data/hub/`` and import it from
-``hub/__init__.py`` so the registration runs on import (as ``rmd17`` and
-``lode_dimers`` do). ``load_dataset`` then handles the ``cutoff=`` wrapping into
-an :class:`~xnns.common.data.dataset.AtomicDataset` for you, so builders only
+``hub/__init__.py`` so the registration runs on import (as ``rmd17``,
+``ani1``, ``argon_md``, and ``lode_dimers`` do). ``load_dataset`` then handles
+the ``cutoff=`` wrapping into an
+:class:`~xnns.common.data.dataset.AtomicDataset` for you, so builders only
 produce structure dicts. Reuse :func:`~xnns.common.data.ase_io.atoms_to_structure`
 for any ASE-readable source, and show progress with ``tqdm`` (respect a
-``quiet`` flag).
+``quiet`` flag). A builder need not download at all — ``argon_md`` (and the
+``lode_dimers`` ``bio_scan`` subset) read files bundled under ``datasets/`` in
+the repository, which is handy for small datasets that travel with the code.
 
 Adding a featurizer
 ===================

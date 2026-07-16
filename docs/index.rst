@@ -126,8 +126,8 @@ Models at a glance
      - Under development
    * - ANI
      - dnn
-     - AEV (radial + angular)
-     - Under development
+     - AEV (radial + angular symmetry functions)
+     - Complete: training, evaluation, deployment (ASE only); matches `aiqm/torchani <https://github.com/aiqm/torchani>`_
    * - NequIP
      - gnn
      - spherical-harmonic edges

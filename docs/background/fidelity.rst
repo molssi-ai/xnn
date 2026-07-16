@@ -4,14 +4,15 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO)
-are not approximations or "inspired-by" re-implementations: they are faithful,
-self-contained reproductions of the reference codes, verified numerically
-block by block and end to end. The spherical-harmonic models need only
-``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
-``opt_einsum_fx`` at runtime; CACE, PhysNet, and BAMBOO need no extra
+The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
+ANI) are not approximations or "inspired-by" re-implementations: they are
+faithful, self-contained reproductions of the reference codes, verified
+numerically block by block and end to end. The spherical-harmonic models need
+only ``e3nn`` — no ``mace-torch``, ``nequip``, ``cuequivariance``, or
+``opt_einsum_fx`` at runtime; CACE, PhysNet, BAMBOO, and ANI need no extra
 dependency at all (PhysNet's original is TensorFlow — the xnns version is pure
-PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn).
+PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn; ANI is
+pure PyTorch symmetry functions).
 
 Equivariance itself is verified in the test suite (rotate the inputs → the
 energy is invariant and the forces co-rotate, to ~1e-7; see
@@ -131,6 +132,39 @@ the upstream repo via ``PHYSNET_UPSTREAM_PATH``, and the block-by-block
 notebook documents three dtype-only harness patches that let the float32-era
 TF graph run in float64). Dropout (upstream ``keep_prob``, default off) is
 not implemented.
+
+ANI
+===
+A faithful, from-scratch re-implementation of the ANI method (Smith, Isayev &
+Roitberg, *Chem. Sci.* 2017), verified against `aiqm/torchani
+<https://github.com/aiqm/torchani>`_ — pure-PyTorch symmetry functions, no extra
+dependency:
+
+- the Atomic Environment Vector
+  (:class:`~xnns.dnn.featurizers.AEV`): element-resolved radial (Behler
+  :math:`G^2`) and angular symmetry functions, bucketed by neighbour species
+  and by the unordered neighbour-species pair in torchani's upper-triangular
+  order, with the parameter grids laid out in torchani's ``(EtaR, ShfR)`` and
+  ``(EtaA, Zeta, ShfA, ShfZ)`` orderings;
+- the ANI / NeuroChem conventions torchani follows over the paper as written:
+  the ``0.25`` radial prefactor and the ``0.95`` scaling of :math:`\cos\theta`
+  inside ``acos`` (both configurable — set to ``1.0`` for the literal
+  Behler-Parrinello form);
+- per-element neural networks with per-element architectures (:meth:`ANI.ani1x`
+  uses torchani's H ``160:128:96``, C ``144:112:96``, N/O ``128:112:96`` widths
+  and the ``CELU`` activation), and per-element self atomic energies;
+- the two published parameterisations as presets: :meth:`ANI.ani1` (the
+  paper's 768-length AEV, 4.6/3.1 Å cutoffs, ``768:128:128:64:1`` networks with
+  a Gaussian activation) and :meth:`ANI.ani1x` (the 384-length ANI-1x grid,
+  5.2/3.5 Å cutoffs).
+
+The AEV matches ``torchani.AEVComputer`` element-for-element to ~1e-16 (for both
+the ANI-1x and ANI-1 grids), and transplanting torchani's **pretrained** ANI-1x
+weights reproduces its energies to ~1e-9 Ha and forces to ~1e-8 Ha/Å, for a
+single network and the full 8-model ensemble
+(``examples/fidelity_checks/ani_verification.ipynb``, ``tests/test_ani.py``; the
+parity tests need ``torchani`` — the ``[ani]`` extra). The original ANI-1
+training set is in the hub as ``load_dataset("ani1")``.
 
 BAMBOO
 ======

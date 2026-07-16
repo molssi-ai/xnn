@@ -46,13 +46,25 @@ step-by-step tutorial that rebuilds the MACE architecture block by block in
 *both* ``mace-torch`` and xnns, with the defining equations and architecture
 figures.
 
-The Argon dataset lives in ``datasets/argon_md/`` (at the repository root) and
-is shared by the MACE, NequIP, Allegro, CACE, and PhysNet notebooks. The CACE series compares against
-the original ``cace`` package
+Every training / MD notebook loads its data through the dataset hub
+(:func:`~xnns.common.data.hub.base.load_dataset`) rather than reading files by
+hand. The Argon set — shared by the MACE, NequIP, Allegro, CACE, and PhysNet
+notebooks — is bundled in the repository and loaded with
+``load_dataset("argon_md", split=...)`` (no download; see :ref:`data`). The CACE
+series compares against the original ``cace`` package
 (``pip install git+https://github.com/BingqingCheng/cace``); the PhysNet
 series (``examples/dnn/physnet/``) compares against the original
 **TensorFlow** implementation and needs a venv with both ``tensorflow`` and
 ``torch`` (the notebooks clone MMunibas/PhysNet on demand).
+
+ANI (``examples/dnn/ani/``) has ``ani_rmd17_train.ipynb`` — training ANI from
+scratch on rMD17 paracetamol (``load_dataset("rmd17", ...)``) with an
+energy/force parity plot and a smooth potential-energy scan — and
+``ani1_dataset.ipynb``, which loads a subset of the original 20 M-conformation
+ANI-1 training set (``load_dataset("ani1", ...)``) and reproduces the paper's
+energy-correlation result. Its block-by-block fidelity check against
+``aiqm/torchani`` is ``examples/fidelity_checks/ani_verification.ipynb`` (needs
+the ``ani`` extra: ``pip install -e ".[ani]"``).
 
 BAMBOO (the ``hybrid`` family) has its block-by-block fidelity check in
 ``examples/fidelity_checks/bamboo_verification.ipynb`` (it clones
@@ -64,13 +76,14 @@ live in ``examples/hybrid/``:
 deployment; ``bamboo_dimer_electrostatics.ipynb`` shows BAMBOO's built-in
 charge-equilibrium electrostatics binding the charged/polar dimers beyond the
 GET cutoff (electrostatics on vs. off), reusing the same CC/CP/PP dimer set as
-the LES example.
+the LES example (``load_dataset("lode_dimers", subset="bio_scan")``).
 
 The Latent Ewald Summation long-range add-on is validated against the original
 ``cace`` ``EwaldPotential`` in ``examples/fidelity_checks/les_verification.ipynb``;
 ``examples/gnn/les/les_molecular_dimers.ipynb`` reproduces
 the LES paper's central experiment: extrapolating the binding
 curves of charged/polar molecular dimers, where short-range models fail
-qualitatively -- a CC/CP/PP subset of the BioFragment dimer set ships with
-the example. (Neutral homogeneous systems like the Argon set carry no
-long-range tail, so they are deliberately *not* used here.)
+qualitatively -- a CC/CP/PP subset of the BioFragment dimer set, loaded with
+``load_dataset("lode_dimers", subset="bio_scan")`` (bundled with the repo).
+(Neutral homogeneous systems like the Argon set carry no long-range tail, so
+they are deliberately *not* used here.)

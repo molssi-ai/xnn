@@ -123,11 +123,20 @@ Key options: ``species``, ``cutoff`` (6.0), ``etas`` (0.05, 0.5, 2.0, 8.0),
 
 ANI (``dnn``)
 =============
-:class:`xnns.dnn.models.ani.ANI` — ANI-style potential over atomic
-environment vectors (radial + angular AEV) with per-element networks.
+:class:`xnns.dnn.models.ani.ANI` — the ANI potential (Smith *et al.* 2017):
+per-element networks over the Atomic Environment Vector (radial + angular
+symmetry functions), verified element-for-element against ``aiqm/torchani``.
+Use the classmethods :meth:`~xnns.dnn.models.ani.ANI.ani1` (the paper's
+768-length AEV, ``768:128:128:64:1`` networks, Gaussian activation) and
+:meth:`~xnns.dnn.models.ani.ANI.ani1x` (the 384-length ANI-1x grid with
+torchani's per-element widths and ``CELU``); the ``preset`` config key
+(``"ani-1"`` / ``"ani-1x"``) selects them from YAML.
 
-Key options: ``species``, ``radial_cutoff`` (5.2), ``angular_cutoff``
-(3.5), ``hidden`` (128, 96, 64), ``aev_kwargs``.
+Key options: ``species`` ([1, 6, 7, 8]), ``radial_cutoff`` (5.2),
+``angular_cutoff`` (3.5), ``hidden`` (128, 128, 64), ``activation``
+(``"celu"``), ``atomic_energies``, ``aev_kwargs`` (symmetry-function grids,
+``radial_prefactor``, ``angular_cos_factor``). The original ANI-1 training set
+is available via ``load_dataset("ani1")``.
 
 PhysNet (``dnn``)
 =================
