@@ -1,14 +1,14 @@
-"""ANI (Smith et al., *Chem. Sci.* **8**, 3192, 2017): per-element networks on
-the Atomic Environment Vector.
+"""The ANI potential: per-element networks on the Atomic Environment Vector.
 
-ANI is an HDNNP whose descriptor is the AEV -- radial *and* angular symmetry
+ANI (Smith et al., *Chem. Sci.* **8**, 3192, 2017) is an HDNNP whose descriptor
+is the AEV -- radial *and* angular symmetry
 functions -- feeding one neural network per element, whose scalar outputs are
 summed (plus a per-element self energy) into the total energy. The AEV lives in
 :class:`xnns.dnn.featurizers.AEV` and reproduces ``torchani.AEVComputer``
 element-for-element; the per-element-network body is the shared
 :class:`~xnns.dnn.models.base.DescriptorPotential`.
 
-Two published parameterisations are exposed as classmethods:
+Three published parameterisations are exposed as classmethods:
 
 * :meth:`ANI.ani1` -- the original ANI-1 potential of the paper: radial cutoff
   4.6 A, angular cutoff 3.1 A (768-length AEV for H, C, N, O), pyramidal
@@ -18,6 +18,10 @@ Two published parameterisations are exposed as classmethods:
   widths (H ``160:128:96``, C ``144:112:96``, N/O ``128:112:96``) with the
   ``CELU`` activation. Building this and transplanting ``torchani``'s pretrained
   weights reproduces its energies and forces (see the fidelity notebook).
+* :meth:`ANI.ani1ccx` -- the ANI-1ccx potential (Smith et al., *Nat. Commun.*
+  **10**, 2903, 2019): the *same* architecture as ANI-1x, retrained by transfer
+  learning on CCSD(T)*/CBS coupled-cluster data. Only the self atomic energies
+  (and the trained weights) differ, so the preset delegates to :meth:`ANI.ani1x`.
 """
 from __future__ import annotations
 
@@ -46,6 +50,16 @@ ANI1X_SELF_ENERGIES: dict[int, float] = {
     8: -75.19446356,
 }
 
+# ANI-1ccx self atomic energies in Hartree: the paper's "ANI-1x CCSD(T)*/CBS
+# linear fitting parameters" (Smith et al. 2019, SI S1.2.3), identical to
+# torchani's ani-1ccx_8x sae_linfit values.
+ANI1CCX_SELF_ENERGIES: dict[int, float] = {
+    1: -0.5991501324919538,
+    6: -38.03750806057356,
+    7: -54.67448347695333,
+    8: -75.16043537275567,
+}
+
 
 @register_model("ani")
 class ANI(DescriptorPotential):
@@ -53,9 +67,22 @@ class ANI(DescriptorPotential):
 
     A :class:`DescriptorPotential` whose featurizer is the
     :class:`~xnns.dnn.featurizers.AEV` (radial *and* angular symmetry functions).
-    Prefer the :meth:`ani1` / :meth:`ani1x` classmethods for the two published
-    parameterisations; the raw constructor exposes every knob for custom grids
-    and architectures.
+    Prefer the :meth:`ani1` / :meth:`ani1x` / :meth:`ani1ccx` classmethods for
+    the published parameterisations; the raw constructor exposes every knob for
+    custom grids and architectures.
+
+    The presets are distinct published models, not tunings of one:
+    :meth:`ani1` is the original ANI-1 (Smith et al. 2017; 768-length AEV,
+    4.6/3.1 A cutoffs, a uniform ``768:128:128:64:1`` network, Gaussian
+    activation) trained on the dense 20 M-conformation ANI-1 dataset, while
+    :meth:`ani1x` is the later ANI-1x (Smith et al. 2018) built by active
+    learning, with a leaner 384-length AEV (5.2/3.5 A cutoffs), torchani's
+    per-element network widths, ``CELU`` activation, and ANI-1x self energies.
+    :meth:`ani1ccx` (Smith et al. 2019) keeps the ANI-1x architecture but was
+    trained by transfer learning to CCSD(T)*/CBS coupled-cluster data, so only
+    its self energies (and trained weights) differ. From a config, the
+    ``preset`` key (``"ani-1"`` / ``"ani-1x"`` / ``"ani-1ccx"``) selects among
+    them; see :meth:`from_config`.
 
     Parameters
     ----------
@@ -160,10 +187,44 @@ class ANI(DescriptorPotential):
                        angular_rs=_even(3.5, 4), angular_theta_s=_ang(8)))
 
     @classmethod
+    def ani1ccx(cls, species: Sequence[int] = ANI_SPECIES,
+                atomic_energies: Optional[Sequence[float]] = "torchani",
+                ) -> "ANI":
+        """Build the ANI-1ccx potential (Smith et al. 2019, transfer learning).
+
+        Architecturally identical to :meth:`ani1x` (384-length AEV, 5.2/3.5 A
+        cutoffs, torchani per-element widths, ``CELU``); the published model was
+        retrained by transfer learning on the CCSD(T)*/CBS energies of the
+        ANI-1ccx data set (holding 65,280 of the 325,248 network weights fixed
+        -- the matrix joining each element network's first two hidden layers),
+        so only the self atomic energies (and the trained weights) differ. With
+        ``torchani``'s pretrained ANI-1ccx weights transplanted this reproduces
+        its energies and forces.
+
+        Parameters
+        ----------
+        species : sequence of int, optional
+            Atomic numbers, by default ``[1, 6, 7, 8]``.
+        atomic_energies : sequence of float, str or None, optional
+            Per-species self energies. ``"torchani"`` (default) uses torchani's
+            ANI-1ccx self energies in Hartree (the CCSD(T)*/CBS linear fit); a
+            sequence sets them explicitly; ``None`` adds nothing.
+
+        Returns
+        -------
+        ANI
+            The ANI-1ccx model.
+        """
+        if atomic_energies == "torchani":
+            atomic_energies = [ANI1CCX_SELF_ENERGIES[z] for z in species]
+        return cls.ani1x(species, atomic_energies=atomic_energies)
+
+    @classmethod
     def from_config(cls, cfg):
         """Build an :class:`ANI` from a configuration object.
 
-        Recognises a ``preset`` key (``"ani-1"`` / ``"ani-1x"``) in ``extra`` to
+        Recognises a ``preset`` key (``"ani-1"`` / ``"ani-1x"`` /
+        ``"ani-1ccx"``) in ``extra`` to
         select a published parameterisation; any other ``extra`` keys override
         the corresponding constructor argument. Upstream torchani / NeuroChem
         key spellings are translated to xnns names by the loader (see
@@ -195,6 +256,9 @@ class ANI(DescriptorPotential):
         elif preset in ("ani-1x", "ani1x"):
             ae = atomic_energies if atomic_energies is not None else "torchani"
             model = cls.ani1x(species, atomic_energies=ae)
+        elif preset in ("ani-1ccx", "ani1ccx"):
+            ae = atomic_energies if atomic_energies is not None else "torchani"
+            model = cls.ani1ccx(species, atomic_energies=ae)
         else:
             model = cls(
                 species=species,
