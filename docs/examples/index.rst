@@ -22,9 +22,9 @@ Data
 ANI (dnn)
 =========
 
-Training ANI from scratch on rMD17, then the three published training sets
-(ANI-1, ANI-1x, and the coupled-cluster ANI-1ccx with its transfer-learning
-recipe), each paired with its matching model preset.
+Training ANI from scratch on rMD17, then the four published training sets
+(ANI-1, ANI-1x, the coupled-cluster ANI-1ccx with its transfer-learning recipe,
+and the seven-element ANI-2x set), each paired with its matching model preset.
 
 .. toctree::
    :maxdepth: 1
@@ -33,6 +33,7 @@ recipe), each paired with its matching model preset.
    nb/dnn/ani/ani1_dataset
    nb/dnn/ani/ani1x_dataset
    nb/dnn/ani/ani1ccx_dataset
+   nb/dnn/ani/ani2x_dataset
 
 PhysNet (dnn)
 =============

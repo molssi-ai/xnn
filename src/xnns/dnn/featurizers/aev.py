@@ -33,6 +33,10 @@ from .symmetry_functions import RadialSymmetryFunctions, AngularSymmetryFunction
 # ANI-1 elements: H, C, N, O.
 ANI_SPECIES = [1, 6, 7, 8]
 
+# ANI-2x element set in torchani's order (H, C, N, O, S, F, Cl). The order
+# fixes the AEV species/pair bucketing, so keep it for weight transplants.
+ANI2X_SPECIES = [1, 6, 7, 8, 16, 9, 17]
+
 
 def _even_shifts(cutoff: float, n: int, start: float = 0.9) -> tuple[float, ...]:
     """Evenly spaced radial shifts on ``[start, cutoff)`` (NeuroChem recipe)."""
@@ -141,6 +145,34 @@ class AEV(Featurizer):
                    angular_etas=(8.0,), angular_zetas=(32.0,),
                    angular_rs=_even_shifts(3.5, 4),
                    angular_theta_s=_angle_shifts(8))
+
+    @classmethod
+    def ani2x(cls, species: list[int] = ANI2X_SPECIES) -> "AEV":
+        """AEV with the exact ANI-2x constants shipped by ``torchani``.
+
+        Radial cutoff 5.1 A (16 shifts), angular cutoff 3.5 A (8 radial x 4
+        angular shifts), with the shift grids starting at 0.8 A and the
+        ANI-2x widths (eta 19.7 / 12.5, zeta 14.1). For the seven ANI-2x
+        elements (H, C, N, O, S, F, Cl) this is a 1008-length AEV that
+        reproduces ``torchani.AEVComputer`` element-for-element.
+
+        Parameters
+        ----------
+        species : list[int], optional
+            Atomic numbers, by default ``[1, 6, 7, 8, 16, 9, 17]``
+            (H, C, N, O, S, F, Cl, in torchani's order).
+
+        Returns
+        -------
+        AEV
+            The ANI-2x-configured featurizer.
+        """
+        return cls(species, radial_cutoff=5.1, angular_cutoff=3.5,
+                   radial_etas=(19.7,),
+                   radial_rs=_even_shifts(5.1, 16, start=0.8),
+                   angular_etas=(12.5,), angular_zetas=(14.1,),
+                   angular_rs=_even_shifts(3.5, 8, start=0.8),
+                   angular_theta_s=_angle_shifts(4))
 
     @classmethod
     def ani1(cls, species: list[int] = ANI_SPECIES) -> "AEV":

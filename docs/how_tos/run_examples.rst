@@ -78,7 +78,9 @@ contrasts the CCSD(T)*/CBS energies with the DFT values for the same
 conformations, and mimics the paper's **transfer learning**: pre-training the
 ``ani-1ccx`` preset on DFT, then retraining on the coupled-cluster energies
 with the paper's exact 65,280 network weights held fixed, against the paper's
-CC-only ANI-1ccx-R control.
+CC-only ANI-1ccx-R control. ``ani2x_dataset.ipynb`` extends the series to seven
+elements: it loads the ANI-2x set (``load_dataset("ani2x", ...)``) and
+trains/evaluates the ``ani-2x`` preset on a subset containing S/F/Cl.
 Its block-by-block fidelity check against
 ``aiqm/torchani`` is ``examples/fidelity_checks/ani_verification.ipynb`` (needs
 the ``ani`` extra: ``pip install -e ".[ani]"``).

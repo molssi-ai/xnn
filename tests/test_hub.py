@@ -12,7 +12,8 @@ import pytest
 import torch
 
 from xnns.common.data import AtomicDataset, list_datasets, load_dataset
-from xnns.common.data.hub import ani1x, default_cache_dir, lode_dimers, rmd17
+from xnns.common.data.hub import (
+    ani1x, ani2x, default_cache_dir, lode_dimers, rmd17)
 
 # eV per kcal/mol, matching rmd17._KCAL_MOL_TO_EV.
 KCAL = 0.0433641153087705
@@ -562,6 +563,152 @@ def test_ani1ccx_rejects_forces_and_level():
         load_dataset("ani1ccx", forces=True, quiet=True)
     with pytest.raises(TypeError):
         load_dataset("ani1ccx", level="wb97x_dz", quiet=True)
+
+
+# --------------------------------------------------------------------------- #
+# ani2x (Zenodo tarball, atom-count-grouped HDF5 with forces, 7 elements)      #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_ani2x(monkeypatch):
+    """Patch the ANI-2x downloader to emit a small synthetic release archive.
+
+    Two atom-count groups keyed like the real file (``"003"``, ``"005"``), each
+    with per-conformation ``species`` (atomic numbers, including S/F/Cl),
+    ``energies`` and ``forces``, packed into a tar.gz so download + extract +
+    per-group parsing can be checked offline (no 3.7 GB download).
+    """
+    h5py = pytest.importorskip("h5py")
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        import tarfile
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            return dest
+        h5 = dest.parent / "ANI-2x-wB97X-631Gd.h5"
+        with h5py.File(h5, "w") as f:
+            g3 = f.create_group("003")            # 2 triatomic conformers
+            g3["coordinates"] = np.arange(2 * 3 * 3, dtype=np.float64).reshape(2, 3, 3)
+            g3["species"] = np.array([[8, 1, 1], [16, 1, 1]], dtype=np.int64)  # H2O, H2S
+            g3["energies"] = np.array([-76.0, -399.0])
+            g3["forces"] = np.ones((2, 3, 3)) * 0.1
+            g5 = f.create_group("005")            # 3 five-atom conformers w/ F, Cl
+            g5["coordinates"] = np.zeros((3, 5, 3))
+            g5["species"] = np.array([[6, 9, 9, 1, 1],
+                                      [6, 17, 1, 1, 1],
+                                      [6, 8, 7, 1, 1]], dtype=np.int64)
+            g5["energies"] = np.array([-200.0, -500.0, -170.0])
+            g5["forces"] = np.zeros((3, 5, 3))
+        with tarfile.open(dest, "w:gz") as t:
+            t.add(h5, arcname=h5.name)
+        h5.unlink()
+        return dest
+
+    monkeypatch.setattr(ani2x, "download_file", fake_download)
+
+
+def test_ani2x_registered():
+    """ani2x is discoverable through the registry."""
+    assert "ani2x" in list_datasets()
+
+
+def test_ani2x_loads_forces_and_seven_elements(fake_ani2x, tmp_path):
+    """ani2x extracts the tarball and yields energies, forces, and 7 elements."""
+    out = load_dataset("ani2x", cache_dir=tmp_path, quiet=True)["all"]
+    assert len(out) == 5                       # 2 (group 003) + 3 (group 005)
+    s = out[0]
+    assert set(s) == {"pos", "atomic_numbers", "energy", "forces"}
+    assert s["forces"].shape == (len(s["atomic_numbers"]), 3)
+    elems = set(int(z) for r in out for z in r["atomic_numbers"])
+    assert {16, 9, 17} <= elems                # S, F, Cl present
+    assert np.isclose(out[0]["energy"], -76.0 * 27.211386245988)
+
+    raw = load_dataset("ani2x", units="hartree", cache_dir=tmp_path,
+                       quiet=True)["all"]
+    assert any(np.isclose(r["energy"], -76.0) for r in raw)
+
+
+def test_ani2x_n_atoms_and_caps(fake_ani2x, tmp_path):
+    """n_atoms selects atom-count groups; max_conformations caps per group."""
+    five = load_dataset("ani2x", n_atoms=5, cache_dir=tmp_path, quiet=True)["all"]
+    assert len(five) == 3 and all(len(s["atomic_numbers"]) == 5 for s in five)
+
+    capped = load_dataset("ani2x", max_conformations=1, cache_dir=tmp_path,
+                          quiet=True)["all"]
+    assert len(capped) == 2                     # one conformer from each group
+
+
+def test_ani2x_forces_false_and_splits(fake_ani2x, tmp_path):
+    """forces=False drops forces; splits cover the whole set."""
+    nf = load_dataset("ani2x", forces=False, cache_dir=tmp_path, quiet=True)["all"]
+    assert all("forces" not in s for s in nf)
+
+    kw = dict(cache_dir=tmp_path, quiet=True)
+    tr = load_dataset("ani2x", split="train", **kw)
+    va = load_dataset("ani2x", split="val", **kw)
+    te = load_dataset("ani2x", split="test", **kw)
+    assert len(tr) + len(va) + len(te) == 5
+
+
+def test_ani2x_cutoff_wraps_dataset_with_forces(fake_ani2x, tmp_path):
+    """cutoff wraps an AtomicDataset carrying forces."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("ani2x", cutoff=5.1, cache_dir=tmp_path, quiet=True)["all"]
+    assert isinstance(ds, AtomicDataset)
+    g = ds[0]
+    assert g.forces is not None and g.energy is not None
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"units": "kcal"}, "units must be"),
+    ({"split": "trian"}, "unknown split"),
+])
+def test_ani2x_invalid_args(fake_ani2x, tmp_path, kwargs, match):
+    """Bad units / split raise clear ValueErrors."""
+    base = dict(cache_dir=tmp_path, quiet=True)
+    base.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        load_dataset("ani2x", **base)
+
+
+def test_ani2x_cap_samples_across_group(monkeypatch, tmp_path):
+    """max_conformations strides across a group, not a contiguous head.
+
+    The real HDF5 orders each atom-count group by molecule, so a head-only cap
+    would drop whole elements. Here a group of four conformers carries Cl only
+    in the *last* one; a cap of 2 must still keep it (evenly-spaced sampling).
+    """
+    h5py = pytest.importorskip("h5py")
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        import tarfile
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            return dest
+        h5 = dest.parent / "ANI-2x-wB97X-631Gd.h5"
+        with h5py.File(h5, "w") as f:
+            g = f.create_group("004")
+            g["coordinates"] = np.zeros((4, 4, 3))
+            # first three are H/C/N/O; only the last contains Cl
+            g["species"] = np.array([[6, 8, 1, 1], [6, 7, 1, 1],
+                                     [6, 8, 1, 1], [6, 17, 1, 1]], dtype=np.int64)
+            g["energies"] = np.array([-1.0, -2.0, -3.0, -500.0])
+            g["forces"] = np.zeros((4, 4, 3))
+        with tarfile.open(dest, "w:gz") as t:
+            t.add(h5, arcname=h5.name)
+        h5.unlink()
+        return dest
+
+    monkeypatch.setattr(ani2x, "download_file", fake_download)
+    out = load_dataset("ani2x", max_conformations=2, cache_dir=tmp_path,
+                       quiet=True)["all"]
+    assert len(out) == 2
+    elems = set(int(z) for s in out for z in s["atomic_numbers"])
+    assert 17 in elems                          # the tail-only Cl survived
 
 
 # --------------------------------------------------------------------------- #

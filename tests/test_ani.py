@@ -23,7 +23,9 @@ from xnns.dnn.featurizers import AEV
 from xnns.dnn.featurizers.aev import _angle_shifts, _even_shifts
 from xnns.dnn.featurizers.symmetry_functions import build_triplets
 from xnns.dnn.models.ani import (
-    ANI, ANI1CCX_SELF_ENERGIES, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES)
+    ANI, ANI1CCX_SELF_ENERGIES, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES,
+    ANI2X_HIDDEN, ANI2X_SELF_ENERGIES)
+from xnns.dnn.featurizers.aev import ANI2X_SPECIES
 
 # H, C, N, O
 SPECIES = [1, 6, 7, 8]
@@ -84,6 +86,17 @@ def test_aev_preset_dimensions():
     a = AEV.ani1x(SPECIES)
     assert a.radial.output_dim == 16 * 4
     assert a.angular.output_dim == (4 * 8) * 10
+
+
+def test_ani2x_aev_dimensions():
+    """ANI-2x has the published 1008-length AEV over seven elements."""
+    a = AEV.ani2x(ANI2X_SPECIES)
+    assert a.output_dim == 1008
+    # radial: 16 shifts * 7 species; angular: (8 radial * 4 angular) * 28 pairs
+    assert a.radial.output_dim == 16 * 7
+    assert a.angular.output_dim == (8 * 4) * 28
+    assert math.isclose(a.radial.cutoff, 5.1)
+    assert math.isclose(a.angular.cutoff, 3.5)
 
 
 def test_shift_recipe_matches_torchani_grid():
@@ -175,6 +188,33 @@ def test_ani1ccx_architecture_matches_ani1x():
                                 ANI1X_SELF_ENERGIES[z])
 
 
+def test_ani2x_architecture():
+    """ANI-2x preset builds torchani's seven-element widths and self energies."""
+    m = ANI.ani2x()                       # default seven-element set
+    assert m.species == ANI2X_SPECIES
+    assert m.featurizer.output_dim == 1008
+    for z in ANI2X_SPECIES:
+        outs = [l.out_features for l in m.element_nets.nets[str(z)]
+                if hasattr(l, "out_features")]
+        assert outs == list(ANI2X_HIDDEN[z]) + [1]
+        assert math.isclose(float(m._self_energies_by_z[z]),
+                            ANI2X_SELF_ENERGIES[z])
+
+
+def test_ani2x_energy_forces_on_halogens():
+    """ANI-2x runs on an S/F/Cl-containing structure with finite forces."""
+    from xnns.dnn.models.ani import ANI as _ANI
+    model = ForceStressOutput(_ANI.ani2x())
+    z = np.array([6, 16, 9, 17, 8, 7, 1, 1], dtype=np.int64)   # C S F Cl O N H H
+    rng = np.random.default_rng(0)
+    pos = rng.uniform(0, 4, (8, 3)).astype(np.float64)
+    g = structure_to_graph({"pos": pos, "atomic_numbers": z}, 5.1)
+    out = model(g)
+    assert out["energy"].shape == (1,)
+    assert out["forces"].shape == (8, 3)
+    assert torch.isfinite(out["forces"]).all()
+
+
 # --------------------------------------------------------------------------- #
 # config                                                                      #
 # --------------------------------------------------------------------------- #
@@ -200,6 +240,16 @@ def test_from_config_preset_and_translation():
     assert m_ccx.featurizer.output_dim == 384
     assert math.isclose(float(m_ccx._self_energies_by_z[6]),
                         ANI1CCX_SELF_ENERGIES[6])
+
+    # ani-2x defaults to its seven-element set (no species given)
+    cfg_2x = from_dict({"model": {
+        "name": "ani", "extra": {"preset": "ani-2x"},
+    }})
+    m_2x = build_model(cfg_2x.model)
+    assert m_2x.species == ANI2X_SPECIES
+    assert m_2x.featurizer.output_dim == 1008
+    assert math.isclose(float(m_2x._self_energies_by_z[16]),
+                        ANI2X_SELF_ENERGIES[16])
 
     # torchani/NeuroChem spellings Rcr/Rca translate to radial/angular cutoff
     cfg2 = from_dict({"model": {
@@ -295,3 +345,60 @@ def test_torchani_energy_force_parity(preset, upstream):
 
     assert abs(out["energy"].item() - e.item()) < 1e-6
     assert torch.allclose(out["forces"].detach(), f, atol=1e-6)
+
+
+def test_torchani_ani2x_aev_parity():
+    """xnns ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
+    torchani = pytest.importorskip("torchani")
+    t = lambda x: torch.tensor(x, dtype=torch.float64)
+    tani = torchani.AEVComputer(
+        5.1, 3.5, t([19.7]), t(_even_shifts(5.1, 16, start=0.8)),
+        t([12.5]), t([14.1]), t(_even_shifts(3.5, 8, start=0.8)),
+        t(_angle_shifts(4)), 7)
+    aev = AEV.ani2x(ANI2X_SPECIES)
+
+    rng = np.random.default_rng(0)
+    Z = np.array([6, 7, 8, 16, 9, 17, 1, 1], dtype=np.int64)
+    pos = rng.uniform(0, 3, (8, 3))
+    idx = {z: i for i, z in enumerate(ANI2X_SPECIES)}
+    x = aev(_xnns_graph(Z, pos, aev.cutoff))
+    sp = torch.tensor([[idx[z] for z in Z]])
+    _, ref = tani((sp, torch.as_tensor(pos[None])))
+    assert torch.allclose(x, ref[0], atol=1e-10)
+
+
+def test_torchani_ani2x_energy_force_parity():
+    """Transplanting torchani's pretrained ANI-2x weights reproduces E and F."""
+    torchani = pytest.importorskip("torchani")
+    model = torchani.models.ANI2x(periodic_table_index=False).double()
+    member = model.neural_networks[0]
+
+    xa = ANI.ani2x(ANI2X_SPECIES)
+    nets = dict(member.named_children())
+    zsym = {1: "H", 6: "C", 7: "N", 8: "O", 16: "S", 9: "F", 17: "Cl"}
+    for z in ANI2X_SPECIES:
+        src = [l for l in nets[zsym[z]] if isinstance(l, torch.nn.Linear)]
+        dst = [l for l in xa.element_nets.nets[str(z)]
+               if isinstance(l, torch.nn.Linear)]
+        for s, d in zip(src, dst):
+            d.weight.data = s.weight.data.clone()
+            d.bias.data = s.bias.data.clone()
+
+    rng = np.random.default_rng(1)
+    Z = np.array([6, 7, 8, 16, 9, 17, 1, 1, 1], dtype=np.int64)
+    pos = rng.uniform(0, 3.5, (9, 3))
+    idx = {z: i for i, z in enumerate(ANI2X_SPECIES)}
+
+    g = _xnns_graph(Z, pos, xa.cutoff)
+    g.pos.requires_grad_(True)
+    out = ForceStressOutput(xa)(g)
+
+    coords = torch.as_tensor(pos[None]).clone().requires_grad_(True)
+    sp = torch.tensor([[idx[z] for z in Z]])
+    e = model.energy_shifter(member(model.aev_computer((sp, coords)))).energies
+    f = -torch.autograd.grad(e.sum(), coords)[0][0]
+
+    # larger absolute energies (S/Cl cores ~ -400 Ha) than ANI-1x, so the
+    # tolerance is looser in absolute terms but still ~1e-10 relative.
+    assert abs(out["energy"].item() - e.item()) < 1e-5
+    assert torch.allclose(out["forces"].detach(), f, atol=1e-5)

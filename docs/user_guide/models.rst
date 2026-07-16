@@ -128,9 +128,10 @@ ANI (``dnn``)
 per-element networks over the Atomic Environment Vector (radial + angular
 symmetry functions), verified element-for-element against ``aiqm/torchani``.
 
-ANI-1 vs. ANI-1x vs. ANI-1ccx: choosing a preset
-------------------------------------------------
-There are **three published ANI parameterisations for H/C/N/O**, and in ``xnns``
+ANI-1 vs. ANI-1x vs. ANI-1ccx vs. ANI-2x: choosing a preset
+-----------------------------------------------------------
+There are **four published ANI parameterisations**: three for H/C/N/O and the
+seven-element ANI-2x (the only one that also covers S, F, and Cl). In ``xnns``
 each one is a *preset*: a classmethod that fills in the AEV grid, the
 per-element network shapes, the activation, and the self atomic energies so you
 do not have to. Pick the preset, not the individual knobs.
@@ -150,6 +151,11 @@ do not have to. Pick the preset, not the individual knobs.
   the smaller coupled-cluster set. The descriptor and networks are *identical*
   to ANI-1x; only the training data, self atomic energies, and resulting
   weights differ. Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1ccx`.
+- **ANI-2x** (Devereux *et al.*, *J. Chem. Theory Comput.* 2020): the only
+  seven-element parameterisation, extending ANI from H/C/N/O to **seven
+  elements** by adding S, F, and Cl. It pairs a larger 1008-length AEV with
+  wider per-element networks (see the paragraph after the table). Preset:
+  :meth:`~xnns.dnn.models.ani.ANI.ani2x`.
 
 ANI-1 and ANI-1x differ in both the descriptor geometry *and* the network body
 (ANI-1ccx shares the ``ani1x`` column, with its own coupled-cluster self
@@ -190,6 +196,15 @@ energies):
 Note that ANI-1x uses the *larger* cutoff but the *shorter* AEV: the
 active-learning data lets it do more with a leaner descriptor.
 
+ANI-2x uses a different grid again, sized for its seven elements: a 1008-length
+AEV built from a 5.1 Å radial cutoff (16 shifts) and a 3.5 Å angular cutoff
+(8 radial x 4 angular shifts), both shift grids starting at 0.8 Å, feeding
+wider per-element networks (H ``256:192:160``, C ``224:192:160``, N/O
+``192:160:128``, S/F/Cl ``160:128:96``) with the ``CELU`` activation and
+wB97X/6-31G* self atomic energies. Its default species set is the seven-element
+``[1, 6, 7, 8, 16, 9, 17]`` (H, C, N, O, S, F, Cl, in torchani's order), so
+:meth:`~xnns.dnn.models.ani.ANI.ani2x` needs no ``species`` argument.
+
 Select a preset in Python:
 
 .. code-block:: python
@@ -199,17 +214,18 @@ Select a preset in Python:
    ani1    = ANI.ani1(species=[1, 6, 7, 8])                        # original ANI-1
    ani1x   = ANI.ani1x(species=[1, 6, 7, 8], atomic_energies="torchani")  # ANI-1x
    ani1ccx = ANI.ani1ccx(species=[1, 6, 7, 8])                     # ANI-1ccx (CC)
+   ani2x   = ANI.ani2x()                                           # ANI-2x (7 elem)
 
 ...or from a config file with the ``preset`` key, which
 :meth:`~xnns.dnn.models.ani.ANI.from_config` routes to the matching classmethod
-(accepts ``"ani-1"``/``"ani1"``, ``"ani-1x"``/``"ani1x"``, and
-``"ani-1ccx"``/``"ani1ccx"``):
+(accepts ``"ani-1"``/``"ani1"``, ``"ani-1x"``/``"ani1x"``,
+``"ani-1ccx"``/``"ani1ccx"``, and ``"ani-2x"``/``"ani2x"``):
 
 .. code-block:: yaml
 
    model:
      name: ani
-     preset: ani-1x        # or ani-1 / ani-1ccx
+     preset: ani-1x        # or ani-1 / ani-1ccx / ani-2x
 
 Any key under ``model`` that is not a core config field (like ``preset``) is
 collected into ``model.extra`` and forwarded to
@@ -221,14 +237,16 @@ collected into ``model.extra`` and forwarded to
    The preset fixes the model *architecture*; the matching training data lives
    in the hub. Each preset has its own dataset builder: the original ANI-1 set
    as ``load_dataset("ani1")``, the active-learning ANI-1x set (with forces) as
-   ``load_dataset("ani1x")``, and the coupled-cluster ANI-1ccx set (energy-only)
-   as ``load_dataset("ani1ccx")``. So ``ani-1`` + ``load_dataset("ani1")``,
-   ``ani-1x`` + ``load_dataset("ani1x")``, and ``ani-1ccx`` +
-   ``load_dataset("ani1ccx")`` each reproduce a published model end-to-end
+   ``load_dataset("ani1x")``, the coupled-cluster ANI-1ccx set (energy-only)
+   as ``load_dataset("ani1ccx")``, and the seven-element ANI-2x set (energies
+   and forces for H/C/N/O/S/F/Cl) as ``load_dataset("ani2x")``. So ``ani-1`` +
+   ``load_dataset("ani1")``, ``ani-1x`` + ``load_dataset("ani1x")``,
+   ``ani-1ccx`` + ``load_dataset("ani1ccx")``, and ``ani-2x`` +
+   ``load_dataset("ani2x")`` each reproduce a published model end-to-end
    (the published ANI-1ccx was *transfer-learned*: pre-trained on ANI-1x DFT
    data, then fine-tuned on the ANI-1ccx coupled-cluster energies). To load
-   torchani's **pretrained** ANI-1x/ANI-1ccx weights instead of training, see
-   :ref:`fidelity`.
+   torchani's **pretrained** ANI-1x/ANI-1ccx/ANI-2x weights instead of
+   training, see :ref:`fidelity`.
 
 Key options (for the bare constructor, when not using a preset): ``species``
 ([1, 6, 7, 8]), ``radial_cutoff`` (5.2), ``angular_cutoff`` (3.5), ``hidden``

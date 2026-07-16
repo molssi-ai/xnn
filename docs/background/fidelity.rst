@@ -156,21 +156,24 @@ extra dependency):
 - the published parameterisations as presets: :meth:`ANI.ani1` (the
   paper's 768-length AEV, 4.6/3.1 Å cutoffs, ``768:128:128:64:1`` networks with
   a Gaussian activation), :meth:`ANI.ani1x` (the 384-length ANI-1x grid,
-  5.2/3.5 Å cutoffs), and :meth:`ANI.ani1ccx` (Smith *et al.* 2019: identical
+  5.2/3.5 Å cutoffs), :meth:`ANI.ani1ccx` (Smith *et al.* 2019: identical
   architecture to ANI-1x, transfer-learned to CCSD(T)*/CBS coupled-cluster
   data; the preset reuses :meth:`ANI.ani1x` and swaps in the coupled-cluster
-  self atomic energies).
+  self atomic energies), and :meth:`ANI.ani2x` (Devereux *et al.* 2020: the
+  seven-element model, adding S, F, and Cl to give a 1008-length AEV with
+  5.1/3.5 Å cutoffs and wider per-element networks).
 
-The AEV matches ``torchani.AEVComputer`` element-for-element to ~1e-16 (for both
-the ANI-1x and ANI-1 grids), and transplanting torchani's **pretrained** ANI-1x
-or ANI-1ccx weights reproduces their energies to ~1e-9 Ha and forces to
-~1e-8 Ha/Å, for a single network and the full 8-model ensemble
+The AEV matches ``torchani.AEVComputer`` element-for-element to ~1e-16 (for the
+ANI-1, ANI-1x, and ANI-2x grids), and transplanting torchani's **pretrained**
+ANI-1x, ANI-1ccx, or ANI-2x weights reproduces their energies to ~1e-8 Ha and
+forces to ~2e-7 Ha/Å, for a single network and the full 8-model ensemble
 (``examples/fidelity_checks/ani_verification.ipynb``, ``tests/test_ani.py``; the
-parity tests need ``torchani``, the ``[ani]`` extra). All three training sets
+parity tests need ``torchani``, the ``[ani]`` extra). All four training sets
 are in the hub: the original ANI-1 data as ``load_dataset("ani1")``, the
 active-learning ANI-1x data (energies and forces) as ``load_dataset("ani1x")``,
-and its coupled-cluster subset (CCSD(T)*/CBS energies, shared release file) as
-``load_dataset("ani1ccx")``.
+its coupled-cluster subset (CCSD(T)*/CBS energies, shared release file) as
+``load_dataset("ani1ccx")``, and the seven-element ANI-2x data (wB97X energies
+and forces for H/C/N/O/S/F/Cl) as ``load_dataset("ani2x")``.
 
 BAMBOO
 ======

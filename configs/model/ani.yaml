@@ -11,6 +11,9 @@ species: [1, 6, 7, 8]   # H, C, N, O
                         #              per-element widths, celu, torchani self energies
                         #   ani-1ccx = ANI-1ccx (transfer learning to CCSD(T)*/CBS):
                         #              same architecture as ani-1x, ccx self energies
+                        #   ani-2x   = ANI-2x (Devereux 2020): adds S, F, Cl (7 elements),
+                        #              1008 AEV, 5.1/3.5 A, wider nets; defaults to its
+                        #              own 7-element set if species is omitted
 radial_cutoff: 5.2      # ANI-1x radial cutoff Rcr   (ignored when preset is set)
 angular_cutoff: 3.5     # ANI-1x angular cutoff Rca  (ignored when preset is set)
 hidden: [128, 128, 64]  # per-element MLP widths (or a {Z: [...]} mapping)

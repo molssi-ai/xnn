@@ -140,7 +140,7 @@ unpacking, or unit conversion:
 
    from xnns.common.data import load_dataset, list_datasets
 
-   list_datasets()                          # ['ani1', 'ani1ccx', 'ani1x', 'argon_md', 'lode_dimers', 'rmd17']
+   list_datasets()                          # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'rmd17']
 
    # all splits, as lists of structure dictionaries
    splits = load_dataset("rmd17", molecule="aspirin")     # {"train": [...], "test": [...]}
@@ -196,6 +196,16 @@ progress bar tracks both downloading and preprocessing.
        the intelligently selected ~10 % subset of ANI-1x that the
        :meth:`~xnns.dnn.models.ani.ANI.ani1ccx` preset was transfer-learned on.
        Shares the ``ani1x`` release file and cache; nothing extra to download.
+   * - ``ani2x``
+     - ``n_atoms`` (int or list), ``forces``, ``max_groups``,
+       ``max_conformations``, ``split`` (``train`` / ``val`` / ``test``),
+       ``units`` (``eV`` / ``hartree``)
+     - The ANI-2x training set (Devereux *et al.* 2020): ~9.6 M conformations
+       with wB97X/6-31G* **energies and forces** for the seven elements
+       H/C/N/O/S/F/Cl. The data the
+       :meth:`~xnns.dnn.models.ani.ANI.ani2x` preset was trained on. One 3.7 GB
+       pyanitools HDF5 file is downloaded once (Zenodo record 10108942), with
+       top-level groups keyed by atom count; ``n_atoms`` selects those groups.
    * - ``argon_md``
      - ``split`` (``train`` / ``test`` / ``all``)
      - Periodic argon configurations with reference energies, forces and stress

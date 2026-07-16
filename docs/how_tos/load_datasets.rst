@@ -18,7 +18,7 @@ List what is available
 
    from xnns.common.data import load_dataset, list_datasets
 
-   list_datasets()          # ['ani1', 'ani1ccx', 'ani1x', 'argon_md', 'lode_dimers', 'rmd17']
+   list_datasets()          # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'rmd17']
 
 Load a dataset
 ==============
@@ -91,6 +91,23 @@ equivalent to the ``level="ccsd(t)_cbs"`` call above, under its own name:
 
    data = load_dataset("ani1ccx", max_molecules=50)             # {"all": [...]}
    train = load_dataset("ani1ccx", split="train")               # 80/10/10 split
+
+The ``ani2x`` set is the seven-element training data behind the
+:meth:`~xnns.dnn.models.ani.ANI.ani2x` preset (Devereux *et al.* 2020): ~9.6 M
+conformations with wB97X/6-31G* **energies and forces** for H/C/N/O/S/F/Cl. It
+is a separate 3.7 GB pyanitools HDF5 download from Zenodo (it shares nothing
+with the ``ani1x`` file), whose top-level groups are keyed by atom count;
+``n_atoms`` selects those groups. ``split`` in ``{"train", "val", "test"}``
+gives a reproducible 80/10/10 partition, and energies/forces convert to eV by
+default:
+
+.. code-block:: python
+
+   # capped subset (3- and 4-atom groups) with forces, energies in eV
+   data = load_dataset("ani2x", n_atoms=[3, 4], max_conformations=200)  # {"all": [...]}
+   train = load_dataset("ani2x", split="train")                 # 80/10/10 split
+   # the S/F/Cl elements (16, 9, 17) and forces are present in the structures
+   assert "forces" in data["all"][0]
 
 The ``argon_md`` set (periodic argon configurations with energies, forces and
 stress, bundled with the repository and used by the ``*_argon_*`` example
