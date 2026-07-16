@@ -84,6 +84,16 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "Qshift": "charge_shift",
         "Qscale": "charge_scale",
     },
+    # ANI / torchani / NeuroChem spellings (torchani.AEVComputer kwargs and the
+    # ANI-1 potential's config knobs).
+    "ani": {
+        "Rcr": "radial_cutoff",
+        "Rca": "angular_cutoff",
+        "atomic_numbers": "species",
+        "self_energies": "atomic_energies",
+        "sae": "atomic_energies",
+        "network_dims": "hidden",
+    },
     # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
     "bamboo": {
         "rcut": "cutoff",

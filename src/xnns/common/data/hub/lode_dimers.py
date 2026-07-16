@@ -12,6 +12,11 @@ dimers, tagging each pair by the polarity of its two fragments: ``CC``
 (charged-charged), ``CP`` (charged-polar), ``PP`` (polar-polar), plus ``AA`` /
 ``CA`` / ``PA`` involving apolar fragments.
 
+One additional subset, ``bio_scan``, ships **inside the repository** (under
+``datasets/lode_dimers/``, no download): a curated distance scan of three
+charged/polar dimers (one ``CC``, one ``CP``, one ``PP``, ~13 separations each),
+used by the long-range example notebooks (LES, BAMBOO electrostatics).
+
 Reference
 ---------
 K. K. Huguenin-Dumittan, P. Loche, H. Ni, M. Ceriotti, "Physics-inspired
@@ -46,6 +51,13 @@ _SUBSETS: dict[str, tuple[str, str, bool]] = {
     "xenon":                     ("xenon.xyz", "9371ed17727e39635fa0c11e27425ace", True),
 }
 
+# Bundled sub-datasets shipped inside the repository (no download): a curated
+# charged/polar dimer distance scan (one CC, one CP, one PP dimer, ~13
+# separations each) used by the LES / BAMBOO long-range example notebooks.
+_BUNDLED: dict[str, str] = {
+    "bio_scan": "bio_dimers_CC_CP_PP.xyz",
+}
+
 # common spellings mapped to the canonical subset key.
 _ALIASES: dict[str, str] = {
     "bio_dimers": "bio",
@@ -55,7 +67,12 @@ _ALIASES: dict[str, str] = {
     "dispersion": "point_charges_dispersion",
     "p6": "point_charges_dispersion",
     "xe": "xenon",
+    "scan": "bio_scan",
+    "dimer_scan": "bio_scan",
 }
+
+# subsets that carry the biomolecular per-fragment `label` (support filtering).
+_LABELLED = frozenset({"bio", "bio_scan"})
 
 # valid `label` values on the biomolecular dimers (fragment polarity pair).
 _LABELS = frozenset({"AA", "CA", "CC", "CP", "PA", "PP"})
@@ -90,12 +107,14 @@ class LODEDimersBuilder(DatasetBuilder):
             ``cache_dir/"lode_dimers"``.
         subset : str, optional
             Which sub-dataset to load. One of ``bio`` (default; biomolecular
-            dimers with energies & forces), ``monomers``,
-            ``point_charges_coulomb``, ``point_charges_dispersion``, ``xenon``.
+            dimers with energies & forces), ``bio_scan`` (a bundled charged/polar
+            dimer distance scan used by the long-range example notebooks; no
+            download), ``monomers``, ``point_charges_coulomb``,
+            ``point_charges_dispersion``, ``xenon``.
         label : str, optional
-            For ``subset="bio"`` only: keep only dimers of this fragment-polarity
-            class -- one of ``AA``, ``CA``, ``CC``, ``CP``, ``PA``, ``PP``.
-            ``None`` (default) keeps all classes.
+            For ``subset="bio"`` / ``"bio_scan"`` only: keep only dimers of this
+            fragment-polarity class -- one of ``AA``, ``CA``, ``CC``, ``CP``,
+            ``PA``, ``PP``. ``None`` (default) keeps all classes.
         return_info : bool, optional
             If ``True``, attach the frame's extxyz ``info`` (the per-frame
             metadata) to each structure dict under the ``"info"`` key. For the
@@ -128,10 +147,17 @@ class LODEDimersBuilder(DatasetBuilder):
                 f"unknown split {split!r}; lode_dimers has no train/test split, "
                 "use split=None or split='all'")
 
-        fname, md5, _ = _SUBSETS[sub]
         root = Path(cache_dir) / self.name
-        path = download_file(_BASE.format(fname=fname), root / "raw" / fname,
-                             md5, quiet=quiet)
+        if sub in _BUNDLED:
+            path = root / _BUNDLED[sub]
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"missing bundled file {path}; the '{sub}' subset ships "
+                    f"under datasets/lode_dimers/ in the repository")
+        else:
+            fname, md5, _ = _SUBSETS[sub]
+            path = download_file(_BASE.format(fname=fname), root / "raw" / fname,
+                                 md5, quiet=quiet)
 
         structures = self._read_xyz(path, sub, label, return_info, quiet)
         if split == "all":
@@ -159,10 +185,10 @@ class LODEDimersBuilder(DatasetBuilder):
         """
         key = subset.strip().lower()
         key = _ALIASES.get(key, key)
-        if key not in _SUBSETS:
+        if key not in _SUBSETS and key not in _BUNDLED:
             raise ValueError(
                 f"unknown lode_dimers subset {subset!r}; choose one of: "
-                + ", ".join(sorted(_SUBSETS)))
+                + ", ".join(sorted(set(_SUBSETS) | set(_BUNDLED))))
         return key
 
     @staticmethod
@@ -201,9 +227,10 @@ class LODEDimersBuilder(DatasetBuilder):
         from ..ase_io import atoms_to_structure
 
         if label is not None:
-            if subset != "bio":
+            if subset not in _LABELLED:
                 raise ValueError(
-                    "`label` filtering is only supported for subset='bio'")
+                    "`label` filtering is only supported for the biomolecular "
+                    "dimer subsets ('bio', 'bio_scan')")
             label = label.strip().upper()
             if label not in _LABELS:
                 raise ValueError(
