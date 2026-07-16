@@ -1,11 +1,12 @@
 """Tests for the faithful ANI model (registered as ``ani``) and its AEV.
 
 Covers the symmetry-function / AEV building blocks, rotation/translation/
-permutation invariance of energies and equivariance of forces, the ANI-1 and
-ANI-1x presets (AEV lengths and per-element architectures), self atomic
-energies, config building with upstream key translation, and -- when
+permutation invariance of energies and equivariance of forces, the ANI-1,
+ANI-1x, and ANI-1ccx presets (AEV lengths and per-element architectures), self
+atomic energies, config building with upstream key translation, and -- when
 ``torchani`` is available -- element-for-element AEV parity against
-``torchani.AEVComputer`` and full energy/force parity via weight transplant.
+``torchani.AEVComputer`` and full energy/force parity via weight transplant of
+both the pretrained ANI-1x and ANI-1ccx models.
 """
 import math
 
@@ -21,7 +22,8 @@ from xnns.common.models import ForceStressOutput, available_models, build_model
 from xnns.dnn.featurizers import AEV
 from xnns.dnn.featurizers.aev import _angle_shifts, _even_shifts
 from xnns.dnn.featurizers.symmetry_functions import build_triplets
-from xnns.dnn.models.ani import ANI, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES
+from xnns.dnn.models.ani import (
+    ANI, ANI1CCX_SELF_ENERGIES, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES)
 
 # H, C, N, O
 SPECIES = [1, 6, 7, 8]
@@ -158,6 +160,21 @@ def test_ani1x_architecture():
                             ANI1X_SELF_ENERGIES[z])
 
 
+def test_ani1ccx_architecture_matches_ani1x():
+    """ANI-1ccx preset shares the ANI-1x architecture; only self energies differ."""
+    ccx = ANI.ani1ccx(SPECIES)
+    x = ANI.ani1x(SPECIES)
+    assert ccx.featurizer.output_dim == x.featurizer.output_dim == 384
+    for z in SPECIES:
+        widths = lambda m: [l.out_features for l in m.element_nets.nets[str(z)]
+                            if hasattr(l, "out_features")]
+        assert widths(ccx) == widths(x)
+        assert math.isclose(float(ccx._self_energies_by_z[z]),
+                            ANI1CCX_SELF_ENERGIES[z])
+        assert not math.isclose(float(ccx._self_energies_by_z[z]),
+                                ANI1X_SELF_ENERGIES[z])
+
+
 # --------------------------------------------------------------------------- #
 # config                                                                      #
 # --------------------------------------------------------------------------- #
@@ -175,6 +192,14 @@ def test_from_config_preset_and_translation():
     }})
     m = build_model(cfg.model)
     assert m.featurizer.output_dim == 384
+
+    cfg_ccx = from_dict({"model": {
+        "name": "ani", "extra": {"preset": "ani-1ccx"},
+    }})
+    m_ccx = build_model(cfg_ccx.model)
+    assert m_ccx.featurizer.output_dim == 384
+    assert math.isclose(float(m_ccx._self_energies_by_z[6]),
+                        ANI1CCX_SELF_ENERGIES[6])
 
     # torchani/NeuroChem spellings Rcr/Rca translate to radial/angular cutoff
     cfg2 = from_dict({"model": {
@@ -232,13 +257,18 @@ def test_torchani_aev_parity(preset, grid):
     assert torch.allclose(x, ref[0], atol=1e-10)
 
 
-def test_torchani_energy_force_parity():
-    """Transplanting torchani's pretrained ANI-1x weights reproduces E and F."""
+@pytest.mark.parametrize("preset,upstream", [
+    ("ani1x", "ANI1x"),
+    ("ani1ccx", "ANI1ccx"),
+])
+def test_torchani_energy_force_parity(preset, upstream):
+    """Transplanting torchani's pretrained ANI-1x/ANI-1ccx weights reproduces E and F."""
     torchani = pytest.importorskip("torchani")
-    model = torchani.models.ANI1x(periodic_table_index=False).double()
+    model = getattr(torchani.models, upstream)(
+        periodic_table_index=False).double()
     member = model.neural_networks[0]
 
-    xa = ANI.ani1x(SPECIES)
+    xa = getattr(ANI, preset)(SPECIES)
     nets = dict(member.named_children())
     zsym = {1: "H", 6: "C", 7: "N", 8: "O"}
     for z in SPECIES:

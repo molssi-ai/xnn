@@ -29,6 +29,7 @@ docs = [
     "pydata-sphinx-theme>=0.15",
     "sphinx-design",
     "sphinx-copybutton",
+    "myst-nb>=1.1",            # renders the executed example notebooks
 ]
 # Everything needed to build and run the example notebooks in examples/gnn/,
 # including the reference ACEsuit/mace and mir-group/nequip implementations the

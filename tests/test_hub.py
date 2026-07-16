@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from xnns.common.data import AtomicDataset, list_datasets, load_dataset
-from xnns.common.data.hub import default_cache_dir, lode_dimers, rmd17
+from xnns.common.data.hub import ani1x, default_cache_dir, lode_dimers, rmd17
 
 # eV per kcal/mol, matching rmd17._KCAL_MOL_TO_EV.
 KCAL = 0.0433641153087705
@@ -377,6 +377,191 @@ def test_ani1_invalid_args(fake_ani1, kwargs, match):
     base.update(kwargs)
     with pytest.raises(ValueError, match=match):
         load_dataset("ani1", **base)
+
+
+# --------------------------------------------------------------------------- #
+# ani1x (single pyanitools HDF5 with forces + NaN masking)                     #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_ani1x(monkeypatch):
+    """Patch the ANI-1x downloader to emit a small synthetic release HDF5.
+
+    Two molecule groups keyed like the real file, with per-conformation NaN
+    holes in the energy and force datasets, so unit conversion, NaN masking,
+    level selection, and forces handling can be checked offline (no 5.6 GB
+    download). ``ccsd(t)_cbs`` is written energy-only, as upstream.
+    """
+    h5py = pytest.importorskip("h5py")
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            return dest
+        with h5py.File(dest, "w") as f:
+            g = f.create_group("C1H2")
+            g["atomic_numbers"] = np.array([6, 1, 1], dtype=np.int64)
+            g["coordinates"] = np.arange(4 * 3 * 3, dtype=np.float64).reshape(4, 3, 3)
+            g["wb97x_dz.energy"] = np.array([-38.0, np.nan, -38.2, -38.3])
+            fr = np.ones((4, 3, 3)) * 0.1
+            fr[2, 0, 0] = np.nan                       # NaN force in conf 2
+            g["wb97x_dz.forces"] = fr
+            g["ccsd(t)_cbs.energy"] = np.array([-38.5, -38.6, np.nan, np.nan])
+            h = f.create_group("H2")
+            h["atomic_numbers"] = np.array([1, 1], dtype=np.int64)
+            h["coordinates"] = np.zeros((2, 2, 3))
+            h["wb97x_dz.energy"] = np.array([-1.0, -1.1])
+            h["wb97x_dz.forces"] = np.zeros((2, 2, 3))
+            h["ccsd(t)_cbs.energy"] = np.array([-1.2, -1.3])
+        return dest
+
+    monkeypatch.setattr(ani1x, "download_file", fake_download)
+
+
+def test_ani1x_registered():
+    """ani1x is discoverable through the registry."""
+    assert "ani1x" in list_datasets()
+
+
+def test_ani1x_masks_nan_and_converts_units(fake_ani1x, tmp_path):
+    """NaN energies/forces are dropped and Hartree->eV conversion applies."""
+    out = load_dataset("ani1x", cache_dir=tmp_path, quiet=True)["all"]
+    # C1H2 keeps conf 0 and 3 (1 NaN energy, 2 NaN force); H2 keeps both -> 4.
+    assert len(out) == 4
+    s = out[0]
+    assert set(s) == {"pos", "atomic_numbers", "energy", "forces"}
+    assert s["forces"].shape == (len(s["atomic_numbers"]), 3)
+    assert np.isclose(s["energy"], -38.0 * 27.211386245988)
+
+    raw = load_dataset("ani1x", units="hartree", cache_dir=tmp_path,
+                       quiet=True)["all"]
+    assert any(np.isclose(r["energy"], -38.0) for r in raw)
+
+
+def test_ani1x_ccsd_is_energy_only(fake_ani1x, tmp_path):
+    """The CCSD(T)/CBS level carries no forces; requesting them raises."""
+    out = load_dataset("ani1x", level="ccsd(t)_cbs", forces=False,
+                       cache_dir=tmp_path, quiet=True)["all"]
+    # C1H2 keeps conf 0, 1 (2, 3 are NaN); H2 keeps both -> 4, all force-free.
+    assert len(out) == 4
+    assert all("forces" not in s for s in out)
+    with pytest.raises(ValueError, match="no forces"):
+        load_dataset("ani1x", level="ccsd(t)_cbs", cache_dir=tmp_path, quiet=True)
+
+
+def test_ani1x_caps_and_splits(fake_ani1x, tmp_path):
+    """max_molecules / max_conformations cap output; splits cover the whole set."""
+    one = load_dataset("ani1x", max_molecules=1, cache_dir=tmp_path,
+                       quiet=True)["all"]
+    assert len(one) == 2                       # only C1H2's two valid confs
+    capped = load_dataset("ani1x", max_conformations=1, cache_dir=tmp_path,
+                          quiet=True)["all"]
+    assert len(capped) == 2                     # one conf from each molecule
+
+    kw = dict(cache_dir=tmp_path, quiet=True)
+    tr = load_dataset("ani1x", split="train", **kw)
+    va = load_dataset("ani1x", split="val", **kw)
+    te = load_dataset("ani1x", split="test", **kw)
+    assert len(tr) + len(va) + len(te) == 4
+
+
+def test_ani1x_cutoff_wraps_dataset_with_forces(fake_ani1x, tmp_path):
+    """cutoff wraps an AtomicDataset; ANI-1x carries forces."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("ani1x", cutoff=5.2, cache_dir=tmp_path, quiet=True)["all"]
+    assert isinstance(ds, AtomicDataset)
+    g = ds[0]
+    assert g.forces is not None and g.energy is not None
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"level": "mp2_dz"}, "unknown level"),
+    ({"units": "kcal"}, "units must be"),
+    ({"split": "trian"}, "unknown split"),
+])
+def test_ani1x_invalid_args(fake_ani1x, tmp_path, kwargs, match):
+    """Bad level / units / split raise clear ValueErrors."""
+    base = dict(cache_dir=tmp_path, quiet=True)
+    base.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        load_dataset("ani1x", **base)
+
+
+# --------------------------------------------------------------------------- #
+# ani1ccx (coupled-cluster subset of the ANI-1x release file)                  #
+# --------------------------------------------------------------------------- #
+
+def test_ani1ccx_registered():
+    """ani1ccx is discoverable through the registry."""
+    assert "ani1ccx" in list_datasets()
+
+
+def test_ani1ccx_loads_ccsd_energy_only(fake_ani1x, tmp_path):
+    """ani1ccx returns only conformations with finite CCSD(T)*/CBS energies."""
+    out = load_dataset("ani1ccx", cache_dir=tmp_path, quiet=True)["all"]
+    # C1H2 keeps conf 0, 1 (2, 3 are NaN in ccsd(t)_cbs.energy); H2 keeps both.
+    assert len(out) == 4
+    assert all(set(s) == {"pos", "atomic_numbers", "energy"} for s in out)
+    assert any(np.isclose(s["energy"], -38.5 * 27.211386245988) for s in out)
+
+    raw = load_dataset("ani1ccx", units="hartree", cache_dir=tmp_path,
+                       quiet=True)["all"]
+    assert any(np.isclose(r["energy"], -38.5) for r in raw)
+
+
+def test_ani1ccx_shares_ani1x_cache(fake_ani1x, tmp_path):
+    """The release file is cached once, under the ani1x directory."""
+    load_dataset("ani1ccx", cache_dir=tmp_path, quiet=True)
+    assert (tmp_path / "ani1x" / "raw" / "ani1x-release.h5").exists()
+    assert not (tmp_path / "ani1ccx").exists()
+    # loading ani1x afterwards reuses the very same file
+    load_dataset("ani1x", cache_dir=tmp_path, quiet=True)
+    assert not (tmp_path / "ani1ccx").exists()
+
+
+def test_ani1ccx_caps_and_splits(fake_ani1x, tmp_path):
+    """max_molecules / max_conformations cap output; splits cover the set."""
+    one = load_dataset("ani1ccx", max_molecules=1, max_conformations=1,
+                       cache_dir=tmp_path, quiet=True)["all"]
+    assert len(one) == 1                       # first conf of C1H2 only
+
+    kw = dict(cache_dir=tmp_path, quiet=True)
+    tr = load_dataset("ani1ccx", split="train", **kw)
+    va = load_dataset("ani1ccx", split="val", **kw)
+    te = load_dataset("ani1ccx", split="test", **kw)
+    assert len(tr) + len(va) + len(te) == 4
+
+
+def test_ani1ccx_cutoff_wraps_forcefree_dataset(fake_ani1x, tmp_path):
+    """cutoff wraps an AtomicDataset; ANI-1ccx is energy-only."""
+    torch.set_default_dtype(torch.float64)
+    ds = load_dataset("ani1ccx", cutoff=5.2, cache_dir=tmp_path,
+                      quiet=True)["all"]
+    assert isinstance(ds, AtomicDataset)
+    g = ds[0]
+    assert g.forces is None and g.energy is not None
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"units": "kcal"}, "units must be"),
+    ({"split": "trian"}, "unknown split"),
+])
+def test_ani1ccx_invalid_args(fake_ani1x, tmp_path, kwargs, match):
+    """Bad units / split raise clear ValueErrors."""
+    base = dict(cache_dir=tmp_path, quiet=True)
+    base.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        load_dataset("ani1ccx", **base)
+
+
+def test_ani1ccx_rejects_forces_and_level():
+    """ani1ccx pins the level of theory; forces / level are not accepted."""
+    with pytest.raises(TypeError):
+        load_dataset("ani1ccx", forces=True, quiet=True)
+    with pytest.raises(TypeError):
+        load_dataset("ani1ccx", level="wb97x_dz", quiet=True)
 
 
 # --------------------------------------------------------------------------- #
