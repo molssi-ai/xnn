@@ -85,6 +85,20 @@ Its block-by-block fidelity check against
 ``aiqm/torchani`` is ``examples/fidelity_checks/ani_verification.ipynb`` (needs
 the ``ani`` extra: ``pip install -e ".[ani]"``).
 
+SchNet (``examples/cnn/schnet/``) is validated differently from the rest: it
+is a clean-room build from the manuscripts, so
+``examples/fidelity_checks/schnet_verification.ipynb`` checks every block
+(embedding, Gaussian RBF, shifted softplus, cfconv, interaction blocks,
+readout/standardization) against an independent NumPy implementation of the
+papers' equations — nothing from schnetpack is used, and no extra dependency
+is needed (it runs with the plain ``xnns`` kernel).
+``schnet_rmd17_train.ipynb`` trains the paper architecture on rMD17 ethanol
+(``load_dataset("rmd17", ...)``) with the paper's energy+force loss
+weighting, and ``schnet_ethanol_md.ipynb`` loads that checkpoint and runs
+thermostat-free NVE dynamics through the ASE calculator to demonstrate the
+paper's energy-conservation-by-construction claim (run the training notebook
+first).
+
 BAMBOO (the ``hybrid`` family) has its block-by-block fidelity check in
 ``examples/fidelity_checks/bamboo_verification.ipynb`` (it clones
 bytedance/bamboo on demand and transplants the weights, matching every GET

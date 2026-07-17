@@ -66,6 +66,14 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "atomic_numbers": "species",
         "l_max": "max_l",
     },
+    # schnetpack spellings (SchNet's reference code base) -- key names only;
+    # the xnns SchNet itself is built from the papers, not from schnetpack
+    "schnet": {
+        "n_atom_basis": "n_features",
+        "n_gaussians": "n_rbf",
+        "n_radial_basis": "n_rbf",
+        "atomref": "atomic_energies",
+    },
     # PhysNet train.py argument spellings (MMunibas/PhysNet)
     "physnet": {
         "num_features": "n_features",

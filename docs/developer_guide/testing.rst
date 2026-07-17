@@ -39,6 +39,22 @@ What is covered
    * - ``test_allegro.py``
      - equivariance, periodic stress, export, key translation, **parity
        with upstream** ``allegro`` given identical weights
+   * - ``test_schnet.py``
+     - **parity with an equation-by-equation reference forward** built from
+       the NIPS 2017 manuscript (SchNet is a clean-room build, so the paper
+       — not schnetpack — is the reference), invariances, forces vs. finite
+       differences, cosine-cutoff continuity, size extensivity, batching,
+       TorchScript/LAMMPS export, schnetpack key translation
+   * - ``test_cace.py`` / ``test_physnet.py`` / ``test_ani.py`` /
+       ``test_bamboo.py`` / ``test_les.py``
+     - the same pattern for the other faithful implementations:
+       invariance/equivariance and **parity with the upstream code** given
+       identical weights (upstream packages required where applicable),
+       plus each model's specific conventions
+   * - ``test_hub.py`` / ``test_ase_io.py`` / ``test_benchmark.py`` /
+       ``test_trainer_distributed.py``
+     - dataset hub builders and caching, ASE file I/O, the benchmark
+       runner/config, and ``torchrun`` DDP training
 
 The equivariance tests rotate the inputs and check that energies are
 invariant and forces co-rotate (errors ~1e-7). The parity tests require the
@@ -52,4 +68,7 @@ Conventions
   script-vs-eager parity test.
 - Faithful re-implementations should additionally pin down parity with the
   upstream code under transplanted weights, guarded by an import check so
-  the suite still runs without the reference package installed.
+  the suite still runs without the reference package installed. For a
+  clean-room build whose reference is a manuscript rather than a code base
+  (SchNet), pin down parity with an independent implementation of the
+  paper's equations instead.

@@ -22,10 +22,12 @@ the NequIP implementation is validated against that of
 against [mir-group/allegro](https://github.com/mir-group/allegro), which pin
 `e3nn==0.4.4`; xnns has been thoroughly tested on this pin. The BAMBOO graph
 equivariant transformer is validated block-by-block against
-[bytedance/bamboo](https://github.com/bytedance/bamboo). The `pyproject.toml`
-also carries a `uv` setup that reproduces the GPU `.venv` that was used to
-create the notebooks (we adopted `torch 2.5.1+cu121` from the PyTorch cu121
-index that are compatible with CUDA-12.x drivers).
+[bytedance/bamboo](https://github.com/bytedance/bamboo). SchNet is built and
+verified directly against the manuscripts' equations (block-by-block, in
+`examples/fidelity_checks/schnet_verification.ipynb`). The `pyproject.toml` also
+carries a `uv` setup that reproduces the GPU `.venv` that was used to create the
+notebooks (we adopted `torch 2.5.1+cu121` from the PyTorch cu121 index that are
+compatible with CUDA-12.x drivers).
 
 ## Quick start
 
@@ -83,7 +85,7 @@ src/xnns/
 │   │   └── …                     + Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
 │   ├── config/                 - one dataclass schema; loaders for yaml / argparse / hydra
 │   │   └── …                     + schema, loaders, translate, coerce
-│   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum)
+│   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum, shifted_softplus)
 │   │   └── …                     + base, registry, outputs, les, ops
 │   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
 │   │   └── …                     + trainer, losses
@@ -190,8 +192,8 @@ pair_mace / pair_allegro pattern). The `LAMMPSWrapper` in
 `common/deploy/lammps.py` defines the tensor ABI. A model is exportable when it
 provides the scriptable `node_energy(atomic_numbers, edge_index, edge_vec)`
 core -- SchNet, NequIP, MACE and Allegro all do (the scripted models reproduce
-the eager ones to ~1e-15, verified in `tests/test_mace.py` /
-`tests/test_nequip.py` / `tests/test_allegro.py`). For NequIP this required a scriptable, bit-exact stand-in
+the eager ones to ~1e-15, verified in `tests/test_schnet.py` /
+`tests/test_mace.py` / `tests/test_nequip.py` / `tests/test_allegro.py`). For NequIP this required a scriptable, bit-exact stand-in
 for e3nn's `Gate` (`xnns.gnn.models.nequip._Gate`), which the e3nn 0.4.4
 original cannot do on torch 2.x.
 

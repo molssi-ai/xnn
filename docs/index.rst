@@ -126,7 +126,7 @@ Models at a glance
    * - SchNet
      - cnn
      - Gaussian RBF
-     - Under development
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); clean-room build matching the `NIPS 2017 manuscript <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_ equation by equation (no schnetpack code)
    * - PhysNet
      - dnn
      - exp-Gaussian RBF + attention masks

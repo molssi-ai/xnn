@@ -14,7 +14,9 @@ for analysis.
 Shared basis functions (``xnns.common.featurizers``)
 ====================================================
 - :class:`~xnns.common.featurizers.radial.GaussianRBF`: Gaussian radial
-  basis expansion of distances (used by SchNet).
+  basis expansion of distances (used by SchNet); the optional ``gamma``
+  fixes the width explicitly (SchNet's ``gamma = 10`` Å\ :sup:`-2`) instead
+  of tying it to the center spacing.
 - :class:`~xnns.common.featurizers.cutoff.CosineCutoff`: smooth cosine
   cutoff envelope.
 

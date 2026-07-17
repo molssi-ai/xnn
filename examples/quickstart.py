@@ -50,8 +50,10 @@ def main():
     print(f"training on {trainer.device} ...")
     trainer.fit()
 
-    # inference with forces on a single structure
-    model = ForceStressOutput(build_model(cfg.model)).eval()
+    # inference with forces on a single structure (with the trained weights;
+    # a freshly built SchNet predicts exactly the energy shift, since its
+    # readout head starts zero-initialized per the DTNN convention)
+    model = trainer.module.to("cpu").eval()
     g = dataset[0]
     out = model(g)
     print("energy:", round(float(out["energy"].detach()), 4),

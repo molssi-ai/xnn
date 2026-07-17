@@ -5,14 +5,17 @@ Model Fidelity to Upstream Codes
 ********************************
 
 The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
-ANI) are not approximations or "inspired-by" re-implementations: they are
-faithful, self-contained reproductions of the reference codes, verified
-numerically block by block and end to end. The spherical-harmonic models need
+ANI, SchNet) are not approximations or "inspired-by" re-implementations: they
+are faithful, self-contained reproductions of the reference codes, verified
+numerically block by block and end to end. (SchNet is the one deliberate
+exception to the *code* part: it is a clean-room build verified against the
+manuscripts' equations instead — see below.) The spherical-harmonic models need
 only ``e3nn``: no ``mace-torch``, ``nequip``, ``cuequivariance``, or
-``opt_einsum_fx`` at runtime; CACE, PhysNet, BAMBOO, and ANI need no extra
-dependency at all (PhysNet's original is TensorFlow, while the xnns version
-is pure PyTorch; BAMBOO uses Cartesian vector channels, so it needs no e3nn;
-ANI is pure PyTorch symmetry functions).
+``opt_einsum_fx`` at runtime; CACE, PhysNet, BAMBOO, ANI, and SchNet need no
+extra dependency at all (PhysNet's original is TensorFlow, while the xnns
+version is pure PyTorch; BAMBOO uses Cartesian vector channels, so it needs
+no e3nn; ANI is pure PyTorch symmetry functions; SchNet is plain PyTorch by
+construction).
 
 Equivariance itself is verified in the test suite (rotate the inputs → the
 energy is invariant and the forces co-rotate, to ~1e-7; see
@@ -174,6 +177,39 @@ active-learning ANI-1x data (energies and forces) as ``load_dataset("ani1x")``,
 its coupled-cluster subset (CCSD(T)*/CBS energies, shared release file) as
 ``load_dataset("ani1ccx")``, and the seven-element ANI-2x data (wB97X energies
 and forces for H/C/N/O/S/F/Cl) as ``load_dataset("ani2x")``.
+
+SchNet
+======
+A faithful implementation of the **manuscripts** — Schütt *et al.*, NIPS 30
+(2017), plus the DTNN predecessor (*Nat. Commun.* **8**, 13890, 2017) for
+the conventions SchNet inherits. By design it is a *clean-room* build: no
+code is taken from (or compared against) schnetpack; the verification
+reference is an independent NumPy implementation of the papers' equations
+run with the same weights:
+
+- the atom-type embedding (eq. 3), the Gaussian radial basis
+  :math:`e_k(r) = \exp(-\gamma (r - \mu_k)^2)` on the paper's grid
+  (:math:`\gamma = 10` Å\ :sup:`-2`, centers every 0.1 Å — the shared
+  :class:`~xnns.common.featurizers.GaussianRBF` with an explicit ``gamma``);
+- the continuous-filter convolution (eq. 2) with the two-dense-layer
+  shifted-softplus filter-generating network, and the Fig. 2 interaction
+  block (*atom-wise → cfconv → atom-wise → ssp → atom-wise*, residual,
+  no weight sharing across the :math:`T` blocks);
+- the exact shifted softplus :math:`\ln(0.5 e^x + 0.5)` (shared with
+  PhysNet in :func:`~xnns.common.models.ops.shifted_softplus`), the
+  atom-wise :math:`F \to F/2 \to 1` readout with a zero-initialized head,
+  and the DTNN per-atom energy standardization
+  :math:`E_i = E_\sigma \hat E_i + E_\mu`;
+- one documented, off-by-default deviation: ``cutoff_fn="cosine"``
+  multiplies the filters by a smooth envelope for finite-cutoff condensed-
+  phase use (the paper trains cutoff-free; its RBF grid simply ends at
+  30 Å).
+
+Given the same weights it reproduces the equation-by-equation reference to
+~1e-15 in energies, block by block and end to end, with autograd forces
+matching finite differences to ~1e-10 and exact TorchScript parity
+(``tests/test_schnet.py``,
+``examples/fidelity_checks/schnet_verification.ipynb``).
 
 BAMBOO
 ======

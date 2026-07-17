@@ -44,6 +44,20 @@ PhysNet (dnn)
    nb/dnn/physnet/physnet_argon_train_test
    nb/dnn/physnet/physnet_argon_density_md
 
+SchNet (cnn)
+============
+
+Training the paper-architecture SchNet on its own MD17-style benchmark
+(rMD17 ethanol, energies + forces through the hub), then driving
+thermostat-free NVE dynamics with the trained model to demonstrate the
+paper's energy-conservation-by-construction claim.
+
+.. toctree::
+   :maxdepth: 1
+
+   nb/cnn/schnet/schnet_rmd17_train
+   nb/cnn/schnet/schnet_ethanol_md
+
 NequIP, MACE, Allegro, CACE (gnn)
 =================================
 
@@ -85,11 +99,13 @@ Fidelity checks
 
 Block-by-block numerical verification of each xnns implementation against its
 upstream reference (see :ref:`fidelity` for the summary of what matches and to
-what precision).
+what precision). SchNet is the exception that proves the rule: a clean-room
+build verified against the manuscripts' equations instead of a reference code.
 
 .. toctree::
    :maxdepth: 1
 
+   nb/fidelity_checks/schnet_verification
    nb/fidelity_checks/ani_verification
    nb/fidelity_checks/physnet_verification
    nb/fidelity_checks/nequip_verification

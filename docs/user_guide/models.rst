@@ -108,10 +108,20 @@ radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
 SchNet (``cnn``)
 ================
 :class:`xnns.cnn.models.schnet.SchNet`: continuous-filter convolutions over
-a Gaussian radial basis (Schütt *et al.*).
+a Gaussian radial basis with shifted-softplus activations (Schütt *et al.*,
+NIPS 2017). Faithful to the manuscript (see :ref:`fidelity`): the defaults
+are the paper architecture — ``F = 64`` feature maps, ``T = 3`` residual
+interaction blocks, RBF centers every 0.1 Å on ``[0, 30]`` with
+``gamma = 10`` Å\ :sup:`-2` — plus the DTNN per-atom energy standardization
+(``energy_shift``/``energy_scale``, or
+:meth:`~xnns.cnn.models.schnet.SchNet.set_energy_scale_shift`).
 
-Key options: ``n_features`` (128), ``n_interactions`` (3), ``n_rbf`` (50),
-``cutoff`` (5.0).
+Key options: ``n_features`` (64), ``n_interactions`` (3), ``n_rbf`` (301),
+``cutoff`` (30.0), ``gamma`` (10.0), ``cutoff_fn`` (``None``; set
+``"cosine"`` to smooth the filters at a finite cutoff for condensed phases),
+``energy_shift`` (0.0), ``energy_scale`` (1.0), ``species`` +
+``atomic_energies`` (per-element reference energies loaded into
+``atom_ref``).
 
 HDNNP (``dnn``)
 ===============

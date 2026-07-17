@@ -7,8 +7,37 @@ live on :class:`~xnns.common.models.base.InteratomicPotential` (``aggregate_ener
 """
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor
+from torch.nn import functional as F
+
+
+def shifted_softplus(x: Tensor) -> Tensor:
+    """Shifted softplus ``ssp(x) = ln(0.5 e^x + 0.5)`` with ``ssp(0) = 0``.
+
+    The activation of SchNet (Schuett et al., NIPS 2017) and PhysNet
+    (Unke & Meuwly 2019); smooth with infinite order of continuity, which is
+    what keeps the predicted potential-energy surface (and thus the autograd
+    forces) smooth.
+
+    Evaluated as ``max(x, 0) + log1p(exp(-|x|)) - ln 2`` -- exact for all
+    ``x``, unlike :func:`torch.nn.functional.softplus`, which switches to the
+    identity above its threshold and drops the ``log1p(exp(-x))`` tail
+    (~1e-9 at the default threshold of 20). TorchScript-compatible.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor of any shape.
+
+    Returns
+    -------
+    torch.Tensor
+        ``ln(0.5 e^x + 0.5)``, same shape as ``x``.
+    """
+    return F.relu(x) + torch.log1p(torch.exp(-x.abs())) - math.log(2.0)
 
 
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:

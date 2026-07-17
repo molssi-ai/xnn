@@ -60,7 +60,7 @@ from torch.nn import functional as F
 
 from xnns.common.data import AtomicGraph
 from xnns.common.models.base import InteratomicPotential
-from xnns.common.models.ops import scatter_sum
+from xnns.common.models.ops import scatter_sum, shifted_softplus
 from xnns.common.models.registry import register_model
 from . import d3
 
@@ -73,15 +73,9 @@ def softplus_inverse(x):
     return x + np.log(-np.expm1(-x))
 
 
-def shifted_softplus(x: Tensor) -> Tensor:
-    """PhysNet's activation ``log(exp(x) + 1) - log(2)``.
-
-    Evaluated as ``max(x, 0) + log1p(exp(-|x|))`` -- exact for all ``x``
-    (matching TF's softplus bit-for-bit), unlike ``F.softplus``, which
-    switches to the identity above its threshold and drops the
-    ``log1p(exp(-x))`` tail (~1e-9 at the default threshold of 20).
-    """
-    return F.relu(x) + torch.log1p(torch.exp(-x.abs())) - math.log(2.0)
+# PhysNet's activation ``log(exp(x) + 1) - log(2)`` is the shared exact
+# shifted softplus (matches TF's softplus bit-for-bit); re-exported here so
+# ``from xnns.dnn.models.physnet import shifted_softplus`` keeps working.
 
 
 def semi_orthogonal_glorot_weights(n_in: int, n_out: int,

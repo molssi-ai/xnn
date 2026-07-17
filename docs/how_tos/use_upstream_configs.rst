@@ -21,11 +21,14 @@ For example, these MACE-CLI spellings are understood directly:
      atomic_numbers: [18]       # -> species
      E0s: {18: -0.05}           # -> atomic_energies
 
-as are NequIP spellings such as ``num_layers`` (→ ``n_layers``) and the
+as are NequIP spellings such as ``num_layers`` (→ ``n_layers``), the
 original CACE constructor spellings (``zs`` → ``species``,
 ``num_message_passing`` → ``n_interactions``, ``type_message_passing`` →
-``message_types``). If both an upstream spelling and the xnns canonical name
-are given, the xnns spelling wins.
+``message_types``), and the schnetpack SchNet spellings
+(``n_atom_basis`` → ``n_features``, ``n_gaussians``/``n_radial_basis`` →
+``n_rbf``, ``atomref`` → ``atomic_energies`` — key names only; no schnetpack
+code is used, see :ref:`fidelity`). If both an upstream spelling and the
+xnns canonical name are given, the xnns spelling wins.
 
 Values are also coerced: ``E0s``-style per-species energies can be a list, a
 ``{Z: E0}`` mapping, or a string, and ``species`` accepts the equivalent
