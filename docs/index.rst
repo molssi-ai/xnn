@@ -126,11 +126,15 @@ Models at a glance
    * - SchNet
      - cnn
      - Gaussian RBF
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); clean-room build matching the `NIPS 2017 manuscript <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_ equation by equation (no schnetpack code)
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       Matching the `NIPS 2017 manuscript
+       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_
+       equation by equation (no schnetpack code)
    * - PhysNet
      - dnn
      - exp-Gaussian RBF + attention masks
-     - Complete: training, evaluation, deployment (ASE only); matches `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
    * - HDNNP
      - dnn
      - radial symmetry functions (G2)
@@ -138,27 +142,33 @@ Models at a glance
    * - ANI
      - dnn
      - AEV (radial + angular symmetry functions)
-     - Complete: training, evaluation, deployment (ASE only); matches `aiqm/torchani <https://github.com/aiqm/torchani>`_
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `aiqm/torchani <https://github.com/aiqm/torchani>`_
    * - NequIP
      - gnn
      - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); matches `mir-group/nequip <https://github.com/mir-group/nequip>`_
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       matches `mir-group/nequip <https://github.com/mir-group/nequip>`_
    * - MACE
      - gnn
      - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); matches `ACEsuit/mace <https://github.com/ACEsuit/mace>`_
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       matches `ACEsuit/mace <https://github.com/ACEsuit/mace>`_
    * - CACE
      - gnn
      - Cartesian monomial edges
-     - Complete: training, evaluation, deployment (ASE only); matches `BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_
    * - Allegro
      - gnn
      - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE); matches `mir-group/allegro <https://github.com/mir-group/allegro>`_
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       matches `mir-group/allegro <https://github.com/mir-group/allegro>`_
    * - BAMBOO
      - hybrid
      - exp-normal RBF + edge attention
-     - Complete: training, evaluation, deployment (ASE only); matches `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
 
 xnns is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository
