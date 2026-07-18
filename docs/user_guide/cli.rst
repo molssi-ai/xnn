@@ -39,15 +39,16 @@ Score several **pre-trained** models on one dataset and write a results table:
 .. code-block:: bash
 
    xnns benchmark --config configs/benchmark.yaml
-   xnns benchmark --config configs/benchmark.yaml --set "targets=['energy']"
+   xnns benchmark --config configs/benchmark.yaml --set "metrics={'energy': ['mae']}"
 
 - ``--config``: a YAML benchmark config (see :ref:`howto-benchmark`)
 - ``--set KEY=VALUE``: dotted-key overrides applied to the config, repeatable
 
 Each model listed in ``models`` is built from its architecture, loaded from its
 ``checkpoint`` (benchmarking does not train; produce checkpoints with
-``xnns train`` first), and scored with the configured ``metrics`` (MAE / MSE /
-RMSE or custom) on the dataset. The comparison table is printed and written to
+``xnns train`` first), and scored with the configured ``metrics`` -- a mapping
+from each target (energy / forces / stress) to the error metrics (MAE / MSE /
+RMSE or custom) reported for it. The comparison table is printed and written to
 ``output.dir`` in every configured format (CSV / JSON / Markdown). See
 :ref:`howto-benchmark` for the full config.
 

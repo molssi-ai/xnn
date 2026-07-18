@@ -31,7 +31,7 @@ def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
         The config dict to mutate in place.
     overrides : list of str
         Override strings of the form ``"output.dir=runs/bench"`` or
-        ``"targets=['energy']"``.
+        ``"metrics={'energy': ['mae']}"``.
 
     Returns
     -------

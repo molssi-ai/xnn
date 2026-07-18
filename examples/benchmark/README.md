@@ -63,14 +63,15 @@ Override any config key on the command line with `--set`:
 
 ```bash
 # forces only
-xnns benchmark --config examples/benchmark/argon_benchmark.yaml --set "targets=['forces']"
+xnns benchmark --config examples/benchmark/argon_benchmark.yaml \
+    --set "metrics={'forces': ['mae','rmse']}"
 
 # report atomization energy (fit the per-atom Ar reference from the data)
 xnns benchmark --config examples/benchmark/argon_benchmark.yaml --set atomic_energies=average
 
-# add MSE and write only JSON
+# add MSE, keep MAE only for energy, and write only JSON
 xnns benchmark --config examples/benchmark/argon_benchmark.yaml \
-    --set "metrics=['mae','mse','rmse']" "output.formats=['json']"
+    --set "metrics={'energy': ['mae'], 'forces': ['mae','mse','rmse']}" "output.formats=['json']"
 ```
 
 See the [How-To guide](../../docs/how_tos/benchmark_models.rst) for custom

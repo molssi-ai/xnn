@@ -50,6 +50,8 @@ data settings from ``configs/data/``.
 
 Train from Python
 =================
+The YAML config can be loaded in Python and passed to the
+:class:`~xnns.common.train.Trainer` to initiate the training loop.
 
 .. code-block:: python
 
@@ -89,8 +91,8 @@ or from Python:
 
 Use Hydra
 =========
-With the ``hydra`` extra installed, an existing Hydra application can hand
-its ``DictConfig`` straight to xnns:
+With the ``hydra`` extra installed, an existing Hydra application can hand its
+``DictConfig`` object straight to xnns's ``Trainer``:
 
 .. code-block:: python
 

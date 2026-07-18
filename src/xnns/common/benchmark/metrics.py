@@ -238,7 +238,7 @@ def collect_predictions(model, loader, device, targets: list[str],
 
 
 def score(pairs: dict[str, tuple[Tensor, Tensor]],
-          metrics: list[str]) -> dict[str, float]:
+          metrics: dict[str, list[str]] | list[str]) -> dict[str, float]:
     """Reduce prediction/target pairs to a flat ``{target_metric: value}`` map.
 
     Parameters
@@ -246,18 +246,23 @@ def score(pairs: dict[str, tuple[Tensor, Tensor]],
     pairs : dict of str to (Tensor, Tensor)
         Prediction/target pairs keyed by target, as returned by
         :func:`collect_predictions`.
-    metrics : list of str
-        Names of registered metrics to apply to every target.
+    metrics : dict of str to list of str, or list of str
+        Which metric is reported for which target: a mapping from target to
+        registered metric names (the canonical
+        :attr:`~xnns.common.benchmark.BenchmarkConfig.metrics` form; targets
+        absent from the mapping are skipped), or a plain list of names applied
+        to every target in ``pairs``.
 
     Returns
     -------
     dict of str to float
-        One entry per ``(target, metric)`` combination, keyed
+        One entry per scored ``(target, metric)`` combination, keyed
         ``f"{target}_{metric}"`` (e.g. ``"energy_mae"``, ``"forces_rmse"``).
     """
-    funcs = {m: get_metric(m) for m in metrics}
+    if not isinstance(metrics, dict):
+        metrics = {t: list(metrics) for t in pairs}
     result: dict[str, float] = {}
     for target, (pred, ref) in pairs.items():
-        for name, fn in funcs.items():
-            result[f"{target}_{name}"] = fn(pred, ref)
+        for name in metrics.get(target, []):
+            result[f"{target}_{name}"] = get_metric(name)(pred, ref)
     return result

@@ -24,9 +24,12 @@ models:
   - label: physnet
     checkpoint: examples/dnn/physnet/runs/argon_xnns/best.pt
 
-# Score energy and forces with MAE and RMSE.
-metrics: [mae, rmse]
-targets: [energy, forces]
+# Score energy and forces, each with MAE and RMSE. The mapping ties every
+# metric to the target it is reported for; the flat shorthand
+# (`metrics: [mae, rmse]` + `targets: [energy, forces]`) is equivalent.
+metrics:
+  energy: [mae, rmse]
+  forces: [mae, rmse]
 
 # Units shown after each metric name in the tables (labels only -- xnns
 # is unit-agnostic). These are the defaults for this eV/Angstrom dataset, shown

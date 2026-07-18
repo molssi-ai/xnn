@@ -201,9 +201,10 @@ original cannot do on torch 2.x.
 
 Score a set of **pre-trained** models on one dataset with
 `xnns.common.benchmark` and tabulate their errors. A single config lists the
-`models` (each an architecture plus the `checkpoint` to load), the error
-`metrics` (`mae` / `mse` / `rmse`, or custom callables), and the `targets` to
-score (`energy` / `forces` / `stress`). Results are tabulated per model and
+`models` (each an architecture plus the `checkpoint` to load) and the
+`metrics` mapping, which ties each target quantity (`energy` / `forces` /
+`stress`) to the error metrics reported for it (`mae` / `mse` / `rmse`, or
+custom callables). Results are tabulated per model and
 written to CSV / JSON / Markdown (or a user-registered format). Energy can be
 scored per atom or, with `atomic_energies` (a `{Z: E0}` map or `average` to fit
 from data), as the physically meaningful atomization (interaction) energy.

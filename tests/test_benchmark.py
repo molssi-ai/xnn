@@ -141,10 +141,58 @@ def test_config_has_no_phases_or_optim():
     assert not hasattr(cfg, "optim")
 
 
-def test_scalar_fields_accept_scalar_or_list():
+def test_metrics_default_cross_product():
+    cfg = from_dict({})
+    assert cfg.metrics == {"energy": ["mae", "rmse"], "forces": ["mae", "rmse"]}
+    assert cfg.targets == ["energy", "forces"]
+
+
+def test_flat_metrics_and_targets_cross_product():
+    cfg = from_dict({"metrics": ["mae", "rmse"], "targets": ["energy", "forces"]})
+    assert cfg.metrics == {"energy": ["mae", "rmse"], "forces": ["mae", "rmse"]}
+    # scalars accepted in the flat form; omitted side falls back to defaults
     cfg = from_dict({"metrics": "mae", "targets": "energy"})
-    assert cfg.metrics == ["mae"]
+    assert cfg.metrics == {"energy": ["mae"]}
     assert cfg.targets == ["energy"]
+    cfg = from_dict({"targets": ["stress"]})
+    assert cfg.metrics == {"stress": ["mae", "rmse"]}
+
+
+def test_metrics_mapping_connects_metric_to_target():
+    cfg = from_dict({"metrics": {"energy": "mae", "forces": ["mae", "rmse"]}})
+    assert cfg.metrics == {"energy": ["mae"], "forces": ["mae", "rmse"]}
+    assert cfg.targets == ["energy", "forces"]
+    # a target given without metrics gets the default metrics
+    cfg = from_dict({"metrics": {"energy": None}})
+    assert cfg.metrics == {"energy": ["mae", "rmse"]}
+
+
+def test_metrics_pairs_connect_metric_to_target():
+    cfg = from_dict({"metrics": [("energy", "mae"),
+                                 ["forces", ["mae", "rmse"]]]})
+    assert cfg.metrics == {"energy": ["mae"], "forces": ["mae", "rmse"]}
+    # repeated targets accumulate (duplicates dropped)
+    cfg = from_dict({"metrics": [["energy", "mae"], ["energy", ["mae", "rmse"]]]})
+    assert cfg.metrics == {"energy": ["mae", "rmse"]}
+    # single-key dict entries work too
+    cfg = from_dict({"metrics": [{"energy": "mae"}, {"forces": "rmse"}]})
+    assert cfg.metrics == {"energy": ["mae"], "forces": ["rmse"]}
+
+
+def test_targets_with_per_target_metrics_is_ambiguous():
+    with pytest.raises(ValueError, match="targets"):
+        from_dict({"metrics": {"energy": ["mae"]}, "targets": ["forces"]})
+    with pytest.raises(ValueError, match="targets"):
+        from_dict({"metrics": [["energy", "mae"]], "targets": ["energy"]})
+
+
+def test_metrics_reject_unknown_target_and_malformed_entries():
+    with pytest.raises(ValueError, match="unknown benchmark target"):
+        from_dict({"metrics": {"enrgy": ["mae"]}})
+    with pytest.raises(ValueError, match="unknown benchmark target"):
+        from_dict({"targets": ["dipole"]})
+    with pytest.raises(ValueError, match="pair"):
+        from_dict({"metrics": [["energy", "mae", "rmse"]]})   # 3-item entry
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +214,17 @@ def test_metric_registry_and_score():
     out = score(pairs, ["mae", "rmse"])
     assert out == {"energy_mae": pytest.approx(1.0),
                    "energy_rmse": pytest.approx(1.0)}
+
+
+def test_score_with_per_target_mapping():
+    pairs = {"energy": (torch.zeros(3), torch.ones(3)),
+             "forces": (torch.zeros(2), torch.full((2,), 2.0))}
+    out = score(pairs, {"energy": ["mae"], "forces": ["rmse"]})
+    assert out == {"energy_mae": pytest.approx(1.0),
+                   "forces_rmse": pytest.approx(2.0)}
+    # targets absent from the mapping are skipped
+    out = score(pairs, {"energy": ["mae"]})
+    assert set(out) == {"energy_mae"}
 
 
 def test_custom_metric_registration_via_decorator():
@@ -368,6 +427,18 @@ def test_benchmark_scores_pretrained_models(tmp_path):
         assert "split" not in r          # benchmarking-only: single dataset
     assert (out_dir / "results.csv").exists()
     assert (out_dir / "results.json").exists()
+
+
+def test_benchmark_honors_per_target_metrics(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz")
+    ckpt = _make_checkpoint(tmp_path / "m.pt")
+    cfg = from_dict(_bench_dict(
+        data, [_model_spec(label="a", checkpoint=ckpt)],
+        metrics={"energy": ["mae"], "forces": ["rmse"]}, targets=None,
+        output={"dir": str(tmp_path / "b"), "formats": ["json"]}))
+    (row,) = run_benchmark(cfg)
+    assert "energy_mae" in row and "forces_rmse" in row
+    assert "energy_rmse" not in row and "forces_mae" not in row
 
 
 def test_architecture_read_from_checkpoint(tmp_path):

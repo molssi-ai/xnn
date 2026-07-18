@@ -45,6 +45,12 @@ from ..config.loaders import from_dict as _run_from_dict
 # model architecture; stripped out before the rest is read as a ModelConfig.
 _ENTRY_KEYS = {"label", "checkpoint", "config"}
 
+# The quantities a benchmark can score (what collect_predictions understands).
+_KNOWN_TARGETS = ("energy", "forces", "stress")
+
+_DEFAULT_METRICS = ("mae", "rmse")
+_DEFAULT_TARGETS = ("energy", "forces")
+
 
 @dataclass
 class ModelEntry:
@@ -147,12 +153,13 @@ class BenchmarkConfig:
         The dataset to score on and its target-key names, reused unchanged from
         a normal run. The benchmark dataset is resolved from ``test_path``,
         falling back to ``val_path`` then ``train_path``.
-    metrics : list[str]
-        Registered error-metric names applied to every target (e.g.
-        ``["mae", "rmse"]``). Defaults to ``["mae", "rmse"]``.
-    targets : list[str]
-        Quantities to score, a subset of ``"energy"``, ``"forces"`` and
-        ``"stress"``. Defaults to ``["energy", "forces"]``.
+    metrics : dict[str, list[str]]
+        What to score and how, as one unambiguous mapping from target quantity
+        (``"energy"`` / ``"forces"`` / ``"stress"``) to the registered
+        error-metric names reported for it, e.g.
+        ``{"energy": ["mae"], "forces": ["mae", "rmse"]}``. The canonical form
+        every accepted config spelling is normalized into (see
+        :func:`_metric_map`). Defaults to MAE and RMSE on energy and forces.
     atomic_energies : Any
         Per-element reference energies (E0s). When set, energy is scored as the
         atomization / interaction energy (total minus the summed atomic
@@ -194,8 +201,8 @@ class BenchmarkConfig:
 
     models: list[ModelEntry] = field(default_factory=list)
     data: DataConfig = field(default_factory=DataConfig)
-    metrics: list[str] = field(default_factory=lambda: ["mae", "rmse"])
-    targets: list[str] = field(default_factory=lambda: ["energy", "forces"])
+    metrics: dict[str, list[str]] = field(default_factory=lambda: {
+        t: list(_DEFAULT_METRICS) for t in _DEFAULT_TARGETS})
     atomic_energies: Any = None
     species: Any = None
     energy_per_atom: bool = True
@@ -204,6 +211,11 @@ class BenchmarkConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     device: str = "auto"
     seed: int = 1234
+
+    @property
+    def targets(self) -> list[str]:
+        """The target quantities to score: the keys of :attr:`metrics`."""
+        return list(self.metrics)
 
 
 def _as_list(x: Any) -> list:
@@ -227,6 +239,92 @@ def _as_list(x: Any) -> list:
     if isinstance(x, (list, tuple)):
         return list(x)
     return [x]
+
+
+def _metric_map(metrics: Any, targets: Any) -> dict[str, list[str]]:
+    """Normalize a metrics/targets spec into the canonical per-target mapping.
+
+    The ``metrics`` key ties each metric to the target it is reported for, so
+    a config can say unambiguously *which* metric is scored on *which*
+    quantity. Accepted spellings::
+
+        metrics: {energy: [mae, rmse], forces: mae}      # mapping (canonical)
+        metrics: [[energy, mae], [forces, [mae, rmse]]]  # (target, metrics) pairs
+        metrics: [mae, rmse]                             # flat: every metric on
+        targets: [energy, forces]                        #   every target
+
+    The mapping and pair forms already name their targets, so combining either
+    with a separate ``targets`` key is ambiguous and rejected. In the flat
+    (cross-product) shorthand, an omitted side falls back to its default
+    (metrics ``mae``/``rmse``, targets ``energy``/``forces``). Repeated targets
+    in the pair form accumulate their metrics; a target given without metrics
+    (e.g. ``{energy: null}``) gets the default metrics.
+
+    Parameters
+    ----------
+    metrics : Any
+        The ``metrics`` config value: a mapping, a list of 2-item
+        (target, metrics) pairs, a flat list of metric names, a single name,
+        or ``None``.
+    targets : Any
+        The ``targets`` config value (flat shorthand only): a list of target
+        names, a single name, or ``None``.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Target -> metric names, in config order.
+
+    Raises
+    ------
+    ValueError
+        If ``targets`` accompanies the mapping / pair form, if a target is not
+        one of ``energy`` / ``forces`` / ``stress``, or if a pair entry or
+        metric name is malformed.
+    """
+    pairs: Optional[list[tuple[str, list]]] = None
+    if isinstance(metrics, dict):
+        pairs = [(t, _as_list(m)) for t, m in metrics.items()]
+    elif (isinstance(metrics, (list, tuple))
+          and any(not isinstance(m, str) for m in metrics)):
+        pairs = []
+        for item in metrics:
+            if isinstance(item, dict):                 # [{energy: [mae]}, ...]
+                pairs += [(t, _as_list(m)) for t, m in item.items()]
+            elif isinstance(item, (list, tuple)) and len(item) == 2 \
+                    and isinstance(item[0], str):      # [[energy, mae], ...]
+                pairs.append((item[0], _as_list(item[1])))
+            else:
+                raise ValueError(
+                    f"metrics entry {item!r} is not a (target, metrics) pair; "
+                    f"write e.g. [energy, [mae, rmse]] or {{energy: mae}}")
+
+    if pairs is not None:
+        if targets is not None:
+            raise ValueError(
+                "'targets' cannot be combined with per-target 'metrics' -- the "
+                "mapping already names its targets. Drop 'targets', or select "
+                "targets through the mapping, e.g. metrics: {energy: [mae]}")
+        mapping: dict[str, list[str]] = {}
+        for t, ms in pairs:
+            mapping.setdefault(t, [])
+            mapping[t] += [m for m in (ms or _DEFAULT_METRICS)
+                           if m not in mapping[t]]
+    else:  # flat shorthand: every metric applied to every target
+        flat = _as_list(metrics) or list(_DEFAULT_METRICS)
+        mapping = {t: list(flat)
+                   for t in (_as_list(targets) or _DEFAULT_TARGETS)}
+
+    for t, ms in mapping.items():
+        if t not in _KNOWN_TARGETS:
+            raise ValueError(
+                f"unknown benchmark target {t!r}; expected one of "
+                f"{list(_KNOWN_TARGETS)}")
+        bad = [m for m in ms if not isinstance(m, str)]
+        if bad:
+            raise ValueError(
+                f"metric names for target '{t}' must be strings, got {bad!r}")
+    return mapping
 
 
 def _model_entry(spec: Any, seen: dict[str, int]) -> ModelEntry:
@@ -287,8 +385,9 @@ def from_dict(d: dict[str, Any]) -> BenchmarkConfig:
 
     The funnel every frontend loader passes through. The ``models`` list may
     hold strings and/or mappings (see :func:`_model_entry`); ``data`` reuses the
-    dataclass from a normal run (unknown keys ignored); ``metrics`` and
-    ``targets`` accept a scalar or a list; and ``output`` populates
+    dataclass from a normal run (unknown keys ignored); ``metrics`` (with the
+    optional flat-form ``targets``) is normalized into the canonical per-target
+    mapping (see :func:`_metric_map`); and ``output`` populates
     :class:`OutputConfig`.
 
     Parameters
@@ -317,10 +416,8 @@ def from_dict(d: dict[str, Any]) -> BenchmarkConfig:
         output.formats = _as_list(d["output"]["formats"])
 
     kwargs: dict[str, Any] = dict(models=models, data=data, output=output)
-    if "metrics" in d:
-        kwargs["metrics"] = _as_list(d["metrics"])
-    if "targets" in d:
-        kwargs["targets"] = _as_list(d["targets"])
+    if "metrics" in d or "targets" in d:
+        kwargs["metrics"] = _metric_map(d.get("metrics"), d.get("targets"))
     if "custom_metrics" in d:
         kwargs["custom_metrics"] = _as_list(d["custom_metrics"])
     for k in ("atomic_energies", "species", "energy_per_atom", "units",
