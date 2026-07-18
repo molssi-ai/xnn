@@ -21,8 +21,8 @@ of xnns are
 
 - the library is designed to be easily extensible with new models and featurizers
 
-- a single configuration file and command-line command enables benchmarking of a
-  wide range of models on a variety of datasets
+- a single configuration file and command-line interface enable benchmarking of
+  a wide range of models on a variety of datasets
 
 - upstream benchmark datasets download and preprocess in one line with a
   HuggingFace-style ``load_dataset()``, ready to train
@@ -127,9 +127,8 @@ Models at a glance
      - cnn
      - Gaussian RBF
      - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       Matching the `NIPS 2017 manuscript
-       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_
-       equation by equation (no schnetpack code)
+       matches the `NIPS 2017 manuscript
+       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
    * - PhysNet
      - dnn
      - exp-Gaussian RBF + attention masks

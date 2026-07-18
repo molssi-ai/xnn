@@ -65,7 +65,7 @@ see the difference.
 
 3. Configure the model
 ======================
-The :class:`~xnns.common.config.schema.Config` dataclass holds everything:
+The :class:`~xnns.common.config.schema.Config` dataclass brings everything together:
 model, data, and optimizer settings. Model-specific options go into
 ``cfg.model.extra``:
 
@@ -101,7 +101,7 @@ Alternatively, load the same settings from a YAML file (see
 :class:`~xnns.common.train.trainer.Trainer` builds the model from the config,
 wraps it in :class:`~xnns.common.models.outputs.ForceStressOutput` (force and
 stress heads are switched on by nonzero loss weights), sets up the Adam
-optimizer, scheduler, and data loaders, and runs the loop:
+optimizer, scheduler, and data loaders, and runs the training loop:
 
 .. code-block:: python
 

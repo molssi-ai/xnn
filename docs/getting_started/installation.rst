@@ -95,5 +95,5 @@ or check quickly from Python:
    print(xnns.__version__)
    print(available_models())   # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'schnet']
 
-The GNN models (NequIP, MACE, Allegro) only appear in the registry when
+The GNN models (NequIP, MACE, Allegro, etc.) only appear in the registry when
 ``e3nn`` is installed.

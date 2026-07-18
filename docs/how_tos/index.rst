@@ -7,7 +7,7 @@ How-To Guides
 Practical recipes for common tasks. Each guide assumes xnns is installed
 (see :ref:`installation`) and focuses on one job; for conceptual background
 see :ref:`background`, and for complete reference information see the
-:ref:`user guide <user-guide>`.
+:ref:`User Guide <user-guide>`.
 
 .. toctree::
    :maxdepth: 2
