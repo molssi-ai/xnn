@@ -21,18 +21,43 @@ For example, these MACE-CLI spellings are understood directly:
      atomic_numbers: [18]       # -> species
      E0s: {18: -0.05}           # -> atomic_energies
 
-as are NequIP spellings such as ``num_layers`` (→ ``n_layers``), the
-original CACE constructor spellings (``zs`` → ``species``,
-``num_message_passing`` → ``n_interactions``, ``type_message_passing`` →
-``message_types``), and the schnetpack SchNet spellings
-(``n_atom_basis`` → ``n_features``, ``n_gaussians``/``n_radial_basis`` →
-``n_rbf``, ``atomref`` → ``atomic_energies`` — key names only; no schnetpack
-code is used, see :ref:`fidelity`). If both an upstream spelling and the
-xnns canonical name are given, the xnns spelling wins.
+NequIP YAML spellings work the same way:
 
-Values are also coerced: ``E0s``-style per-species energies can be a list, a
-``{Z: E0}`` mapping, or a string, and ``species`` accepts the equivalent
-forms (see :mod:`xnns.common.config.coerce`).
+.. code-block:: yaml
+
+   model:
+     name: nequip
+     r_max: 4.0                 # -> cutoff
+     num_layers: 3              # -> n_interactions
+     num_features: 32           # -> n_features
+     num_basis: 8               # -> n_rbf
+     chemical_symbols: [Ar]     # -> species
+
+as do the original CACE constructor spellings
+(``BingqingCheng/cace``'s ``Cace(...)`` kwargs):
+
+.. code-block:: yaml
+
+   model:
+     name: cace
+     zs: [18]                   # -> species
+     num_message_passing: 1     # -> n_interactions
+     type_message_passing: ["M", "Ar", "Bchi"]  # -> message_types
+
+and the schnetpack SchNet spellings (key names only; see :ref:`fidelity`):
+
+.. code-block:: yaml
+
+   model:
+     name: schnet
+     n_atom_basis: 64           # -> n_features
+     n_gaussians: 25            # -> n_rbf
+     atomref: {18: -0.05}       # -> atomic_energies
+
+If both an upstream spelling and the xnns canonical name are given, the xnns
+spelling wins. Values are also coerced: ``E0s``-style per-species energies can
+be a list, a ``{Z: E0}`` mapping, or a string, and ``species`` accepts the
+equivalent forms (see :mod:`xnns.common.config.coerce`).
 
 Extending the translation table
 ===============================

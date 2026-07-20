@@ -4,9 +4,9 @@
 Run Molecular Dynamics with ASE
 *********************************
 
-Any trained xnns model can drive `ASE <https://wiki.fysik.dtu.dk/ase/>`_
-through :class:`~xnns.common.deploy.ase_calculator.XNNSCalculator` (requires
-the ``ase`` extra).
+Any trained xnns model can drive `ASE <https://wiki.fysik.dtu.dk/ase/>`_ through
+:class:`~xnns.common.deploy.ase_calculator.XNNSCalculator` (requires the ``ase``
+extra installed).
 
 Attach the calculator
 =====================
@@ -35,7 +35,7 @@ Run NPT dynamics
 ================
 With the calculator attached, the model works in any ASE dynamics driver.
 For example, liquid-argon NPT (the workflow of the
-``03_*_argon_density_md.ipynb`` example notebooks):
+``*_argon_density_md.ipynb`` example notebooks):
 
 .. code-block:: python
 
@@ -57,7 +57,7 @@ For example, liquid-argon NPT (the workflow of the
 
 .. tip::
 
-   The notebooks ``examples/gnn/{mace,nequip,allegro}/03_*_argon_density_md.ipynb``
+   The notebooks ``examples/gnn/{mace,nequip,allegro}/*_argon_density_md.ipynb``
    run this exact pipeline with both xnns and the corresponding reference
    implementation and compare the resulting mass densities; with identical
    weights the difference is essentially zero.
