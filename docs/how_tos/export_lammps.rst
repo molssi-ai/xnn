@@ -12,9 +12,9 @@ the scriptable core
 
    node_energy(atomic_numbers, edge_index, edge_vec)
 
-which all four deployable models do. The scripted models reproduce the eager
-ones to ~1e-15 (verified in ``tests/test_mace.py``, ``tests/test_nequip.py``,
-and ``tests/test_allegro.py``).
+which all four deployable models do. The scripted models reproduce their eager
+counterparts up to ~1e-15 (verified in ``tests/test_mace.py``,
+``tests/test_nequip.py``, and ``tests/test_allegro.py``).
 
 From Python
 ===========
@@ -23,13 +23,17 @@ From Python
 
    from xnns.common.deploy import export_to_lammps, export_torchscript
 
-   export_to_lammps(model, cutoff=5.0, path="deployed.pt")   # LAMMPS wrapper
-   export_torchscript(model, path="model_ts.pt")             # plain TorchScript
+   # LAMMPS wrapper
+   export_to_lammps(model, cutoff=5.0, path="deployed.pt")
+
+   # plain TorchScript
+   export_torchscript(model, path="model_ts.pt")
 
 ``export_to_lammps`` wraps the model in
 :class:`~xnns.common.deploy.lammps.LAMMPSWrapper`, which defines the tensor
-ABI expected by the LAMMPS pair styles (positions, atomic numbers, edge
-index, and edge vectors in; per-atom and total energies out).
+application binary interface (ABI) expected by the LAMMPS pair styles
+(positions, atomic numbers, edge index, and edge vectors in; per-atom and total
+energies out).
 
 From the command line
 =====================

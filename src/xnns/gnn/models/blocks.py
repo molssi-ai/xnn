@@ -104,29 +104,33 @@ def tp_out_irreps_with_instructions(
         The sorted output irreps and the corresponding list of tensor-product
         instructions ``(i, j, k, "uvu", True)`` referencing the sorted indices.
     """
-    irreps_out_list, instructions = [], []
-    for i, (mul, ir_in) in enumerate(o3.Irreps(irreps1)):
-        for j, (_, ir_edge) in enumerate(o3.Irreps(irreps2)):
-            for ir_out in ir_in * ir_edge:
-                if ir_out in o3.Irreps(target_irreps):
-                    k = len(irreps_out_list)
-                    irreps_out_list.append((mul, ir_out))
-                    instructions.append((i, j, k, "uvu", True))
-    irreps_out, permut, _ = o3.Irreps(irreps_out_list).sort()
-    instructions = [
-        (a, b, permut[c], mode, train) for a, b, c, mode, train in instructions
-    ]
+    wanted = o3.Irreps(target_irreps)
+    kept: List[Tuple[int, o3.Irrep]] = []
+    paths = []
+    for a, (mul, ir_node) in enumerate(o3.Irreps(irreps1)):
+        for b, (_, ir_edge) in enumerate(o3.Irreps(irreps2)):
+            for ir_prod in ir_node * ir_edge:
+                if ir_prod not in wanted:
+                    continue
+                # one uvu path per (input pair, product irrep); its output slot
+                # is the position of the entry appended to `kept`
+                paths.append((a, b, len(kept), "uvu", True))
+                kept.append((mul, ir_prod))
+    irreps_sorted, remap, _ = o3.Irreps(kept).sort()
+    paths = [(a, b, remap[slot], mode, weighted)
+             for a, b, slot, mode, weighted in paths]
     if sort_instructions:
-        instructions = sorted(instructions, key=lambda x: x[2])
-    return irreps_out, instructions
+        paths.sort(key=lambda path: path[2])
+    return irreps_sorted, paths
 
 
 def tp_path_exists(irreps_in1, irreps_in2, ir_out) -> bool:
     """Whether some tensor-product path ``irreps_in1 x irreps_in2 -> ir_out`` exists.
 
-    Mirrors ``nequip.utils.tp_utils.tp_path_exists``: used to prune hidden
-    irreps that no tensor-product path can populate (e.g. ``0o`` features in
-    the first NequIP layer, where the node features are still all ``0e``).
+    Behaves like ``nequip.utils.tp_utils.tp_path_exists`` (independent
+    implementation): used to prune hidden irreps that no tensor-product path
+    can populate (e.g. ``0o`` features in the first NequIP layer, where the
+    node features are still all ``0e``).
 
     Parameters
     ----------
@@ -140,12 +144,12 @@ def tp_path_exists(irreps_in1, irreps_in2, ir_out) -> bool:
     bool
         ``True`` if any pair of input irreps couples to ``ir_out``.
     """
-    irreps_in1 = o3.Irreps(irreps_in1).simplify()
-    irreps_in2 = o3.Irreps(irreps_in2).simplify()
-    ir_out = o3.Irrep(ir_out)
-    for _, ir1 in irreps_in1:
-        for _, ir2 in irreps_in2:
-            if ir_out in ir1 * ir2:
+    target = o3.Irrep(ir_out)
+    for mul1, ir1 in o3.Irreps(irreps_in1):
+        if mul1 == 0:  # empty entries cannot contribute a path
+            continue
+        for mul2, ir2 in o3.Irreps(irreps_in2):
+            if mul2 > 0 and target in ir1 * ir2:
                 return True
     return False
 

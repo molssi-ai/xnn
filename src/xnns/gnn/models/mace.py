@@ -26,13 +26,16 @@ upstream MACE-CLI spellings (``r_max``, ``atomic_numbers``, ``E0s``, ...) are
 translated to the xnns names at config-load time by the key-translation registry
 in :mod:`xnns.common.config.translate`.
 
-Vendored maths (CG coupling + symmetric contraction) is adapted from
-ACEsuit/mace (MIT licence; authors Ilyes Batatia, Gregor Simm; CG based on e3nn
-by Mario Geiger), simplified to plain ``torch.einsum`` with no codegen/cueq deps.
+The CG coupling and the symmetric contraction are independent implementations
+(plain ``torch.einsum``, built on e3nn's ``o3.wigner_3j``; no codegen/cueq
+deps), verified bit-identical against ACEsuit/mace (MIT licence). All
+conventions -- CG normalization, coupling-path ordering, parameter and buffer
+names -- follow upstream so trained ``mace-torch`` weights transplant directly.
 """
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies the
 # class-level attribute annotations that TorchScript needs to resolve (e.g.
-# `dims: List[int]` on _ReshapeIrreps), breaking `torch.jit.script`.
+# `widths: List[int]` on _ReshapeIrreps), breaking `torch.jit.script`.
+import itertools
 from typing import Final, List, Optional, Tuple, Union
 
 import torch
@@ -56,12 +59,14 @@ from .blocks import tp_out_irreps_with_instructions
 # Clebsch-Gordan symmetric coupling basis (the ``U`` tensors)
 # ===========================================================================
 def _wigner_nj(irrepss, normalization: str = "component", filter_ir_mid=None, dtype=None):
-    """Recursively couple ``len(irrepss)`` copies of irreps into each output irrep.
+    """Generalized Clebsch-Gordan coupling of ``len(irrepss)`` irreps factors.
 
-    Builds the generalized (nested) Clebsch-Gordan coupling of a list of input
-    :class:`e3nn.o3.Irreps` by repeatedly contracting Wigner-3j symbols, one
-    input at a time. The result enumerates every coupling path that yields each
-    reachable output irrep.
+    Enumerates every coupling path that combines one irrep occurrence from each
+    factor in ``irrepss`` into a single output irrep, together with the coupling
+    tensor of that path. The coupling is built as a left fold: the paths for the
+    first ``d`` factors are extended by contracting a Wigner-3j symbol with each
+    irrep occurrence of factor ``d + 1``, and the path list is re-sorted by
+    output irrep after every stage (ties keep enumeration order).
 
     Parameters
     ----------
@@ -69,8 +74,9 @@ def _wigner_nj(irrepss, normalization: str = "component", filter_ir_mid=None, dt
         The list of input irreps (one entry per body factor) to couple together.
     normalization : {"component", "norm"}, optional
         Clebsch-Gordan normalization convention. ``"component"`` scales each
-        3j block by ``ir_out.dim ** 0.5``; ``"norm"`` scales by
-        ``ir_left.dim ** 0.5 * ir.dim ** 0.5``. Defaults to ``"component"``.
+        3j block by ``sqrt(dim)`` of the coupled output irrep; ``"norm"``
+        scales by ``sqrt(dim)`` of both coupled inputs. Defaults to
+        ``"component"``.
     filter_ir_mid : list of e3nn.o3.Irrep or None, optional
         If given, restricts the intermediate/output irreps to this set (used to
         keep the coupling tractable at high correlation order). ``None`` keeps
@@ -81,54 +87,56 @@ def _wigner_nj(irrepss, normalization: str = "component", filter_ir_mid=None, dt
     Returns
     -------
     list of tuple
-        A list sorted by output irrep, each entry ``(ir_out, path, C)`` where
-        ``ir_out`` is the coupled output :class:`e3nn.o3.Irrep`, ``path`` is a
-        ``(depth, start, stop)`` slice descriptor, and ``C`` is the coupling
-        tensor of shape ``(ir_out.dim, in_0.dim, ..., in_last.dim)``.
+        Entries ``(ir_out, C)``: the coupled output :class:`e3nn.o3.Irrep` and
+        the coupling tensor of shape ``(ir_out.dim, in_0.dim, ..., in_last.dim)``
+        (each ``in_d.dim`` the full dimension of factor ``d``, zero outside the
+        occurrence the path passes through). Sorted by output irrep whenever
+        more than one factor is coupled.
     """
-    irrepss = [o3.Irreps(irreps) for irreps in irrepss]
+    factors = [o3.Irreps(irreps) for irreps in irrepss]
+    keep = None
     if filter_ir_mid is not None:
-        filter_ir_mid = [o3.Irrep(ir) for ir in filter_ir_mid]
+        keep = frozenset(o3.Irrep(ir) for ir in filter_ir_mid)
 
-    if len(irrepss) == 1:
-        (irreps,) = irrepss
-        ret = []
-        e = torch.eye(irreps.dim, dtype=dtype)
-        i = 0
-        for mul, ir in irreps:
-            for _ in range(mul):
-                sl = slice(i, i + ir.dim)
-                ret += [(ir, (0, sl.start, sl.stop), e[sl])]
-                i += ir.dim
-        return ret
+    # correlation-1 seed: each irrep occurrence of the first factor couples to
+    # itself through the identity (its rows of the full-dimension identity)
+    seed = factors[0]
+    identity = torch.eye(seed.dim, dtype=dtype)
+    paths: List[Tuple[o3.Irrep, Tensor]] = []
+    row = 0
+    for mul, ir in seed:
+        for _ in range(mul):
+            paths.append((ir, identity[row : row + ir.dim]))
+            row += ir.dim
 
-    *irrepss_left, irreps_right = irrepss
-    ret = []
-    for ir_left, path_left, C_left in _wigner_nj(
-        irrepss_left, normalization=normalization, filter_ir_mid=filter_ir_mid, dtype=dtype
-    ):
-        i = 0
-        for mul, ir in irreps_right:
-            for ir_out in ir_left * ir:
-                if filter_ir_mid is not None and ir_out not in filter_ir_mid:
-                    continue
-                C = o3.wigner_3j(ir_out.l, ir_left.l, ir.l, dtype=dtype)
-                if normalization == "component":
-                    C *= ir_out.dim**0.5
-                if normalization == "norm":
-                    C *= ir_left.dim**0.5 * ir.dim**0.5
-                C = torch.einsum("jk,ijl->ikl", C_left.flatten(1), C)
-                C = C.reshape(ir_out.dim, *(irr.dim for irr in irrepss_left), ir.dim)
-                for u in range(mul):
-                    E = torch.zeros(
-                        ir_out.dim, *(irr.dim for irr in irrepss_left), irreps_right.dim,
-                        dtype=dtype,
-                    )
-                    sl = slice(i + u * ir.dim, i + (u + 1) * ir.dim)
-                    E[..., sl] = C
-                    ret += [(ir_out, (len(irrepss_left), sl.start, sl.stop), E)]
-            i += mul * ir.dim
-    return sorted(ret, key=lambda x: x[0])
+    for depth in range(1, len(factors)):
+        factor = factors[depth]
+        lead_shape = [f.dim for f in factors[:depth]]
+        grown: List[Tuple[o3.Irrep, Tensor]] = []
+        for ir_acc, w_acc in paths:
+            col = 0  # running offset of the occurrence within `factor`
+            for mul, ir_f in factor:
+                for ir_tot in ir_acc * ir_f:
+                    if keep is not None and ir_tot not in keep:
+                        continue
+                    w3j = o3.wigner_3j(ir_tot.l, ir_acc.l, ir_f.l, dtype=dtype)
+                    if normalization == "component":
+                        w3j = w3j * ir_tot.dim**0.5
+                    if normalization == "norm":
+                        w3j = w3j * (ir_acc.dim**0.5 * ir_f.dim**0.5)
+                    coupled = torch.einsum("ap,oaf->opf", w_acc.flatten(1), w3j)
+                    coupled = coupled.reshape(ir_tot.dim, *lead_shape, ir_f.dim)
+                    for copy in range(mul):
+                        lo = col + copy * ir_f.dim
+                        embedded = torch.zeros(
+                            ir_tot.dim, *lead_shape, factor.dim, dtype=dtype
+                        )
+                        embedded[..., lo : lo + ir_f.dim] = coupled
+                        grown.append((ir_tot, embedded))
+                col += mul * ir_f.dim
+        grown.sort(key=lambda entry: entry[0])
+        paths = grown
+    return paths
 
 
 def U_matrix_real(irreps_in, irreps_out, correlation: int, normalization: str = "component",
@@ -162,44 +170,51 @@ def U_matrix_real(irreps_in, irreps_out, correlation: int, normalization: str = 
     Returns
     -------
     list
-        ``[..., U]`` where the final element ``U`` is the coupling tensor of
-        shape ``([out.dim,] in.dim, ..., in.dim, n_paths)`` (leading output axis
-        squeezed away for scalar outputs). When no coupling path exists, ``U``
-        is an all-zeros tensor of the appropriate shape.
+        Alternating ``[ir, U, ir, U, ...]`` pairs, one per contiguous run of
+        coupling paths reaching an irrep of ``irreps_out``; each ``U`` has
+        shape ``([out.dim,] in.dim, ..., in.dim, n_paths)`` (leading output
+        axis squeezed away for scalar outputs, so callers typically take the
+        final element). When no coupling path exists, a single
+        ``[label, zeros]`` pair with one all-zero path is returned instead.
     """
     irreps_out = o3.Irreps(irreps_out)
-    irrepss = [o3.Irreps(irreps_in)] * correlation
-    if correlation == 4:  # upstream restricts the 4-body intermediates for tractability
-        filter_ir_mid = [(i, 1 if i % 2 == 0 else -1) for i in range(12)]
+    if correlation == 4:
+        # tractability restriction inherited from upstream: 4-body
+        # intermediates are limited to the natural-parity irreps p = (-1)^l
+        # (the spherical-harmonic series) up to l = 11
+        filter_ir_mid = [o3.Irrep(l, (-1) ** l) for l in range(12)]
+    couplings = _wigner_nj(
+        [o3.Irreps(irreps_in)] * correlation, normalization, filter_ir_mid, dtype
+    )
 
-    wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype)
-    current_ir = wigners[0][0]
-    out = []
-    stack = torch.tensor([])
-    for ir, _, base_o3 in wigners:
-        if ir in irreps_out and ir == current_ir:
-            stack = torch.cat((stack, base_o3.squeeze().unsqueeze(-1)), dim=-1)
-            last_ir = current_ir
-        elif ir in irreps_out and ir != current_ir:
-            if len(stack) != 0:
-                out += [last_ir, stack]
-            stack = base_o3.squeeze().unsqueeze(-1)
-            current_ir, last_ir = ir, ir
-        else:
-            current_ir = ir
-    try:
-        out += [last_ir, stack]  # noqa: F821 - last_ir unbound => no coupling (fallback)
-    except (NameError, UnboundLocalError):
-        first_dim = irreps_out.dim
-        size = ([first_dim] if first_dim != 1 else []) + [o3.Irreps(irreps_in).dim] * correlation + [1]
-        out = [str(irreps_out)[:-2], torch.zeros(size, dtype=dtype)]
-    return out
+    # group the (sorted) paths by output irrep; stack every run reaching a
+    # requested irrep along a trailing path axis
+    result = []
+    for ir, run in itertools.groupby(couplings, key=lambda entry: entry[0]):
+        if ir in irreps_out:
+            result.append(ir)
+            result.append(torch.stack([w.squeeze() for _, w in run], dim=-1))
+    if result:
+        return result
+
+    # nothing couples into irreps_out: emit one all-zero path so downstream
+    # contraction shapes stay well-defined
+    shape = [o3.Irreps(irreps_in).dim] * correlation + [1]
+    if irreps_out.dim != 1:
+        shape.insert(0, irreps_out.dim)
+    # upstream labels this placeholder with the target irreps string minus its
+    # final two characters; the odd value is kept for bit-compatibility
+    text = format(irreps_out)
+    return [text[: len(text) - 2], torch.zeros(shape, dtype=dtype)]
 
 
 # ===========================================================================
 # Symmetric contraction (MACE Eq. 10-11): the learned product basis
 # ===========================================================================
-_ALPHABET = ["w", "x", "v", "n", "z", "r", "t", "y", "u", "o", "p", "s"]
+# free einsum labels for the correlation axes of the U tensors; anything is
+# fine as long as none collides with the reserved labels b (batch), c (channel),
+# e (element), i (coupling dim), k (path) used in the contraction equations
+_EINSUM_AXES = "mnopqrstuvwx"
 
 
 class _Contraction(nn.Module):
@@ -285,17 +300,19 @@ class _Contraction(nn.Module):
             self.weights.append(
                 nn.Parameter(torch.randn(num_elements, n_paths, self.num_features) / n_paths)
             )
-        # precompute the einsum equations (TorchScript cannot build them)
-        L = min(self.lmax_out, 1)
-        g = "".join(_ALPHABET[: correlation + L - 1])
-        self.eq_main = f"{g}ik,ekc,bci,be->bc{g}"
+        # precompute the einsum equations (TorchScript cannot build them);
+        # non-scalar outputs carry one extra spatial (m) axis on the U tensors,
+        # scalar outputs have it squeezed away
+        m_axis = 1 if self.lmax_out > 0 else 0
+        lead = _EINSUM_AXES[: correlation + m_axis - 1]
+        self.eq_main = f"{lead}ik,ekc,bci,be->bc{lead}"
         self.eqs_weighting = []
         self.eqs_contract = []
-        for nu in range(1, correlation):
-            gw = "".join(_ALPHABET[: nu + L])
-            gf = "".join(_ALPHABET[: nu - 1 + L])
-            self.eqs_weighting.append(f"{gw}k,ekc,be->bc{gw}")
-            self.eqs_contract.append(f"bc{gf}i,bci->bc{gf}")
+        for order in range(1, correlation):
+            axes_w = _EINSUM_AXES[: order + m_axis]
+            axes_f = _EINSUM_AXES[: order + m_axis - 1]
+            self.eqs_weighting.append(f"{axes_w}k,ekc,be->bc{axes_w}")
+            self.eqs_contract.append(f"bc{axes_f}i,bci->bc{axes_f}")
 
     def _U(self, nu: int) -> Tensor:
         """Return the registered coupling basis buffer for correlation order ``nu``.
@@ -330,17 +347,20 @@ class _Contraction(nn.Module):
             Contracted features of shape ``(B, num_features * irrep_out.dim)``.
         """
         # x: (B, num_features, coupling_dim); y: (B, num_elements)
-        ws: List[Tensor] = []
+        path_weights: List[Tensor] = []
         for w in self.weights:
-            ws.append(w)
-        us = [self.U_matrix_1, self.U_matrix_2, self.U_matrix_3, self.U_matrix_4]
+            path_weights.append(w)
+        bases = [self.U_matrix_1, self.U_matrix_2, self.U_matrix_3, self.U_matrix_4]
         corr = self.correlation
-        out = torch.einsum(self.eq_main, us[corr - 1], ws[corr - 1], x, y)
-        for nu in range(corr - 1, 0, -1):
-            c = torch.einsum(self.eqs_weighting[nu - 1], us[nu - 1], ws[nu - 1], y)
-            c = c + out
-            out = torch.einsum(self.eqs_contract[nu - 1], c, x)
-        return out.reshape(out.shape[0], -1)
+        # Horner evaluation: start at the highest order and repeatedly fold in
+        # the next-lower weighted basis before contracting one power of x away
+        acc = torch.einsum(self.eq_main, bases[corr - 1], path_weights[corr - 1], x, y)
+        for order in range(corr - 1, 0, -1):
+            weighted = torch.einsum(
+                self.eqs_weighting[order - 1], bases[order - 1], path_weights[order - 1], y
+            )
+            acc = torch.einsum(self.eqs_contract[order - 1], weighted + acc, x)
+        return acc.reshape(acc.shape[0], -1)
 
 
 class SymmetricContraction(nn.Module):
@@ -418,20 +438,20 @@ class _ReshapeIrreps(nn.Module):
 
     Attributes
     ----------
-    dims : list of int
-        The dimension ``ir.dim`` of each irrep.
-    muls : list of int
-        The multiplicity ``mul`` of each irrep.
+    widths : list of int
+        The flat width ``mul * ir.dim`` of each irrep entry (the split sizes).
+    shapes : list of list of int
+        The target ``[mul, ir.dim]`` shape of each entry.
     """
 
-    dims: List[int]
-    muls: List[int]
+    widths: List[int]
+    shapes: List[List[int]]
 
     def __init__(self, irreps: o3.Irreps):
         super().__init__()
         self.irreps = o3.Irreps(irreps)
-        self.dims = [ir.dim for _, ir in self.irreps]
-        self.muls = [mul for mul, _ in self.irreps]
+        self.widths = [mul * ir.dim for mul, ir in self.irreps]
+        self.shapes = [[mul, ir.dim] for mul, ir in self.irreps]
 
     def forward(self, tensor: Tensor) -> Tensor:
         """Reshape flat irreps features to a channel-first layout.
@@ -446,13 +466,11 @@ class _ReshapeIrreps(nn.Module):
         torch.Tensor
             Reshaped features of shape ``(N, mul, sum_ir_dim)``.
         """
-        ix = 0
-        out: List[Tensor] = []
-        batch = tensor.shape[0]
-        for mul, d in zip(self.muls, self.dims):
-            out.append(tensor[:, ix : ix + mul * d].reshape(batch, mul, d))
-            ix += mul * d
-        return torch.cat(out, dim=-1)
+        pieces = torch.split(tensor, self.widths, dim=-1)
+        unflattened: List[Tensor] = []
+        for pos, piece in enumerate(pieces):
+            unflattened.append(piece.unflatten(-1, self.shapes[pos]))
+        return torch.cat(unflattened, dim=-1)
 
 
 class _EquivariantProductBasis(nn.Module):
@@ -626,14 +644,15 @@ class RealAgnosticInteractionBlock(_InteractionBase):
             The reshaped message features and ``None`` (no separate
             self-connection for the non-residual block).
         """
-        num_nodes = node_feats.shape[0]
-        node_feats = self.linear_up(node_feats)
-        tp_weights = self.conv_tp_weights(edge_feats)
-        mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
-        message = scatter_sum(mji, edge_index[1], num_nodes)
-        message = self.linear(message) / self.avg_num_neighbors
-        message = self.skip_tp(message, node_attrs)
-        return self.reshape(message), None
+        n_atoms = node_feats.shape[0]
+        feats = self.linear_up(node_feats)
+        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
+        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.linear(pooled) / self.avg_num_neighbors
+        # the self-connection acts on the aggregated message here, not the input
+        pooled = self.skip_tp(pooled, node_attrs)
+        return self.reshape(pooled), None
 
 
 class RealAgnosticResidualInteractionBlock(_InteractionBase):
@@ -674,14 +693,16 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
             The reshaped message features and the self-connection ``sc``
             computed from the input features (to be added as a residual).
         """
-        num_nodes = node_feats.shape[0]
-        sc = self.skip_tp(node_feats, node_attrs)
-        node_feats = self.linear_up(node_feats)
-        tp_weights = self.conv_tp_weights(edge_feats)
-        mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
-        message = scatter_sum(mji, edge_index[1], num_nodes)
-        message = self.linear(message) / self.avg_num_neighbors
-        return self.reshape(message), sc
+        n_atoms = node_feats.shape[0]
+        # self-connection from the raw input features, returned for the
+        # product basis to add downstream
+        residual = self.skip_tp(node_feats, node_attrs)
+        feats = self.linear_up(node_feats)
+        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
+        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.linear(pooled) / self.avg_num_neighbors
+        return self.reshape(pooled), residual
 
 
 class _LinearReadout(nn.Module):
@@ -811,10 +832,12 @@ class _ZBLPairRepulsion(nn.Module):
         torch.Tensor
             The envelope value, masked to zero where ``x >= r_max``.
         """
-        t = x / r_max
-        env = (1.0 - ((p + 1.0) * (p + 2.0) / 2.0) * t**p
-               + p * (p + 2.0) * t**(p + 1) - (p * (p + 1.0) / 2) * t**(p + 2))
-        return env * (x < r_max)
+        s = x / r_max
+        a0 = (p + 1.0) * (p + 2.0) / 2.0
+        a1 = p * (p + 2.0)
+        a2 = p * (p + 1.0) / 2.0
+        smooth = 1.0 - a0 * s**p + a1 * s ** (p + 1) - a2 * s ** (p + 2)
+        return smooth * (x < r_max)
 
     def forward(self, lengths: Tensor, atomic_numbers: Tensor, edge_index: Tensor,
                 num_nodes: int) -> Tensor:
@@ -836,17 +859,19 @@ class _ZBLPairRepulsion(nn.Module):
         torch.Tensor
             Per-node repulsion energy of shape ``(num_nodes,)``.
         """
-        x = lengths  # (E, 1)
-        Z_u = atomic_numbers[edge_index[0]].unsqueeze(-1).to(torch.int64)
-        Z_v = atomic_numbers[edge_index[1]].unsqueeze(-1).to(torch.int64)
-        a = 0.4543 * 0.529 / (torch.pow(Z_u, 0.300) + torch.pow(Z_v, 0.300))
-        r_a = x / a
-        phi = (self.c[0] * torch.exp(-3.2 * r_a) + self.c[1] * torch.exp(-0.9423 * r_a)
-               + self.c[2] * torch.exp(-0.4028 * r_a) + self.c[3] * torch.exp(-0.2016 * r_a))
-        v = (14.3996 * Z_u * Z_v) / x * phi
-        r_max = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
-        v = 0.5 * v * self._envelope(x, r_max, self.p)
-        return scatter_sum(v, edge_index[1], num_nodes).squeeze(-1)
+        r = lengths  # (E, 1)
+        z_src = atomic_numbers[edge_index[0]].to(torch.int64).unsqueeze(-1)
+        z_dst = atomic_numbers[edge_index[1]].to(torch.int64).unsqueeze(-1)
+        # ZBL universal screening length (angstrom) and screening function
+        screen_len = 0.4543 * 0.529 / (torch.pow(z_src, 0.300) + torch.pow(z_dst, 0.300))
+        d = r / screen_len
+        screening = (self.c[0] * torch.exp(-3.2 * d) + self.c[1] * torch.exp(-0.9423 * d)
+                     + self.c[2] * torch.exp(-0.4028 * d) + self.c[3] * torch.exp(-0.2016 * d))
+        pair_energy = (14.3996 * z_src * z_dst) / r * screening
+        r_cut = self.covalent_radii[z_src] + self.covalent_radii[z_dst]
+        # halve the double-counted pair sum and taper it to zero at r_cut
+        pair_energy = 0.5 * pair_energy * self._envelope(r, r_cut, self.p)
+        return scatter_sum(pair_energy, edge_index[1], num_nodes).squeeze(-1)
 
 
 INTERACTIONS = {

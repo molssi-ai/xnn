@@ -84,11 +84,14 @@ def nequip_hidden_irreps(num_features: int, l_max: int, parity: bool = True) -> 
         E.g. ``32x0e+32x1e+32x2e+32x0o+32x1o+32x2o`` for
         ``num_features=32, l_max=2, parity=True``.
     """
-    return o3.Irreps(
-        [(num_features, (l, p))
-         for p in ((1, -1) if parity else (1,))
-         for l in range(l_max + 1)]
-    )
+    # The element order is transplant-forced (it fixes the hidden layout):
+    # all even irreps 0e..l_max e first, then the odd block if requested.
+    parities = [1, -1] if parity else [1]
+    hidden = []
+    for p in parities:
+        for ell in range(l_max + 1):
+            hidden.append((num_features, (ell, p)))
+    return o3.Irreps(hidden)
 
 
 def _act_parity(act) -> int:
@@ -105,11 +108,15 @@ def _act_parity(act) -> int:
         ``+1`` if ``act(-x) == act(x)``, ``-1`` if ``act(-x) == -act(x)``,
         ``0`` otherwise.
     """
-    x = torch.linspace(0, 10, 256)
-    a1, a2 = act(x), act(-x)
-    if (a1 - a2).abs().max() < 1e-5:
+    # Probe grid and tolerance match e3nn's Activation so the inferred
+    # parity (and hence the irreps bookkeeping) agrees with upstream.
+    probe = torch.linspace(0, 10, 256)
+    on_pos, on_neg = act(probe), act(-probe)
+    even_defect = (on_pos - on_neg).abs().max()
+    if even_defect < 1e-5:
         return 1
-    if (a1 + a2).abs().max() < 1e-5:
+    odd_defect = (on_pos + on_neg).abs().max()
+    if odd_defect < 1e-5:
         return -1
     return 0
 
@@ -360,10 +367,13 @@ class InteractionBlock(nn.Module):
         x_in = x
         x = self.linear_1(x)
         edge_feats = self.tp(x[edge_index[0]], edge_sh, weight)
-        # divide first for numerics; the scatter is linear (upstream convention)
-        avg: Optional[float] = self.avg_num_neighbors
-        if avg is not None:
-            edge_feats = edge_feats.div(avg ** 0.5)
+        # NequIP normalizes the messages by sqrt(<neighbours>) on the edges,
+        # before summing; since the sum is linear this equals normalizing the
+        # node result, and we keep the edge-side order to stay bit-for-bit.
+        # (The local copy refines the Optional for TorchScript.)
+        n_avg: Optional[float] = self.avg_num_neighbors
+        if n_avg is not None:
+            edge_feats = edge_feats / n_avg ** 0.5
         out = scatter_sum(edge_feats, edge_index[1], x.shape[0])
         out = self.linear_2(out)
         if self.use_sc:

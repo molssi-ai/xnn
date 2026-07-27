@@ -66,35 +66,28 @@ class ExpNormalSmearing(nn.Module):
         self.cutoff_fn = CosineCutoff(cutoff)
         self.alpha = 5.0 / (self.cutoff_upper - self.cutoff_lower)
 
-        means, betas = self._initial_params()
         if trainable:
-            self.register_parameter("means", nn.Parameter(means))
-            self.register_parameter("betas", nn.Parameter(betas))
+            self.means = nn.Parameter(torch.empty(n_rbf))
+            self.betas = nn.Parameter(torch.empty(n_rbf))
         else:
-            self.register_buffer("means", means)
-            self.register_buffer("betas", betas)
-
-    def _initial_params(self) -> tuple[Tensor, Tensor]:
-        """Initial centers and widths (TorchMD-Net/PhysNet convention).
-
-        Returns
-        -------
-        tuple of Tensor
-            The ``(means, betas)`` initial values, each of shape ``(n_rbf,)``.
-        """
-        start_value = math.exp(-self.cutoff_upper + self.cutoff_lower)
-        means = torch.linspace(start_value, 1.0, self.n_rbf)
-        betas = torch.full(
-            (self.n_rbf,),
-            (2.0 / self.n_rbf * (1.0 - start_value)) ** -2,
-        )
-        return means, betas
+            self.register_buffer("means", torch.empty(n_rbf))
+            self.register_buffer("betas", torch.empty(n_rbf))
+        self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        """Reset ``means`` and ``betas`` to their initial values in place."""
-        means, betas = self._initial_params()
-        self.means.data.copy_(means)
-        self.betas.data.copy_(betas)
+        """Fill ``means`` and ``betas`` with their default values in place.
+
+        The defaults follow the TorchMD-Net/PhysNet convention: in exponential
+        distance space the centers run linearly from
+        ``exp(cutoff_lower - cutoff_upper)`` (the image of the upper cutoff) up
+        to ``1`` (the image of the lower cutoff), and every Gaussian starts
+        with the same width, matched to the center spacing.
+        """
+        first_center = math.exp(self.cutoff_lower - self.cutoff_upper)
+        shared_width = (2.0 / self.n_rbf * (1.0 - first_center)) ** -2
+        with torch.no_grad():
+            self.means.copy_(torch.linspace(first_center, 1.0, self.n_rbf))
+            self.betas.fill_(shared_width)
 
     def forward(self, r: Tensor) -> Tensor:
         """Expand distances onto the exponential-normal basis.
@@ -111,7 +104,7 @@ class ExpNormalSmearing(nn.Module):
             and beyond the cutoff.
         """
         r = r.unsqueeze(-1)
-        return self.cutoff_fn(r) * torch.exp(
-            -self.betas
-            * (torch.exp(self.alpha * (-r + self.cutoff_lower)) - self.means) ** 2
-        )
+        # image of the distance in exponential space, where the centers live
+        u = torch.exp(self.alpha * (self.cutoff_lower - r))
+        gaussians = torch.exp(-self.betas * (u - self.means) ** 2)
+        return self.cutoff_fn(r) * gaussians

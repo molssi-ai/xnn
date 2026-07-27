@@ -21,7 +21,6 @@ edge feature and an equivariant edge vector -- see
 """
 from typing import Tuple
 
-import torch
 from torch import Tensor, nn
 
 
@@ -98,16 +97,13 @@ class EdgeMultiheadAttention(nn.Module):
             of shape ``(E, num_heads, dim_per_head)`` and ``attn`` the scalar
             attention weight per edge and head, shape ``(E, num_heads)``.
         """
-        node_feat = self.layer_norm(node_feat)
-        qkv = self.qkv_proj(node_feat)
-        qkv = qkv.reshape(qkv.shape[:-1] + (self.num_heads, self.dim_per_head * 3))
-        q = qkv[..., :self.dim_per_head]
-        k = qkv[..., self.dim_per_head:2 * self.dim_per_head]
-        v = qkv[..., 2 * self.dim_per_head:]
+        normed = self.layer_norm(node_feat)
+        packed = self.qkv_proj(normed)
+        # the fused projection emits, per head, a [q | k | v] block of
+        # 3 * dim_per_head entries; unfold it and peel off the three roles
+        q, k, v = packed.unflatten(
+            -1, (self.num_heads, 3, self.dim_per_head)).unbind(dim=-2)
 
-        q_center = q[center_index]
-        k_neighbor = k[neighbor_index]
-        v_neighbor = v[neighbor_index]
-        logits = torch.sum(q_center * k_neighbor, dim=-1)
-        attn = self.attn_act(logits) * envelope.unsqueeze(-1)
-        return v_neighbor, attn
+        score = (q[center_index] * k[neighbor_index]).sum(dim=-1)
+        attn = self.attn_act(score) * envelope.unsqueeze(-1)
+        return v[neighbor_index], attn

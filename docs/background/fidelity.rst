@@ -6,42 +6,48 @@ Model Fidelity to Upstream Codes
 
 The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
 ANI, SchNet) are not approximations or "inspired-by" re-implementations: they
-are faithful, self-contained reproductions of the reference codes, verified
-numerically block by block and end to end. (SchNet is the one deliberate
-exception to the *code* part: it is a clean-room build verified against the
-manuscripts' equations instead — see below.) The spherical-harmonic models need
-only ``e3nn``: no ``mace-torch``, ``nequip``, ``cuequivariance``, or
-``opt_einsum_fx`` at runtime; CACE, PhysNet, BAMBOO, ANI, and SchNet need no
-extra dependency at all (PhysNet's original is TensorFlow, while the xnns
-version is pure PyTorch; BAMBOO uses Cartesian vector channels, so it needs
-no e3nn; ANI is pure PyTorch symmetry functions; SchNet is plain PyTorch by
-construction).
+are faithful, self-contained xnns-native reproductions of the reference codes,
+verified numerically block by block and end to end. Models based on
+spherical-harmonic features will only need ``e3nn``: no additional packages such
+as  ``mace-torch``, ``nequip``, ``cuequivariance``, or ``opt_einsum_fx`` is
+required at the runtime. Furthermore, CACE, PhysNet, BAMBOO, ANI, and SchNet
+need no extra dependency at all. Moreover, PhysNet's original implementation in
+TensorFlow has been ported to xnns's ecosystem in pure PyTorch. The BAMBOO model
+uses Cartesian vector channels, so, it does not need the e3nn package. The ANI
+model is written in pure PyTorch and use symmetry functions. The SchNet model is
+also written in plain PyTorch.
 
-Equivariance itself is verified in the test suite (rotate the inputs → the
-energy is invariant and the forces co-rotate, to ~1e-7; see
-``tests/test_gnn.py`` and ``tests/test_mace.py``).
+The equivariance itself is verified in the test suite (rotate the inputs
+$\rightarrow$ check to see whether the energy remains invariant and the forces
+co-rotate, numerically, to the threshold of ~1e-7; see ``tests/test_gnn.py`` and
+``tests/test_mace.py``).
 
 MACE
 ====
-A faithful re-implementation of `ACEsuit/mace <https://github.com/ACEsuit/mace>`_
-(``mace-torch``):
+MACE in xnns reproduces the upstream `ACEsuit/mace
+<https://github.com/ACEsuit/mace>`_ (``mace-torch``). Notably, the xnns
+implementation reproduces:
 
 - the real ``RealAgnostic(Residual)InteractionBlock`` and the paper's
-  *learned symmetric contraction* over Clebsch–Gordan paths (``correlation``
+  *learned symmetric contraction* over Clebsch-Gordan paths (``correlation``
   order);
-- the CG coupling basis (``U_matrix_real``) is bit-identical to
+- the CG coupling basis (``U_matrix_real``), which is bit-identical to
   ``mace-torch``, and the contraction reproduces it to ~1e-16 given the same
   weights;
-- adds ZBL ``pair_repulsion``, and makes the message-passing depth fully
-  flexible (``num_interactions`` = T = 0..N, vs. upstream's fixed 2).
+- the ZBL ``pair_repulsion``, which makes the message-passing depth fully
+  flexible (contrary to the original code, where the ``num_interactions``, T, is
+  fixed to 2, our implementation allows for T to be set to 0, ..., N).
 
-The notebooks in ``examples/gnn/mace/`` verify it block by block and end to
-end against ``mace-torch`` on Argon MD data.
+The notebooks in ``examples/fidelity_checks`` verify the xnns's implementation
+and compare it against the upstream version block by block. The notebooks in
+``examples/gnn/mace/`` offer end to end examples which compare the xnns's MACE
+implementation against ``mace-torch`` on argon molecular dynamics data.
 
 NequIP
 ======
-A faithful re-implementation of the upstream ``EnergyModel`` of
-`mir-group/nequip <https://github.com/mir-group/nequip>`_:
+The NequIP model in xnns offers a faithful re-implementation of the upstream
+``EnergyModel`` of `mir-group/nequip <https://github.com/mir-group/nequip>`_ and
+involves:
 
 - the real ``InteractionBlock``, with upstream parameter names, so state
   dicts transplant directly;
@@ -121,9 +127,10 @@ implementation `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
   nuclear charge -- alchemical by construction);
 - the exact charge-correction, the switched/shielded Coulomb term
   (``kehalf`` constant and the force-shifted long-range form included), and
-  a statement-for-statement port of the bundled Grimme D3(BJ) module with
-  its reference tables (shipped compressed in
-  ``xnns/dnn/models/d3_tables.npz``) and softplus-learnable coefficients;
+  an independently written D3(BJ) dispersion module that reproduces the
+  behavior of upstream's bundled Grimme D3 code exactly, with its reference
+  tables (shipped compressed in ``xnns/dnn/models/d3_tables.npz``) and
+  softplus-learnable coefficients;
 - the shifted-softplus is evaluated in its exact form
   ``max(x, 0) + log1p(exp(-|x|))`` -- PyTorch's ``F.softplus`` goes linear
   above its threshold and would cost ~1e-9.
@@ -249,9 +256,10 @@ path.
 
 Latent Ewald Summation (LES)
 ============================
-The long-range add-on :class:`~xnns.common.models.les.LatentEwald` is a
-faithful port of the reference ``cace.modules.EwaldPotential`` (Cheng,
-*npj Comput Mater* 2025) and the ``cace-lr-fit`` training-script conventions:
+The long-range add-on :class:`~xnns.common.models.les.LatentEwald` is an
+independently written implementation of the algorithm of the reference
+``cace.modules.EwaldPotential`` (Cheng, *npj Comput Mater* 2025) and the
+``cace-lr-fit`` training-script conventions, verified against them:
 
 - the reciprocal-space sum with hemisphere symmetry factors, tinfoil
   boundary conditions (no ``k = 0`` term), triclinic cells, the optional

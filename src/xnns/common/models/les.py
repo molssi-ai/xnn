@@ -12,13 +12,15 @@ energy
 
 Faithful to the reference implementation (``cace.modules.EwaldPotential`` of
 https://github.com/BingqingCheng/cace and the training scripts of
-https://github.com/BingqingCheng/cace-lr-fit): :class:`EwaldSummation` ports the
-reciprocal-space (triclinic-capable) sum, the hemisphere symmetry factors, the
-``k = 0`` and self-interaction conventions, the ``1/r^6`` dispersion variant
-(paper eq 5), and the real-space ``erf``-converged direct sum used for
-non-periodic structures. (One upstream wart is fixed rather than ported: its
-k-vector grid is always built in float32, which crashes float64 runs; here it
-follows the input dtype.)
+https://github.com/BingqingCheng/cace-lr-fit): :class:`EwaldSummation` follows
+the same algorithm (the triclinic-capable reciprocal-space sum with half-space
+symmetry weights, the ``k = 0`` and self-interaction conventions, the
+``1/r^6`` dispersion variant of paper eq 5, and the real-space
+``erf``-converged direct sum used for non-periodic structures), independently
+implemented and verified against the reference to machine precision in
+``tests/test_les.py``. One upstream wart is fixed rather than reproduced: the
+reference always builds its k-vector grid in float32, which crashes float64
+runs; here the grid follows the input dtype.
 
 Because :class:`LatentEwald` only needs *invariant per-atom features*, it wraps
 **any** registered xnns model -- every model exposes its features through the
@@ -91,21 +93,29 @@ class EwaldSummation(nn.Module):
         self.sigma = sigma
         self.exponent = exponent
         self.remove_self_interaction = remove_self_interaction
-        self.k_sq_max = (2.0 * math.pi / dl) ** 2
+        self.k_cut_sq = (2.0 * math.pi / dl) ** 2
 
-    def _kfac(self, k_sq: Tensor) -> Tensor:
-        """Interaction kernel in reciprocal space (paper eqs 4 and 5)."""
-        sigma_sq_half = self.sigma ** 2 / 2.0
+    def _kfac(self, k2: Tensor) -> Tensor:
+        """Interaction kernel in reciprocal space (paper eqs 4 and 5).
+
+        Parameters
+        ----------
+        k2 : Tensor
+            Squared magnitudes ``|k|^2`` of the wave vectors, shape ``(M,)``.
+        """
+        half_sigma_sq = 0.5 * self.sigma ** 2
         if self.exponent == 1:
-            return torch.exp(-sigma_sq_half * k_sq) / k_sq
-        b_sq = k_sq * sigma_sq_half
-        b = torch.sqrt(b_sq)
-        return -1.0 * k_sq ** 1.5 * (
-            math.sqrt(math.pi) * torch.special.erfc(b)
-            + (1 / (2 * b ** 3) - 1 / b) * torch.exp(-b_sq))
+            return torch.exp(-half_sigma_sq * k2) / k2
+        # dispersion kernel, written in the reduced variable u = sigma|k|/sqrt(2)
+        u2 = half_sigma_sq * k2
+        u = torch.sqrt(u2)
+        tail = math.sqrt(math.pi) * torch.special.erfc(u)
+        tail = tail + (0.5 / u ** 3 - 1.0 / u) * torch.exp(-u2)
+        return -(k2 ** 1.5 * tail)
 
     def _self_energy(self, q: Tensor) -> Tensor:
-        return torch.sum(q ** 2) / (self.sigma * (2 * math.pi) ** 1.5)
+        gaussian_norm = self.sigma * (2.0 * math.pi) ** 1.5
+        return q.square().sum() / gaussian_norm
 
     def reciprocal(self, pos: Tensor, q: Tensor, cell: Tensor) -> Tensor:
         """Reciprocal-space Ewald energy of one periodic structure.
@@ -125,37 +135,55 @@ class EwaldSummation(nn.Module):
             Scalar long-range energy (summed over channels).
         """
         device, dtype = pos.device, pos.dtype
-        G = 2 * math.pi * torch.linalg.inv(cell).T  # reciprocal lattice rows
-        norms = torch.norm(cell, dim=1)
-        # the small relative tolerances below resolve floating-point ties in
-        # the grid size and at the |k| = k_c shell consistently, so the energy
-        # is exactly rotation-invariant (upstream truncates/compares exactly,
-        # which can drop a whole k shell when a rotated cell's row norm or a
-        # boundary shell lands an ulp below the cut)
-        nk = [max(1, int(n.item() / self.dl + 1e-9)) for n in norms]
-        grids = [torch.arange(-k, k + 1, device=device) for k in nk]
-        nvec = torch.stack(torch.meshgrid(*grids, indexing="ij"),
-                           dim=-1).reshape(-1, 3)
-        kvec = nvec.to(dtype) @ G
-        k_sq = torch.sum(kvec ** 2, dim=1)
-        mask = (k_sq > self.k_sq_max * 1e-12) & (k_sq <= self.k_sq_max * (1 + 1e-9))
-        kvec, k_sq, nvec = kvec[mask], k_sq[mask], nvec[mask]
+        # rows of the reciprocal cell, satisfying b_i . a_j = 2 pi delta_ij
+        recip = 2.0 * math.pi * torch.linalg.inv(cell).T
+        # per-axis integer extent of the candidate grid; the tiny nudge keeps
+        # the extent stable when a cell edge length sits within an ulp of a
+        # multiple of dl (a documented xnns deviation: upstream truncates the
+        # exact quotient, so a rigid rotation of the cell can change the grid)
+        n_max = [max(int(length / self.dl + 1e-9), 1)
+                 for length in cell.norm(dim=1).tolist()]
 
-        # half-space to avoid double counting: keep k whose first nonzero
-        # integer component is positive, with symmetry factor 2
-        first_nonzero = torch.argmax((nvec != 0).to(torch.int), dim=1)
-        sign = torch.gather(nvec, 1, first_nonzero.unsqueeze(1)).squeeze(1)
-        keep = sign > 0
-        kvec, k_sq = kvec[keep], k_sq[keep]
+        # Enumerate one half-space of integer lattice points directly: a
+        # triple is generated iff its leading nonzero index is positive, so
+        # exactly one of each {+n, -n} pair appears and n = 0 never does.
+        # Every surviving k thus stands for its mirror image as well and
+        # enters the energy with weight 2.
+        na, nb, nc = n_max
+        all_b = torch.arange(-nb, nb + 1, device=device)
+        all_c = torch.arange(-nc, nc + 1, device=device)
+        zero = torch.zeros(1, dtype=torch.long, device=device)
+        half_grid = torch.cat([
+            torch.cartesian_prod(
+                torch.arange(1, na + 1, device=device), all_b, all_c),
+            torch.cartesian_prod(
+                zero, torch.arange(1, nb + 1, device=device), all_c),
+            torch.cartesian_prod(
+                zero, zero, torch.arange(1, nc + 1, device=device)),
+        ])
 
-        exp_ikr = torch.exp(1j * (pos @ kvec.T))               # (n, M)
-        s_k = (q.to(exp_ikr.dtype).unsqueeze(2)
-               * exp_ikr.unsqueeze(1)).sum(dim=0)              # (n_q, M)
-        pot = (2.0 * self._kfac(k_sq) * torch.abs(s_k) ** 2).sum() \
-            / torch.det(cell)
+        kpts = half_grid.to(dtype) @ recip
+        k2 = kpts.square().sum(dim=1)
+        # spherical cutoff |k| <= k_c with a relative slack on both bounds;
+        # the slack resolves floating-point ties on the boundary shell
+        # consistently, keeping the energy exactly rotation-invariant (a
+        # documented xnns deviation: upstream compares exactly, so a whole
+        # shell can drop out when its |k|^2 lands an ulp above the cutoff)
+        in_shell = ((k2 > self.k_cut_sq * 1e-12)
+                    & (k2 <= self.k_cut_sq * (1.0 + 1e-9)))
+        kpts, k2 = kpts[in_shell], k2[in_shell]
+
+        # |S(k)|^2 per channel via the real and imaginary parts of the
+        # structure factor S(k) = sum_i q_i exp(i k . r_i)
+        angles = pos @ kpts.T                       # (n, M)
+        re_sk = torch.cos(angles).T @ q             # (M, n_channels)
+        im_sk = torch.sin(angles).T @ q
+        sk_sq = re_sk.square() + im_sk.square()
+        energy = (2.0 * (self._kfac(k2).unsqueeze(1) * sk_sq).sum()
+                  / torch.det(cell))
         if self.remove_self_interaction and self.exponent == 1:
-            pot = pot - self._self_energy(q)
-        return pot
+            energy = energy - self._self_energy(q)
+        return energy
 
     def realspace(self, pos: Tensor, q: Tensor) -> Tensor:
         """Direct-sum equivalent for a non-periodic structure.
@@ -168,14 +196,18 @@ class EwaldSummation(nn.Module):
         """
         if self.exponent != 1:
             raise ValueError("realspace fallback supports exponent=1 only")
-        r_ij = torch.norm(pos.unsqueeze(0) - pos.unsqueeze(1), dim=-1)
-        conv = torch.special.erf(r_ij / self.sigma / math.sqrt(2.0))
-        inv_r = 1.0 / (r_ij + 1e-6)
-        pot = torch.sum(q.unsqueeze(0) * q.unsqueeze(1)
-                        * (inv_r * conv).unsqueeze(2)) / (4 * math.pi)
+        dist = (pos[:, None, :] - pos[None, :, :]).norm(dim=-1)
+        # two behavioral conventions of the reference are kept on purpose:
+        # erf(r / (sqrt(2) sigma)) vanishes at r = 0, silencing the i == j
+        # terms, and the 1e-6 offset in the denominator keeps the diagonal
+        # finite and differentiable without any masking
+        screen = torch.special.erf(dist / (self.sigma * math.sqrt(2.0)))
+        pair_kernel = screen / (dist + 1e-6)
+        coupling = q[:, None, :] * q[None, :, :]        # (n, n, n_channels)
+        energy = (coupling * pair_kernel[:, :, None]).sum() / (4.0 * math.pi)
         if not self.remove_self_interaction:
-            pot = pot + self._self_energy(q)
-        return pot
+            energy = energy + self._self_energy(q)
+        return energy
 
     def forward(self, q: Tensor, pos: Tensor, batch: Tensor, num_graphs: int,
                 cell: Tensor | None, pbc: Tensor | None = None) -> Tensor:

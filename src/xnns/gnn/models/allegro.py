@@ -55,11 +55,13 @@ from .blocks import tp_path_exists
 class _ChannelWeighter(nn.Module):
     """Weight single-multiplicity irreps into ``mul_out`` channels.
 
-    Faithful to allegro's ``MakeWeightedChannels`` (per-irrep weights): each
-    output channel is the input scaled per irrep by a learned weight,
-    ``out[z,u,:] = attr[z,:] * (alpha * w[z,u,r])`` broadcast over each irrep's
-    ``m`` components. The normalization ``alpha`` is baked into the expansion
-    buffer, exactly as upstream.
+    Numerically identical to allegro's ``MakeWeightedChannels``: every output
+    channel ``u`` carries one learned weight per irrep entry ``r``, and that
+    weight (times the constant ``alpha``) multiplies all ``2l + 1`` components
+    of irrep ``r``. Here the broadcast is done with a per-component Long
+    lookup buffer that records which irrep entry each flattened component
+    belongs to; the flat weights are gathered through it to full feature
+    width and then scaled by ``alpha``.
 
     Parameters
     ----------
@@ -68,7 +70,9 @@ class _ChannelWeighter(nn.Module):
     mul_out : int
         Number of output channels (``num_tensor_features``).
     alpha : float, optional
-        Constant folded into the weights (the env-sum normalization).
+        Constant folded into the weights (the env-sum normalization). Kept as
+        a floating buffer so that module dtype conversions round it the same
+        way they round any other floating buffer.
     """
 
     weight_numel: Final[int]
@@ -81,10 +85,13 @@ class _ChannelWeighter(nn.Module):
         self._num_irreps = len(irreps)
         self.mul_out = mul_out
         self.weight_numel = len(irreps) * mul_out
-        rtoi = torch.zeros(self._num_irreps, irreps.dim)
-        for i, sl in enumerate(irreps.slices()):
-            rtoi[i, sl] = alpha
-        self.register_buffer("_rtoi", rtoi, persistent=False)
+        # Component j of the flattened feature vector belongs to irrep entry
+        # _which_irrep[j] (entry index repeated over its 2l + 1 components).
+        which = torch.arange(self._num_irreps).repeat_interleave(
+            torch.tensor([mul_ir.ir.dim for mul_ir in irreps])
+        )
+        self.register_buffer("_which_irrep", which, persistent=False)
+        self.register_buffer("_alpha", torch.tensor(alpha), persistent=False)
 
     def forward(self, edge_attr: Tensor, weights: Tensor) -> Tensor:
         """Apply per-irrep channel weights.
@@ -101,8 +108,9 @@ class _ChannelWeighter(nn.Module):
         torch.Tensor
             Weighted channels of shape ``(E, mul_out, irreps.dim)``.
         """
-        w = torch.mm(weights.reshape(-1, self._num_irreps), self._rtoi)
-        return edge_attr.unsqueeze(-2) * w.view(edge_attr.shape[0], self.mul_out, -1)
+        w = weights.reshape(-1, self.mul_out, self._num_irreps)
+        w = w.index_select(-1, self._which_irrep) * self._alpha
+        return edge_attr.unsqueeze(-2) * w
 
 
 class _Contracter(nn.Module):

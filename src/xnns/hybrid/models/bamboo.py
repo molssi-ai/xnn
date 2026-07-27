@@ -211,46 +211,43 @@ class GETLayer(nn.Module):
             this is the last layer, the vector update/output of shape
             ``(N, 3, dim)`` (``None`` for the last layer).
         """
-        v_neighbor, attn = self.attn(node_feat, center, neighbor, envelope)
+        values, gate = self.attn(node_feat, center, neighbor, envelope)
 
-        # scalar message: sum_j a_ij (v_j * d_ij)
-        m_feat = v_neighbor * edge_feat * attn.unsqueeze(-1)
-        m_feat = scatter_sum(m_feat, center, n_atoms)
-        m_feat = m_feat.reshape(m_feat.shape[:-2] + (self.dim,))
+        # scalar channel: values carry the radial edge feature and the
+        # attention gate onto the centre atom, heads then merge back to dim
+        weighted = values * edge_feat * gate.unsqueeze(-1)
+        scal_msg = scatter_sum(weighted, center, n_atoms).flatten(-2)
 
         if self.is_first:
-            # vector message only; no incoming V_i
-            m_vec = v_neighbor.unsqueeze(-3) * edge_vec
-            m_vec = scatter_sum(m_vec, center, n_atoms)
-            m_vec = m_vec.reshape(m_vec.shape[:-2] + (self.dim,))
-            return self.output_proj(m_feat), m_vec
+            # nothing equivariant exists yet, so the vector output is just
+            # the aggregated edge-vector message
+            lifted = values.unsqueeze(-3) * edge_vec
+            vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
+            return self.output_proj(scal_msg), vec_msg
 
-        # vector preprocessing: inner product -> invariant scalar
         assert self.vec_proj is not None and node_vec is not None
-        input_vec = self.vec_proj(node_vec)
+        # a dot product between two learned projections of V_i is rotation
+        # invariant, so it may feed the scalar channel without breaking
+        # equivariance
+        mixed = self.vec_proj(node_vec)
+        proj = self.output_proj(scal_msg)
+
         if self.is_last:
-            in1, in2 = input_vec[..., :self.dim], input_vec[..., self.dim:]
-            input_dot = (in1 * in2).sum(dim=-2)
-            out = self.output_proj(m_feat)
-            out2, out3 = out[..., :self.dim], out[..., self.dim:]
-            return input_dot * out2 + out3, None
+            left, right = torch.split(mixed, self.dim, dim=-1)
+            invariant = (left * right).sum(dim=-2)
+            scale, shift = torch.split(proj, self.dim, dim=-1)
+            return invariant * scale + shift, None
 
-        in1 = input_vec[..., :self.dim]
-        in2 = input_vec[..., self.dim:2 * self.dim]
-        in3 = input_vec[..., 2 * self.dim:]
-        input_dot = (in1 * in2).sum(dim=-2)
+        left, right, carry = torch.split(mixed, self.dim, dim=-1)
+        invariant = (left * right).sum(dim=-2)
+        vec_gate, scale, shift = torch.split(proj, self.dim, dim=-1)
 
-        m_vec = v_neighbor.unsqueeze(-3) * edge_vec
-        m_vec = scatter_sum(m_vec, center, n_atoms)
-        m_vec = m_vec.reshape(m_vec.shape[:-2] + (self.dim,))
+        lifted = values.unsqueeze(-3) * edge_vec
+        vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
 
-        out = self.output_proj(m_feat)
-        out1 = out[..., :self.dim]
-        out2 = out[..., self.dim:2 * self.dim]
-        out3 = out[..., 2 * self.dim:]
-        delta_feat = input_dot * out2 + out3
-        delta_vec = in3 * out1.unsqueeze(-2) + m_vec
-        return delta_feat, delta_vec
+        delta_x = invariant * scale + shift
+        delta_v = carry * vec_gate.unsqueeze(-2) + vec_msg
+        return delta_x, delta_v
 
 
 @register_model("bamboo")
@@ -429,11 +426,11 @@ class BAMBOO(InteratomicPotential):
         Tensor
             Per-pair Coulomb energy ``(P,)``.
         """
-        rij = edge_vec.norm(dim=-1)
-        prefactor = self.ele_factor * charges[row] * charges[col] / rij
+        dist = edge_vec.norm(dim=-1)
+        bare = self.ele_factor * charges[row] * charges[col] / dist
         r0 = self.coul_damping_r0
-        softplus_coul = self.coul_softplus((rij - r0) / r0)
-        return prefactor * rij / r0 / (1.0 + softplus_coul)
+        damp = self.coul_softplus((dist - r0) / r0)
+        return bare * dist / r0 / (1.0 + damp)
 
     @staticmethod
     def _all_pairs(batch: Tensor) -> tuple[Tensor, Tensor]:
@@ -485,13 +482,14 @@ class BAMBOO(InteratomicPotential):
         neighbor = data.edge_index[0]                # sender   (upstream "col")
         r = edge_vec.norm(dim=-1)
         unit = edge_vec / r.unsqueeze(-1)
-        weights_rbf = self.dis_rbf(r)
+        radial_emb = self.dis_rbf(r)
         envelope = self.cutoff_fn(r)
 
-        edge_feat = self.rbf_proj(weights_rbf)
-        edge_feat = edge_feat.reshape(
-            edge_feat.shape[:-1] + (self.num_heads, self.dim // self.num_heads))
-        edge_vec_feat = edge_feat.unsqueeze(-3) * unit.unsqueeze(-1).unsqueeze(-1)
+        # split the projected radial embedding into heads, then lift it onto
+        # the unit bond direction to seed the equivariant edge feature
+        edge_feat = self.rbf_proj(radial_emb).unflatten(
+            -1, (self.num_heads, self.dim // self.num_heads))
+        edge_vec_feat = unit[..., None, None] * edge_feat.unsqueeze(-3)
 
         x0 = self.atom_emb(Z)                        # initial scalar feature
         chi = self.electronegativity_mlp(x0).squeeze(-1)

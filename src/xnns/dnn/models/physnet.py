@@ -29,9 +29,10 @@ Architecture (paper eqs 3-15, J. Chem. Theory Comput. 15, 3678, 2019):
   a damped/switched Coulomb term (eqs 12-13 -- the code form: shielded
   ``1/sqrt(r^2+1)`` below ``sr_cut/2``, smoothstep-switched to ``1/r``, and
   force-shifted at ``lr_cutoff`` when one is set);
-* Grimme D3(BJ) dispersion (:mod:`~xnns.dnn.models.d3`, translated from the
-  upstream TF port, tables included) with optionally learnable
-  ``s6/s8/a1/a2`` completes the total energy (eq 12).
+* Grimme D3(BJ) dispersion (:mod:`~xnns.dnn.models.d3`, an independent
+  implementation verified against the upstream TF module, tables included)
+  with optionally learnable ``s6/s8/a1/a2`` completes the total energy
+  (eq 12).
 
 Upstream conventions preserved: shifted-softplus activation, semi-orthogonal
 Glorot weight init with zero biases, zero-initialized ``k2f``/output heads,
@@ -64,12 +65,16 @@ from xnns.common.models.ops import scatter_sum, shifted_softplus
 from xnns.common.models.registry import register_model
 from . import d3
 
-MAX_Z = 95  # up to Pu(94); indices start at 0, as upstream
-KEHALF = 7.199822675975274  # half Coulomb constant in units e=1, eV=1, A=1
+MAX_Z = 95  # element-indexed tables cover Z = 0..94 (through Pu)
+KEHALF = 7.199822675975274  # ke/2 in eV*A/e^2; halved since edges come in pairs
 
 
 def softplus_inverse(x):
-    """Numerically stable inverse of the softplus transform."""
+    """Return ``y`` such that ``softplus(y) = x``.
+
+    Evaluated as ``x + log(1 - exp(-x))`` (i.e. ``log(expm1(x))`` rearranged
+    so the exponential never overflows for large ``x``).
+    """
     return x + np.log(-np.expm1(-x))
 
 
@@ -148,12 +153,18 @@ class _RBF(nn.Module):
         super().__init__()
         self.n_rbf = n_rbf
         self.cutoff = cutoff
-        self.centers = nn.Parameter(torch.tensor(
-            softplus_inverse(np.linspace(1.0, np.exp(-cutoff), n_rbf)),
+        # initialization convention: the (post-softplus) centers tile
+        # [exp(-cutoff), 1], the range exp(-r) sweeps on [0, cutoff], on a
+        # uniform grid; all basis functions start from one shared width
+        # beta = 1/(2 delta)^2 with delta = (1 - exp(-cutoff)) / n_rbf, so
+        # neighboring Gaussians overlap at about half height
+        grid = np.linspace(1.0, np.exp(-cutoff), n_rbf)
+        delta = (1.0 - np.exp(-cutoff)) / n_rbf
+        self.centers = nn.Parameter(torch.as_tensor(
+            softplus_inverse(grid), dtype=torch.get_default_dtype()))
+        self.widths = nn.Parameter(torch.full(
+            (n_rbf,), float(softplus_inverse((0.5 / delta) ** 2)),
             dtype=torch.get_default_dtype()))
-        self.widths = nn.Parameter(torch.tensor(
-            [softplus_inverse((0.5 / ((1.0 - np.exp(-cutoff)) / n_rbf)) ** 2)]
-            * n_rbf, dtype=torch.get_default_dtype()))
 
     def cutoff_fn(self, r: Tensor) -> Tensor:
         """Smooth cutoff ``phi(r) = 1 - 6x^5 + 15x^4 - 10x^3`` (paper eq 8)."""
@@ -425,34 +436,38 @@ class PhysNet(InteratomicPotential):
         Returns
         -------
         tuple of Tensor
-            ``(Ea, Qa, Dij, nh_loss, features)``: per-atom energies ``(N,)``,
-            raw (uncorrected) per-atom charges ``(N,)``, edge distances
-            ``(E,)``, the scalar non-hierarchicality penalty, and the final
-            per-atom feature vectors ``(N, n_features)``.
+            Per-atom energies ``(N,)``, raw (uncorrected) per-atom charges
+            ``(N,)``, edge distances ``(E,)``, the scalar
+            non-hierarchicality penalty, and the final per-atom feature
+            vectors ``(N, n_features)``.
         """
         idx_j, idx_i = edge_index[0], edge_index[1]
         Dij = edge_vec.norm(dim=-1)
         rbf = self.rbf_layer(Dij)
         x = self.embeddings[atomic_numbers]
 
-        Ea = x.new_zeros(x.shape[0])
-        Qa = x.new_zeros(x.shape[0])
-        nh_loss = x.new_zeros(())
-        last_out2 = None
-        for interaction, output in zip(self.interaction_blocks,
-                                       self.output_blocks):
+        # every module contributes an additive (energy, charge) pair per atom
+        energy = x.new_zeros(x.shape[0])
+        charge = x.new_zeros(x.shape[0])
+        head_sq = []
+        for interaction, head in zip(self.interaction_blocks,
+                                     self.output_blocks):
             x = interaction(x, rbf, idx_i, idx_j)
-            out = output(x)
-            Ea = Ea + out[:, 0]
-            Qa = Qa + out[:, 1]
-            out2 = out ** 2
-            if last_out2 is not None:
-                nh_loss = nh_loss + torch.mean(out2 / (out2 + last_out2 + 1e-7))
-            last_out2 = out2
+            eq = head(x)  # (N, 2): energy column 0, charge column 1
+            energy = energy + eq[:, 0]
+            charge = charge + eq[:, 1]
+            head_sq.append(eq ** 2)
 
-        Ea = self.Escale[atomic_numbers] * Ea + self.Eshift[atomic_numbers]
-        Qa = self.Qscale[atomic_numbers] * Qa + self.Qshift[atomic_numbers]
-        return Ea, Qa, Dij, nh_loss, x
+        # non-hierarchicality penalty (paper eqs 18/19): push every module to
+        # contribute less than its predecessor; the small constant keeps the
+        # ratio finite when both contributions vanish (zero-init heads)
+        nh_loss = x.new_zeros(())
+        for prev_sq, cur_sq in zip(head_sq, head_sq[1:]):
+            nh_loss = nh_loss + torch.mean(cur_sq / (cur_sq + prev_sq + 1e-7))
+
+        energy = self.Escale[atomic_numbers] * energy + self.Eshift[atomic_numbers]
+        charge = self.Qscale[atomic_numbers] * charge + self.Qshift[atomic_numbers]
+        return energy, charge, Dij, nh_loss, x
 
     def scaled_charges(self, Qa: Tensor, batch: Tensor, num_graphs: int,
                        total_charge: Tensor | None = None) -> Tensor:
@@ -465,33 +480,40 @@ class PhysNet(InteratomicPotential):
         return Qa + ((total_charge - q_sum) / n_per)[batch]
 
     def _switch(self, Dij: Tensor) -> Tensor:
-        """Smoothstep from shielded to ordinary Coulomb at ``sr_cut / 2``."""
-        cut = self.sr_cut / 2
-        x = Dij / cut
-        step = 6 * x ** 5 - 15 * x ** 4 + 10 * x ** 3
-        return torch.where(Dij < cut, step, torch.ones_like(Dij))
+        """Weight of the bare Coulomb kernel: quintic smoothstep in the
+        distance, rising from 0 at ``r = 0`` to exactly 1 at ``sr_cut / 2``
+        and beyond (where electrostatics are purely ``1/r``)."""
+        half = self.sr_cut / 2
+        y = Dij / half
+        ramp = y ** 3 * (y * (6.0 * y - 15.0) + 10.0)
+        return torch.where(Dij < half, ramp, torch.ones_like(Dij))
 
     def electrostatic_energy_per_atom(self, Dij: Tensor, Qa: Tensor,
                                       idx_i: Tensor, idx_j: Tensor) -> Tensor:
-        """Switched, shielded Coulomb energy per atom (paper eqs 12-13)."""
-        Qi, Qj = Qa[idx_i], Qa[idx_j]
-        DijS = torch.sqrt(Dij * Dij + 1.0)  # shielded distance
-        switch = self._switch(Dij)
-        cswitch = 1.0 - switch
+        """Switched, shielded Coulomb energy per atom (paper eqs 12-13).
+
+        At short range the divergent ``1/r`` is traded for the bounded
+        ``1/sqrt(r^2 + 1)``; :meth:`_switch` blends the two so the kernel is
+        smooth everywhere. When ``lr_cut`` is set, both kernels are
+        force-shifted (value and slope zero at the cutoff) and pairs beyond
+        it are dropped.
+        """
+        q_pair = self.kehalf * Qa[idx_i] * Qa[idx_j]
+        r_bound = torch.sqrt(Dij * Dij + 1.0)
+        w = self._switch(Dij)
+        w_bar = 1.0 - w
         if self.lr_cut is None:
-            Eele_ordinary = 1.0 / Dij
-            Eele_shielded = 1.0 / DijS
-            Eele = self.kehalf * Qi * Qj * (
-                cswitch * Eele_shielded + switch * Eele_ordinary)
+            kernel_bare = 1.0 / Dij
+            kernel_bound = 1.0 / r_bound
+            e_pair = q_pair * (w_bar * kernel_bound + w * kernel_bare)
         else:
-            cut = self.lr_cut
-            cut2 = cut * cut
-            Eele_ordinary = 1.0 / Dij + Dij / cut2 - 2.0 / cut
-            Eele_shielded = 1.0 / DijS + DijS / cut2 - 2.0 / cut
-            Eele = self.kehalf * Qi * Qj * (
-                cswitch * Eele_shielded + switch * Eele_ordinary)
-            Eele = torch.where(Dij <= cut, Eele, torch.zeros_like(Eele))
-        return scatter_sum(Eele, idx_i, Qa.shape[0])
+            rc = self.lr_cut
+            rc_sq = rc * rc
+            kernel_bare = 1.0 / Dij + Dij / rc_sq - 2.0 / rc
+            kernel_bound = 1.0 / r_bound + r_bound / rc_sq - 2.0 / rc
+            e_pair = q_pair * (w_bar * kernel_bound + w * kernel_bare)
+            e_pair = torch.where(Dij <= rc, e_pair, torch.zeros_like(e_pair))
+        return scatter_sum(e_pair, idx_i, Qa.shape[0])
 
     def dispersion_energy_per_atom(self, atomic_numbers: Tensor, Dij: Tensor,
                                    idx_i: Tensor, idx_j: Tensor) -> Tensor:

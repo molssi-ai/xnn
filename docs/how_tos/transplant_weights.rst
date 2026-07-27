@@ -4,12 +4,15 @@
 Transplant Weights from Upstream Codes
 **************************************
 
-Because the xnns NequIP and Allegro implementations use the upstream
-parameter names and weight layouts, a state dict trained with the reference
-code loads directly into the xnns model (and vice versa). The MACE
-implementation reproduces upstream block-by-block, so whole models transplant
-as well; the example notebooks do exactly this and reproduce upstream
-energies and forces to ~1e-15/1e-16.
+Every literature model in xnns is verified against its reference code by
+weight transplant: MACE, NequIP, Allegro, CACE, PhysNet, ANI, BAMBOO, and the
+LES long-range add-on all load upstream weights and reproduce the upstream
+energies and forces to round-off (see :ref:`fidelity` for what each
+implementation matches, and the per-model notes below for the achieved
+precision). The one exception is SchNet: it is a clean-room build from the
+manuscripts, so there is no upstream code (or weights) to transplant; its
+verification reference is an independent NumPy implementation of the papers'
+equations (``examples/fidelity_checks/schnet_verification.ipynb``).
 
 The pattern
 ===========
@@ -19,24 +22,71 @@ The pattern
 2. Map the upstream state dict onto the xnns parameter names.
 3. ``load_state_dict`` and verify on a batch.
 
-For NequIP the parameter names already match (the interaction block uses
-upstream names), so step 2 is nearly a no-op. For Allegro the strided
-channel-mixing linears keep the same flat weight layout as upstream, so
-tensors copy over unchanged.
+Transplants work in *both* directions: the same mapping loads xnns-trained
+weights back into the reference code (see the lock-step MD example below).
+
+How much work step 2 is depends on the model:
+
+- **NequIP / Allegro**: the parameter names already match (the interaction
+  block uses upstream names), and Allegro's strided channel-mixing linears
+  keep the same flat weight layout as upstream, so a state dict trained with
+  the reference code loads nearly as-is (and vice versa).
+- **MACE**: the implementation reproduces upstream block by block, so whole
+  models transplant through a simple name map.
+- **CACE**: same, with one gotcha: upstream lazily initializes some layers
+  (the ``Bchi`` transform and the readout MLP), so run one forward pass on a
+  sample batch before reading the upstream state dict.
+- **PhysNet**: the transplant crosses frameworks (the original is
+  TensorFlow 1.x); each TF variable is assigned from / to the corresponding
+  torch parameter as a NumPy array.
+- **ANI**: torchani's *pretrained* ANI-1x, ANI-1ccx, and ANI-2x weights
+  transplant into the :meth:`ANI.ani1x` / :meth:`ANI.ani1ccx` /
+  :meth:`ANI.ani2x` presets, for a single network or the full 8-model
+  ensemble.
+- **BAMBOO / LES**: plain name maps onto the xnns modules; for BAMBOO note
+  the documented force-convention difference (xnns returns the conservative
+  ``-dE/dr``, equal to upstream ``forces + qeq_force``).
 
 Worked examples
 ===============
-The block-by-block notebooks perform full transplants and check every
-intermediate tensor:
+The block-by-block notebooks in ``examples/fidelity_checks`` perform full
+transplants and check every intermediate tensor:
 
-- ``examples/gnn/mace/recreate_mace_architecture.ipynb``: rebuilds the
-  MACE architecture step by step in both ``mace-torch`` and xnns, transplants
-  a whole model, and reproduces its energy and forces to ~1e-15.
-- ``examples/fidelity_checks/nequip_verification.ipynb``: ends
-  with a whole-model weight transplant (~1e-16 agreement).
-- ``examples/fidelity_checks/allegro_verification.ipynb``: the
-  same for Allegro (~1e-15).
+- ``mace_verification.ipynb``: transplants a whole ``mace-torch`` model and
+  reproduces its energy and forces to ~1e-15
+  (``examples/gnn/mace/recreate_mace_architecture.ipynb`` is a longer
+  companion tutorial that rebuilds the architecture step by step in both
+  codes).
+- ``nequip_verification.ipynb``: ends with a whole-model weight transplant
+  (~1e-16 agreement in energies, forces, and stress).
+- ``allegro_verification.ipynb``: the same for Allegro (~1e-15).
+- ``cace_verification.ipynb``: whole-model transplant from the original
+  ``cace`` package, ~1e-16 relative in energies and forces, molecular and
+  periodic.
+- ``physnet_verification.ipynb``: transplants the TF1 graph's variables into
+  the pure-PyTorch xnns model; energies, forces, and corrected charges match
+  to ~1e-15 (float64).
+- ``ani_verification.ipynb``: transplants torchani's pretrained ANI-1x /
+  ANI-1ccx / ANI-2x ensembles; the AEV matches element for element to ~1e-16,
+  ensemble energies to ~1e-8 Ha and forces to ~2e-7 Ha/Å.
+- ``bamboo_verification.ipynb``: transplants ``bytedance/bamboo`` weights;
+  every GET layer, the charges, dipole, and component energies match to
+  ~1e-15.
+- ``les_verification.ipynb``: transplants the upstream CACE-LR latent-charge
+  head and Ewald settings into ``LatentEwald(CACE)``; each kernel matches to
+  ~1e-16 in float64 and the whole model to float32 round-off.
 
+A reverse transplant in production: the MD notebook
+``examples/dnn/physnet/physnet_argon_density_md.ipynb`` loads *xnns-trained*
+PhysNet weights back into the original TF1 graph and propagates both engines
+through the same NVE trajectory in lock step.
+
+Tests
+=====
 Parity with upstream given identical weights is also enforced in the test
-suite (``tests/test_nequip.py``, ``tests/test_allegro.py``) whenever the
-reference packages are installed.
+suite whenever the reference package is available: ``tests/test_nequip.py``,
+``tests/test_allegro.py``, ``tests/test_cace.py``, ``tests/test_ani.py``
+(needs ``torchani``, the ``[ani]`` extra), ``tests/test_les.py``,
+``tests/test_physnet.py`` (needs TensorFlow and an upstream clone via
+``PHYSNET_UPSTREAM_PATH``), and ``tests/test_bamboo.py`` (upstream clone via
+``BAMBOO_UPSTREAM_PATH``).
