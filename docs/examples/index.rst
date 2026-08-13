@@ -94,6 +94,24 @@ BAMBOO (hybrid)
    nb/hybrid/bamboo/bamboo_charge_analysis
    nb/hybrid/bamboo/bamboo_dimer_electrostatics
 
+Deployment: MDI (common)
+========================
+
+Serving a trained checkpoint as a `MolSSI Driver Interface
+<https://github.com/MolSSI-MDI/MDI_Library>`_ engine: train on the hub argon
+data, launch ``xnns mdi``, validate the wire protocol against direct
+evaluation, and drive NVE molecular dynamics from a minimal Python driver.
+The companion notebook then replaces the Python driver with **LAMMPS**
+(``fix mdi/qm``): same engine, production driver, with LAMMPS-side
+thermodynamics and a radial distribution function. The engine is model
+agnostic, so the same workflow serves any family's checkpoint.
+
+.. toctree::
+   :maxdepth: 1
+
+   nb/deploy/mdi_argon_md
+   nb/deploy/mdi_argon_lammps
+
 Fidelity checks
 ===============
 

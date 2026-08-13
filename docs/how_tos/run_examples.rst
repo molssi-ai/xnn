@@ -120,3 +120,19 @@ qualitatively -- a CC/CP/PP subset of the BioFragment dimer set, loaded with
 ``load_dataset("lode_dimers", subset="bio_scan")`` (bundled with the repo).
 (Neutral homogeneous systems like the Argon set carry no long-range tail, so
 they are deliberately *not* used here.)
+
+Deployment over MDI (``examples/deploy/mdi_argon_md.ipynb``) trains a small
+MACE on the bundled Argon set, serves the checkpoint with the ``xnns mdi``
+command as a `MolSSI Driver Interface
+<https://github.com/MolSSI-MDI/MDI_Library>`_ engine, and drives NVE molecular
+dynamics from a minimal Python driver over TCP. It needs the ``mdi`` extra
+(``pip install -e ".[mdi]"``, i.e. ``pymdi``); because the MDI library can
+only be initialized once per process, restart the kernel before re-running it.
+The engine is model agnostic: the same command serves any family's
+``best.pt``. Its companion ``mdi_argon_lammps.ipynb`` drives the identical
+engine from **LAMMPS** (``fix mdi/qm``) instead: NVE plus a LAMMPS-side radial
+distribution function, with the step-0 energy and pressure validated against
+direct evaluation. It additionally needs a LAMMPS executable built with the
+MDI package (``cmake -D PKG_MDI=yes``; serial is fine) available as ``lmp`` on
+``PATH`` or via the ``XNNS_LMP`` environment variable; it runs both codes as
+subprocesses, so no kernel restart is needed.

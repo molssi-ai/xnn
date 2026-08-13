@@ -1,8 +1,9 @@
-"""Command-line entrypoint: train / benchmark / export.
+"""Command-line entrypoint: train / benchmark / export / mdi.
 
     xnns train --config configs/train.yaml --set optim.epochs=50 model.cutoff=6.0
     xnns benchmark --config configs/benchmark.yaml
     xnns export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
+    xnns mdi --ckpt runs/exp/best.pt -mdi "-role ENGINE -name xnns -method TCP ..."
 
 Hydra users can instead write a tiny @hydra.main wrapper that calls
 `xnns.common.config.from_hydra(cfg)` and hands the Config to the same routines.
@@ -56,7 +57,7 @@ def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
 
 
 def main(argv=None):
-    """Command-line entry point dispatching the ``train``, ``benchmark`` and ``export`` commands.
+    """Command-line entry point dispatching the ``train``, ``benchmark``, ``export`` and ``mdi`` commands.
 
     The first argument selects the command; the rest are that command's options.
     ``train`` builds a :class:`Config` from the arguments, constructs the
@@ -64,7 +65,9 @@ def main(argv=None):
     :class:`~xnns.common.benchmark.BenchmarkConfig` and scores the listed
     pre-trained models on the dataset, writing a comparison table. ``export``
     loads a checkpoint into a :class:`ForceStressOutput`-wrapped model and
-    writes it out for LAMMPS or as TorchScript. With no arguments a usage line
+    writes it out for LAMMPS or as TorchScript. ``mdi`` serves a checkpoint as
+    an MDI engine (see :mod:`xnns.common.deploy.mdi_engine`). With no
+    arguments a usage line
     is printed; an unknown command prints an error message.
 
     Parameters
@@ -80,7 +83,7 @@ def main(argv=None):
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        print("usage: xnns {train,benchmark,export} [options]"); return
+        print("usage: xnns {train,benchmark,export,mdi} [options]"); return
     cmd, rest = argv[0], argv[1:]
 
     from .. import config as cfgmod
@@ -132,6 +135,11 @@ def main(argv=None):
             print("wrote", export_to_lammps(base, cfg.model.cutoff, args.out))
         else:
             print("wrote", export_torchscript(base, args.out))
+
+    elif cmd == "mdi":
+        from ..deploy.mdi_engine import main as mdi_main
+        mdi_main(rest)
+
     else:
         print(f"unknown command: {cmd}")
 

@@ -4,15 +4,16 @@
 Transplant Weights from Upstream Codes
 **************************************
 
-Every literature model in xnns is verified against its reference code by
-weight transplant: MACE, NequIP, Allegro, CACE, PhysNet, ANI, BAMBOO, and the
-LES long-range add-on all load upstream weights and reproduce the upstream
-energies and forces to round-off (see :ref:`fidelity` for what each
-implementation matches, and the per-model notes below for the achieved
-precision). The one exception is SchNet: it is a clean-room build from the
-manuscripts, so there is no upstream code (or weights) to transplant; its
-verification reference is an independent NumPy implementation of the papers'
-equations (``examples/fidelity_checks/schnet_verification.ipynb``).
+Every state-of-the-art model from the literature, which is implemented in xnns,
+is verified against its reference code by weight transplant: MACE, NequIP,
+Allegro, CACE, PhysNet, ANI, BAMBOO, and the LES long-range add-on all load
+upstream weights and reproduce the upstream energies and forces to round-off
+error (see :ref:`fidelity` for what each implementation matches, and the
+per-model notes below for the achieved precision). The one exception is SchNet:
+it is a clean-room build from the manuscripts, so there is no upstream code (or
+weights) to transplant; its verification reference is an independent NumPy
+implementation of the papers' equations
+(``examples/fidelity_checks/schnet_verification.ipynb``).
 
 The pattern
 ===========
