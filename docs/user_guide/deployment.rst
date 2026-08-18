@@ -44,7 +44,10 @@ A model is exportable when it provides the scriptable core
 MACE, and Allegro all do, and the scripted models reproduce the eager ones
 to ~1e-15 (verified in the test suite). CACE is the exception: like the
 original ``cace`` package (which has no LAMMPS interface) it deploys via the
-ASE calculator only.
+ASE calculator only. ReaxFF likewise deploys via the ASE calculator only
+(its per-structure EEM linear solve and valence enumeration have no
+scriptable per-edge core); when running molecular dynamics with it, use the
+customary ReaxFF timestep of about 0.1 fs.
 
 See :ref:`howto-lammps` for the step-by-step guide, including the CLI form
 (``xnns export``).

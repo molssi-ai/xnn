@@ -109,6 +109,13 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "num_rbf": "n_rbf",
         "n_layers": "n_interactions",
     },
+    # alternative ReaxFF spellings used by ReaxFF-nn training tools
+    "reaxff": {
+        "libfile": "ffield",
+        "vdwcut": "cutoff",
+        "hbshort": "hb_short",
+        "hblong": "hb_long",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

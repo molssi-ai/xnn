@@ -278,6 +278,56 @@ float64), exact ties at the ``|k| = k_c`` shell resolve consistently so the
 energy is exactly rotation-invariant, and the self-interaction term is
 subtracted once (upstream subtracts it once per ``q`` channel).
 
+ReaxFF / ReaxFF-nn
+==================
+A faithful implementation of the **published equations**: the classical
+reactive force field of van Duin *et al.* (*J. Phys. Chem. A* 105, 9396,
+2001; the transition-metal extension of Nielson *et al.* 2005 and the
+standard form reviewed by Senftle *et al.* 2016) and the machine-learned
+ReaxFF-nn variant (Guo *et al.*, *Comput. Mater. Sci.* 172, 109393, 2020;
+Xue *et al.*, *PCCP* 23, 19457, 2021), including the conventions required to
+evaluate published parameter libraries (``ffield`` text and ReaxFF-nn JSON):
+kcal/mol units and their per-term application rules, off-diagonal
+combination rules, torsion wildcards, hydrogen-bond defaults, and the
+bond-order switching behavior the libraries were trained under.
+
+The classical evaluation was additionally cross-checked against standalone
+LAMMPS ``pair_style reaxff`` on the published C/H/O combustion field
+(Chenoweth *et al.* 2008, read from the standard ``ffield`` text format):
+per-term energies agree at the level set by the two codes' different
+bond-list truncation conventions (nonbonded van der Waals and Coulomb terms
+to ~1e-6 eV; bond, angle, and total energies to ~0.1 percent), and forces
+match within a fraction of a percent. LAMMPS is used there only as an
+external oracle; nothing in xnns depends on it.
+
+**Licensing note.** The authors' reference implementation of ReaxFF-nn is
+distributed under the AGPL, which is incompatible with redistributing any
+derived verification artifact alongside this MIT-licensed code base. During
+development the xnns implementation was checked term by term against that
+publicly available implementation (agreement at its float32 working
+precision on molecular and periodic CHNO systems, classical and neural
+variants alike), but **no fidelity notebook, test, or vendored code that
+depends on it is distributed here, and none of its code was copied**. The
+distributed verification is therefore self-contained, following the same
+clean-room convention as SchNet: ``tests/test_reaxff.py`` recomputes every
+energy term from the papers' equations (uncorrected and corrected bond
+orders, bond energy, the analytic two-atom EEM solution and its
+self/Coulomb energies, the shielded-Morse van der Waals dimer, the valence
+angle of water via eqs 8a-8d, hydrogen bonds, valence/torsion enumeration by
+brute force) and checks rotation/translation invariance, autograd forces
+against finite differences, size extensivity, batching, charge-constraint
+handling, trainability, and library round-trips.
+
+Documented conventions: valence angles and torsions use the composed edge
+geometry (well defined for any cell); nonbonded terms are evaluated on a
+true periodic neighbor list under the standard 7th-order taper; the torsion
+angle enters through Chebyshev cosine identities (no ``arccos`` in the
+graph, whose derivative diverges for the planar torsions every conjugated
+molecule has); and a handful of rational-exponential terms are evaluated in
+overflow-safe sigmoid form (exact) or with an argument-capped ``exp``
+(differing below 1e-17, inside saturating ratios only) so that float32
+training with force losses stays finite.
+
 Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,

@@ -14,6 +14,8 @@ Complete reference documentation, generated from the docstrings in
 - :mod:`xnns.cnn`: continuous-filter convolution models (SchNet)
 - :mod:`xnns.dnn`: descriptor models (HDNNP, ANI, PhysNet) and
   symmetry-function / AEV featurizers
+- :mod:`xnns.ffnn`: learnable classical force fields
+  (ReaxFF / ReaxFF-nn) and their parameter-library I/O
 - :mod:`xnns.transformer`: shared graph-transformer building blocks
   (multi-head edge attention, exponential-normal radial basis)
 - :mod:`xnns.hybrid`: GNN + transformer models with a physics energy split
@@ -27,5 +29,6 @@ Complete reference documentation, generated from the docstrings in
    xnns.gnn
    xnns.cnn
    xnns.dnn
+   xnns.ffnn
    xnns.transformer
    xnns.hybrid

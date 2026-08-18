@@ -51,6 +51,15 @@ What is covered
        invariance/equivariance and **parity with the upstream code** given
        identical weights (upstream packages required where applicable),
        plus each model's specific conventions
+   * - ``test_reaxff.py``
+     - **equation-by-equation references from the ReaxFF papers** (bond
+       orders and corrections, bond energy, analytic two-atom EEM, van der
+       Waals dimer, the water valence angle, hydrogen bonds, brute-force
+       angle/torsion enumeration), invariances, forces vs. finite
+       differences, size extensivity, batching, ``total_charge`` handling,
+       trainable-group selection and training steps, ``ffield`` text and
+       JSON library round-trips, key translation (self-contained: no
+       third-party ReaxFF code is used -- see the fidelity notes)
    * - ``test_hub.py`` / ``test_ase_io.py`` / ``test_benchmark.py`` /
        ``test_trainer_distributed.py``
      - dataset hub builders and caching, ASE file I/O, the benchmark

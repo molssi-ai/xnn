@@ -45,7 +45,7 @@ from xnns.common.data import AtomicDataset
 from xnns.common.train import Trainer
 
 cfg = Config()
-# E.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace
+# E.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace | reaxff
 cfg.model.name = "nequip"
 # Unshared model specific hyperparameters go here
 cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
@@ -68,7 +68,7 @@ train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 
 ## Package layout
 
-The package is organized **by model family** (`gnn`, `cnn`, `dnn`, `hybrid`),
+The package is organized **by model family** (`gnn`, `cnn`, `dnn`, `ffnn`, `hybrid`),
 with shared resources factored into the `common` modules and reusable
 transformer building blocks in `transformer`. An object (e.g., function, module
 etc.) lives with the model family that uses it, or with `common` if more than
@@ -101,12 +101,15 @@ src/xnns/
 │   └── models/                 - base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
 │       └── …                     + base, blocks, nequip, mace, allegro, cace
 ├── cnn/                        continuous-filter conv net
-│   └── models/                 schnet
+│   └── models/                 - schnet
 ├── dnn/                        descriptor + per-element networks, and PhysNet
 │   ├── featurizers/            - DNN featurizers
 │   │   └── …                     + symmetry functions, AEV
 │   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
 │       └── …
+├── ffnn/                       learnable classical force fields
+│   └── models/                 - reaxff, ffield
+│       └── …                     + ReaxFF, ReaxFF-nn reactive force field, parameter-library I/O, template
 ├── transformer/                shared graph-transformer building blocks
 │   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
 │   └── featurizers/            - ExpNormalSmearing radial basis
@@ -236,6 +239,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
 | Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
+| ReaxFF / ReaxFF-nn | ffnn | bond orders + EEM charges (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 
 ## Examples
 
@@ -247,12 +251,23 @@ networks): each holds a `<model>_argon_train_test.ipynb` and a
 `<model>_argon_density_md.ipynb` (LES has `les_molecular_dimers.ipynb`; ANI has
 `examples/dnn/ani/ani_rmd17_train.ipynb` and `ani1_dataset.ipynb`). Every
 training/MD notebook pulls its data through the one-line dataset hub
-(`load_dataset("argon_md")`, `load_dataset("rmd17", ...)`,
-`load_dataset("ani1", ...)`, `load_dataset("lode_dimers", subset="bio_scan")`).
-The block-by-block numerical verifications against the upstream codes are
-collected under `examples/fidelity_checks/` as `<model>_verification.ipynb`. The
-`examples/quickstart.py` module presents a minimal train/predict workflow on
-toy-data.
+(`load_dataset("argon_md")`, `load_dataset("rmd17", ...)`, `load_dataset("ani1",
+...)`, `load_dataset("lode_dimers", subset="bio_scan")`). The `ffnn` family
+trains the ReaxFF-nn reactive force field on rMD17 and analyses its bond orders,
+EEM charges and bond dissociation (`examples/ffnn/reaxff/`), benchmarking
+throughout against the original classical ReaxFF with published parameters (the
+Chenoweth 2008 C/H/O combustion field, run directly from the standard `ffield`
+text format). The block-by-block numerical verifications against the upstream
+codes are collected under `examples/fidelity_checks/` as
+`<model>_verification.ipynb`. **ReaxFF is the exception:** the authors'
+reference implementation of ReaxFF-nn is AGPL-licensed, so no verification
+notebook or test depending on it (and no code derived from it) is distributed
+with this MIT-licensed code base; the implementation follows the published
+equations, was checked against that implementation during development without
+redistributing anything from it, and ships with self-contained
+equation-by-equation tests instead (`tests/test_reaxff.py`; see the fidelity
+notes in the documentation). The `examples/quickstart.py` module presents a
+minimal train/predict workflow on toy-data.
 
 ## Extension points
 

@@ -1,0 +1,9 @@
+name: reaxff
+cutoff: 10.0              # nonbonded (vdW / Coulomb / EEM) cutoff, the ReaxFF standard
+ffield: ffield.json       # parameter library: ffield text or ReaxFF-nn JSON (required)
+species: null             # subset of the library's species (default: all of them)
+nn: null                  # ReaxFF-nn neural bond blocks (default: on iff the library has weights)
+messages: null            # message-passing steps T (default: the library's value)
+hb_short: 6.75            # hydrogen-bond X..Z taper window, lower edge
+hb_long: 7.5              # hydrogen-bond X..Z taper window, upper edge
+trainable: []             # classical parameter groups to refit, e.g. [Desi, be1, V2]; "all" for every group

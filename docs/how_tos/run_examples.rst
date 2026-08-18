@@ -111,6 +111,20 @@ charge-equilibrium electrostatics binding the charged/polar dimers beyond the
 GET cutoff (electrostatics on vs. off), reusing the same CC/CP/PP dimer set as
 the LES example (``load_dataset("lode_dimers", subset="bio_scan")``).
 
+ReaxFF (``examples/ffnn/reaxff/``) has ``reaxff_rmd17_train_test.ipynb``,
+which trains the ReaxFF-nn reactive force field from a generic seed library
+on rMD17 malonaldehyde (``load_dataset("rmd17", ...)``, energies **and**
+forces) and exports the result as a portable ``ffield.json``, and
+``reaxff_md_bond_orders.ipynb``, which runs ASE molecular dynamics with the
+trained library and analyses the reactive descriptors (bond orders, EEM
+charges, a smooth bond-dissociation scan). Both notebooks also benchmark the
+**original classical ReaxFF**: the published C/H/O combustion field
+(``ffield.reax.cho``, Chenoweth *et al.* 2008) runs in the same ``ReaxFF``
+class straight from the standard ``ffield`` text format, giving the
+published-parameter baseline for the test-set metrics and the
+bond-dissociation scan. No third-party ReaxFF code is required (see the
+fidelity notes in the documentation).
+
 The Latent Ewald Summation long-range add-on is validated against the original
 ``cace`` ``EwaldPotential`` in ``examples/fidelity_checks/les_verification.ipynb``;
 ``examples/gnn/les/les_molecular_dimers.ipynb`` reproduces

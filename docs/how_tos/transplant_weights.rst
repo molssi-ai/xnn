@@ -82,6 +82,12 @@ A reverse transplant in production: the MD notebook
 PhysNet weights back into the original TF1 graph and propagates both engines
 through the same NVE trajectory in lock step.
 
+ReaxFF needs no transplant machinery at all: the force field *is* its
+parameter library, so :class:`~xnns.ffnn.models.reaxff.ReaxFF` loads
+``ffield`` text and ReaxFF-nn JSON libraries directly, and
+``ReaxFF.export_library()`` writes trained parameters back out in the same
+portable format.
+
 Tests
 =====
 Parity with upstream given identical weights is also enforced in the test

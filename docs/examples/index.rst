@@ -94,6 +94,23 @@ BAMBOO (hybrid)
    nb/hybrid/bamboo/bamboo_charge_analysis
    nb/hybrid/bamboo/bamboo_dimer_electrostatics
 
+ReaxFF / ReaxFF-nn (ffnn)
+=========================
+
+Training a reactive force field by gradient descent: a generic seed library
+is fit to rMD17 malonaldehyde energies and forces through the standard
+pipeline, then exported as a portable ``ffield.json``. The companion
+notebook runs ASE molecular dynamics with the trained library and analyses
+the reactive descriptors -- per-pair bond orders, geometry-dependent EEM
+charges, and a smooth bond-dissociation scan -- including an honest look at
+what equilibrium-only training data cannot constrain.
+
+.. toctree::
+   :maxdepth: 1
+
+   nb/ffnn/reaxff/reaxff_rmd17_train_test
+   nb/ffnn/reaxff/reaxff_md_bond_orders
+
 Deployment: MDI (common)
 ========================
 

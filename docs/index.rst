@@ -10,8 +10,9 @@ Machine-Learning Interatomic Potentials in PyTorch
 molecular and periodic systems, implemented in PyTorch behind a single coherent
 ``nn.Module`` interface. It provides faithful and self-contained implementations
 of state-of-the-art equivariant open-source models such as NequIP, MACE,
-Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, and the BAMBOO graph
-equivariant transformer. The key strengths
+Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, the BAMBOO graph
+equivariant transformer, and the ReaxFF / ReaxFF-nn learnable reactive force
+field. The key strengths
 of xnns are
 
 - all models share one data object, module interface, training loop, and

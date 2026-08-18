@@ -19,7 +19,7 @@ frontend:
 
    from xnns.common.models import available_models, build_model
 
-   available_models()          # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'schnet']
+   available_models()          # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -327,6 +327,43 @@ D3(CSO), and ``disp_cutoff`` (10.0).
    regularises the charge–position-derivative ``qeq_force`` toward zero during
    training; the xnns force equals the upstream ``forces + qeq_force`` to
    machine precision (see :ref:`fidelity`).
+
+ReaxFF / ReaxFF-nn (``ffnn``)
+=============================
+:class:`xnns.ffnn.models.reaxff.ReaxFF`: the bond-order **reactive force
+field** (van Duin *et al.*, *J. Phys. Chem. A* 2001; Nielson *et al.* 2005;
+Senftle *et al.*, *npj Comput. Mater.* 2016) and its machine-learned variant
+**ReaxFF-nn** (Guo *et al.*, *Comput. Mater. Sci.* 2020; Xue *et al.*, *PCCP*
+2021), in one model. Bond orders are computed from interatomic distances
+(sigma/pi/double-pi), corrected for over-coordination and residual 1-3
+contributions — in nn mode by a per-species message-passing network — and
+every valence term (bond, lone pair, over/under-coordination, valence angle,
+penalty, three-body conjugation, torsion, four-body conjugation, hydrogen
+bond) is written in these bond orders so it vanishes smoothly as bonds break.
+Nonbonded terms are the tapered, shielded van der Waals and Coulomb
+interactions, with partial charges equilibrated at every geometry by a
+differentiable EEM solve (so autograd forces stay conservative). ``forward``
+additionally returns ``"charges"`` and the full per-term energy decomposition
+(``"e_bond"``, ``"e_angle"``, ``"e_vdw"``, ...).
+
+The model is fully specified by a parameter library — a standard ``ffield``
+text file or a ReaxFF-nn JSON library (:mod:`xnns.ffnn.models.ffield`) — and
+the whole functional form is differentiable, so any parameter group can be
+refit by gradient descent (``trainable=...``); in nn mode the network weights
+are always trainable. :func:`~xnns.ffnn.models.ffield.template_library`
+builds a generic seed library for training from scratch, and
+``ReaxFF.export_library()`` writes a trained force field back to a portable
+JSON file. Every energy term is verified against the published equations
+(see :ref:`fidelity` for why no third-party comparison is distributed).
+
+Key options (defaults in parentheses): ``ffield`` (required), the parameter
+library path; ``cutoff`` (10.0), the nonbonded vdW/Coulomb/EEM cutoff and
+neighbor-list radius; ``species`` (all in the library); ``nn`` (on iff the
+library carries network weights); ``messages`` (the library's value), the
+message-passing steps; ``hb_short``/``hb_long`` (6.75/7.5), the
+hydrogen-bond distance window; ``trainable`` (none), the classical parameter
+groups to refit. ReaxFF is evaluated in eV/Angstrom (libraries store
+energies in kcal/mol; conversion is automatic).
 
 Long-range interactions: Latent Ewald Summation (LES)
 ======================================================
