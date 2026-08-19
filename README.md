@@ -272,14 +272,15 @@ minimal train/predict workflow on toy-data.
 ## Extension points
 
 - **Implement a new model:** 
-  + Pick your model family package (`gnn` / `cnn` / `dnn`,  or add one) and add
-    a module under `<family>/models/`.
-  + Subclass `xnns.common.models.InteratomicPotential` (or the family base, e.g.,
-  `gnn.models.base.EquivariantGNN`) and implement its `forward(data)` method.
+  + Pick your model family package (`gnn` / `cnn` / `dnn`/ `ffnn`,  or add one)
+    and add a module under `<family>/models/`.
+  + Subclass `xnns.common.models.InteratomicPotential` (or the family base,
+  e.g., `gnn.models.base.EquivariantGNN`) and implement its `forward(data)`
+  method.
   + register your model implementation using `@register_model` decorator.
   + Add a YAML config file for your model `configs/model/<name>.yaml`. 
-  + Import the family package so the model registers.
   + For TorchScript/LAMMPS export, it is important to expose a scriptable
+  + Import the family package so the model registers.
   `node_energy(atomic_numbers, edge_index, edge_vec)` core (SchNet shows the
   pattern; e3nn models need e3nn's JIT support for this).
 - **Add a new featurizer:**
