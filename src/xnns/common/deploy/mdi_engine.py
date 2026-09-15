@@ -215,7 +215,7 @@ class MDIEngine:
             "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
                     if self.cell_bohr is not None else None),
         }
-        graph = structure_to_graph(struct, self.cutoff).to(self.device)
+        graph = structure_to_graph(struct, self.cutoff, device=self.device)
         out = self.model(graph)
 
         self.energy = float(out["energy"].sum().detach()) / HARTREE_TO_EV

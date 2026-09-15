@@ -22,10 +22,15 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-try:  # optional: a cell-list implementation, orders of magnitude faster
-    from vesin.torch import NeighborList as _VesinNeighborList
-except ImportError:  # pragma: no cover - exercised by not having vesin
-    _VesinNeighborList = None
+try:  # keep import-safe without vesin
+    from vesin_torch import NeighborList as VesinNeighborList
+    _HAS_VESIN = True
+except ModuleNotFoundError:
+    try:  # vesin < 0.4 shipped it here, and warns from this path
+        from vesin.torch import NeighborList as VesinNeighborList
+        _HAS_VESIN = True
+    except ModuleNotFoundError:
+        VesinNeighborList, _HAS_VESIN = None, False
 
 
 def _n_repeats(cell: Tensor, cutoff: float, pbc: Tensor) -> list[int]:
@@ -77,8 +82,28 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
 
     The gain is large enough to matter at any real system size: on 5001 atoms
     with a 6 A cutoff, 1674 ms of brute force becomes 0.6 ms.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Cartesian positions of shape ``(N, 3)``.
+    cutoff : float
+        Neighbor cutoff radius.
+    cell : Tensor or None
+        Lattice vectors as rows, of shape ``(3, 3)``.
+    pbc : Tensor or None
+        Boolean periodicity flags of shape ``(3,)``.
+    self_interaction : bool
+        Whether self-edges were asked for; vesin cannot produce them.
+
+    Returns
+    -------
+    tuple of Tensor, or None
+        ``(edge_index, cell_shifts)`` as :func:`build_neighbor_list` returns
+        them, or ``None`` when vesin is absent or cannot express the request,
+        leaving the caller to fall back.
     """
-    if _VesinNeighborList is None or self_interaction:
+    if not _HAS_VESIN or self_interaction:
         return None
 
     molecular = cell is None or pbc is None or not bool(pbc.any())
@@ -88,7 +113,7 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
 
     box = (torch.zeros((3, 3), device=pos.device, dtype=pos.dtype)
            if molecular else cell)
-    i, j, shifts = _VesinNeighborList(cutoff=cutoff, full_list=True).compute(
+    i, j, shifts = VesinNeighborList(cutoff=cutoff, full_list=True).compute(
         points=pos, box=box, periodic=not molecular, quantities="ijS"
     )
     return torch.stack([i, j], dim=0), shifts.to(torch.long)
