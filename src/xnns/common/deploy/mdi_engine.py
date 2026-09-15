@@ -134,6 +134,10 @@ class MDIEngine:
         # ---- timing ----
         self._n_calc = 0
         self._t_total = 0.0
+        self._t_graph = 0.0     # neighbour list + tensor assembly
+        self._t_model = 0.0     # the forward pass
+        self._t_extract = 0.0   # pulling results back to the host
+        self._n_edges = 0       # from the most recent graph
 
     @classmethod
     def from_checkpoint(cls, path: str, device: str = "cpu",
@@ -215,8 +219,13 @@ class MDIEngine:
             "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
                     if self.cell_bohr is not None else None),
         }
-        graph = structure_to_graph(struct, self.cutoff).to(self.device)
+        graph = structure_to_graph(struct, self.cutoff, device=self.device)
+        self._sync()
+        t_graph = time.perf_counter()
+
         out = self.model(graph)
+        self._sync()
+        t_model = time.perf_counter()
 
         self.energy = float(out["energy"].sum().detach()) / HARTREE_TO_EV
         if "forces" in out:
@@ -231,11 +240,40 @@ class MDIEngine:
         else:
             self.stress = None
 
+        t_end = time.perf_counter()
         self._n_calc += 1
-        self._t_total += time.perf_counter() - t0
+        self._t_graph += t_graph - t0
+        self._t_model += t_model - t_graph
+        self._t_extract += t_end - t_model
+        self._t_total += t_end - t0
+        self._n_edges = int(graph.edge_index.shape[1])
+
         if self._n_calc % 100 == 0:
-            logger.info("step %d: avg %.1f ms/step", self._n_calc,
-                        self._t_total / self._n_calc * 1000)
+            n = self._n_calc
+            ms = 1000.0 / n
+            # katom-step/s makes runs of different size comparable, which
+            # ms/step on its own does not.
+            rate = self.natoms * n / self._t_total / 1000.0
+            logger.info(
+                "step %d: graph=%.1f model=%.1f extract=%.1f total=%.1f ms/step"
+                "  %.1f katom-step/s  %d edges",
+                n, self._t_graph * ms, self._t_model * ms,
+                self._t_extract * ms, self._t_total * ms, rate, self._n_edges,
+            )
+
+    def _sync(self) -> None:
+        """Wait for queued device work to finish.
+
+        GPU work is asynchronous, so a timestamp taken without this records
+        when a kernel was *launched*, not when it finished -- which would put
+        the model's cost into whatever ran next and make the breakdown
+        meaningless. Costs a little per step and is worth it only because the
+        numbers are then attributable.
+        """
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
 
     def _ensure_results(self) -> None:
         """Re-evaluate the model if the geometry changed since the last call."""
@@ -345,9 +383,14 @@ class MDIEngine:
             else:
                 raise RuntimeError(f"unhandled MDI command: {command}")
 
-        logger.info("engine finished: %d calculations, avg %.1f ms/step",
-                    self._n_calc,
-                    self._t_total / max(self._n_calc, 1) * 1000)
+        n = max(self._n_calc, 1)
+        ms = 1000.0 / n
+        logger.info(
+            "engine finished: %d calculations, avg %.1f ms/step "
+            "(graph %.1f, model %.1f, extract %.1f)",
+            self._n_calc, self._t_total * ms, self._t_graph * ms,
+            self._t_model * ms, self._t_extract * ms,
+        )
 
 
 def main(argv=None) -> None:

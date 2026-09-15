@@ -113,7 +113,7 @@ class XNNSCalculator(Calculator):
             "cell": np.asarray(atoms.get_cell()) if atoms.pbc.any() else None,
             "pbc": np.asarray(atoms.pbc),
         }
-        graph = structure_to_graph(struct, self.cutoff).to(self.device)
+        graph = structure_to_graph(struct, self.cutoff, device=self.device)
         out = self.model(graph)
 
         self.results["energy"] = float(out["energy"].sum().detach())
