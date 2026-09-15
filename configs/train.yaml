@@ -1,0 +1,20 @@
+# Default Hydra-style config. `defaults` lets Hydra compose model/data groups;
+# plain YAML/argparse users can ignore it and edit the sections directly. Keep
+# the `_self_` entry at the end of the defaults list to allow overriding any
+# config values by those in this file
+defaults:
+  - model: schnet
+  - data: default
+  - _self_
+
+optim:
+  lr: 1.0e-3
+  epochs: 100
+  energy_weight: 1.0
+  force_weight: 10.0
+  stress_weight: 0.0
+  scheduler: cosine
+
+device: auto      # auto | cpu | cuda | cuda:0
+seed: 0
+output_dir: runs/exp

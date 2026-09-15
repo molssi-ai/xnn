@@ -1,0 +1,31 @@
+# BAMBOO (bytedance/bamboo, Gong et al. 2024): graph equivariant transformer
+# with a physics energy split (semi-local NN + charge-equilibrium electrostatics
+# + optional D3(CSO) dispersion). Only name/cutoff/n_features/n_interactions/
+# n_rbf are typed core fields; every other key folds into `ModelConfig.extra`
+# and falls back to these same values inside `BAMBOO.from_config`.
+#
+# Keys copied from an upstream BAMBOO config also work: the key-translation
+# registry (xnns.common.config.translate) rewrites the original spellings to
+# these canonical names -- rcut -> cutoff, dim -> n_features, num_rbf -> n_rbf,
+# n_layers -> n_interactions. The xnns spelling wins if both are given.
+name: bamboo
+cutoff: 5.0              # rcut (semi-local GET cutoff, Angstrom)
+n_features: 64           # dim (node scalar feature width; divisible by num_heads)
+n_interactions: 3        # n_layers (GET layers; >= 2)
+n_rbf: 32                # num_rbf (exponential-normal radial basis functions)
+# transformer / architecture
+num_heads: 16            # attention heads
+charge_ub: 2.0           # tanh bound on the per-atom partial charge
+charge_mlp_layers: 2     # hidden layers of the charge / electronegativity / hardness MLPs
+energy_mlp_layers: 2     # hidden layers of the energy read-out MLP
+n_elements: 87           # atom-type embedding table size (indexed by Z; H..Rn)
+act_fn: silu             # read-out MLP activation (upstream SiLU)
+attn_act_fn: gelu        # attention + radial-projection activation (upstream GELU)
+# electrostatics (charge equilibrium)
+use_electrostatics: true # on-site electronegativity/hardness + damped Coulomb (all pairs)
+coul_damping_beta: 18.7  # softplus sharpness of the short-range Coulomb damping
+coul_damping_r0: 2.2     # onset distance of the Coulomb damping (Angstrom)
+# dispersion (off by default -- excluded from DFT training in the paper)
+use_dispersion: false    # add the optional D3(CSO) correction (MD/inference only)
+disp_cutoff: 10.0        # dispersion real-space cutoff (Angstrom)
+species: null            # supported atomic numbers, recorded for bookkeeping

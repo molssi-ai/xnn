@@ -1,0 +1,74 @@
+# Multi-model benchmark config.  Run with:
+#
+#     xnns benchmark --config configs/benchmark.yaml
+#     xnns benchmark --config configs/benchmark.yaml --set "metrics={'energy': ['mae']}"
+#
+# Benchmarking scores *pre-trained* models on one dataset and tabulates their
+# errors -- it does not train. Train the models first (e.g. `xnns train`), then
+# point each entry at its checkpoint.
+
+# Which models to compare. Each entry pairs an architecture with the checkpoint
+# whose weights are loaded into it. An entry is either a mapping or (when the
+# architecture defaults suffice) a bare name -- but every entry needs a
+# `checkpoint`. Optional per-entry keys: `label`, `config` (seed the
+# architecture from a model YAML).
+models:
+  - name: mace
+    cutoff: 5.0   # architecture (must match the checkpoint)
+    checkpoint: /D3/sina/xnns/examples/gnn/mace/runs/argon_xnns/best.pt
+  - name: physnet
+    checkpoint: /D3/sina/xnns/examples/dnn/physnet/runs/argon_xnns/best.pt
+  - name: nequip
+    label: nequip-argon
+    checkpoint: /D3/sina/xnns/examples/gnn/nequip/runs/argon_xnns/best.pt
+
+# What to score and how: each target quantity (energy / forces / stress) maps
+# to the error metrics reported for it (mae / mse / rmse, or custom below).
+metrics:
+  energy: [mae, rmse]
+  forces: [mae, rmse]
+# Equivalent spellings: (target, metrics) pairs, e.g.
+#   metrics: [[energy, mae], [forces, [mae, rmse]]]
+# or the flat cross-product shorthand (every metric on every target):
+#   metrics: [mae, rmse]
+#   targets: [energy, forces]
+
+# Per-element reference energies (E0s).  When set, energy is scored as the
+# atomization / interaction energy (total minus the summed atomic references)
+# rather than the raw total -- the physically meaningful quantity.  Accepts a
+# {Z: E0} dict, a list aligned with `species`, a single number, or "average" to
+# fit E0s from the benchmark dataset by least squares.  Omit / null to score
+# raw total energy.
+atomic_energies: null
+#   atomic_energies: {1: -13.663, 6: -1029.863, 8: -2042.785}   # {Z: E0} eV
+#   atomic_energies: average                                    # fit from data
+# species: [H, C, O]          # only needed for the list / scalar E0 forms
+
+# Whether energy metrics are per atom (divide by atom count).
+# Combined with atomic_energies this gives atomization energy per atom.
+energy_per_atom: true
+
+# Optional user-defined metrics, imported as `module:function` with the
+# signature fn(pred, target) -> float and registered under `name`.
+custom_metrics: []
+#   - {name: maxae, path: my_metrics:max_abs_error}
+
+# The dataset to score on. Reuses the standard data section; the benchmark set
+# is resolved from test_path, falling back to val_path then train_path.
+data:
+  test_path: /D3/sina/xnns/datasets/argon_md/argon_test.xyz
+  batch_size: 16
+  num_workers: 0
+  energy_key: REF_energy
+  forces_key: REF_forces
+  stress_key: REF_stress
+
+# Results table destination and formats.  `formats` are registered writers
+# (csv / json / md, or user-registered ones).
+output:
+  dir: runs/benchmark
+  filename: results
+  formats: [csv, json, md]
+
+device: auto        # auto | cpu | cuda | cuda:0
+seed: 1234

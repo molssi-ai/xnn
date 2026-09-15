@@ -1,0 +1,7 @@
+train_path: data/train.extxyz
+val_path: null
+test_path: null       # optional held-out test set, evaluated once after training
+batch_size: 16        # set to 1 to disable batch training
+num_workers: 0
+val_fraction: 0.1
+test_fraction: 0.0    # carve a test split from the training set when no test_path

@@ -1,0 +1,47 @@
+# The full MACE architecture flag set with its stock defaults (MACE-CLI names
+# in comments). Only name/cutoff/n_features/n_interactions/n_rbf are typed core
+# fields; the loader folds every other key into `ModelConfig.extra`. Omitted
+# keys fall back to these same values inside `MACE.from_config`.
+#
+# Keys copied verbatim from an upstream MACE yaml also work: the key-translation
+# registry (xnns.common.config.translate) rewrites the original MACE spellings
+# to these canonical names at config-load time -- r_max -> cutoff,
+# num_channels -> n_features, num_interactions -> n_interactions,
+# num_radial_basis/num_bessel -> n_rbf, num_cutoff_basis -> num_polynomial_cutoff,
+# atomic_numbers -> species, E0s -> atomic_energies. The xnns spelling wins if
+# both are given. MACE's string value forms are coerced too
+# (radial_MLP: "[64, 64, 64]", E0s: '{1: -13.6}' or a {Z: E0} mapping).
+name: mace
+cutoff: 4.0             # r_max
+n_features: 32          # num_channels
+n_interactions: 2       # num_interactions / T -- fully flexible here (0..N), unlike upstream MACE (fixed 2)
+n_rbf: 8                # num_bessel / num_radial_basis
+species: [1, 6, 8]      # atomic_numbers
+# radial / cutoff basis
+radial_type: bessel           # bessel | gaussian (upstream chebyshev is not implemented)
+num_polynomial_cutoff: 5      # num_cutoff_basis
+distance_transform: "None"    # only "None" is supported (the YAML string, not null)
+# interaction blocks
+interaction: RealAgnosticResidualInteractionBlock
+interaction_first: RealAgnosticResidualInteractionBlock
+avg_num_neighbors: 1.0
+# equivariant features
+max_ell: 3            # spherical-harmonic degree on edges
+max_L: 0              # max angular momentum of hidden node features
+correlation: 3        # symmetric-contraction body order
+hidden_irreps: null   # derived from n_features x max_L when null (e.g. 32x0e+32x1o)
+MLP_irreps: 16x0e     # readout MLP irreps
+radial_MLP: [64, 64, 64]
+gate: silu            # silu | tanh | abs | null
+# physics extras
+pair_repulsion: false # ZBL two-body repulsion
+atomic_energies: null # E0s: per-element reference energies as a list aligned with
+                      # `species` or a {Z: E0} dict; null = trainable from zero
+#
+# Remaining upstream MACE flags, for reference:
+#  - training/runtime flags (lr, batch_size, max_num_epochs, energy_weight,
+#    forces_weight, scheduler, valid_fraction, seed, device, ...) belong in
+#    configs/train.yaml under the optim/data/top-level sections, not here.
+#  - scaling / mean / std (ScaleShiftMACE), compute_avg_num_neighbors, heads /
+#    multihead fine-tuning, foundation models, swa/ema, and enable_cueq are not
+#    implemented in xnns; such keys land in `ModelConfig.extra` and are ignored.

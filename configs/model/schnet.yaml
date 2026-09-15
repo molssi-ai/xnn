@@ -1,0 +1,16 @@
+# SchNet, the paper architecture (Schuett et al., NIPS 2017): F = 64 feature
+# maps, T = 3 interaction blocks, Gaussian RBFs every 0.1 A on [0, 30] with
+# gamma = 10 A^-2, and no explicit cutoff (30 A covers every pair of the
+# paper's molecular datasets).
+name: schnet
+cutoff: 30.0
+n_features: 64
+n_interactions: 3
+n_rbf: 301
+
+# For condensed phases / large systems, use a finite cutoff with a matching
+# 0.1 A RBF grid and the smooth cosine filter envelope instead:
+#   cutoff: 5.0
+#   n_rbf: 50
+#   extra:
+#     cutoff_fn: cosine

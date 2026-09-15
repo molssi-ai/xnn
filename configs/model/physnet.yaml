@@ -1,0 +1,18 @@
+name: physnet
+cutoff: 10.0              # short-range cutoff sr_cut (paper value)
+n_features: 128           # feature-space width F
+n_rbf: 64                 # radial basis functions K
+n_interactions: 5         # stacked module blocks (paper N_module)
+lr_cutoff: null           # long-range cutoff for electrostatics/dispersion
+num_residual_atomic: 2    # residual blocks for atom-wise refinements
+num_residual_interaction: 3  # residual blocks refining the proto-message
+num_residual_output: 1    # residual blocks in the output blocks
+use_electrostatics: true  # switched/shielded Coulomb term of predicted charges
+use_dispersion: true      # Grimme D3(BJ) dispersion
+s6: null                  # D3 coefficients: null = learnable (softplus > 0)
+s8: null
+a1: null
+a2: null
+species: null             # only to map atomic_energies/atomic_scales
+atomic_energies: null     # per-species E0 loaded into the Eshift table
+atomic_scales: null       # per-species initial Escale values

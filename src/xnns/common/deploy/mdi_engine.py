@@ -1,0 +1,397 @@
+"""MDI engine serving any trained xnns model to an external driver.
+
+The `MolSSI Driver Interface <https://github.com/MolSSI-MDI/MDI_Library>`_
+(MDI) lets simulation codes (LAMMPS, QCEngine, SEAMM, ...) drive an external
+"engine" through a small command protocol. :class:`MDIEngine` implements the
+engine side for xnns: the driver sends the system (``>NATOMS``, ``>ELEMENTS``,
+``>CELL``, ``>COORDS``) and requests results (``<ENERGY``, ``<FORCES``,
+``<STRESS``), and the engine evaluates the wrapped model each time the
+geometry changes.
+
+The engine is model agnostic: it speaks to the model exclusively through the
+:class:`~xnns.common.data.AtomicGraph` contract shared by every model in the
+library (the same contract :class:`XNNSCalculator` uses), so any registered
+family (MACE, NequIP, Allegro, CACE, SchNet, ANI, PhysNet, HDNNP, BAMBOO, ...)
+works unchanged. Graphs are built with the library's own
+:func:`~xnns.common.data.structure_to_graph`; forces and stress come from the
+:class:`~xnns.common.models.ForceStressOutput` wrapper.
+
+Typical use, from a trainer checkpoint::
+
+    from xnns.common.deploy import MDIEngine
+    engine = MDIEngine.from_checkpoint("runs/exp/best.pt", device="cuda")
+    engine.run("-role ENGINE -name xnns -method TCP -port 8021 -hostname localhost")
+
+or from the command line (see :func:`main`)::
+
+    xnns mdi --ckpt runs/exp/best.pt -mdi "-role ENGINE -name xnns -method TCP ..."
+
+Requires the ``pymdi`` package (``pip install pymdi``); MPI communication
+additionally requires ``mpi4py``.
+
+Units: MDI communicates in atomic units (Bohr / Hartree) while xnns models
+follow the library's ASE-style convention of angstrom / eV (the units of the
+training data). The engine converts at the boundary in both directions.
+"""
+from __future__ import annotations
+
+import logging
+import time
+
+import numpy as np
+import torch
+
+from ..data import structure_to_graph
+
+try:
+    import mdi
+    _HAS_MDI = True
+except ModuleNotFoundError:  # keep import-safe without pymdi
+    mdi, _HAS_MDI = None, False
+
+logger = logging.getLogger(__name__)
+
+# Wire conversion constants (CODATA 2018, the values used in
+# xnns.common.data.hub). Public on purpose: a driver that converts with the
+# same constants gets bit-clean round trips. Codes with a different CODATA
+# vintage (e.g. ase.units, CODATA 2014) differ at the 1e-8 relative level.
+BOHR_TO_ANGSTROM = 0.529177210903
+HARTREE_TO_EV = 27.211386245988
+
+# MDI commands the engine understands, registered on the @DEFAULT node.
+_COMMANDS = (
+    ">NATOMS", ">COORDS", ">CELL", ">ELEMENTS",
+    "<ENERGY", "<FORCES", "<STRESS",
+    "SCF", "EXIT",
+)
+
+
+class MDIEngine:
+    """MDI engine exposing a trained xnns model to an external driver.
+
+    Holds the driver-supplied system state (atom count, elements, cell,
+    coordinates) and lazily re-evaluates the model whenever a result is
+    requested after the geometry changed. Each evaluation converts the MDI
+    atomic-unit inputs to angstrom, builds an
+    :class:`~xnns.common.data.AtomicGraph` via
+    :func:`~xnns.common.data.structure_to_graph` (which handles molecular and
+    periodic systems alike), runs the model, and converts the eV / angstrom
+    outputs back to Hartree / Bohr.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        A trained model. It is moved to ``device``, put in ``eval`` mode and
+        its parameter gradients are disabled. Its forward must accept an
+        ``AtomicGraph`` and return a dict with an ``"energy"`` key and, for
+        the ``<FORCES`` / ``<STRESS`` commands, ``"forces"`` / ``"stress"``
+        keys; wrap a bare model in
+        :class:`~xnns.common.models.ForceStressOutput` to provide them (as
+        :meth:`from_checkpoint` does).
+    cutoff : float
+        Neighbor-list cutoff radius in angstrom used when building the graph.
+    device : str, optional
+        Torch device the model runs on. Defaults to ``"cpu"``.
+
+    Attributes
+    ----------
+    model : torch.nn.Module
+        The wrapped model (on ``device``, in eval mode).
+    cutoff : float
+        The neighbor-list cutoff radius in angstrom.
+    device : torch.device
+        The torch device.
+    dtype : torch.dtype
+        Floating-point dtype of the model parameters; graph tensors are built
+        in this dtype.
+    energy, forces, stress
+        Results of the latest evaluation, in MDI atomic units (Hartree,
+        Hartree/Bohr, Hartree/Bohr^3). ``None`` before the first evaluation
+        (``stress`` also for non-periodic systems).
+    """
+
+    def __init__(self, model: torch.nn.Module, cutoff: float,
+                 device: str = "cpu"):
+        self.device = torch.device(device)
+        self.model = model.to(self.device).eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.cutoff = float(cutoff)
+        self.dtype = next(model.parameters()).dtype
+
+        # ---- system state, set by driver commands (MDI atomic units) ----
+        self.natoms: int | None = None
+        self.atomic_numbers: np.ndarray | None = None
+        self.coords_bohr: np.ndarray | None = None   # (N, 3)
+        self.cell_bohr: np.ndarray | None = None     # (3, 3); None => molecular
+
+        # ---- results of the latest evaluation (MDI atomic units) ----
+        self.energy: float | None = None
+        self.forces: np.ndarray | None = None
+        self.stress: np.ndarray | None = None
+        self._needs_calculation = True
+
+        # ---- timing ----
+        self._n_calc = 0
+        self._t_total = 0.0
+
+    @classmethod
+    def from_checkpoint(cls, path: str, device: str = "cpu",
+                        dtype: torch.dtype | None = None) -> "MDIEngine":
+        """Build an engine from a trainer checkpoint (``best.pt``).
+
+        The checkpoint is the dictionary written by
+        :meth:`~xnns.common.train.Trainer.save`: ``{"model": state_dict,
+        "cfg": Config}``. The model is rebuilt with
+        :func:`~xnns.common.models.build_model` from the stored config,
+        wrapped in :class:`~xnns.common.models.ForceStressOutput` (with the
+        stress head enabled, matching the state-dict layout the trainer
+        saves), and the weights are loaded.
+
+        Parameters
+        ----------
+        path : str
+            Path to the checkpoint file.
+        device : str, optional
+            Torch device the model runs on. Defaults to ``"cpu"``.
+        dtype : torch.dtype, optional
+            When given, convert the model to this floating-point dtype
+            (e.g. ``torch.float32`` to speed up a float64-trained model).
+
+        Returns
+        -------
+        MDIEngine
+            An engine wrapping the restored model, with the neighbor-list
+            cutoff taken from the checkpoint's model config.
+        """
+        from ..models import build_model, ForceStressOutput
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        cfg = ckpt["cfg"]
+        model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
+        model.load_state_dict(ckpt["model"])
+        if dtype is not None:
+            model = model.to(dtype)
+        logger.info("Loaded %s checkpoint %s (cutoff=%.3f A)",
+                    cfg.model.name, path, cfg.model.cutoff)
+        return cls(model, cutoff=cfg.model.cutoff, device=device)
+
+    # ------------------------------------------------------------------ #
+    # evaluation
+    # ------------------------------------------------------------------ #
+
+    def calculate(self) -> None:
+        """Evaluate the model on the current system state.
+
+        Converts positions and cell from Bohr to angstrom, builds the graph
+        with :func:`~xnns.common.data.structure_to_graph` (tensors are created
+        in the model's dtype so float32 and float64 models both work), runs
+        the model and stores ``energy`` (Hartree), ``forces`` (Hartree/Bohr)
+        and, for periodic systems, ``stress`` (Hartree/Bohr^3).
+
+        Raises
+        ------
+        RuntimeError
+            If no coordinates or elements have been received yet.
+        """
+        if self.coords_bohr is None or self.atomic_numbers is None:
+            raise RuntimeError(
+                "cannot calculate: driver has not sent >ELEMENTS/>COORDS yet")
+        t0 = time.perf_counter()
+
+        struct = {
+            "pos": torch.as_tensor(self.coords_bohr * BOHR_TO_ANGSTROM,
+                                   dtype=self.dtype),
+            "atomic_numbers": torch.as_tensor(self.atomic_numbers,
+                                              dtype=torch.long),
+            "cell": (torch.as_tensor(self.cell_bohr * BOHR_TO_ANGSTROM,
+                                     dtype=self.dtype)
+                     if self.cell_bohr is not None else None),
+            "pbc": (np.array([True, True, True])
+                    if self.cell_bohr is not None else None),
+        }
+        graph = structure_to_graph(struct, self.cutoff).to(self.device)
+        out = self.model(graph)
+
+        self.energy = float(out["energy"].sum().detach()) / HARTREE_TO_EV
+        if "forces" in out:
+            self.forces = (out["forces"].detach().cpu().double().numpy()
+                           / (HARTREE_TO_EV / BOHR_TO_ANGSTROM))
+        if "stress" in out and self.cell_bohr is not None:
+            # MDI expects the pressure-sign convention (negated vs the
+            # dE/d(strain)/V tensor the model returns), as in reference MDI
+            # engines.
+            self.stress = (-out["stress"][0].detach().cpu().double().numpy()
+                           / (HARTREE_TO_EV / BOHR_TO_ANGSTROM**3))
+        else:
+            self.stress = None
+
+        self._n_calc += 1
+        self._t_total += time.perf_counter() - t0
+        if self._n_calc % 100 == 0:
+            logger.info("step %d: avg %.1f ms/step", self._n_calc,
+                        self._t_total / self._n_calc * 1000)
+
+    def _ensure_results(self) -> None:
+        """Re-evaluate the model if the geometry changed since the last call."""
+        if self._needs_calculation:
+            self.calculate()
+            self._needs_calculation = False
+
+    # ------------------------------------------------------------------ #
+    # MDI communication loop
+    # ------------------------------------------------------------------ #
+
+    def run(self, mdi_options: str, mpi_comm=None) -> None:
+        """Run the MDI engine loop until the driver sends ``EXIT``.
+
+        Initializes the MDI library, registers the supported commands on the
+        ``@DEFAULT`` node, accepts the driver connection and then services
+        commands: system updates (``>NATOMS``, ``>ELEMENTS``, ``>CELL``,
+        ``>COORDS``) mark the results stale, result requests (``<ENERGY``,
+        ``<FORCES``, ``<STRESS``) trigger a model evaluation when needed and
+        send the values in MDI atomic units. ``<STRESS`` sends zeros for
+        non-periodic systems. ``SCF`` forces an immediate evaluation.
+
+        Parameters
+        ----------
+        mdi_options : str
+            The MDI option string, e.g.
+            ``"-role ENGINE -name xnns -method TCP -port 8021 -hostname
+            localhost"``.
+        mpi_comm : mpi4py.MPI.Comm, optional
+            MPI communicator to hand to ``MDI_Init`` (required for
+            ``-method MPI``). Defaults to ``None`` (TCP method).
+
+        Raises
+        ------
+        ImportError
+            If the ``pymdi`` package is not installed.
+        RuntimeError
+            If the driver sends a command this engine does not support, or
+            requests forces/stress from a model that does not produce them.
+        """
+        if not _HAS_MDI:
+            raise ImportError("the MDI library is required: pip install pymdi")
+
+        if mpi_comm is not None:
+            mdi.MDI_Init(mdi_options, mpi_comm)
+        else:
+            mdi.MDI_Init(mdi_options)
+
+        mdi.MDI_Register_Node("@DEFAULT")
+        for cmd in _COMMANDS:
+            mdi.MDI_Register_Command("@DEFAULT", cmd)
+
+        comm = mdi.MDI_Accept_Communicator()
+        logger.info("MDI connection established")
+
+        while True:
+            command = mdi.MDI_Recv_Command(comm)
+            logger.debug("MDI command: %s", command)
+
+            if command == "EXIT":
+                break
+
+            elif command == ">NATOMS":
+                self.natoms = mdi.MDI_Recv(1, mdi.MDI_INT, comm)
+
+            elif command == ">ELEMENTS":
+                elements = mdi.MDI_Recv(self.natoms, mdi.MDI_INT, comm)
+                self.atomic_numbers = np.array(elements, dtype=np.int64)
+                self._needs_calculation = True
+                logger.info("received %d atoms, elements %s", self.natoms,
+                            sorted(set(self.atomic_numbers.tolist())))
+
+            elif command == ">CELL":
+                cell = mdi.MDI_Recv(9, mdi.MDI_DOUBLE, comm)
+                self.cell_bohr = np.array(cell, dtype=np.float64).reshape(3, 3)
+                self._needs_calculation = True
+
+            elif command == ">COORDS":
+                coords = mdi.MDI_Recv(3 * self.natoms, mdi.MDI_DOUBLE, comm)
+                self.coords_bohr = np.array(coords, dtype=np.float64).reshape(
+                    self.natoms, 3)
+                self._needs_calculation = True
+
+            elif command == "<ENERGY":
+                self._ensure_results()
+                mdi.MDI_Send(self.energy, 1, mdi.MDI_DOUBLE, comm)
+
+            elif command == "<FORCES":
+                self._ensure_results()
+                if self.forces is None:
+                    raise RuntimeError(
+                        "model produced no forces; wrap it in "
+                        "ForceStressOutput before serving over MDI")
+                mdi.MDI_Send(self.forces.flatten(), 3 * self.natoms,
+                             mdi.MDI_DOUBLE, comm)
+
+            elif command == "<STRESS":
+                self._ensure_results()
+                stress = (self.stress if self.stress is not None
+                          else np.zeros(9))
+                mdi.MDI_Send(stress.flatten(), 9, mdi.MDI_DOUBLE, comm)
+
+            elif command == "SCF":
+                self.calculate()
+                self._needs_calculation = False
+
+            else:
+                raise RuntimeError(f"unhandled MDI command: {command}")
+
+        logger.info("engine finished: %d calculations, avg %.1f ms/step",
+                    self._n_calc,
+                    self._t_total / max(self._n_calc, 1) * 1000)
+
+
+def main(argv=None) -> None:
+    """Command-line entry point serving a checkpoint as an MDI engine.
+
+    Invoked as ``xnns mdi ...`` or
+    ``python -m xnns.common.deploy.mdi_engine ...``::
+
+        xnns mdi --ckpt runs/exp/best.pt \\
+            -mdi "-role ENGINE -name xnns -method TCP -port 8021 -hostname localhost"
+
+    For the MPI communication method, launch under ``mpirun`` alongside the
+    driver (``mpi4py`` required)::
+
+        mpirun -np 1 xnns mdi --ckpt best.pt -mdi "-role ENGINE -name xnns -method MPI" \\
+            : -np 1 lmp -mdi "-role DRIVER -name LAMMPS -method MPI" -in input.dat
+
+    Parameters
+    ----------
+    argv : list of str or None, optional
+        Argument vector excluding the program name. When ``None`` (the
+        default), ``sys.argv[1:]`` is used.
+    """
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="xnns mdi",
+        description="Serve a trained xnns checkpoint as an MDI engine.")
+    p.add_argument("--ckpt", required=True,
+                   help="trainer checkpoint (best.pt) holding model + config")
+    p.add_argument("-mdi", "--mdi", dest="mdi_options", required=True,
+                   help='MDI option string, e.g. "-role ENGINE -name xnns '
+                        '-method TCP -port 8021 -hostname localhost"')
+    p.add_argument("--device", default="cpu",
+                   help='torch device, e.g. "cpu" or "cuda:0" (default: cpu)')
+    p.add_argument("--dtype", choices=["float32", "float64"], default=None,
+                   help="optionally convert the model dtype before serving")
+    args = p.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO)
+
+    mpi_comm = None
+    if "MPI" in args.mdi_options.split():
+        from mpi4py import MPI
+        mpi_comm = MPI.COMM_WORLD
+
+    dtype = getattr(torch, args.dtype) if args.dtype else None
+    engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
+                                       dtype=dtype)
+    engine.run(args.mdi_options, mpi_comm=mpi_comm)
+
+
+if __name__ == "__main__":
+    main()
