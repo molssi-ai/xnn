@@ -1,0 +1,21 @@
+{#-
+  Collapse button for the secondary (right-hand) sidebar.
+
+  pydata-sphinx-theme ships components/sidebar-collapse.html for the primary
+  sidebar only, so this is the mirror of it for the table of contents. The
+  markup deliberately follows that component -- same button/label structure and
+  ARIA wiring -- so the theme's styling of .pst-icon and the collapse labels
+  applies here too. Behaviour lives in _static/toc-collapse.js.
+-#}
+<button id="xnns-collapse-toc-button"
+        aria-expanded="true"
+        aria-controls="pst-secondary-sidebar"
+        title="{{ _('Collapse table of contents') }}">
+  <svg class="pst-icon svg-inline--fa" role="img" aria-hidden="true"
+       focusable="false" viewBox="0 0 16 16"
+       xmlns="http://www.w3.org/2000/svg">
+    <path fill="currentColor" d="M13 15.5C13.6377 15.5 14.2513 15.2564 14.7152 14.8189C15.1792 14.3815 15.4584 13.7832 15.4958 13.1467L15.5 13L15.5 3C15.5 2.36232 15.2564 1.74874 14.8189 1.28478C14.3815 0.820828 13.7832 0.541576 13.1467 0.504167L13 0.5L3 0.5C2.36232 0.499965 1.74874 0.743605 1.28478 1.18107C0.820828 1.61854 0.541576 2.21676 0.504167 2.85333L0.5 3L0.5 13C0.5 13.6377 0.743605 14.2513 1.18107 14.7152C1.61854 15.1792 2.21676 15.4584 2.85333 15.4958L3 15.5L13 15.5ZM13 13.8333L5.5 13.8333L5.5 2.16667L13 2.16667C13.2041 2.16669 13.4011 2.24163 13.5536 2.37726C13.7062 2.5129 13.8036 2.69979 13.8275 2.9025L13.8333 3L13.8333 13C13.8333 13.2041 13.7584 13.4011 13.6227 13.5536C13.4871 13.7062 13.3002 13.8036 13.0975 13.8275L13 13.8333ZM9.34417 10.325L9.4225 10.2558L11.0892 8.58917C11.2326 8.44567 11.3188 8.25476 11.3316 8.05223C11.3443 7.84971 11.2827 7.6495 11.1583 7.48917L11.0892 7.41083L9.4225 5.74417C9.27253 5.59471 9.0713 5.50794 8.85968 5.50148C8.64806 5.49502 8.44191 5.56935 8.2831 5.70937C8.1243 5.8494 8.02475 6.04463 8.00467 6.25539C7.98459 6.46616 8.04549 6.67667 8.175 6.84417L8.24417 6.9225L9.32083 8L8.24417 9.0775C8.10069 9.22099 8.01449 9.41191 8.00176 9.61443C7.98903 9.81695 8.05062 10.0172 8.175 10.1775L8.24417 10.2558C8.38766 10.3993 8.57858 10.4855 8.7811 10.4982C8.98362 10.511 9.18383 10.4494 9.34417 10.325Z"/>
+  </svg>
+  <span class="pst-collapse-sidebar-label">{{ _("Collapse") }}</span>
+  <span class="pst-expand-sidebar-label">{{- _("Contents") -}}</span>
+</button>
