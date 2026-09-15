@@ -71,3 +71,435 @@ img:not(.logo__image, .footer_logo) {
 .footer_logo {
 	max-height: 60px;
 }
+
+
+/* ==========================================================================
+   Layout, typography and responsive behaviour
+   --------------------------------------------------------------------------
+   Adapted from the MolSSI e3nn-course book. Those rules target
+   pydata-sphinx-theme selectors (.bd-*, .pst-*, --pst-*), which is the theme
+   used here too, so they carry over unchanged in spirit.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Palette before JavaScript runs
+   --------------------------------------------------------------------------
+   `data-theme` is stamped onto <html> by the theme's JS at runtime and is
+   absent from the served markup, so a rule keyed only on [data-theme="light"]
+   does not apply until that script has run -- and never, if it fails. Mirror
+   the light tokens onto the unstamped state, the way the theme scopes its own.
+   -------------------------------------------------------------------------- */
+
+html:not([data-theme]) {
+	--pst-color-primary: #ed1c24;
+	--pst-color-warning: #ed1c24;
+	--pst-color-primary-highlight: #bc151b;
+	--pst-color-secondary: #1d35e7;
+	--pst-color-secondary-highlight: #3e51e3;
+}
+
+/* --------------------------------------------------------------------------
+   Typography
+   -------------------------------------------------------------------------- */
+
+:root {
+	--pst-font-family-heading: "Helvetica Neue", Helvetica, Arial, "Segoe UI",
+		system-ui, -apple-system, sans-serif;
+	--pst-font-family-base: system-ui, -apple-system, "Segoe UI", Roboto,
+		"Helvetica Neue", Arial, sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6,
+.bd-article h1, .bd-article h2, .bd-article h3 {
+	font-family: var(--pst-font-family-heading);
+	letter-spacing: -0.01em;
+	font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   Heading accents
+   -------------------------------------------------------------------------- */
+
+.bd-article > section > h1 {
+	padding-bottom: 0.4rem;
+	border-bottom: 3px solid #ed1c24;
+}
+
+.bd-article h2 {
+	padding-bottom: 0.25rem;
+	border-bottom: 1px solid var(--pst-color-border);
+}
+
+.bd-article blockquote {
+	border-left: 3px solid #ed1c24;
+	padding-left: 1rem;
+	color: var(--pst-color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Announcement banner -- MolSSI black / red / white
+   --------------------------------------------------------------------------
+   The theme sets no background on .bd-header-announcement, so this styles it
+   outright: ink ground, white text, red rule underneath. Dark in both colour
+   schemes, as in the e3nn course.
+   -------------------------------------------------------------------------- */
+
+:root {
+	--xnns-molssi-red: #ed1c24;
+	--xnns-molssi-ink: #393536;
+	--xnns-molssi-white: #ffffff;
+	/* A lighter red for links on the ink ground: --xnns-molssi-red itself
+	   only reaches ~3:1 there, short of the 4.5:1 body text needs. */
+	--xnns-molssi-red-on-ink: #ff8a8f;
+}
+
+.bd-header-announcement {
+	background-color: var(--xnns-molssi-ink);
+	color: var(--xnns-molssi-white);
+	border-bottom: 3px solid var(--xnns-molssi-red);
+	font-size: 0.85rem;
+}
+
+.bd-header-announcement p,
+.bd-header-announcement .bd-header-announcement__content {
+	color: var(--xnns-molssi-white);
+}
+
+.bd-header-announcement a {
+	color: var(--xnns-molssi-white);
+	text-decoration: underline;
+}
+
+.bd-header-announcement a:hover {
+	color: var(--xnns-molssi-red-on-ink);
+}
+
+/* --------------------------------------------------------------------------
+   Wide-screen layout
+   --------------------------------------------------------------------------
+   The theme caps .bd-page-width at 88rem, which squeezes the API reference's
+   signature blocks and the wide figures and training logs in the example
+   notebooks. Everything is expressed in clamp() so the layout tracks the
+   viewport instead of snapping between fixed breakpoints.
+   -------------------------------------------------------------------------- */
+
+:root {
+	--xnns-page-width: clamp(60rem, 98vw, 132rem);
+	--xnns-content-width: clamp(45rem, 82vw, 100rem);
+	--xnns-sidebar-width: 17rem;
+	--xnns-sidebar-collapsed: 4rem;
+	--xnns-toc-width: 15rem;
+	--xnns-toc-collapsed: 3rem;
+}
+
+.bd-page-width,
+.bd-container,
+.bd-header .bd-header__inner,
+.bd-footer .bd-footer__inner,
+.bd-footer-article {
+	max-width: var(--xnns-page-width) !important;
+}
+
+.bd-main .bd-content,
+.bd-article-container,
+.bd-content .bd-article-container {
+	max-width: var(--xnns-content-width) !important;
+	width: 100%;
+}
+
+.bd-article,
+.bd-content article,
+div.bd-article-container > article {
+	max-width: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   Sliding sidebar
+   --------------------------------------------------------------------------
+   The theme's Collapse Sidebar button toggles .pst-squeeze, whose own
+   `width: 4rem` would win over a flex-basis -- so the collapsed size is
+   expressed in the same properties as the expanded one. The transition is
+   also what the theme's JS waits on (transitionend) before accepting another
+   click, so removing it breaks the button.
+   -------------------------------------------------------------------------- */
+
+@media (min-width: 960px) {
+	.bd-sidebar-primary {
+		flex: 0 0 var(--xnns-sidebar-width);
+		max-width: var(--xnns-sidebar-width);
+		transition: flex-basis 0.4s ease, max-width 0.4s ease;
+	}
+
+	.bd-sidebar-primary.pst-squeeze {
+		flex-basis: var(--xnns-sidebar-collapsed);
+		max-width: var(--xnns-sidebar-collapsed);
+	}
+
+	/* Hand the reclaimed space to the article; otherwise collapsing just
+	   re-centres the same column. The content cap reads this variable, so
+	   widening it here is enough. */
+	.bd-sidebar-primary.pst-squeeze ~ .bd-main {
+		--xnns-content-width: clamp(45rem, 96vw, 120rem);
+	}
+
+	.bd-sidebar-secondary {
+		flex: 0 0 var(--xnns-toc-width);
+		max-width: var(--xnns-toc-width);
+	}
+
+	/* On a short window the theme scrolls the sidebar to reveal the current
+	   page, carrying the Collapse button off the top. The button itself
+	   cannot be pinned (the theme sets position: relative on it with a
+	   stronger selector), so pin its wrapper instead. */
+	.bd-sidebar-primary .sidebar-primary-item.pst-sidebar-collapse {
+		position: sticky;
+		top: 0;
+		z-index: 3;
+		background-color: var(--pst-color-background);
+		box-shadow: 0 -1rem 0 var(--pst-color-background);
+	}
+}
+
+/* Past a certain width, let prose run as wide as the tables and figures beside
+   it rather than wrapping short against full-width content. */
+@media (min-width: 1600px) {
+	.bd-article > section > p,
+	.bd-article > section > ul,
+	.bd-article > section > ol,
+	.bd-article > section > dl,
+	.bd-article > section > blockquote,
+	.bd-article > section > section > p,
+	.bd-article > section > section > ul,
+	.bd-article > section > section > ol,
+	.bd-article > section > section > dl,
+	.bd-article > section > section > blockquote {
+		max-width: none;
+	}
+}
+
+/* --------------------------------------------------------------------------
+   Automatic resizing: nothing may break the page horizontally
+   --------------------------------------------------------------------------
+   Notebook outputs are the main offender -- wide dataframes, fixed-width
+   figures and long unbroken equations otherwise force the whole page to
+   scroll sideways on narrow screens. Each is made to scroll within its own
+   box instead.
+   -------------------------------------------------------------------------- */
+
+.cell_output,
+.cell_output .output,
+div.output_area {
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+.cell_output table,
+table.dataframe {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	white-space: nowrap;
+}
+
+.cell_output img,
+.bd-article img {
+	max-width: 100%;
+	height: auto;
+}
+
+table.docutils {
+	width: auto;
+	max-width: 100%;
+}
+
+/* Long unbroken equations scroll rather than overflow. */
+.MathJax_Display,
+mjx-container[jax="CHTML"][display="true"] {
+	overflow-x: auto;
+	overflow-y: hidden;
+	max-width: 100%;
+	padding: 0.2rem 0;
+}
+
+/* Wide API signatures wrap instead of forcing a horizontal scrollbar. */
+dl.py dt.sig {
+	white-space: normal;
+	word-break: break-word;
+}
+
+/* --------------------------------------------------------------------------
+   Code cells and notebook output
+   -------------------------------------------------------------------------- */
+
+div.highlight pre,
+.cell_input pre {
+	font-size: 0.86rem;
+	line-height: 1.5;
+}
+
+.cell {
+	margin-bottom: 1.35rem;
+}
+
+.cell .cell_input div.highlight {
+	border-left: 3px solid #ed1c24;
+	border-radius: 0 0.25rem 0.25rem 0;
+}
+
+/* Training logs run to thousands of lines; scroll them instead of letting a
+   single cell dominate the page. */
+.cell_output > .output > .highlight pre,
+.cell_output pre {
+	max-height: 32rem;
+	overflow-y: auto;
+}
+
+button.toggle-button {
+	z-index: 2;
+}
+
+/* --------------------------------------------------------------------------
+   Cards
+   -------------------------------------------------------------------------- */
+
+.sd-card {
+	border-radius: 0.5rem;
+	border-top: 3px solid transparent;
+	transition: transform 0.12s ease, box-shadow 0.12s ease,
+		border-color 0.12s ease;
+}
+
+.sd-card:hover {
+	transform: translateY(-2px);
+	border-top-color: #ed1c24;
+	box-shadow: 0 0.4rem 1rem rgba(57, 53, 54, 0.16);
+}
+
+.sd-card-title {
+	font-family: var(--pst-font-family-heading);
+	font-weight: 650;
+}
+
+
+/* --------------------------------------------------------------------------
+   Collapsible table of contents (right-hand sidebar)
+   --------------------------------------------------------------------------
+   pydata-sphinx-theme collapses the primary sidebar only, so the button, the
+   behaviour (_static/toc-collapse.js) and the collapsed state below are ours.
+   The widths are expressed in the same properties the wide-screen block uses,
+   so collapsing hands the reclaimed space to the article.
+   -------------------------------------------------------------------------- */
+
+#xnns-collapse-toc-button {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	width: 100%;
+	padding: 0.25rem 0.5rem;
+	border: none;
+	border-radius: 0.25rem;
+	background-color: transparent;
+	color: var(--pst-color-text-muted);
+	font-size: 0.85rem;
+	cursor: pointer;
+}
+
+#xnns-collapse-toc-button:hover {
+	background-color: var(--pst-color-surface);
+	color: var(--pst-color-link-hover);
+}
+
+/* The chevron points right while expanded (collapse -> move out of the way)
+   and flips when collapsed. */
+#xnns-collapse-toc-button .pst-icon {
+	flex: 0 0 auto;
+	transition: transform 0.3s ease;
+}
+
+#xnns-collapse-toc-button[aria-expanded="false"] .pst-icon {
+	transform: rotate(180deg);
+}
+
+/* Only one of the two labels shows at a time, matching the primary sidebar. */
+#xnns-collapse-toc-button .pst-expand-sidebar-label {
+	display: none;
+}
+
+.xnns-toc-squeeze #xnns-collapse-toc-button .pst-collapse-sidebar-label {
+	display: none;
+}
+
+.xnns-toc-squeeze #xnns-collapse-toc-button .pst-expand-sidebar-label {
+	display: none;
+}
+
+@media (min-width: 960px) {
+	.bd-sidebar-secondary {
+		transition: flex-basis 0.4s ease, max-width 0.4s ease;
+	}
+
+	/* Collapsed: keep just enough width for the button itself.
+	   `width` has to be overridden too, not only max-width/flex-basis: the
+	   theme sets width: var(--pst-sidebar-secondary) (17rem) outright.
+	   The side padding has to go as well -- the theme's own 1rem each side,
+	   plus the 1rem padding-left and border-left it puts on every
+	   .sidebar-secondary-item, together exceed the collapsed width, which
+	   laid the button out past the edge where overflow clipped it. */
+	.bd-sidebar-secondary.xnns-toc-squeeze {
+		width: var(--xnns-toc-collapsed);
+		flex-basis: var(--xnns-toc-collapsed);
+		max-width: var(--xnns-toc-collapsed);
+		padding-left: 0;
+		padding-right: 0;
+		overflow: hidden;
+	}
+
+	/* The theme gives every entry the same class, and our button is first in
+	   secondary_sidebar_items -- so hide the rest by position. */
+	.xnns-toc-squeeze .sidebar-secondary-item:not(:first-child) {
+		display: none;
+	}
+
+	/* Strip the item chrome from the button's own wrapper and centre it in
+	   what is left. */
+	.xnns-toc-squeeze .sidebar-secondary-item:first-child {
+		display: flex;
+		justify-content: center;
+		border-left: 0;
+		padding: 0.25rem;
+	}
+
+	.xnns-toc-squeeze #xnns-collapse-toc-button {
+		width: auto;
+		gap: 0;
+		padding: 0.35rem;
+		justify-content: center;
+	}
+
+	/* Hand the reclaimed width to the article, as the primary sidebar does. */
+	.bd-main:has(.bd-sidebar-secondary.xnns-toc-squeeze) {
+		--xnns-content-width: clamp(45rem, 92vw, 116rem);
+	}
+}
+
+
+/* --------------------------------------------------------------------------
+   Navbar brand (MolSSI-AI mark)
+   -------------------------------------------------------------------------- */
+
+.navbar-brand img,
+img.logo__image {
+	max-height: 3.2rem;
+	width: auto;
+}
+
+/* The mark is black and red artwork on a transparent field, so in the dark
+   scheme it would all but vanish. Sit it on a white plate, as the e3nn course
+   does. */
+html[data-theme="dark"] .navbar-brand img,
+html[data-theme="dark"] img.logo__image {
+	background-color: var(--xnns-molssi-white);
+	border-radius: 0.5rem;
+	padding: 0.35rem 0.5rem;
+	box-sizing: border-box;
+}

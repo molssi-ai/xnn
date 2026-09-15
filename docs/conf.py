@@ -112,27 +112,55 @@ copybutton_prompt_is_regexp = True
 html_theme = "pydata_sphinx_theme"
 
 html_theme_options = {
-    "github_url": "https://github.com/molssi-ai/xnns",
+    # GitHub lives in icon_links below rather than in "github_url" -- setting
+    # both renders the icon twice.
     "logo": {
-        "image_light": "xnns_logo_light.svg",
-        "image_dark": "xnns_logo_dark.svg",
+        # Navbar brand: the MolSSI-AI mark, as in the e3nn course. The
+        # molssi_* keys below are separate -- _templates/molssi_footer.html
+        # reads those for the footer logo.
+        "image_light": "molssi_ai_logo.png",
+        "image_dark": "molssi_ai_logo.png",
         "molssi_light": "molssi_main_logo.png",
         "molssi_dark": "molssi_main_logo_inverted_white.png",
-        "alt_text": "xnns",
+        "alt_text": "xnns - MolSSI-AI",
     },
     "announcement": (
         "xnns is under active development (pre-1.0): APIs may change between "
         "releases. Feedback and contributions are welcome."
     ),
     "show_toc_level": 2,
+    # 0 makes the toctree captions themselves collapsible section headings in
+    # the sidebar; at the default of 1 they are inert labels and every entry
+    # under them is listed flat (87 of them under Examples).
+    "show_nav_level": 0,
     "header_links_before_dropdown": 6,
-    "external_links": [
-        {"name": "MolSSI", "url": "https://molssi.org"},
+    "external_links": [],
+    # sidebar-secondary-collapse is ours (_templates/): pydata ships a collapse
+    # button for the primary sidebar only. It goes first so it sits at the top
+    # of the table of contents, mirroring the left-hand one.
+    "secondary_sidebar_items": [
+        "sidebar-secondary-collapse",
+        "page-toc",
+        "sourcelink",
     ],
-    "secondary_sidebar_items": ["page-toc", "sourcelink"],
     "footer_start": ["molssi_footer"],
     "footer_end": [],
-    "icon_links": [],
+    "icon_links": [
+        {
+            "name": "GitHub",
+            "url": "https://github.com/molssi-ai/xnns",
+            "icon": "fa-brands fa-github",
+            "type": "fontawesome",
+        },
+        # A PyPI icon belongs here once the package is published; pypi.org
+        # currently 404s for xnns, so linking it would be a dead icon.
+        {
+            "name": "MolSSI",
+            "url": "https://molssi.org",
+            "icon": "fa-solid fa-flask",
+            "type": "fontawesome",
+        },
+    ],
 }
 
 html_static_path = ["_static"]
@@ -147,9 +175,11 @@ html_js_files = [
     ("https://www.googletagmanager.com/gtag/js?id=G-YK7FCTPX7M",
      {"async": "async"}),
     "gtag-init.js",
+    "toc-collapse.js",
 ]
 
-html_favicon = "_static/molssi_square.png"
+# The MolSSI-AI mark, matching the e3nn course.
+html_favicon = "_static/molssi_ai_icon.png"
 
 html_show_sphinx = False
 html_show_copyright = False

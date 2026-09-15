@@ -16,6 +16,7 @@ Data
 
 .. toctree::
    :maxdepth: 1
+   :caption: Data
 
    nb/data/load_dataset_tutorial
 
@@ -28,6 +29,7 @@ and the seven-element ANI-2x set), each paired with its matching model preset.
 
 .. toctree::
    :maxdepth: 1
+   :caption: ANI (dnn)
 
    nb/dnn/ani/ani_rmd17_train
    nb/dnn/ani/ani1_dataset
@@ -40,6 +42,7 @@ PhysNet (dnn)
 
 .. toctree::
    :maxdepth: 1
+   :caption: PhysNet (dnn)
 
    nb/dnn/physnet/physnet_argon_train_test
    nb/dnn/physnet/physnet_argon_density_md
@@ -54,6 +57,7 @@ paper's energy-conservation-by-construction claim.
 
 .. toctree::
    :maxdepth: 1
+   :caption: SchNet (cnn)
 
    nb/cnn/schnet/schnet_rmd17_train
    nb/cnn/schnet/schnet_ethanol_md
@@ -66,6 +70,7 @@ model), plus a block-by-block walkthrough of the MACE architecture.
 
 .. toctree::
    :maxdepth: 1
+   :caption: NequIP, MACE, Allegro, CACE (gnn)
 
    nb/gnn/nequip/nequip_argon_train_test
    nb/gnn/nequip/nequip_argon_density_md
@@ -82,6 +87,7 @@ Long-range: Latent Ewald Summation (gnn)
 
 .. toctree::
    :maxdepth: 1
+   :caption: Long-range: Latent Ewald Summation (gnn)
 
    nb/gnn/les/les_molecular_dimers
 
@@ -90,6 +96,7 @@ BAMBOO (hybrid)
 
 .. toctree::
    :maxdepth: 1
+   :caption: BAMBOO (hybrid)
 
    nb/hybrid/bamboo/bamboo_charge_analysis
    nb/hybrid/bamboo/bamboo_dimer_electrostatics
@@ -107,6 +114,7 @@ what equilibrium-only training data cannot constrain.
 
 .. toctree::
    :maxdepth: 1
+   :caption: ReaxFF / ReaxFF-nn (ffnn)
 
    nb/ffnn/reaxff/reaxff_rmd17_train_test
    nb/ffnn/reaxff/reaxff_md_bond_orders
@@ -127,6 +135,7 @@ and checking NVE energy conservation.
 
 .. toctree::
    :maxdepth: 1
+   :caption: OPLS / L-OPLS (ffnn)
 
    nb/ffnn/opls/opls_conformational_energetics
    nb/ffnn/opls/opls_lopls_torsion_refit
@@ -145,6 +154,7 @@ agnostic, so the same workflow serves any family's checkpoint.
 
 .. toctree::
    :maxdepth: 1
+   :caption: Deployment: MDI (common)
 
    nb/deploy/mdi_argon_md
    nb/deploy/mdi_argon_lammps
@@ -159,6 +169,7 @@ build verified against the manuscripts' equations instead of a reference code.
 
 .. toctree::
    :maxdepth: 1
+   :caption: Fidelity checks
 
    nb/fidelity_checks/schnet_verification
    nb/fidelity_checks/ani_verification
