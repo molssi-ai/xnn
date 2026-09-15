@@ -26,6 +26,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "sphinx_design",
     "sphinx_copybutton",
+    "sphinx_togglebutton",
     "myst_nb",
 ]
 
@@ -67,6 +68,10 @@ intersphinx_mapping = {
 # The example notebooks are committed fully executed, so the docs build only
 # renders them -- it never runs them (no GPU, datasets, or extra venvs needed).
 nb_execution_mode = "off"
+# Training loops write progress across many separate stdout writes; without
+# this each one becomes its own output block, breaking a single log into
+# dozens of boxes.
+nb_merge_streams = True
 myst_enable_extensions = ["dollarmath", "amsmath", "html_image", "colon_fence"]
 
 # Sphinx only reads sources inside docs/, while the notebooks live in
@@ -115,6 +120,10 @@ html_theme_options = {
         "molssi_dark": "molssi_main_logo_inverted_white.png",
         "alt_text": "xnns",
     },
+    "announcement": (
+        "xnns is under active development (pre-1.0): APIs may change between "
+        "releases. Feedback and contributions are welcome."
+    ),
     "show_toc_level": 2,
     "header_links_before_dropdown": 6,
     "external_links": [
@@ -129,6 +138,15 @@ html_theme_options = {
 html_static_path = ["_static"]
 html_css_files = [
     "css/custom.css",
+]
+
+# Google Analytics 4. Deliberately not html_theme_options["analytics"]: that
+# path hardcodes a consent default of analytics_storage='denied', which limits
+# GA4 to cookieless pings and leaves the reports empty. See _static/gtag-init.js.
+html_js_files = [
+    ("https://www.googletagmanager.com/gtag/js?id=G-YK7FCTPX7M",
+     {"async": "async"}),
+    "gtag-init.js",
 ]
 
 html_favicon = "_static/molssi_square.png"

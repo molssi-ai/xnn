@@ -2675,6 +2675,37 @@ wheels = [
 ]
 
 [[package]]
+name = "openmm"
+version = "8.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/19/c48f55ba5b9d4690829200f6a2ad6392183d8b112f7dd0e51279e5be08fe/openmm-8.6.1-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:40486d34776c22f1fa21f495901429d79ede67bde37899610847c0e8afb8d412", size = 13442906, upload-time = "2026-09-11T21:16:52.206Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/a1/a803dcb91882720562748ce029e827de80d39657f2a6bf4016289ce27370/openmm-8.6.1-cp310-cp310-manylinux_2_34_aarch64.whl", hash = "sha256:6e9f62b1dc5a52fc4089540ef2203d72ddb8ba3c502965de36c967d4a3136b4f", size = 14013029, upload-time = "2026-09-11T21:14:04.795Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/86/03805a60a29a2a1b2ebc5c95ffd43639155c15da7f4a2a1f03aa7f568eda/openmm-8.6.1-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:213d830042252d1bf939f8093de30363611d9e4ed061cbe6191f37dbec4c32f7", size = 14410742, upload-time = "2026-09-11T21:14:09.924Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/d1/23895aa26eb7ebd24e20eba7e836a5acfe7e6a354249015a0e371c707e43/openmm-8.6.1-cp310-cp310-win_amd64.whl", hash = "sha256:648f43e9b9c414efb1a2010d06fa008aee7de65dd1c3bb0b8f669418a02760de", size = 13164553, upload-time = "2026-09-11T21:14:14.38Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/b2/33a6cf1e738322d3b08a055598378582e8b01e0e4bd4f02878157280f6ca/openmm-8.6.1-cp311-cp311-manylinux_2_34_aarch64.whl", hash = "sha256:cfe4b2e8fb5d43f88de03fefb86f2668102f9609fc0162d22e2e79617d949646", size = 13916764, upload-time = "2026-09-11T21:14:18.856Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/f5/89672e51ea51e07217929daec66775351032b503f52355d5eda0e3231a5b/openmm-8.6.1-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:e0a6ec580be31d4afba35f290c27c069aaeea9a168b0cf959a0dac0df1d9fd5d", size = 14409788, upload-time = "2026-09-11T21:14:23.395Z" },
+    { url = "https://files.pythonhosted.org/packages/60/b5/cba53196079369964d1e0f616ba4bca232c71177f133388d24c0a9fca433/openmm-8.6.1-cp311-cp311-win_amd64.whl", hash = "sha256:176a4d1c65a43ce02087e72fdb056437636689aff9f9cab6027b9516934bc87d", size = 13163945, upload-time = "2026-09-11T21:14:28.5Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/e3/6186297d001c6107d1615f3f8b9b5d06a38de991cfa2fa987467a448e848/openmm-8.6.1-cp312-cp312-macosx_10_12_universal2.whl", hash = "sha256:1ab4a634ae3d0b0784dc5731ae5efb658ec92baf0e4a139c72f6510309791d22", size = 14082674, upload-time = "2026-09-11T21:15:52.676Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/1a/2ba2706a2cf22bc6142a5688ddc032d908b082aba7d74727b995536587f9/openmm-8.6.1-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:cbf75e64bc1350857c07c67bad71264fb270a15ed8ee7fa59ba0bd106af32589", size = 13919342, upload-time = "2026-09-11T21:14:32.75Z" },
+    { url = "https://files.pythonhosted.org/packages/01/09/23fa5df6c710336300d3b69b2b409099612a100f97faed2c13df9adb73a2/openmm-8.6.1-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:c198fa3a0cb236ab2e8c6405b59ee8acc4ffb6b1a54d001e29c4afb8419e959b", size = 14413848, upload-time = "2026-09-11T21:14:37.362Z" },
+    { url = "https://files.pythonhosted.org/packages/10/67/174355f48699620920094b94791d8e7a41fff3dcd7c5f9d8fed6d4a8fd88/openmm-8.6.1-cp312-cp312-win_amd64.whl", hash = "sha256:81d2db56d6cfc9d7ade0adc0039020cb995d3606915087fab3563499981e739a", size = 13167407, upload-time = "2026-09-11T21:14:41.858Z" },
+    { url = "https://files.pythonhosted.org/packages/09/7f/21e082fd8f9c8063393c24787b3ec6a8da936d974f5bfce60bfa01387537/openmm-8.6.1-cp313-cp313-macosx_10_12_universal2.whl", hash = "sha256:91139fb502ccf27055ce8cd7de2c240d75bc0b78fb4342b86a63412aa3380e2e", size = 14084310, upload-time = "2026-09-11T21:15:57.867Z" },
+    { url = "https://files.pythonhosted.org/packages/80/ee/7a8b96d34330235c79e7eb115dbe40bf285534cd7719b7460a139f325428/openmm-8.6.1-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:683a8961635826f9746174e717f11085a6f07c3cbc53024358d3849032f02565", size = 13917229, upload-time = "2026-09-11T21:14:46.475Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/1f/42399dc86b826ab451f3fe0f9c062a40e8edb1e5b71b18b519a8fdb52e4c/openmm-8.6.1-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:b6295b1cfe63eac11c013cda90b9988fd74a1ec863522a1480affdaed3f20d7a", size = 14412072, upload-time = "2026-09-11T21:14:51.004Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/a8/9c9d9c35874e7d2a45cf923149295ce7540a4499ffb356be7c98b30a9a0f/openmm-8.6.1-cp313-cp313-win_amd64.whl", hash = "sha256:fe4d1acfb0278c9591f1f4c247b1b7d3d236b49e7a7d6d464e1c547f406d8af9", size = 13165567, upload-time = "2026-09-11T21:14:55.432Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/b2/14957cf05d42053e9e84ad3ebf15433f76437ab36644a35070c4323a1147/openmm-8.6.1-cp314-cp314-macosx_10_12_universal2.whl", hash = "sha256:b32f55a3f2c3285208c3b360b7fd3dd5dbb23a6c7fc8688bc6d6e250e1a60999", size = 14118407, upload-time = "2026-09-11T21:16:02.976Z" },
+    { url = "https://files.pythonhosted.org/packages/49/56/ccc7de3c876b6cb3276b2cf10017979cc9fb5405a0e3e7afc0177e7e4b2c/openmm-8.6.1-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:1bb475c7e9c371b2d786804d0e89ba2f22dce720bd374522d2d1e7ef80845fd8", size = 13921455, upload-time = "2026-09-11T21:15:00.065Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/4f/19380624c65ccc5a9f0b8baf2ef006833b8852a71fbb46a5bde5408ff3f5/openmm-8.6.1-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:85fa5b75a16f57b3a6d98341653071f0fce1ae7b0864d99e4b0b6daf36aa1ae2", size = 14413401, upload-time = "2026-09-11T21:15:05.157Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/87/96dc1d1af72e8de758ca7fc26d8f0d0482b580c99399a02160da5626b344/openmm-8.6.1-cp314-cp314-win_amd64.whl", hash = "sha256:291e40e9977e4c02c116d91d6dae586a8668135f3dece50a682c47b129b2cc8c", size = 13166129, upload-time = "2026-09-11T21:15:09.659Z" },
+]
+
+[[package]]
 name = "opt-einsum"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3194,6 +3225,26 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pymdi"
+version = "1.4.40"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/6b/c576e60646cb013c76d3363dc37f94b37cc1b58e07e5fc59acbef6a9205b/pymdi-1.4.40.tar.gz", hash = "sha256:f3f4f23fb6c875b4d92d13eeebffabfc62f294c801cb7cbdd058c5ddd481e10a", size = 86022, upload-time = "2026-06-17T21:16:03.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/e2/be0e64b0061c220869fa2530a9c3bbfa3529f4f0991cd7d45e24bf5366ff/pymdi-1.4.40-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:feae86509d29cc273fd3e56ef7ad58573733042cbaec440c2b9a1435be6cc0d6", size = 3838535, upload-time = "2026-06-17T21:15:43.369Z" },
+    { url = "https://files.pythonhosted.org/packages/73/b2/855b4c0d690509d6616cb8e406eb8200039c37b7f2cf03864635aac6252d/pymdi-1.4.40-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:116e43b843a6c97802980e1f9acd886e27e1d3d6f7cd5164d8ba936b48bacbc4", size = 175886, upload-time = "2026-06-17T21:15:44.906Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/e8/8b6fee83f64a4b95195937f1ab1d7db728b9167588f03496993d856db5ee/pymdi-1.4.40-cp310-cp310-win_amd64.whl", hash = "sha256:21bd1ba017c4e1dd1d702090ba889979b2eb50f54f3c894f188278dfebf120ff", size = 121880, upload-time = "2026-06-17T21:15:46.234Z" },
+    { url = "https://files.pythonhosted.org/packages/18/3e/54079053026743d09b79e7f259920c09700db4da70ebcbcba91987666490/pymdi-1.4.40-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:7ef9f500984c6e85cb86db7a54f96ac48487f55b869754b0741691a70b861fa1", size = 4837499, upload-time = "2026-06-17T21:15:47.422Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/ae/a8a7c2296914f249759ecdea1223e271032e916a4bc40d0acc872c30aff3/pymdi-1.4.40-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:82de070f67b3aec0164d344a6d065147e48da7c16ba620693cb3c16a39ad0a4a", size = 175887, upload-time = "2026-06-17T21:15:48.742Z" },
+    { url = "https://files.pythonhosted.org/packages/44/9a/3dde1ccab6e578bf599cfc9c0ec9a6edff69063e6935848e94867d56968f/pymdi-1.4.40-cp311-cp311-win_amd64.whl", hash = "sha256:16a465e6303ea2ead5e2bcb1c03ef293b1dd96874b1f3494123265b9bde2efef", size = 121880, upload-time = "2026-06-17T21:15:50.128Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/d1/903ee90378b08ce0edd27c6511c7de7d9c34a8837708ad9d519e923b9d4c/pymdi-1.4.40-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:297cd14ed73e22bdcffa8611ae67e2e50685ffe174cbef2bd3cdf772e590b2a1", size = 5063196, upload-time = "2026-06-17T21:15:51.387Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/73/5009e812088d7e16719b0739cea4d3ccafe45220cfc9d61acadb4bd381d5/pymdi-1.4.40-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a2611477fd3debf0ef8ead769cfab0d0ee2da7965b625b1c5528c1b1f7e97d48", size = 175885, upload-time = "2026-06-17T21:15:52.954Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/c6/8842ba52510a525b41b7a6a098057a0b7969737e4a10d5afb640df85dd2c/pymdi-1.4.40-cp312-cp312-win_amd64.whl", hash = "sha256:e0aaa2913d7410f5378a7efbe436f048e332f4757a746356b4f614937e37fa04", size = 121881, upload-time = "2026-06-17T21:15:54.16Z" },
+    { url = "https://files.pythonhosted.org/packages/58/7f/7ebc6f3cffe19171b31ee13f20b8d32de0aac15bb7d301f64d3032128d1c/pymdi-1.4.40-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:8e35e73c7e79e7f2f5d4de24bc631afdac0058ed6759695326fe33378be15786", size = 5008525, upload-time = "2026-06-17T21:15:55.395Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/16/bcb0b942691ac4d39f6a73e17e8c1ba9fc168f48fc348ab84c4319f2f84b/pymdi-1.4.40-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:52ce7667b291fb13357e2dc21c711d491ac80834b376a74e8e2880022d26067a", size = 175886, upload-time = "2026-06-17T21:15:56.757Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/64/73cfdb1f854eef44592e7c5683a258f17c7fd064261aea2c750667a704f2/pymdi-1.4.40-cp313-cp313-win_amd64.whl", hash = "sha256:a263ce0ef13afd9c7a76e3d4e23a709d75bb7a24ee867d415bf4d2e4226566f5", size = 121880, upload-time = "2026-06-17T21:15:57.897Z" },
 ]
 
 [[package]]
@@ -4151,6 +4202,24 @@ wheels = [
 ]
 
 [[package]]
+name = "sphinx-togglebutton"
+version = "0.4.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docutils", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "setuptools" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "wheel" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cc/be/169a0b0a8ad9588e8697c85e1d489aaaca7416073c2fc0267c360af5aae9/sphinx_togglebutton-0.4.5.tar.gz", hash = "sha256:c870dfbd3bc6e119b50ff9a37a64f8991902269e856728931c7d89877e8d4b3d", size = 18101, upload-time = "2026-03-27T13:50:41.984Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/2e/3dd55564928c5d61f92827d4b91307dde7911a40fbe0000645d73202eea9/sphinx_togglebutton-0.4.5-py3-none-any.whl", hash = "sha256:74eac6d2426110c3e1e6f989a98e07d7823141a335df1ad8a9d637bdf6a7af62", size = 44907, upload-time = "2026-03-27T13:50:40.94Z" },
+]
+
+[[package]]
 name = "sphinxcontrib-applehelp"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4587,6 +4656,18 @@ wheels = [
 ]
 
 [[package]]
+name = "wheel"
+version = "0.48.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/20/50ed6bdf27dec98b568a8ae25dc599f35baa3d9709f9e83fd1edb56b9a90/wheel-0.48.0.tar.gz", hash = "sha256:94800765601e9171bf5d58d066e640662842bcedcbab982b2c90787a2c987322", size = 66471, upload-time = "2026-08-11T22:02:27.327Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl", hash = "sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab", size = 33320, upload-time = "2026-08-11T22:02:26.1Z" },
+]
+
+[[package]]
 name = "widgetsnbextension"
 version = "4.0.15"
 source = { registry = "https://pypi.org/simple" }
@@ -4644,6 +4725,7 @@ docs = [
     { name = "sphinx-copybutton" },
     { name = "sphinx-design", version = "0.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sphinx-design", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "sphinx-togglebutton" },
 ]
 examples = [
     { name = "ase" },
@@ -4658,6 +4740,7 @@ examples = [
     { name = "nbformat" },
     { name = "nequip" },
     { name = "nequip-allegro" },
+    { name = "openmm" },
 ]
 gnn = [
     { name = "e3nn" },
@@ -4668,6 +4751,12 @@ hub = [
 hydra = [
     { name = "hydra-core" },
     { name = "omegaconf" },
+]
+mdi = [
+    { name = "pymdi" },
+]
+opls = [
+    { name = "openmm" },
 ]
 
 [package.metadata]
@@ -4703,18 +4792,22 @@ requires-dist = [
     { name = "numpy" },
     { name = "omegaconf", marker = "extra == 'all'", specifier = ">=2.3" },
     { name = "omegaconf", marker = "extra == 'hydra'", specifier = ">=2.3" },
+    { name = "openmm", marker = "extra == 'examples'", specifier = ">=8.0" },
+    { name = "openmm", marker = "extra == 'opls'", specifier = ">=8.0" },
     { name = "pydata-sphinx-theme", marker = "extra == 'docs'", specifier = ">=0.15" },
+    { name = "pymdi", marker = "extra == 'mdi'", specifier = ">=1.4" },
     { name = "pytest", marker = "extra == 'all'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pyyaml" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=7" },
     { name = "sphinx-copybutton", marker = "extra == 'docs'" },
     { name = "sphinx-design", marker = "extra == 'docs'" },
+    { name = "sphinx-togglebutton", marker = "extra == 'docs'" },
     { name = "torch", specifier = ">=2.0", index = "https://download.pytorch.org/whl/cu121" },
     { name = "torchani", marker = "extra == 'ani'", specifier = "==2.2.4" },
     { name = "tqdm" },
 ]
-provides-extras = ["ase", "hub", "gnn", "hydra", "dev", "docs", "examples", "ani", "all"]
+provides-extras = ["ase", "hub", "gnn", "mdi", "hydra", "dev", "docs", "examples", "ani", "opls", "all"]
 
 [[package]]
 name = "zipp"
