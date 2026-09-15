@@ -11,8 +11,8 @@ molecular and periodic systems, implemented in PyTorch behind a single coherent
 ``nn.Module`` interface. It provides faithful and self-contained implementations
 of state-of-the-art equivariant open-source models such as NequIP, MACE,
 Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, the BAMBOO graph
-equivariant transformer, and the ReaxFF / ReaxFF-nn learnable reactive force
-field. The key strengths
+equivariant transformer, and the learnable classical force fields ReaxFF /
+ReaxFF-nn (reactive) and OPLS / L-OPLS (fixed topology). The key strengths
 of xnns are
 
 - all models share one data object, module interface, training loop, and
@@ -169,6 +169,18 @@ Models at a glance
      - exp-normal RBF + edge attention
      - Complete: training, evaluation, deployment (ASE only); matches
        `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
+   * - ReaxFF / ReaxFF-nn
+     - ffnn
+     - bond orders from distances (reactive)
+     - Complete: training, evaluation, deployment (ASE only); implements the
+       published equations, cross-checked against LAMMPS ``pair_style
+       reaxff`` (see the fidelity notes)
+   * - OPLS / L-OPLS
+     - ffnn
+     - fixed valence topology
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `OpenMM <https://openmm.org>`_ to ~1e-7 kJ/mol and Table 1 of
+       Jorgensen et al. (1996)
 
 xnns is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository

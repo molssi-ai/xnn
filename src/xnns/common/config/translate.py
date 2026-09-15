@@ -116,6 +116,17 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "hbshort": "hb_short",
         "hblong": "hb_long",
     },
+    # OPLS spellings used by GROMACS / OpenMM-style inputs
+    "opls": {
+        "itp": "library",
+        "prm": "library",
+        "parameter_file": "library",
+        "ffield": "library",
+        "rvdw": "cutoff",
+        "pair_cutoff": "cutoff",
+        "fudgeLJ": "fudge_lj",
+        "fudgeQQ": "fudge_qq",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

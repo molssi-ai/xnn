@@ -26,28 +26,110 @@ molecular-dynamics recipe.
 
 TorchScript and LAMMPS export
 =============================
+:func:`~xnns.common.deploy.torchscript.export_torchscript_potential` writes a
+**self-contained** ``.pt``: it is driven purely by tensors and carries its own
+neighbor list, so a consumer needs nothing but ``libtorch`` /
+``torch.jit.load`` -- no ``xnns`` import, no Python model code, no config file.
+
+.. code-block:: console
+
+   $ xnns export --ckpt runs/exp/best.pt --out deployed.pt
+
+``--config`` is optional: xnns-trained checkpoints embed their own
+:class:`~xnns.common.config.schema.Config`, so the architecture is recovered
+from the checkpoint itself. The equivalent Python call is
+
 .. code-block:: python
 
-   from xnns.common.deploy import export_torchscript, export_to_lammps
+   from xnns.common.deploy import export_torchscript_potential
 
-   export_torchscript(model, path="model_ts.pt")
-   export_to_lammps(model, cutoff=5.0, path="deployed.pt")
+   export_torchscript_potential(model, cutoff=5.0, path="deployed.pt")
 
-``export_to_lammps`` wraps the model in
-:class:`~xnns.common.deploy.lammps.LAMMPSWrapper`, which defines the tensor
-ABI for the LAMMPS side, and compiles the result with TorchScript. Pair the
-exported ``.pt`` with the matching C++ pair style (the ``pair_nequip`` /
-``pair_mace`` / ``pair_allegro`` pattern).
+The artifact exposes two entry points:
 
-A model is exportable when it provides the scriptable core
-``node_energy(atomic_numbers, edge_index, edge_vec)``; SchNet, NequIP,
+``forward(pos, atomic_numbers, cell, pbc)``
+   The whole-system ABI. Builds its own neighbor list from the cutoff baked in
+   at export time, and returns ``energy``, ``node_energy``, ``forces``,
+   ``stress``, ``virial`` (plus ``energy_sr`` / ``energy_lr`` /
+   ``latent_charges`` for long-range models). This is the general-purpose
+   entry point.
+
+``forward_lammps(pos, edge_index, cell_shifts, atomic_numbers, cell)``
+   The pair-style ABI, matching
+   :class:`~xnns.common.deploy.lammps.LAMMPSWrapper` and hence the
+   ``pair_nequip`` / ``pair_mace`` / ``pair_allegro`` pattern: the MD engine
+   supplies the neighbor list it already has.
+
+Loading it from any MD package is then:
+
+.. code-block:: python
+
+   import torch
+
+   model = torch.jit.load("deployed.pt")          # no xnns needed
+   out = model(pos, atomic_numbers, cell, pbc)
+   energy, forces = out["energy"], out["forces"]
+
+Calling conventions
+-------------------
+The artifact behaves like an ordinary scripted module: ``.parameters()``,
+``.state_dict()``, ``.eval()``, ``.to(device)`` and ``.double()`` all work, and
+it runs on GPU via ``torch.jit.load(path, map_location="cuda")``. Positions may
+be float32 or float64 regardless of the weights' dtype -- the module computes
+in its own dtype and returns results in the caller's -- and ``cell`` / ``pbc``
+may be omitted for a molecular system. Three things differ from a typical
+inference model:
+
+* **One structure per call.** Inputs are ``(N, 3)``, not ``(B, N, 3)``; there
+  is no batch dimension. Loop over structures.
+* **Wrapping the call in** ``torch.no_grad()`` **is fine** -- the module
+  re-enables grad internally, because its forces come from autograd, and
+  restores the caller's grad mode afterwards.
+* ``torch.inference_mode()`` **is not supported** and raises. Tensors created
+  under inference mode can never participate in autograd, so the force
+  gradient cannot be taken; this cannot be worked around from inside the
+  module. Use ``torch.no_grad()``, or no context manager at all.
+
+The cutoff and a ``long_range`` flag are embedded as extra files in the
+archive, so a consumer can introspect the artifact without xnns::
+
+   extra = {"cutoff": "", "long_range": ""}
+   torch.jit.load("deployed.pt", _extra_files=extra)
+
+.. warning::
+
+   **Long-range (LES) models must be driven with the whole system on one
+   rank.** :class:`~xnns.common.models.les.LatentEwald` adds an Ewald energy
+   over latent charges, which is a *global* sum -- every atom's latent charge
+   enters, with no cutoff -- so it does not decompose into a local, per-domain
+   neighbor list. An MPI-decomposed pair style that only ever sees its own
+   subdomain plus ghosts cannot reproduce the trained energy. Use ``forward``
+   (or ``forward_lammps`` with a full-system neighbor list) via a
+   single-rank run, ``fix external``, or the
+   :class:`~xnns.common.deploy.mdi_engine.MDIEngine`. The
+   ``long_range`` metadata key records whether this applies.
+
+.. note::
+
+   The built-in neighbor list is the brute-force ``O(S N^2)`` reference
+   algorithm, matching :func:`~xnns.common.data.build_neighbor_list`. It is
+   fine for molecular and modest periodic systems; for large cells, supply the
+   engine's own neighbor list through ``forward_lammps``.
+
+The older :func:`~xnns.common.deploy.lammps.export_to_lammps` remains for the
+short-range-only pair-style wrapper. A model is exportable when it provides
+the scriptable core
+``node_energy(atomic_numbers, edge_index, edge_vec)`` and, for the
+self-contained export, ``node_features_energy(...)``; SchNet, NequIP,
 MACE, and Allegro all do, and the scripted models reproduce the eager ones
 to ~1e-15 (verified in the test suite). CACE is the exception: like the
 original ``cace`` package (which has no LAMMPS interface) it deploys via the
 ASE calculator only. ReaxFF likewise deploys via the ASE calculator only
 (its per-structure EEM linear solve and valence enumeration have no
 scriptable per-edge core); when running molecular dynamics with it, use the
-customary ReaxFF timestep of about 0.1 fs.
+customary ReaxFF timestep of about 0.1 fs. OPLS also deploys via the ASE
+calculator (its energy is defined relative to a bound molecular topology,
+not per edge); with explicit hydrogens the customary timestep is 0.5-1 fs.
 
 See :ref:`howto-lammps` for the step-by-step guide, including the CLI form
 (``xnns export``).

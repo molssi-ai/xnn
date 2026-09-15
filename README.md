@@ -108,8 +108,9 @@ src/xnns/
 │   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
 │       └── …
 ├── ffnn/                       learnable classical force fields
-│   └── models/                 - reaxff, ffield
-│       └── …                     + ReaxFF, ReaxFF-nn reactive force field, parameter-library I/O, template
+│   └── models/                 - reaxff, ffield, opls, oplslib, topology
+│       └── …                     + ReaxFF / ReaxFF-nn reactive force field, OPLS / L-OPLS fixed-topology
+│                                   force field, parameter-library I/O (ffield, OPLS JSON, GROMACS .itp)
 ├── transformer/                shared graph-transformer building blocks
 │   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
 │   └── featurizers/            - ExpNormalSmearing radial basis
@@ -240,6 +241,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
 | ReaxFF / ReaxFF-nn | ffnn | bond orders + EEM charges (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
+| OPLS / OPLS-AA / L-OPLS | ffnn | fixed valence topology (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 
 ## Examples
 
@@ -257,7 +259,11 @@ trains the ReaxFF-nn reactive force field on rMD17 and analyses its bond orders,
 EEM charges and bond dissociation (`examples/ffnn/reaxff/`), benchmarking
 throughout against the original classical ReaxFF with published parameters (the
 Chenoweth 2008 C/H/O combustion field, run directly from the standard `ffield`
-text format). The block-by-block numerical verifications against the upstream
+text format), and validates the OPLS fixed-topology force field against its own
+literature (`examples/ffnn/opls/`): Table 1 of the 1996 OPLS-AA paper is
+reproduced with a relaxed dihedral driver, and the L-OPLS hydrocarbon torsion
+refit of Siu et al. (2012) is re-derived by gradient descent
+(`trainable=("dihedral_v",)`). The block-by-block numerical verifications against the upstream
 codes are collected under `examples/fidelity_checks/` as
 `<model>_verification.ipynb`. **ReaxFF is the exception:** the authors'
 reference implementation of ReaxFF-nn is AGPL-licensed, so no verification
@@ -266,7 +272,9 @@ with this MIT-licensed code base; the implementation follows the published
 equations, was checked against that implementation during development without
 redistributing anything from it, and ships with self-contained
 equation-by-equation tests instead (`tests/test_reaxff.py`; see the fidelity
-notes in the documentation). The `examples/quickstart.py` module presents a
+notes in the documentation). OPLS is verified against OpenMM (an independent
+MD engine, optional dependency) in `examples/fidelity_checks/opls_verification.ipynb`
+and `tests/test_opls.py`. The `examples/quickstart.py` module presents a
 minimal train/predict workflow on toy-data.
 
 ## Extension points

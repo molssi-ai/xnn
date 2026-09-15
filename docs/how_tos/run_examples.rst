@@ -125,6 +125,19 @@ published-parameter baseline for the test-set metrics and the
 bond-dissociation scan. No third-party ReaxFF code is required (see the
 fidelity notes in the documentation).
 
+OPLS (``examples/ffnn/opls/``) has
+``opls_conformational_energetics.ipynb``, which reproduces the relaxed
+torsional energies of Table 1 of the OPLS-AA paper (Jorgensen *et al.* 1996)
+with an ASE dihedral driver on the built-in parameter libraries, and
+``opls_lopls_torsion_refit.ipynb``, which compares OPLS-AA against the
+L-OPLS long-hydrocarbon refit (Siu *et al.* 2012) on the hexane torsion
+profile and then recovers the published L-OPLS torsion coefficients by
+gradient descent (``trainable=("dihedral_v",)``), exporting the trained
+library and finishing with an NVE energy-conservation check. The
+implementation itself is cross-validated against OpenMM in
+``examples/fidelity_checks/opls_verification.ipynb`` (optional ``openmm``
+dependency).
+
 The Latent Ewald Summation long-range add-on is validated against the original
 ``cace`` ``EwaldPotential`` in ``examples/fidelity_checks/les_verification.ipynb``;
 ``examples/gnn/les/les_molecular_dimers.ipynb`` reproduces

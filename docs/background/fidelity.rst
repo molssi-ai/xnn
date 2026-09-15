@@ -328,6 +328,44 @@ overflow-safe sigmoid form (exact) or with an argument-capped ``exp``
 (differing below 1e-17, inside saturating ratios only) so that float32
 training with force losses stays finite.
 
+OPLS / OPLS-AA / L-OPLS
+=======================
+A clean-room implementation of the **published functional form** (Jorgensen,
+Maxwell & Tirado-Rives, *JACS* 118, 11225, 1996, eqs 1-4), with parameters
+taken from the published tables rather than any upstream code. Fidelity is
+established two independent ways:
+
+* **Parity with OpenMM**: ``tests/test_opls.py`` and
+  ``examples/fidelity_checks/opls_verification.ipynb`` assemble the same
+  parameter library and topology into an OpenMM ``System`` (Coulomb via
+  ``NonbondedForce``, Lennard-Jones via a ``CustomNonbondedForce`` with OPLS
+  geometric mixing, exact 1,4 exceptions, Fourier torsions as phased
+  periodic torsions) and compare on randomized conformations of butane,
+  ethanol and ethylene: energies agree to ~1e-7 kJ/mol and forces to ~1e-6
+  kJ/mol/nm — the precision at which the two codes' physical constants are
+  written down. OpenMM is an optional test dependency; the suite skips the
+  parity test without it.
+* **The papers' own numbers**: relaxed dihedral-driver scans reproduce the
+  OPLS-AA column of Table 1 of the 1996 paper to a few hundredths of a
+  kcal/mol across ethane, propane, butane, methanol and ethanol
+  (``examples/ffnn/opls/opls_conformational_energetics.ipynb``), and the
+  Fourier/Ryckaert-Bellemans conversion reproduces the dual-form torsion
+  rows of Table 2 of the L-OPLS paper (Siu *et al.*, *JCTC* 8, 1459, 2012)
+  exactly. The hexane gauche-trans gap of the built-in ``"lopls"`` library
+  matches the published refit (~2 kJ/mol vs OPLS-AA's ~5).
+
+Documented conventions: the built-in ``"oplsaa"`` set carries the alkane
+torsions of the standard OPLS-AA distribution (a late-1999 revision by the
+Jorgensen lab); ``"oplsaa-1996"`` restores the paper's original values,
+which are what Table 1 was computed with. Parameters use the thermochemical
+calorie (4.184 kJ exactly) and the CODATA Coulomb constant, matching the
+kJ-based ecosystem (BOSS/GROMACS/OpenMM) in which OPLS parameters are
+distributed — ReaxFF keeps its own historical Fortran-era constants for
+``ffield`` compatibility, and the two differ by ~8e-6 relative. Dihedral
+angles enter through Chebyshev cosine identities (the OPLS Fourier terms
+are even in the angle, so no ``arccos``/``atan2`` is needed); excluded
+pairs are excluded in every periodic image, the standard MM convention.
+
 Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,

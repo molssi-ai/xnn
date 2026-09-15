@@ -110,7 +110,7 @@ ready for inference:
 
 Run end to end, the script prints something like::
 
-   registered models: ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
+   registered models: ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet']
    training on cuda ...
    epoch    0 | train loss 2.0641e+00 | val loss 9.3133e-01
    epoch    1 | train loss 1.8768e+00 | val loss 8.7541e-01

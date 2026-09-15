@@ -111,6 +111,26 @@ what equilibrium-only training data cannot constrain.
    nb/ffnn/reaxff/reaxff_rmd17_train_test
    nb/ffnn/reaxff/reaxff_md_bond_orders
 
+OPLS / L-OPLS (ffnn)
+====================
+
+The fixed-topology classical force field, validated against its own
+literature: ``opls_conformational_energetics.ipynb`` reproduces the relaxed
+torsional energies of Table 1 of Jorgensen *et al.* (1996) with the paper's
+dihedral-driver protocol (ethane, propane, butane, methanol, ethanol), and
+``opls_lopls_torsion_refit.ipynb`` first compares the hexane torsion
+profile of OPLS-AA and L-OPLS (Siu *et al.* 2012) and then *re-derives* the
+L-OPLS ``CT-CT-CT-CT`` torsion by gradient descent — mark ``dihedral_v``
+trainable, fit conformer energies, recover the published Fourier
+coefficients to machine precision — before exporting the trained library
+and checking NVE energy conservation.
+
+.. toctree::
+   :maxdepth: 1
+
+   nb/ffnn/opls/opls_conformational_energetics
+   nb/ffnn/opls/opls_lopls_torsion_refit
+
 Deployment: MDI (common)
 ========================
 
@@ -149,3 +169,4 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/cace_verification
    nb/fidelity_checks/les_verification
    nb/fidelity_checks/bamboo_verification
+   nb/fidelity_checks/opls_verification

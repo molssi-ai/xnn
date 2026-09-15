@@ -82,11 +82,15 @@ A reverse transplant in production: the MD notebook
 PhysNet weights back into the original TF1 graph and propagates both engines
 through the same NVE trajectory in lock step.
 
-ReaxFF needs no transplant machinery at all: the force field *is* its
-parameter library, so :class:`~xnns.ffnn.models.reaxff.ReaxFF` loads
-``ffield`` text and ReaxFF-nn JSON libraries directly, and
+The classical force fields need no transplant machinery at all: the force
+field *is* its parameter library. :class:`~xnns.ffnn.models.reaxff.ReaxFF`
+loads ``ffield`` text and ReaxFF-nn JSON libraries directly, and
 ``ReaxFF.export_library()`` writes trained parameters back out in the same
-portable format.
+portable format. :class:`~xnns.ffnn.models.opls.OPLS` likewise loads its
+built-in sets, native JSON libraries, and GROMACS ``oplsaa.ff``-style
+``.itp`` files (translated to OPLS conventions at load time), and
+``OPLS.export_library()`` round-trips trained parameters through the native
+JSON format.
 
 Tests
 =====

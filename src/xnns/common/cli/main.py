@@ -118,23 +118,37 @@ def main(argv=None):
         run_benchmark(from_dict(raw))
 
     elif cmd == "export":
-        p = argparse.ArgumentParser()
-        p.add_argument("--config", required=True)
-        p.add_argument("--ckpt", required=True)
-        p.add_argument("--to", choices=["lammps", "torchscript"], default="lammps")
+        p = argparse.ArgumentParser(prog="xnns export")
+        p.add_argument("--config", default=None,
+                       help="YAML config describing the architecture; "
+                            "optional, and only needed for checkpoints that "
+                            "do not embed their own Config (xnns-trained ones "
+                            "do)")
+        p.add_argument("--ckpt", required=True, help="checkpoint to export")
+        p.add_argument("--to", choices=["lammps", "torchscript"],
+                       default="lammps",
+                       help="both write the same self-contained artifact, "
+                            "which exposes the whole-system entry point "
+                            "'forward' and the pair-style 'forward_lammps'")
         p.add_argument("--out", default="model_deployed.pt")
         args, _ = p.parse_known_args(rest)
-        cfg = cfgmod.from_yaml(args.config)
         from ..models import build_model, ForceStressOutput
-        from ..deploy import export_to_lammps, export_torchscript
-        base = build_model(cfg.model)
-        wrapped = ForceStressOutput(base)
+        from ..deploy import export_torchscript_potential
         state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-        wrapped.load_state_dict(state["model"])
-        if args.to == "lammps":
-            print("wrote", export_to_lammps(base, cfg.model.cutoff, args.out))
-        else:
-            print("wrote", export_torchscript(base, args.out))
+        # prefer the architecture embedded in the checkpoint, as `benchmark`
+        # does, so exporting a trained run needs nothing but the .pt
+        cfg = cfgmod.from_yaml(args.config) if args.config else state.get("cfg")
+        if cfg is None:
+            raise SystemExit(
+                f"{args.ckpt} embeds no config; pass --config with the "
+                f"architecture it was trained with")
+        base = build_model(cfg.model)
+        ForceStressOutput(base).load_state_dict(state["model"])
+        meta = {"model": cfg.model.name,
+                "species": (cfg.model.extra or {}).get("species"),
+                "source_checkpoint": args.ckpt}
+        print("wrote", export_torchscript_potential(
+            base, cfg.model.cutoff, args.out, meta))
 
     elif cmd == "mdi":
         from ..deploy.mdi_engine import main as mdi_main

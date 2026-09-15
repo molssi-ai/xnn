@@ -365,6 +365,51 @@ hydrogen-bond distance window; ``trainable`` (none), the classical parameter
 groups to refit. ReaxFF is evaluated in eV/Angstrom (libraries store
 energies in kcal/mol; conversion is automatic).
 
+OPLS / OPLS-AA / L-OPLS (``ffnn``)
+==================================
+:class:`xnns.ffnn.models.opls.OPLS`: the **fixed-topology classical force
+field** of Jorgensen, Maxwell & Tirado-Rives (*J. Am. Chem. Soc.* 118,
+11225, 1996): harmonic bonds and angles, Fourier-series proper dihedrals,
+``V2`` improper dihedrals at trigonal centers, and Coulomb plus
+Lennard-Jones nonbonded interactions with geometric combining rules and the
+OPLS 1,2/1,3 exclusions and 1/2-scaled 1,4 pairs. The united-atom variant
+(OPLS-UA) and reparameterizations such as **L-OPLS** for long hydrocarbons
+(Siu *et al.*, *JCTC* 2012) share the functional form and differ only in
+their parameter libraries, so one model serves all of them. ``forward``
+additionally returns ``"charges"`` and the per-term decomposition
+(``"e_bond"``, ``"e_angle"``, ``"e_torsion"``, ``"e_improper"``, ``"e_lj"``,
+``"e_coulomb"``, ``"e_lj14"``, ``"e_coulomb14"``).
+
+Unlike ReaxFF, OPLS needs a fixed molecular topology: a
+:class:`~xnns.ffnn.models.topology.MolecularTopology` holds the per-atom
+OPLS type names and the bond list (guessed from covalent radii by
+:func:`~xnns.ffnn.models.topology.guess_bonds` if not given) and derives the
+angles, dihedrals, exclusions and 1,4 pairs. The topology binds to the model
+instance, so every structure the model evaluates — a training batch of
+conformers, an MD trajectory — is a conformation of that system; bonded
+terms use minimum-image displacements, so molecules may wrap across periodic
+boundaries. Parameters come from an :class:`~xnns.ffnn.models.oplslib.OPLSLibrary`:
+built-in curated sets (``"oplsaa"``, ``"oplsaa-1996"`` with the paper's
+original alkane torsions, ``"lopls"``), the native JSON format, or GROMACS
+``oplsaa.ff``-style ``.itp`` files (translated at load time: kJ/mol to
+kcal/mol, Ryckaert-Bellemans to Fourier torsions). Any parameter group can
+be refit by gradient descent (``trainable=("dihedral_v", "charge", ...)``),
+several models (different molecules) can share one
+:class:`~xnns.ffnn.models.opls.OPLSForceField` to fit transferable
+parameters jointly, and ``export_library()`` writes the trained values back
+to a portable JSON library. The implementation is verified against OpenMM
+to ~1e-7 kJ/mol and against Table 1 of the 1996 paper (see :ref:`fidelity`).
+
+Key options (defaults in parentheses): ``library`` (required), the parameter
+source; ``topology`` (required), a topology JSON path or inline ``types`` +
+``bonds`` (+ ``impropers``/``improper_keys``); ``cutoff`` (10.0), the
+Lennard-Jones/Coulomb cutoff and neighbor-list radius (1,4 pairs are
+cutoff-independent); ``switch_width`` (0.0), a quintic switching window at
+the cutoff; ``fudge_lj``/``fudge_qq`` (the library's, 0.5 for OPLS), the 1,4
+scalings; ``trainable`` (none), the parameter groups to refit. OPLS is
+evaluated in eV/Angstrom (libraries store kcal/mol; conversion is
+automatic).
+
 Long-range interactions: Latent Ewald Summation (LES)
 ======================================================
 Short-range models miss electrostatics and dispersion beyond their receptive

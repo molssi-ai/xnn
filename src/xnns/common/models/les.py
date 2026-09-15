@@ -39,6 +39,7 @@ The wrapped energy cost is roughly twice the short-range cost.
 from __future__ import annotations
 
 import math
+from typing import List
 
 import torch
 from torch import Tensor, nn
@@ -117,6 +118,7 @@ class EwaldSummation(nn.Module):
         gaussian_norm = self.sigma * (2.0 * math.pi) ** 1.5
         return q.square().sum() / gaussian_norm
 
+    @torch.jit.export
     def reciprocal(self, pos: Tensor, q: Tensor, cell: Tensor) -> Tensor:
         """Reciprocal-space Ewald energy of one periodic structure.
 
@@ -141,15 +143,20 @@ class EwaldSummation(nn.Module):
         # the extent stable when a cell edge length sits within an ulp of a
         # multiple of dl (a documented xnns deviation: upstream truncates the
         # exact quotient, so a rigid rotation of the cell can change the grid)
-        n_max = [max(int(length / self.dl + 1e-9), 1)
-                 for length in cell.norm(dim=1).tolist()]
+        # (written as an explicit loop rather than a comprehension over
+        # ``.tolist()`` so the method stays ``torch.jit.script``-able for the
+        # deploy wrappers; the arithmetic is unchanged)
+        lengths = torch.linalg.norm(cell, dim=1)
+        n_max: List[int] = []
+        for i in range(3):
+            n_max.append(max(int(float(lengths[i]) / self.dl + 1e-9), 1))
 
         # Enumerate one half-space of integer lattice points directly: a
         # triple is generated iff its leading nonzero index is positive, so
         # exactly one of each {+n, -n} pair appears and n = 0 never does.
         # Every surviving k thus stands for its mirror image as well and
         # enters the energy with weight 2.
-        na, nb, nc = n_max
+        na, nb, nc = n_max[0], n_max[1], n_max[2]
         all_b = torch.arange(-nb, nb + 1, device=device)
         all_c = torch.arange(-nc, nc + 1, device=device)
         zero = torch.zeros(1, dtype=torch.long, device=device)
@@ -185,6 +192,7 @@ class EwaldSummation(nn.Module):
             energy = energy - self._self_energy(q)
         return energy
 
+    @torch.jit.export
     def realspace(self, pos: Tensor, q: Tensor) -> Tensor:
         """Direct-sum equivalent for a non-periodic structure.
 
@@ -196,7 +204,7 @@ class EwaldSummation(nn.Module):
         """
         if self.exponent != 1:
             raise ValueError("realspace fallback supports exponent=1 only")
-        dist = (pos[:, None, :] - pos[None, :, :]).norm(dim=-1)
+        dist = torch.linalg.norm(pos[:, None, :] - pos[None, :, :], dim=-1)
         # two behavioral conventions of the reference are kept on purpose:
         # erf(r / (sqrt(2) sigma)) vanishes at r = 0, silencing the i == j
         # terms, and the 1e-6 offset in the denominator keeps the diagonal
@@ -209,6 +217,7 @@ class EwaldSummation(nn.Module):
             energy = energy + self._self_energy(q)
         return energy
 
+    @torch.jit.ignore
     def forward(self, q: Tensor, pos: Tensor, batch: Tensor, num_graphs: int,
                 cell: Tensor | None, pbc: Tensor | None = None) -> Tensor:
         """Long-range energy per structure for a batched graph.

@@ -48,9 +48,12 @@ examples = [
     "ipykernel",
     "nbconvert",
     "nbformat",
+    "openmm>=8.0",
 ]
 # The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
 ani = ["torchani==2.2.4", "h5py>=3.0"]
+# The OPLS fidelity notebook and parity test compare against OpenMM.
+opls = ["openmm>=8.0"]
 all = [
     "ase>=3.22",
     "e3nn>=0.4.4",

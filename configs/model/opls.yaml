@@ -1,0 +1,12 @@
+name: opls
+cutoff: 10.0              # nonbonded (Lennard-Jones / Coulomb) cutoff; 1,4 pairs are cutoff-independent
+library: oplsaa           # parameter library: built-in name (oplsaa, lopls), native JSON path, or GROMACS .itp source (required)
+topology: null            # topology JSON written by MolecularTopology.save (or give types + bonds inline)
+types: null               # per-atom OPLS type names, e.g. [opls_135, opls_140, ...]
+bonds: null               # bond index pairs, e.g. [[0, 1], [0, 2]]
+impropers: null           # improper dihedral index quadruples (trigonal centers)
+improper_keys: null       # improper type key per improper, e.g. [Z-CM-X-Y]
+switch_width: 0.0         # width (A) of the quintic switching function at the cutoff; 0 = plain truncation
+fudge_lj: null            # 1,4 Lennard-Jones scaling (default: the library's, 0.5 for OPLS)
+fudge_qq: null            # 1,4 Coulomb scaling (default: the library's, 0.5 for OPLS)
+trainable: []             # parameter groups to refit, e.g. [dihedral_v, charge]; "all" for every group
