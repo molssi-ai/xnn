@@ -198,24 +198,18 @@ class MDIEngine:
                 "cannot calculate: driver has not sent >ELEMENTS/>COORDS yet")
         t0 = time.perf_counter()
 
-        # Build the graph on the device the model runs on, rather than on the
-        # CPU and moving it afterwards. The neighbour list is the expensive
-        # part and it is rebuilt every step, so where it runs decides the cost
-        # of the step: on 5001 atoms this was 1.8 s of CPU per step against
-        # 36 ms on the GPU, and 0.6 ms once vesin's cell list is available.
         struct = {
             "pos": torch.as_tensor(self.coords_bohr * BOHR_TO_ANGSTROM,
-                                   dtype=self.dtype, device=self.device),
+                                   dtype=self.dtype),
             "atomic_numbers": torch.as_tensor(self.atomic_numbers,
-                                              dtype=torch.long,
-                                              device=self.device),
+                                              dtype=torch.long),
             "cell": (torch.as_tensor(self.cell_bohr * BOHR_TO_ANGSTROM,
-                                     dtype=self.dtype, device=self.device)
+                                     dtype=self.dtype)
                      if self.cell_bohr is not None else None),
-            "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
+            "pbc": (np.array([True, True, True])
                     if self.cell_bohr is not None else None),
         }
-        graph = structure_to_graph(struct, self.cutoff).to(self.device)
+        graph = structure_to_graph(struct, self.cutoff, device=self.device)
         out = self.model(graph)
 
         self.energy = float(out["energy"].sum().detach()) / HARTREE_TO_EV
