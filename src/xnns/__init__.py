@@ -29,11 +29,22 @@ from . import common  # noqa: F401  (data, config, models, train, deploy, cli)
 # transformer building blocks need no e3nn
 from . import cnn, dnn, ffnn, hybrid, transformer  # noqa: F401
 
-# the GNN family (NequIP/MACE/Allegro) requires e3nn; register only if available
+# the GNN family (NequIP/MACE/Allegro) requires e3nn; register only if available.
+# Catch Exception, not just ImportError: e3nn does real work at import time --
+# it loads its Wigner constants with torch.load -- so it can fail in ways that
+# are not import errors, and an optional family must not take the whole package
+# with it when it does.
 try:
     from . import gnn  # noqa: F401
     _HAS_GNN = True
-except ImportError:
+except Exception as _gnn_error:  # noqa: BLE001 - optional family, degrade quietly
+    import warnings as _warnings
+
+    _warnings.warn(
+        f"xnns: the GNN family (NequIP/MACE/Allegro/CACE) is unavailable: "
+        f"{type(_gnn_error).__name__}: {_gnn_error}",
+        stacklevel=2,
+    )
     _HAS_GNN = False
 
 __version__ = "0.1.0"
