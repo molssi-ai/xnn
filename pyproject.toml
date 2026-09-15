@@ -31,6 +31,7 @@ docs = [
     "pydata-sphinx-theme>=0.15",
     "sphinx-design",
     "sphinx-copybutton",
+    "sphinx-togglebutton",    # collapsible long notebook outputs
     "myst-nb>=1.1",            # renders the executed example notebooks
 ]
 # Everything needed to build and run the example notebooks in examples/gnn/,
