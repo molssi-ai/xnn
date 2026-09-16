@@ -10,7 +10,7 @@ finish, explaining each step. It requires the ``gnn`` extra
 
 1. Prepare the data
 ===================
-xnns consumes structures as plain Python dictionaries. Required keys are
+xnn consumes structures as plain Python dictionaries. Required keys are
 ``pos`` (an ``(N, 3)`` array of positions) and ``atomic_numbers`` (an
 ``(N,)`` array); training targets and periodicity are optional:
 
@@ -38,7 +38,7 @@ skip the dictionaries entirely and load the file directly (requires the
 
 .. code-block:: python
 
-   from xnns.common.data import AtomicDataset
+   from xnn.common.data import AtomicDataset
 
    dataset = AtomicDataset.from_file("my_trajectory.extxyz", cutoff=4.0)
 
@@ -47,13 +47,13 @@ automatically; see :ref:`data`.
 
 2. Build the dataset
 ====================
-:class:`~xnns.common.data.dataset.AtomicDataset` turns the structure
-dictionaries into :class:`~xnns.common.data.atomic_data.AtomicGraph` objects,
+:class:`~xnn.common.data.dataset.AtomicDataset` turns the structure
+dictionaries into :class:`~xnn.common.data.atomic_data.AtomicGraph` objects,
 building the (PBC-aware) neighbor list at the given cutoff:
 
 .. code-block:: python
 
-   from xnns.common.data import AtomicDataset
+   from xnn.common.data import AtomicDataset
 
    cutoff = 4.0
    train_set = AtomicDataset(structures[:800], cutoff)
@@ -65,13 +65,13 @@ see the difference.
 
 3. Configure the model
 ======================
-The :class:`~xnns.common.config.schema.Config` dataclass brings everything together:
+The :class:`~xnn.common.config.schema.Config` dataclass brings everything together:
 model, data, and optimizer settings. Model-specific options go into
 ``cfg.model.extra``:
 
 .. code-block:: python
 
-   from xnns.common.config import Config
+   from xnn.common.config import Config
 
    cfg = Config()
    cfg.model.name = "mace"
@@ -98,14 +98,14 @@ Alternatively, load the same settings from a YAML file (see
 
 4. Train
 ========
-:class:`~xnns.common.train.trainer.Trainer` builds the model from the config,
-wraps it in :class:`~xnns.common.models.outputs.ForceStressOutput` (force and
+:class:`~xnn.common.train.trainer.Trainer` builds the model from the config,
+wraps it in :class:`~xnn.common.models.outputs.ForceStressOutput` (force and
 stress heads are switched on by nonzero loss weights), sets up the Adam
 optimizer, scheduler, and data loaders, and runs the training loop:
 
 .. code-block:: python
 
-   from xnns.common.train import Trainer
+   from xnn.common.train import Trainer
 
    trainer = Trainer(cfg, train_set, val_set)
    trainer.fit()
@@ -124,8 +124,8 @@ Load the checkpoint and evaluate on new structures:
 .. code-block:: python
 
    import torch
-   from xnns.common.data import AtomicDataset
-   from xnns.common.models import build_model, ForceStressOutput
+   from xnn.common.data import AtomicDataset
+   from xnn.common.models import build_model, ForceStressOutput
 
    ckpt = torch.load("runs/my_first_run/best.pt", weights_only=False)
    model = build_model(ckpt["cfg"].model)

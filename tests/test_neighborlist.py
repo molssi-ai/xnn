@@ -9,7 +9,7 @@ the smooth envelope then silently zeros -- i.e. all periodic neighbours dropped.
 import numpy as np
 import torch
 
-from xnns.common.data import build_neighbor_list, structure_to_graph
+from xnn.common.data import build_neighbor_list, structure_to_graph
 
 
 def _rng_crystal(n=40, L=8.0, seed=0):
@@ -49,9 +49,9 @@ def test_matches_ase_neighbor_list():
         {"pos": pos, "atomic_numbers": [18] * len(pos), "cell": cell, "pbc": [True] * 3},
         cutoff,
     )
-    d_xnns = g.edge_vectors().norm(dim=1).numpy()
+    d_xnn = g.edge_vectors().norm(dim=1).numpy()
     assert g.num_edges == len(d_ase)
-    assert np.allclose(np.sort(d_xnns), np.sort(d_ase), atol=1e-8)
+    assert np.allclose(np.sort(d_xnn), np.sort(d_ase), atol=1e-8)
 
 
 def test_unwrapped_positions_match_ase():
@@ -72,9 +72,9 @@ def test_unwrapped_positions_match_ase():
         {"pos": pos, "atomic_numbers": [18] * len(pos), "cell": cell, "pbc": [True] * 3},
         cutoff,
     )
-    d_xnns = g.edge_vectors().norm(dim=1).numpy()
+    d_xnn = g.edge_vectors().norm(dim=1).numpy()
     assert g.num_edges == len(d_ase)
-    assert np.allclose(np.sort(d_xnns), np.sort(d_ase), atol=1e-8)
+    assert np.allclose(np.sort(d_xnn), np.sort(d_ase), atol=1e-8)
 
 
 def test_unwrapped_mixed_pbc_match_ase():
@@ -98,9 +98,9 @@ def test_unwrapped_mixed_pbc_match_ase():
         {"pos": pos, "atomic_numbers": [18] * len(pos), "cell": cell, "pbc": pbc},
         cutoff,
     )
-    d_xnns = g.edge_vectors().norm(dim=1).numpy()
+    d_xnn = g.edge_vectors().norm(dim=1).numpy()
     assert g.num_edges == len(d_ase)
-    assert np.allclose(np.sort(d_xnns), np.sort(d_ase), atol=1e-8)
+    assert np.allclose(np.sort(d_xnn), np.sort(d_ase), atol=1e-8)
 
 
 def test_molecular_shifts_are_zero():

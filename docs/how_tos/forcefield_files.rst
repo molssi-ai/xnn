@@ -6,7 +6,7 @@ Use and write ``.frc`` force-field files
 
 The classical force fields of the ``ffnn`` family -- ReaxFF, OPLS, and the
 ones to come -- read their parameters from one format: the MolSSI/SEAMM
-``.frc`` force-field file (:mod:`xnns.ffnn.common.frc`), the format of the
+``.frc`` force-field file (:mod:`xnn.ffnn.common.frc`), the format of the
 `SEAMM force-field distribution
 <https://github.com/molssi-seamm/forcefield_step/tree/main/forcefield_step/data>`_.
 Besides the parameters, a ``.frc`` file carries the **SMARTS templates**
@@ -14,11 +14,11 @@ that assign its own atom types to any structure, so a fixed-topology force
 field such as OPLS can be applied to a molecule without knowing its type
 names.
 
-What ships with xnns
+What ships with xnn
 ====================
 .. code-block:: python
 
-   from xnns.ffnn.common import list_forcefields
+   from xnn.ffnn.common import list_forcefields
    sorted(list_forcefields())
    # ['CL&P', 'lopls', 'oplsaa', 'oplsaa+', 'oplsaa-1996',
    #  'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
@@ -26,8 +26,8 @@ What ships with xnns
 ``oplsaa.frc`` is the OPLS-AA distribution (variants ``oplsaa``, the
 CL&P ionic-liquid extension ``CL&P``, and their union ``oplsaa+``), and a
 dozen published ReaxFF fields live under ``reaxff/``; all are copied verbatim
-from SEAMM (BSD-3-Clause, see ``src/xnns/ffnn/data/README.md`` for the
-commit and per-file provenance). xnns adds ``lopls`` (Siu *et al.* 2012) and
+from SEAMM (BSD-3-Clause, see ``src/xnn/ffnn/data/README.md`` for the
+commit and per-file provenance). xnn adds ``lopls`` (Siu *et al.* 2012) and
 ``oplsaa-1996`` (the alkane and alcohol torsions of the original paper),
 both small files that ``#include`` ``oplsaa.frc`` and override a few rows.
 
@@ -40,7 +40,7 @@ Apply a force field to a molecule
 .. code-block:: python
 
    from ase.build import molecule
-   from xnns.ffnn.models import OPLS, ReaxFF
+   from xnn.ffnn.models import OPLS, ReaxFF
 
    ethanol = molecule("CH3CH2OH")
    model = OPLS.from_atoms(ethanol, "oplsaa", cutoff=12.0)   # types + topology
@@ -49,18 +49,18 @@ Apply a force field to a molecule
    reax = ReaxFF("CHO_cho_2008")   # ReaxFF needs no typing: species only
 
 ``OPLS.from_atoms`` perceives the bonding with RDKit, assigns the library's
-atom types from its templates (:func:`~xnns.ffnn.common.typing.assign_atom_types`),
+atom types from its templates (:func:`~xnn.ffnn.common.typing.assign_atom_types`),
 derives the topology, and places impropers at trigonal centers the library
 has a pattern for. RDKit is an optional dependency::
 
-   pip install "xnns[ffnn]"
+   pip install "xnn[ffnn]"
 
 The lower-level pieces are available separately when you need them:
 
 .. code-block:: python
 
-   from xnns.ffnn.common import read_forcefield, assign_atom_types
-   from xnns.ffnn.models import MolecularTopology, read_opls
+   from xnn.ffnn.common import read_forcefield, assign_atom_types
+   from xnn.ffnn.models import MolecularTopology, read_opls
 
    ff = read_forcefield("oplsaa")                  # resolved variant
    types = assign_atom_types(ethanol, ff)          # SMARTS typing only
@@ -69,7 +69,7 @@ The lower-level pieces are available separately when you need them:
 
 Query a force field directly
 ============================
-:class:`~xnns.ffnn.common.frc.ForceField` exposes the lookups force-field
+:class:`~xnn.ffnn.common.frc.ForceField` exposes the lookups force-field
 codes need, with the equivalence and wildcard rules of the format:
 
 .. code-block:: python
@@ -102,7 +102,7 @@ original. Two caveats: a dihedral ``V0`` constant has no column in
 ``torsion_opls`` and is dropped (it affects neither forces nor energy
 differences), and ReaxFF-nn network weights have no place in the format, so
 neural libraries keep using the JSON format of
-:meth:`~xnns.ffnn.models.ffield.FFieldLibrary.save`.
+:meth:`~xnn.ffnn.models.ffield.FFieldLibrary.save`.
 
 The format in brief
 ===================
@@ -121,7 +121,7 @@ sections that start at a ``#`` line and run to the next one::
 make up the variant ``<name>``; later labels override earlier ones for the
 same key, which is how ``CL&P`` and ``lopls`` extend ``oplsaa``, and within a
 section the newest version of each key wins. ``#include <file>`` splices
-another file in (``local:`` resolves against the xnns data directory and any
+another file in (``local:`` resolves against the xnn data directory and any
 ``include_dirs`` you pass); ``#templates`` and ``#fragments`` hold JSON;
 ``#reference <n>`` holds provenance.
 
@@ -129,9 +129,9 @@ Adding a new force field
 ========================
 Write its parameters as a ``.frc`` file (any unknown section kind is read
 from its column header; register known ones with
-:func:`~xnns.ffnn.common.frc.register_section_schema` to get key symmetry
+:func:`~xnn.ffnn.common.frc.register_section_schema` to get key symmetry
 and unit conversion), give it a ``#templates`` section, and write the small
-bridge that turns a :class:`~xnns.ffnn.common.frc.ForceField` into the
-model's parameter tables -- :func:`xnns.ffnn.models.oplslib.from_forcefield`
-and :func:`xnns.ffnn.models.ffield.from_forcefield` are the two existing
-examples. Files placed in ``src/xnns/ffnn/data/`` are found by name.
+bridge that turns a :class:`~xnn.ffnn.common.frc.ForceField` into the
+model's parameter tables -- :func:`xnn.ffnn.models.oplslib.from_forcefield`
+and :func:`xnn.ffnn.models.ffield.from_forcefield` are the two existing
+examples. Files placed in ``src/xnn/ffnn/data/`` are found by name.

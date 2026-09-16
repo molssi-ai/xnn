@@ -1,0 +1,161 @@
+!MolSSI forcefield 1
+
+! L-OPLS: the long-hydrocarbon refit of OPLS-AA by Siu, Pluhackova &
+! Boeckmann, J. Chem. Theory Comput. 8, 1459 (2012), Table 2, layered over
+! the OPLS-AA distribution in oplsaa.frc. New nonbonded types distinguish
+! CH3 and CH2 groups (adjusted charges, a reduced epsilon for CH2 hydrogens)
+! and the alkane / alkene torsions are refit. Bonds, angles and everything
+! not listed here are the OPLS-AA values.
+!
+! The published torsions are Ryckaert-Bellemans coefficients; the Fourier
+! form below is exact up to the constant V0 term (0.305938 kJ/mol for
+! CCCC), which the torsion_opls form has no column for and which does not
+! affect forces or conformational energy differences.
+
+#define lopls
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  --------------
+2026.09.15      1  metadata                         oplsaa
+2026.09.15      1  atom_types                       oplsaa lopls
+2026.09.15      1  equivalence                      oplsaa lopls
+2026.09.15      1  charges                          oplsaa lopls
+2026.09.15      1  nonbond(12-6)                    oplsaa lopls
+2026.09.15      1  quadratic_bond                   oplsaa
+2026.09.15      1  quadratic_angle                  oplsaa
+2026.09.15      1  torsion_opls                     oplsaa lopls
+2026.09.15      1  improper_opls                    oplsaa
+2026.09.15      1  templates                        oplsaa lopls
+#end
+
+#include local:oplsaa.frc
+
+#atom_types lopls
+
+> L-OPLS nonbonded types for saturated and olefinic hydrocarbon groups
+
+!Version      Ref  Type          Mass    El  connections  Comment
+!---------  -----  ------------  ------  --  -----------  -------------------------
+2026.09.15      1  lopls_CT_CH3  12.011  C   4            alkane CH3 carbon (L-OPLS)
+2026.09.15      1  lopls_CT_CH2  12.011  C   4            alkane CH2 carbon (L-OPLS)
+2026.09.15      1  lopls_CM_CH   12.011  C   3            alkene =CH- carbon (L-OPLS)
+2026.09.15      1  lopls_HC_CH3   1.008  H   1            hydrogen on CH3 (L-OPLS)
+2026.09.15      1  lopls_HC_CH2   1.008  H   1            hydrogen on CH2 (L-OPLS)
+2026.09.15      1  lopls_HC_CH    1.008  H   1            hydrogen on =CH- (L-OPLS)
+
+#equivalence lopls
+
+> Bonded terms use the OPLS-AA classes: opls_18 (alkane C), opls_86 (alkene
+> C), opls_85 (H on carbon)
+
+!Version      Ref  Type          NonB          Bond     Angle    Torsion  OOP
+!---------  -----  ------------  ------------  -------  -------  -------  -------
+2026.09.15      1  lopls_CT_CH3  lopls_CT_CH3  opls_18  opls_18  opls_18  opls_18
+2026.09.15      1  lopls_CT_CH2  lopls_CT_CH2  opls_18  opls_18  opls_18  opls_18
+2026.09.15      1  lopls_CM_CH   lopls_CM_CH   opls_86  opls_86  opls_86  opls_86
+2026.09.15      1  lopls_HC_CH3  lopls_HC_CH3  opls_85  opls_85  opls_85  opls_85
+2026.09.15      1  lopls_HC_CH2  lopls_HC_CH2  opls_85  opls_85  opls_85  opls_85
+2026.09.15      1  lopls_HC_CH   lopls_HC_CH   opls_85  opls_85  opls_85  opls_85
+
+#charges lopls
+
+!Version      Ref  I             Q
+!---------  -----  ------------  -------
+2026.09.15      1  lopls_CT_CH3  -0.222
+2026.09.15      1  lopls_CT_CH2  -0.148
+2026.09.15      1  lopls_CM_CH   -0.160
+2026.09.15      1  lopls_HC_CH3   0.074
+2026.09.15      1  lopls_HC_CH2   0.074
+2026.09.15      1  lopls_HC_CH    0.160
+
+#nonbond(12-6) lopls
+
+> E = 4 * eps(ij) * [(sigma(ij)/r(ij))**12 - (sigma(ij)/r(ij))**6]
+> sigma(ij) = sqrt(sigma(i) * sigma(j)), eps(ij) = sqrt(eps(i) * eps(j))
+> epsilon is given in kJ/mol exactly as published (Table 2)
+
+@type sigma-eps
+@units eps kJ/mol
+@combination geometric
+
+!Version      Ref  I             sigma   eps
+!---------  -----  ------------  ------  ---------
+2026.09.15      1  lopls_CT_CH3  3.50    0.276144
+2026.09.15      1  lopls_CT_CH2  3.50    0.276144
+2026.09.15      1  lopls_CM_CH   3.55    0.317984
+2026.09.15      1  lopls_HC_CH3  2.50    0.125520
+2026.09.15      1  lopls_HC_CH2  2.50    0.110000
+2026.09.15      1  lopls_HC_CH   2.42    0.125520
+
+#torsion_opls lopls
+
+> E = 1/2*V1*[1 + cos(phi)] + 1/2*V2*[1 - cos(2*phi)]
+>   + 1/2*V3*[1 + cos(3*phi)] + 1/2*V4*[1 - cos(4*phi)]
+> Refit hydrocarbon torsions (Table 2), in kJ/mol as published
+
+@units V1 kJ/mol
+@units V2 kJ/mol
+@units V3 kJ/mol
+@units V4 kJ/mol
+
+!Version      Ref  I        J        K        L        V1         V2         V3         V4
+!---------  -----  -------  -------  -------  -------  ---------  ---------  ---------  ----
+2026.09.15      1  opls_18  opls_18  opls_18  opls_18   2.697394  -0.896807   0.745670  0.0
+2026.09.15      1  *        opls_86  opls_86  *         0.000000  51.255100   0.000000  0.0
+2026.09.15      1  opls_86  opls_86  opls_18  opls_18  -3.368171   1.346790  -0.432111  0.0
+2026.09.15      1  opls_86  opls_18  opls_18  opls_18   2.017484   0.562197   0.743690  0.0
+
+#templates lopls
+{
+    "lopls_CT_CH3": {
+        "2026.09.15": {
+            "smarts": ["[CX4;H3:1][#6]"],
+            "description": "methyl carbon of a hydrocarbon (L-OPLS)",
+            "overrides": []
+        }
+    },
+    "lopls_CT_CH2": {
+        "2026.09.15": {
+            "smarts": ["[CX4;H2:1]([#6])[#6]"],
+            "description": "methylene carbon between two carbons (L-OPLS)",
+            "overrides": []
+        }
+    },
+    "lopls_CM_CH": {
+        "2026.09.15": {
+            "smarts": ["[CX3;H1:1](=[CX3])[#6]"],
+            "description": "olefinic =CH- carbon (L-OPLS)",
+            "overrides": []
+        }
+    },
+    "lopls_HC_CH3": {
+        "2026.09.15": {
+            "smarts": ["[H:1][CX4;H3][#6]"],
+            "description": "hydrogen on a hydrocarbon methyl (L-OPLS)",
+            "overrides": []
+        }
+    },
+    "lopls_HC_CH2": {
+        "2026.09.15": {
+            "smarts": ["[H:1][CX4;H2]([#6])[#6]"],
+            "description": "hydrogen on a hydrocarbon methylene (L-OPLS)",
+            "overrides": []
+        }
+    },
+    "lopls_HC_CH": {
+        "2026.09.15": {
+            "smarts": ["[H:1][CX3;H1](=[CX3])[#6]"],
+            "description": "hydrogen on an olefinic =CH- carbon (L-OPLS)",
+            "overrides": []
+        }
+    }
+}
+
+#reference 1
+@Author xnn
+@Date 2026-09-15
+Siu, S. W. I.; Pluhackova, K.; Boeckmann, R. A. Optimization of the OPLS-AA
+Force Field for Long Hydrocarbons. J. Chem. Theory Comput. 2012, 8, 1459-1470.
+DOI: 10.1021/ct200908r  (Table 2). Base parameters: oplsaa.frc.
+
+#end

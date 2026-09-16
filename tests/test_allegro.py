@@ -11,9 +11,9 @@ import torch
 
 pytest.importorskip("e3nn")
 
-from xnns.common.config import from_dict  # noqa: E402
-from xnns.common.data import structure_to_graph  # noqa: E402
-from xnns.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import structure_to_graph  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
 
 SPECIES = [1, 6, 8]
 TB, LAT, EE = [16, 32], [32], [16]
@@ -74,7 +74,7 @@ def test_periodic_stress():
 
 
 def test_scriptable_and_lammps_export(tmp_path):
-    from xnns.common.deploy import export_to_lammps
+    from xnn.common.deploy import export_to_lammps
 
     model = _build(num_layers=2, l_max=2).eval()
     g = _graph(n=6, cutoff=5.0, periodic=True)
@@ -93,7 +93,7 @@ def test_scriptable_and_lammps_export(tmp_path):
 
 
 def test_upstream_allegro_key_translation():
-    """Keys copied verbatim from an upstream allegro yaml map to xnns names."""
+    """Keys copied verbatim from an upstream allegro yaml map to xnn names."""
     cfg = from_dict({"model": {
         "name": "allegro",
         "r_max": 4.5, "num_layers": 3, "num_tensor_features": 8,

@@ -5,11 +5,11 @@ Models
 ******
 
 All models subclass
-:class:`~xnns.common.models.base.InteratomicPotential`: they take an
-:class:`~xnns.common.data.atomic_data.AtomicGraph` and return a dictionary
+:class:`~xnn.common.models.base.InteratomicPotential`: they take an
+:class:`~xnn.common.data.atomic_data.AtomicGraph` and return a dictionary
 with ``node_energy`` (per atom) and ``energy`` (per structure). Forces and
 stress are added uniformly by
-:class:`~xnns.common.models.outputs.ForceStressOutput`; no model implements
+:class:`~xnn.common.models.outputs.ForceStressOutput`; no model implements
 them itself.
 
 Models are registered by name, so they can be built from any config
@@ -17,7 +17,7 @@ frontend:
 
 .. code-block:: python
 
-   from xnns.common.models import available_models, build_model
+   from xnn.common.models import available_models, build_model
 
    available_models()          # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
@@ -28,14 +28,14 @@ double as the keys accepted in ``model.extra`` of a config file.
 .. note::
 
    The GNN models (NequIP, MACE, Allegro, CACE) register themselves when
-   ``xnns.gnn`` is importable, which requires the ``gnn`` extra (``e3nn``).
+   ``xnn.gnn`` is importable, which requires the ``gnn`` extra (``e3nn``).
    CACE itself works entirely in Cartesian coordinates and does not use
    e3nn. The hybrid model (BAMBOO) and the shared building blocks in
-   ``xnns.transformer`` likewise need no e3nn and are always available.
+   ``xnn.transformer`` likewise need no e3nn and are always available.
 
 MACE (``gnn``)
 ==============
-:class:`xnns.gnn.models.mace.MACE`: higher-order equivariant message
+:class:`xnn.gnn.models.mace.MACE`: higher-order equivariant message
 passing with the learned symmetric contraction of Batatia *et al.*
 Faithful to `ACEsuit/mace <https://github.com/ACEsuit/mace>`_ (see
 :ref:`fidelity`).
@@ -54,7 +54,7 @@ repulsion, and ``atomic_energies``, the per-species reference energies
 
 NequIP (``gnn``)
 ================
-:class:`xnns.gnn.models.nequip.NequIP`: E(3)-equivariant message passing
+:class:`xnn.gnn.models.nequip.NequIP`: E(3)-equivariant message passing
 with gated nonlinearities (Batzner *et al.*). Faithful to
 `mir-group/nequip <https://github.com/mir-group/nequip>`_, with directly
 transplantable state dicts.
@@ -70,7 +70,7 @@ per-species energy scale/shift.
 
 Allegro (``gnn``)
 =================
-:class:`xnns.gnn.models.allegro.Allegro`: strictly local equivariant
+:class:`xnn.gnn.models.allegro.Allegro`: strictly local equivariant
 many-body potential (Musaelian *et al.*), without message passing between
 atoms. Faithful to `mir-group/allegro <https://github.com/mir-group/allegro>`_
 v0.3.0 (``uuulin`` mode), with directly transplantable state dicts.
@@ -84,7 +84,7 @@ widths, ``initial_scalar_embedding_dim``, ``avg_num_neighbors``,
 
 CACE (``gnn``)
 ==============
-:class:`xnns.gnn.models.cace.CACE`: Cartesian atomic cluster expansion
+:class:`xnn.gnn.models.cace.CACE`: Cartesian atomic cluster expansion
 (Cheng, *npj Comput Mater* 2024): body-ordered invariant features built
 entirely in Cartesian coordinates (monomial angular basis, multinomial
 symmetrization instead of Clebsch–Gordan contraction), with a
@@ -107,14 +107,14 @@ radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
 
 SchNet (``cnn``)
 ================
-:class:`xnns.cnn.models.schnet.SchNet`: continuous-filter convolutions over
+:class:`xnn.cnn.models.schnet.SchNet`: continuous-filter convolutions over
 a Gaussian radial basis with shifted-softplus activations (Schütt *et al.*,
 NIPS 2017). Faithful to the manuscript (see :ref:`fidelity`): the defaults
 are the paper architecture — ``F = 64`` feature maps, ``T = 3`` residual
 interaction blocks, RBF centers every 0.1 Å on ``[0, 30]`` with
 ``gamma = 10`` Å\ :sup:`-2` — plus the DTNN per-atom energy standardization
 (``energy_shift``/``energy_scale``, or
-:meth:`~xnns.cnn.models.schnet.SchNet.set_energy_scale_shift`).
+:meth:`~xnn.cnn.models.schnet.SchNet.set_energy_scale_shift`).
 
 Key options: ``n_features`` (64), ``n_interactions`` (3), ``n_rbf`` (301),
 ``cutoff`` (30.0), ``gamma`` (10.0), ``cutoff_fn`` (``None``; set
@@ -125,7 +125,7 @@ Key options: ``n_features`` (64), ``n_interactions`` (3), ``n_rbf`` (301),
 
 HDNNP (``dnn``)
 ===============
-:class:`xnns.dnn.models.hdnnp.HDNNP`: Behler–Parrinello high-dimensional
+:class:`xnn.dnn.models.hdnnp.HDNNP`: Behler–Parrinello high-dimensional
 neural network potential: radial (G2) symmetry-function descriptors feeding
 one MLP per element.
 
@@ -134,38 +134,38 @@ Key options: ``species``, ``cutoff`` (6.0), ``etas`` (0.05, 0.5, 2.0, 8.0),
 
 ANI (``dnn``)
 =============
-:class:`xnns.dnn.models.ani.ANI`: the ANI potential (Smith *et al.* 2017),
+:class:`xnn.dnn.models.ani.ANI`: the ANI potential (Smith *et al.* 2017),
 per-element networks over the Atomic Environment Vector (radial + angular
 symmetry functions), verified element-for-element against ``aiqm/torchani``.
 
 ANI-1 vs. ANI-1x vs. ANI-1ccx vs. ANI-2x: choosing a preset
 -----------------------------------------------------------
 There are **four published ANI parameterisations**: three for H/C/N/O and the
-seven-element ANI-2x (the only one that also covers S, F, and Cl). In ``xnns``
+seven-element ANI-2x (the only one that also covers S, F, and Cl). In ``xnn``
 each one is a *preset*: a classmethod that fills in the AEV grid, the
 per-element network shapes, the activation, and the self atomic energies so you
 do not have to. Pick the preset, not the individual knobs.
 
 - **ANI-1** (Smith *et al.*, *Chem. Sci.* 2017): the original model, trained on
   the ~20 M-conformation ANI-1 dataset (dense normal-mode sampling of GDB-11
-  molecules). Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1`.
+  molecules). Preset: :meth:`~xnn.dnn.models.ani.ANI.ani1`.
 - **ANI-1x** (Smith *et al.*, *J. Chem. Phys.* 2018, *"Less is more"*): the
   later model built by **active learning**: it iteratively adds only the
   conformations where an ensemble disagrees, giving a smaller (~5 M) but more
   diverse and more transferable training set. It also uses a *different, leaner*
-  AEV grid. Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1x`.
+  AEV grid. Preset: :meth:`~xnn.dnn.models.ani.ANI.ani1x`.
 - **ANI-1ccx** (Smith *et al.*, *Nat. Commun.* 2019): the ANI-1x architecture
   retrained by **transfer learning** to ~500 k coupled-cluster (CCSD(T)*/CBS)
   energies, holding 65,280 of the 325,248 network weights fixed (the matrix
   joining each element network's first two hidden layers) to avoid overfitting
   the smaller coupled-cluster set. The descriptor and networks are *identical*
   to ANI-1x; only the training data, self atomic energies, and resulting
-  weights differ. Preset: :meth:`~xnns.dnn.models.ani.ANI.ani1ccx`.
+  weights differ. Preset: :meth:`~xnn.dnn.models.ani.ANI.ani1ccx`.
 - **ANI-2x** (Devereux *et al.*, *J. Chem. Theory Comput.* 2020): the only
   seven-element parameterisation, extending ANI from H/C/N/O to **seven
   elements** by adding S, F, and Cl. It pairs a larger 1008-length AEV with
   wider per-element networks (see the paragraph after the table). Preset:
-  :meth:`~xnns.dnn.models.ani.ANI.ani2x`.
+  :meth:`~xnn.dnn.models.ani.ANI.ani2x`.
 
 ANI-1 and ANI-1x differ in both the descriptor geometry *and* the network body
 (ANI-1ccx shares the ``ani1x`` column, with its own coupled-cluster self
@@ -213,13 +213,13 @@ wider per-element networks (H ``256:192:160``, C ``224:192:160``, N/O
 ``192:160:128``, S/F/Cl ``160:128:96``) with the ``CELU`` activation and
 wB97X/6-31G* self atomic energies. Its default species set is the seven-element
 ``[1, 6, 7, 8, 16, 9, 17]`` (H, C, N, O, S, F, Cl, in torchani's order), so
-:meth:`~xnns.dnn.models.ani.ANI.ani2x` needs no ``species`` argument.
+:meth:`~xnn.dnn.models.ani.ANI.ani2x` needs no ``species`` argument.
 
 Select a preset in Python:
 
 .. code-block:: python
 
-   from xnns.dnn.models.ani import ANI
+   from xnn.dnn.models.ani import ANI
 
    ani1    = ANI.ani1(species=[1, 6, 7, 8])                        # original ANI-1
    ani1x   = ANI.ani1x(species=[1, 6, 7, 8], atomic_energies="torchani")  # ANI-1x
@@ -227,7 +227,7 @@ Select a preset in Python:
    ani2x   = ANI.ani2x()                                           # ANI-2x (7 elem)
 
 ...or from a config file with the ``preset`` key, which
-:meth:`~xnns.dnn.models.ani.ANI.from_config` routes to the matching classmethod
+:meth:`~xnn.dnn.models.ani.ANI.from_config` routes to the matching classmethod
 (accepts ``"ani-1"``/``"ani1"``, ``"ani-1x"``/``"ani1x"``,
 ``"ani-1ccx"``/``"ani1ccx"``, and ``"ani-2x"``/``"ani2x"``):
 
@@ -239,7 +239,7 @@ Select a preset in Python:
 
 Any key under ``model`` that is not a core config field (like ``preset``) is
 collected into ``model.extra`` and forwarded to
-:meth:`~xnns.dnn.models.ani.ANI.from_config`. Omit ``preset`` to build a bare
+:meth:`~xnn.dnn.models.ani.ANI.from_config`. Omit ``preset`` to build a bare
 ``ANI`` from the individual keys below instead.
 
 .. note::
@@ -265,7 +265,7 @@ Key options (for the bare constructor, when not using a preset): ``species``
 
 PhysNet (``dnn``)
 =================
-:class:`xnns.dnn.models.physnet.PhysNet`: message-passing HDNN with
+:class:`xnn.dnn.models.physnet.PhysNet`: message-passing HDNN with
 explicit physics (Unke & Meuwly 2019): distance-based attention masks over
 an exponential-Gaussian radial basis, pre-activation residual blocks,
 per-module output heads predicting atomic energies *and* partial charges,
@@ -289,7 +289,7 @@ neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
 
 BAMBOO (``hybrid``)
 ===================
-:class:`xnns.hybrid.models.bamboo.BAMBOO`: a graph equivariant transformer
+:class:`xnn.hybrid.models.bamboo.BAMBOO`: a graph equivariant transformer
 with a physics energy split (Gong *et al.* 2024). Each message-passing layer
 is a multi-head QKV attention on the neighbour graph that couples a scalar and
 a Cartesian **vector** node channel (so equivariance comes from vectors, not
@@ -304,9 +304,9 @@ conserved to the total charge), ``"dipole"``, and the component energies
 transplantable weights (see :ref:`fidelity`). BAMBOO works in kcal/mol and Å,
 and embeds elements directly by atomic number (no species list required).
 
-The shared transformer pieces live in :mod:`xnns.transformer`
-(:class:`~xnns.transformer.featurizers.ExpNormalSmearing` radial basis,
-:class:`~xnns.transformer.attention.EdgeMultiheadAttention`) so future
+The shared transformer pieces live in :mod:`xnn.transformer`
+(:class:`~xnn.transformer.featurizers.ExpNormalSmearing` radial basis,
+:class:`~xnn.transformer.attention.EdgeMultiheadAttention`) so future
 attention-based models can reuse them.
 
 Key options (defaults in parentheses): ``cutoff`` (5.0), the semi-local GET
@@ -321,16 +321,16 @@ D3(CSO), and ``disp_cutoff`` (10.0).
 
 .. note::
 
-   xnns returns the **full conservative force** ``-dE/dr`` uniformly via
-   :class:`~xnns.common.models.outputs.ForceStressOutput`. The original BAMBOO
+   xnn returns the **full conservative force** ``-dE/dr`` uniformly via
+   :class:`~xnn.common.models.outputs.ForceStressOutput`. The original BAMBOO
    instead reports ``nn_forces + coul_forces`` (charges held fixed) and
    regularises the charge–position-derivative ``qeq_force`` toward zero during
-   training; the xnns force equals the upstream ``forces + qeq_force`` to
+   training; the xnn force equals the upstream ``forces + qeq_force`` to
    machine precision (see :ref:`fidelity`).
 
 ReaxFF / ReaxFF-nn (``ffnn``)
 =============================
-:class:`xnns.ffnn.models.reaxff.ReaxFF`: the bond-order **reactive force
+:class:`xnn.ffnn.models.reaxff.ReaxFF`: the bond-order **reactive force
 field** (van Duin *et al.*, *J. Phys. Chem. A* 2001; Nielson *et al.* 2005;
 Senftle *et al.*, *npj Comput. Mater.* 2016) and its machine-learned variant
 **ReaxFF-nn** (Guo *et al.*, *Comput. Mater. Sci.* 2020; Xue *et al.*, *PCCP*
@@ -347,12 +347,12 @@ additionally returns ``"charges"`` and the full per-term energy decomposition
 (``"e_bond"``, ``"e_angle"``, ``"e_vdw"``, ...).
 
 The model is fully specified by a parameter library — a published field in
-the SEAMM ``.frc`` force-field format (a dozen ship with xnns, e.g.
+the SEAMM ``.frc`` force-field format (a dozen ship with xnn, e.g.
 ``ReaxFF("CHO_cho_2008")``; see :ref:`howto-forcefield-files`) or a
-ReaxFF-nn JSON library (:mod:`xnns.ffnn.models.ffield`) — and the whole
+ReaxFF-nn JSON library (:mod:`xnn.ffnn.models.ffield`) — and the whole
 functional form is differentiable, so any parameter group can be refit by
 gradient descent (``trainable=...``); in nn mode the network weights are
-always trainable. :func:`~xnns.ffnn.models.ffield.template_library` builds a
+always trainable. :func:`~xnn.ffnn.models.ffield.template_library` builds a
 generic seed library for training from scratch, and
 ``ReaxFF.export_library()`` writes a trained force field back out — as a
 ``.frc`` file for a classical field, or as JSON when it carries network
@@ -370,7 +370,7 @@ energies in kcal/mol; conversion is automatic).
 
 OPLS / OPLS-AA / L-OPLS (``ffnn``)
 ==================================
-:class:`xnns.ffnn.models.opls.OPLS`: the **fixed-topology classical force
+:class:`xnn.ffnn.models.opls.OPLS`: the **fixed-topology classical force
 field** of Jorgensen, Maxwell & Tirado-Rives (*J. Am. Chem. Soc.* 118,
 11225, 1996): harmonic bonds and angles, Fourier-series proper dihedrals,
 ``V2`` improper dihedrals at trigonal centers, and Coulomb plus
@@ -384,19 +384,19 @@ additionally returns ``"charges"`` and the per-term decomposition
 ``"e_coulomb"``, ``"e_lj14"``, ``"e_coulomb14"``).
 
 Unlike ReaxFF, OPLS needs a fixed molecular topology: a
-:class:`~xnns.ffnn.models.topology.MolecularTopology` holds the per-atom
+:class:`~xnn.ffnn.models.topology.MolecularTopology` holds the per-atom
 OPLS type names and the bond list and derives the angles, dihedrals,
 exclusions and 1,4 pairs. ``OPLS.from_atoms(atoms, "oplsaa")`` builds all of
 it from a structure: bonds are perceived with RDKit and the atom types are
 assigned from the **SMARTS templates** the parameter file carries
-(:func:`~xnns.ffnn.common.typing.assign_atom_types`), so the force field's
+(:func:`~xnn.ffnn.common.typing.assign_atom_types`), so the force field's
 own type names never have to be spelled out. The topology binds to the
 model instance, so every structure the model evaluates — a training batch
 of conformers, an MD trajectory — is a conformation of that system; bonded
 terms use minimum-image displacements, so molecules may wrap across periodic
-boundaries. Parameters come from an :class:`~xnns.ffnn.models.oplslib.OPLSLibrary`
+boundaries. Parameters come from an :class:`~xnn.ffnn.models.oplslib.OPLSLibrary`
 read from a SEAMM ``.frc`` force-field file (:ref:`howto-forcefield-files`):
-the OPLS-AA distribution ships with xnns (``"oplsaa"``; ``"CL&P"`` and
+the OPLS-AA distribution ships with xnn (``"oplsaa"``; ``"CL&P"`` and
 ``"oplsaa+"`` add the ionic-liquid extension, loadable with
 ``strict=False`` since their tabulated ``PF6-`` angle is not implemented),
 together with ``"oplsaa-1996"`` (the paper's original alkane and alcohol
@@ -404,7 +404,7 @@ torsions, which reproduce its Table 1) and ``"lopls"``; the native JSON
 format round-trips trained parameters. Any parameter group can be refit by
 gradient descent (``trainable=("dihedral_v", "charge", ...)``), several
 models (different molecules) can share one
-:class:`~xnns.ffnn.models.opls.OPLSForceField` to fit transferable
+:class:`~xnn.ffnn.models.opls.OPLSForceField` to fit transferable
 parameters jointly, and ``export_library()`` writes the trained values back
 to a ``.frc`` file (``save_frc``) or JSON. The implementation is verified
 against OpenMM to ~1e-7 kJ/mol and against Table 1 of the 1996 paper (see
@@ -425,10 +425,10 @@ automatic).
 Long-range interactions: Latent Ewald Summation (LES)
 ======================================================
 Short-range models miss electrostatics and dispersion beyond their receptive
-field. :class:`~xnns.common.models.les.LatentEwald` (Cheng, *npj Comput
+field. :class:`~xnn.common.models.les.LatentEwald` (Cheng, *npj Comput
 Mater* 2025; the CACE-LR method) fixes this for **any** registered model: a
 small MLP maps each atom's invariant features to a latent charge ``q`` and an
-Ewald summation over ``q`` (:class:`~xnns.common.models.les.EwaldSummation`)
+Ewald summation over ``q`` (:class:`~xnn.common.models.les.EwaldSummation`)
 adds the long-range energy. Enable it from a config --
 
 .. code-block:: yaml
@@ -448,7 +448,7 @@ HDNNP/ANI descriptors. Key options: ``n_channels`` (4), ``hidden``
 k-space cutoff is ``2*pi/dl``), ``exponent`` (1 for electrostatics, 6 for
 dispersion), ``remove_self_interaction`` (False). Non-periodic structures use
 the equivalent real-space direct sum; forces and stress flow through
-:class:`~xnns.common.models.outputs.ForceStressOutput` unchanged. The outputs
+:class:`~xnn.common.models.outputs.ForceStressOutput` unchanged. The outputs
 gain ``"energy_sr"``, ``"energy_lr"`` and ``"latent_charges"``.
 
 Forces and stress
@@ -457,14 +457,14 @@ Wrap any model to get autograd forces and stress:
 
 .. code-block:: python
 
-   from xnns.common.models import ForceStressOutput
+   from xnn.common.models import ForceStressOutput
 
    model = ForceStressOutput(base_model, compute_forces=True, compute_stress=True)
    out = model(graph)   # adds "forces" (N, 3) and "stress" (B, 3, 3)
 
 The stress is obtained by differentiating with respect to a symmetric
 strain, so it is available for any model on periodic data. The
-:class:`~xnns.common.train.trainer.Trainer` applies this wrapper
+:class:`~xnn.common.train.trainer.Trainer` applies this wrapper
 automatically, enabling the force/stress heads when the corresponding loss
 weights are nonzero.
 

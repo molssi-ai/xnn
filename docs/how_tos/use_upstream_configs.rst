@@ -6,9 +6,9 @@ Reuse Upstream MACE/NequIP Configs
 
 If you already have a YAML config written for the upstream `MACE CLI
 <https://github.com/ACEsuit/mace>`_ or `NequIP <https://github.com/mir-group/nequip>`_,
-you can copy its model keys into an xnns config verbatim. A per-model
-key-translation registry (:mod:`xnns.common.config.translate`) rewrites the
-foreign spellings to the xnns canonical names at config-load time.
+you can copy its model keys into an xnn config verbatim. A per-model
+key-translation registry (:mod:`xnn.common.config.translate`) rewrites the
+foreign spellings to the xnn canonical names at config-load time.
 
 For example, these MACE-CLI spellings are understood directly:
 
@@ -54,10 +54,10 @@ and the schnetpack SchNet spellings (key names only; see :ref:`fidelity`):
      n_gaussians: 25            # -> n_rbf
      atomref: {18: -0.05}       # -> atomic_energies
 
-If both an upstream spelling and the xnns canonical name are given, the xnns
+If both an upstream spelling and the xnn canonical name are given, the xnn
 spelling wins. Values are also coerced: ``E0s``-style per-species energies can
 be a list, a ``{Z: E0}`` mapping, or a string, and ``species`` accepts the
-equivalent forms (see :mod:`xnns.common.config.coerce`).
+equivalent forms (see :mod:`xnn.common.config.coerce`).
 
 Extending the translation table
 ===============================
@@ -66,7 +66,7 @@ once at import time:
 
 .. code-block:: python
 
-   from xnns.common.config.translate import register_key_translation
+   from xnn.common.config.translate import register_key_translation
 
    register_key_translation(
        "mymodel",

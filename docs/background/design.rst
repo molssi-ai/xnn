@@ -1,10 +1,10 @@
 .. _design:
 
 ***************
-Design of xnns
+Design of xnn
 ***************
 
-xnns is organized **by model family** (``gnn``, E(3)-equivariant graph
+xnn is organized **by model family** (``gnn``, E(3)-equivariant graph
 networks; ``cnn``, continuous-filter convolutions; ``dnn``, descriptor +
 per-element networks), with everything shared across families factored into
 ``common``. A component lives with the family that uses it, or in ``common``
@@ -13,7 +13,7 @@ imported on its own.
 
 .. code-block:: text
 
-   src/xnns/
+   src/xnn/
      common/       shared across all families
        data/         AtomicGraph (the one data object), PBC neighbor list,
                      AtomicDataset, batching
@@ -27,7 +27,7 @@ imported on its own.
        benchmark/    score pre-trained models on a dataset (metrics,
                      atomization energy, report writers)
        deploy/       ASE Calculator, LAMMPS/TorchScript export
-       cli/          the `xnns` command
+       cli/          the `xnn` command
      gnn/          E(3)-equivariant GNNs (need e3nn)
        featurizers/  SphericalHarmonicEdgeEmbedding, BesselRBF, PolynomialCutoff
        models/       base (EquivariantGNN, GNNPotential), blocks,
@@ -42,10 +42,10 @@ Four ideas hold the package together.
 
 1. One data object
 ==================
-Every model consumes an :class:`~xnns.common.data.atomic_data.AtomicGraph`
+Every model consumes an :class:`~xnn.common.data.atomic_data.AtomicGraph`
 and returns ``{"node_energy", "energy"}``. Molecular vs. periodic is
 invisible to models; periodicity lives only in
-:meth:`~xnns.common.data.atomic_data.AtomicGraph.edge_vectors`:
+:meth:`~xnn.common.data.atomic_data.AtomicGraph.edge_vectors`:
 
 .. math::
 
@@ -58,7 +58,7 @@ differentiable end to end.
 
 2. Featurizers are first-class
 ==============================
-A :class:`~xnns.common.featurizers.base.Featurizer` (a subclass of
+A :class:`~xnn.common.featurizers.base.Featurizer` (a subclass of
 ``nn.Module``) turns a graph into invariant descriptors (symmetry functions,
 AEV) or equivariant edge attributes (spherical harmonics). Descriptor models
 (HDNNP, ANI) and GNNs (NequIP, MACE, Allegro) are thin compositions over
@@ -66,15 +66,15 @@ featurizers, so the featurization is reusable and inspectable on its own:
 
 .. code-block:: python
 
-   from xnns.dnn.featurizers import AEV
-   from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
+   from xnn.dnn.featurizers import AEV
+   from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
 
    descriptor = AEV(species=[1, 6, 8])(graph)               # (N, D) invariant
    edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)   # equivariant
 
 3. Forces and stress in one place
 =================================
-:class:`~xnns.common.models.outputs.ForceStressOutput` wraps any model and
+:class:`~xnn.common.models.outputs.ForceStressOutput` wraps any model and
 differentiates the predicted energy with respect to positions (forces,
 :math:`\mathbf{F}_i = -\partial E / \partial \mathbf{r}_i`) and a symmetric
 strain (stress). Models never implement forces themselves: a model is just
@@ -84,8 +84,8 @@ an energy function, and the physics of differentiation is written once.
 ===========================================================
 A model becomes available everywhere with two ingredients: the
 ``@register_model("name")`` decorator and a ``from_config`` classmethod. The
-registry (:func:`~xnns.common.models.registry.build_model`) dispatches on
-``cfg.model.name``, and the single :class:`~xnns.common.config.schema.Config`
+registry (:func:`~xnn.common.models.registry.build_model`) dispatches on
+``cfg.model.name``, and the single :class:`~xnn.common.config.schema.Config`
 dataclass is filled from any of three frontends (YAML, argparse, or
 Hydra), which all funnel into the same place. Upstream config spellings are
 handled by a loader-level key-translation registry, never by per-model

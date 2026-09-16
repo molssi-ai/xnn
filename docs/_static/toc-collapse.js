@@ -8,8 +8,8 @@
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "xnns-toc-collapsed";
-  var COLLAPSED_CLASS = "xnns-toc-squeeze";
+  var STORAGE_KEY = "xnn-toc-collapsed";
+  var COLLAPSED_CLASS = "xnn-toc-squeeze";
 
   function apply(sidebar, button, collapsed) {
     sidebar.classList.toggle(COLLAPSED_CLASS, collapsed);
@@ -22,7 +22,7 @@
 
   function init() {
     var sidebar = document.getElementById("pst-secondary-sidebar");
-    var button = document.getElementById("xnns-collapse-toc-button");
+    var button = document.getElementById("xnn-collapse-toc-button");
     if (!sidebar || !button) {
       return;
     }

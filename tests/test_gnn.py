@@ -3,12 +3,12 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.data import structure_to_graph
-from xnns.dnn.featurizers import (
+from xnn.common.data import structure_to_graph
+from xnn.dnn.featurizers import (
     RadialSymmetryFunctions, AngularSymmetryFunctions, AEV, build_triplets,
 )
-from xnns.common.models import build_model, ForceStressOutput, available_models
-from xnns.common.config import from_dict
+from xnn.common.models import build_model, ForceStressOutput, available_models
+from xnn.common.config import from_dict
 
 e3nn = pytest.importorskip("e3nn")  # GNN tests need e3nn
 
@@ -99,7 +99,7 @@ def test_gnn_periodic_stress(name):
 
 @pytest.mark.parametrize("name", ["nequip", "allegro"])
 def test_upstream_key_translation(name):
-    """Upstream NequIP/Allegro yaml spellings map onto the xnns core fields."""
+    """Upstream NequIP/Allegro yaml spellings map onto the xnn core fields."""
     cfg = from_dict({"model": {"name": name, "r_max": 4.5, "num_layers": 3,
                                "species": SPECIES}})
     assert cfg.model.cutoff == 4.5

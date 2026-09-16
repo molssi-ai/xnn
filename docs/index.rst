@@ -1,19 +1,19 @@
-.. _xnns-main:
+.. _xnn-main:
 
 ****
-xnns
+xnn
 ****
 
 Machine-Learning Interatomic Potentials in PyTorch
 ==================================================
-**xnns** is a library of machine-learning interatomic potentials (MLIPs) for
+**xnn** is a library of machine-learning interatomic potentials (MLIPs) for
 molecular and periodic systems, implemented in PyTorch behind a single coherent
 ``nn.Module`` interface. It provides faithful and self-contained implementations
 of state-of-the-art equivariant open-source models such as NequIP, MACE,
 Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, the BAMBOO graph
 equivariant transformer, and the learnable classical force fields ReaxFF /
 ReaxFF-nn (reactive) and OPLS / L-OPLS (fixed topology). The key strengths
-of xnns are
+of xnn are
 
 - all models share one data object, module interface, training loop, and
   deployment path to popular molecular dynamics packages such as ASE and LAMMPS
@@ -39,7 +39,7 @@ of xnns are
    .. grid-item-card:: Getting Started
       :margin: 0 3 0 0
 
-      Installing xnns and a first training run
+      Installing xnn and a first training run
 
       .. button-link:: ./getting_started/index.html
          :color: primary
@@ -72,7 +72,7 @@ of xnns are
    .. grid-item-card:: User Guide
       :margin: 0 3 0 0
 
-      Reference information for using xnns
+      Reference information for using xnn
 
       .. button-link:: ./user_guide/index.html
          :color: primary
@@ -83,7 +83,7 @@ of xnns are
    .. grid-item-card:: Developer Guide
       :margin: 0 3 0 0
 
-      Extending xnns with new models and featurizers
+      Extending xnn with new models and featurizers
 
       .. button-link:: ./developer_guide/index.html
          :color: primary
@@ -94,7 +94,7 @@ of xnns are
    .. grid-item-card:: Background Information
       :margin: 0 3 0 0
 
-      The design of xnns and the models it implements
+      The design of xnn and the models it implements
 
       .. button-link:: ./background/index.html
          :color: primary
@@ -105,7 +105,7 @@ of xnns are
    .. grid-item-card:: API Reference
       :margin: 0 3 0 0
 
-      Documentation of the xnns Python API
+      Documentation of the xnn Python API
 
       .. button-link:: ./api/index.html
          :color: primary
@@ -182,9 +182,9 @@ Models at a glance
        `OpenMM <https://openmm.org>`_ to ~1e-7 kJ/mol and Table 1 of
        Jorgensen et al. (1996)
 
-xnns is developed by `The Molecular Sciences Software Institute (MolSSI)
+xnn is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository
-<https://github.com/molssi-ai/xnns>`_ for the latest updates.
+<https://github.com/molssi-ai/xnn>`_ for the latest updates.
 
 .. toctree::
    :maxdepth: 5

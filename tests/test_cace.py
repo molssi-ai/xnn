@@ -10,15 +10,15 @@ import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("e3nn")  # the xnns.gnn package import chain needs e3nn
+pytest.importorskip("e3nn")  # the xnn.gnn package import chain needs e3nn
 
-from xnns.common.config import from_dict  # noqa: E402
-from xnns.common.data import structure_to_graph  # noqa: E402
-from xnns.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
-from xnns.gnn.featurizers.cartesian import (  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import structure_to_graph  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
+from xnn.gnn.featurizers.cartesian import (  # noqa: E402
     CartesianAngularBasis, lxlylz_list, n_lxlylz,
 )
-from xnns.gnn.models.cace import _Symmetrizer  # noqa: E402
+from xnn.gnn.models.cace import _Symmetrizer  # noqa: E402
 
 SPECIES = [1, 8]
 
@@ -139,7 +139,7 @@ def test_atomic_energies_shift():
 
 
 def test_upstream_cace_key_translation():
-    """Keys spelled as in the upstream Cace(...) constructor map to xnns names."""
+    """Keys spelled as in the upstream Cace(...) constructor map to xnn names."""
     cfg = from_dict({"model": {
         "name": "cace",
         "zs": [1, 8], "cutoff": 5.5, "num_message_passing": 2,

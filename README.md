@@ -1,4 +1,4 @@
-# xnns
+# xnn
 
 Machine-learning interatomic potentials for **molecules and materials** behind a
 single coherent PyTorch interface.
@@ -25,9 +25,9 @@ pytest tests/
 ```
 
 ```python
-from xnns.common.config import Config
-from xnns.common.data import AtomicDataset
-from xnns.common.train import Trainer
+from xnn.common.config import Config
+from xnn.common.data import AtomicDataset
+from xnn.common.train import Trainer
 
 cfg = Config()
 # E.g. schnet | hdnnp | ani | physnet | nequip | mace | allegro | cace | reaxff
@@ -47,7 +47,7 @@ ASE-native format loads directly and targets can also be included. So, no
 pre-wrapping is required:
 
 ```python
-# xnns supports ase-io native formats such as .extxyz, .cif, VASP, ...
+# xnn supports ase-io native formats such as .extxyz, .cif, VASP, ...
 train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 ```
 
@@ -81,20 +81,20 @@ Four ideas hold `xnn` together:
 
 ```python
 # Data (structures dict -> AtomicGraph)
-from xnns.common.data import AtomicDataset, build_neighbor_list
+from xnn.common.data import AtomicDataset, build_neighbor_list
 ds = AtomicDataset(structures, cutoff=5.0)
 graph = ds[0]
 
 # Featurizers (AtomicGraph -> model inputs)
-from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
-from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
+from xnn.dnn.featurizers import AEV, RadialSymmetryFunctions
+from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
 # (N, D) invariant per-atom AEV
 descriptor = AEV(species=[1, 6, 8])(graph)
 # Equivariant edge attributes
 edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)
 
 # Models (model inputs -> energy)
-from xnns.common.models import build_model, ForceStressOutput, available_models
+from xnn.common.models import build_model, ForceStressOutput, available_models
 # Any registered model + autograd forces/stress
 model = ForceStressOutput(build_model(cfg.model))
 ```
@@ -102,27 +102,27 @@ model = ForceStressOutput(build_model(cfg.model))
 ## Config frontends (interchangeable)
 
 ```python
-from xnns.common.config import from_yaml, from_argparse, from_hydra
+from xnn.common.config import from_yaml, from_argparse, from_hydra
 cfg = from_yaml("configs/train.yaml")
 cfg = from_argparse(["--config", "configs/train.yaml", "--set", "model.cutoff=6.0"])
 ```
 
-CLI: `xnns train --config configs/train.yaml --set optim.epochs=50`
-(also `xnns benchmark --config configs/benchmark.yaml` and
-`xnns export --config ... --ckpt ... --to lammps|torchscript`).
+CLI: `xnn train --config configs/train.yaml --set optim.epochs=50`
+(also `xnn benchmark --config configs/benchmark.yaml` and
+`xnn export --config ... --ckpt ... --to lammps|torchscript`).
 
 Model keys copied verbatim from an upstream code's yaml also work: a per-model
-key-translation registry (`xnns.common.config.translate`) rewrites the foreign
+key-translation registry (`xnn.common.config.translate`) rewrites the foreign
 spellings (MACE-CLI `r_max`/`num_radial_basis`/`atomic_numbers`/`E0s`, NequIP
-`num_layers`, ...) to the xnns canonical names at config-load time; the xnns
+`num_layers`, ...) to the xnn canonical names at config-load time; the xnn
 spelling wins if both are given. Extend it for another code with
 `register_key_translation("name", {...})`.
 
 ## Deployment
 
 ```python
-from xnns.common.deploy import XNNSCalculator, export_to_lammps
-atoms.calc = XNNSCalculator(model, cutoff=5.0)          # ASE
+from xnn.common.deploy import XNNCalculator, export_to_lammps
+atoms.calc = XNNCalculator(model, cutoff=5.0)          # ASE
 export_to_lammps(model, cutoff=5.0, path="deployed.pt") # TorchScript for LAMMPS
 ```
 
@@ -133,13 +133,13 @@ provides the scriptable `node_energy(atomic_numbers, edge_index, edge_vec)`
 core -- SchNet, NequIP, MACE and Allegro all do (the scripted models reproduce
 the eager ones to ~1e-15, verified in `tests/test_schnet.py` /
 `tests/test_mace.py` / `tests/test_nequip.py` / `tests/test_allegro.py`). For NequIP this required a scriptable, bit-exact stand-in
-for e3nn's `Gate` (`xnns.gnn.models.nequip._Gate`), which the e3nn 0.4.4
+for e3nn's `Gate` (`xnn.gnn.models.nequip._Gate`), which the e3nn 0.4.4
 original cannot do on torch 2.x.
 
 ## Benchmarking
 
 Score a set of **pre-trained** models on one dataset with
-`xnns.common.benchmark` and tabulate their errors. A single config lists the
+`xnn.common.benchmark` and tabulate their errors. A single config lists the
 `models` (each an architecture plus the `checkpoint` to load) and the
 `metrics` mapping, which ties each target quantity (`energy` / `forces` /
 `stress`) to the error metrics reported for it (`mae` / `mse` / `rmse`, or
@@ -147,14 +147,14 @@ custom callables). Results are tabulated per model and
 written to CSV / JSON / Markdown (or a user-registered format). Energy can be
 scored per atom or, with `atomic_energies` (a `{Z: E0}` map or `average` to fit
 from data), as the physically meaningful atomization (interaction) energy.
-Benchmarking does not train — produce the checkpoints first with `xnns train`.
+Benchmarking does not train — produce the checkpoints first with `xnn train`.
 
 ```bash
-xnns benchmark --config configs/benchmark.yaml
+xnn benchmark --config configs/benchmark.yaml
 ```
 
 ```python
-from xnns.common.benchmark import from_yaml, run_benchmark
+from xnn.common.benchmark import from_yaml, run_benchmark
 rows = run_benchmark(from_yaml("configs/benchmark.yaml"))
 ```
 
@@ -190,8 +190,8 @@ one family needs it. Of course, layers are designed as stand-alone entities and
 can be imported on their own.
 
 ```
-src/xnns/
-├── __main__.py                 `python -m xnns` entry point
+src/xnn/
+├── __main__.py                 `python -m xnn` entry point
 ├── common/                     shared across all model families
 │   ├── data/                   - common data abstractions
 │   │   └── …                     + AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, ASE I/O
@@ -207,7 +207,7 @@ src/xnns/
 │   │   └── …                     + config, runner, metrics, energy, report
 │   ├── deploy/                 - ASE Calculator, and LAMMPS/TorchScript export
 │   │   └── …                     + ase_calculator, lammps
-│   └── cli/                    - the `xnns` command-line interface
+│   └── cli/                    - the `xnn` command-line interface
 │       └── main.py
 ├── gnn/                        graph potentials
 │   ├── featurizers/            - GNN featurizers
@@ -300,7 +300,7 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
 - **Implement a new model:** 
   + Pick your model family package (`gnn` / `cnn` / `dnn`/ `ffnn`,  or add one)
     and add a module under `<family>/models/`.
-  + Subclass `xnns.common.models.InteratomicPotential` (or the family base,
+  + Subclass `xnn.common.models.InteratomicPotential` (or the family base,
   e.g., `gnn.models.base.EquivariantGNN`) and implement its `forward(data)`
   method.
   + register your model implementation using `@register_model` decorator.
@@ -310,7 +310,7 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
   `node_energy(atomic_numbers, edge_index, edge_vec)` core (SchNet shows the
   pattern; e3nn models need e3nn's JIT support for this).
 - **Add a new featurizer:**
-  + Subclass `xnns.common.featurizers.Featurizer` and implement `output_dim` and
+  + Subclass `xnn.common.featurizers.Featurizer` and implement `output_dim` and
   `forward(data)`. Put the resulting featurizer module in the
   `common/featurizers/` if shared by more than one model family or under the
   using family's `featurizers/` if it is only used by that one model family.

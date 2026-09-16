@@ -4655,6 +4655,21 @@ wheels = [
 ]
 
 [[package]]
+name = "vesin-torch"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/41/6b5b990fb61ede0204736daad8f1186adf6f710df60bb778450155dffaed/vesin_torch-0.6.1.tar.gz", hash = "sha256:2dda9587830b9967e70446b6f4ee7fb555218f83b7f29e5eedcf3fdc7055bff6", size = 105384, upload-time = "2026-07-29T12:33:30.295Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/a4/c871068307d3142406ff5e08923c0ed9a0196a4eadb2fbd6a25c27484eed/vesin_torch-0.6.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fbf1f8835664ac142e9acd60e8141c134ecf379a174803eb33ea417c69458a32", size = 2369826, upload-time = "2026-07-29T12:33:11.781Z" },
+    { url = "https://files.pythonhosted.org/packages/31/f4/38039b99cf4444daac1a5c9896658a48a44198406ba2c1cfb22891786c76/vesin_torch-0.6.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:525e8cd24d9e724fa1135f01e3a24dc3dbda430273426c7b8575d1f6267c43ca", size = 2972239, upload-time = "2026-07-29T12:33:17.539Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/fb/617b218586b658aa1ce098c432632a77d405d07e9148e4df2122b118f5be/vesin_torch-0.6.1-py3-none-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:073a4d516ed05f650ad41ceeb659a2a403c82415fc229d76262a8fd892608d49", size = 2621885, upload-time = "2026-07-29T12:33:14.756Z" },
+    { url = "https://files.pythonhosted.org/packages/33/c7/59786955fa5a78bed2663496d0c67a1c776d3de41bf5aaa919d0b86231ca/vesin_torch-0.6.1-py3-none-win_amd64.whl", hash = "sha256:5c52cc5cee742afd2d9f338b4ed786e37a50480b80dfd47c477eed1b937340dc", size = 2321150, upload-time = "2026-07-29T12:33:22.034Z" },
+]
+
+[[package]]
 name = "wcwidth"
 version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4712,7 +4727,7 @@ wheels = [
 ]
 
 [[package]]
-name = "xnns"
+name = "xnn"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -4740,6 +4755,7 @@ all = [
     { name = "nequip-allegro" },
     { name = "omegaconf" },
     { name = "pytest" },
+    { name = "vesin-torch" },
 ]
 ani = [
     { name = "h5py" },
@@ -4798,6 +4814,9 @@ opls = [
     { name = "openmm" },
     { name = "rdkit" },
 ]
+vesin = [
+    { name = "vesin-torch" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -4849,8 +4868,10 @@ requires-dist = [
     { name = "torch", specifier = ">=2.0", index = "https://download.pytorch.org/whl/cu121" },
     { name = "torchani", marker = "extra == 'ani'", specifier = "==2.2.4" },
     { name = "tqdm" },
+    { name = "vesin-torch", marker = "extra == 'all'", specifier = ">=0.3" },
+    { name = "vesin-torch", marker = "extra == 'vesin'", specifier = ">=0.3" },
 ]
-provides-extras = ["ase", "hub", "gnn", "mdi", "hydra", "dev", "docs", "examples", "ani", "ffnn", "opls", "all"]
+provides-extras = ["ase", "hub", "gnn", "mdi", "vesin", "hydra", "dev", "docs", "examples", "ani", "ffnn", "opls", "all"]
 
 [[package]]
 name = "zipp"

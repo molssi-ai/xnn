@@ -13,11 +13,11 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import structure_to_graph
-from xnns.common.models import ForceStressOutput, available_models, build_model
-from xnns.common.models.ops import shifted_softplus
-from xnns.cnn.models.schnet import SchNet
+from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph
+from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.common.models.ops import shifted_softplus
+from xnn.cnn.models.schnet import SchNet
 
 SPECIES = [1, 6, 8]
 
@@ -249,8 +249,8 @@ def test_size_extensivity_and_batching():
     e12 = float(model(structure_to_graph(both, 5.0))["energy"])
     assert abs(e12 - (e1 + e2)) < 1e-10
 
-    from xnns.common.data import collate
-    from xnns.common.data.dataset import AtomicDataset
+    from xnn.common.data import collate
+    from xnn.common.data.dataset import AtomicDataset
     ds = AtomicDataset([s, far], 5.0)
     batch = collate([ds[0], ds[1]])
     eb = model(batch)["energy"]
@@ -268,7 +268,7 @@ def test_periodic_stress():
 
 @pytest.mark.parametrize("cutoff_fn", [None, "cosine"])
 def test_scriptable_and_lammps_export(tmp_path, cutoff_fn):
-    from xnns.common.deploy import export_to_lammps
+    from xnn.common.deploy import export_to_lammps
 
     model = _small(cutoff_fn=cutoff_fn).eval()
     g = _graph(n=6, cutoff=5.0, periodic=True)
@@ -306,7 +306,7 @@ def test_from_config_extras():
 
 
 def test_schnetpack_key_translation():
-    """schnetpack config spellings map onto the xnns core fields."""
+    """schnetpack config spellings map onto the xnn core fields."""
     cfg = from_dict({"model": {"name": "schnet", "cutoff": 4.5,
                                "n_atom_basis": 48, "n_gaussians": 30}})
     assert cfg.model.n_features == 48

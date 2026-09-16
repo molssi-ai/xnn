@@ -6,11 +6,11 @@ Training
 
 The Trainer
 ===========
-:class:`~xnns.common.train.trainer.Trainer` owns the whole loop:
+:class:`~xnn.common.train.trainer.Trainer` owns the whole loop:
 
 .. code-block:: python
 
-   from xnns.common.train import Trainer
+   from xnn.common.train import Trainer
 
    trainer = Trainer(cfg, train_set, val_set, test_set)   # val/test optional
    metrics = trainer.fit()   # {"train": ..., "val": ..., "test": ...}
@@ -25,15 +25,15 @@ means no test split unless you ask for one.
 Constructing a ``Trainer``:
 
 1. builds the model from ``cfg.model`` via
-   :func:`~xnns.common.models.registry.build_model`;
-2. wraps it in :class:`~xnns.common.models.outputs.ForceStressOutput`, with
+   :func:`~xnn.common.models.registry.build_model`;
+2. wraps it in :class:`~xnn.common.models.outputs.ForceStressOutput`, with
    the force and stress heads enabled by nonzero ``optim.force_weight`` /
    ``optim.stress_weight``;
 3. resolves the device (``cfg.device``, with ``"auto"`` choosing CUDA when
    available) and moves everything there;
 4. sets up the Adam optimizer (``lr``, ``weight_decay``), the learning-rate
    scheduler (``cosine``, ``plateau``, or none), and batched data loaders
-   using :func:`~xnns.common.data.dataset.collate`.
+   using :func:`~xnn.common.data.dataset.collate`.
 
 ``fit()`` trains for ``cfg.optim.epochs`` epochs, validating each epoch when
 a validation set is available, and writes checkpoints to
@@ -48,7 +48,7 @@ A checkpoint is ``{"model": state_dict, "cfg": Config}``; load it with
 When a test set exists, ``fit()`` evaluates it once after the final epoch
 (with the final-epoch weights) and reports the test loss; the returned
 metrics dict carries the numbers. To test the *best* checkpoint instead,
-load it and call :meth:`~xnns.common.train.trainer.Trainer.evaluate`:
+load it and call :meth:`~xnn.common.train.trainer.Trainer.evaluate`:
 
 .. code-block:: python
 
@@ -60,7 +60,7 @@ load it and call :meth:`~xnns.common.train.trainer.Trainer.evaluate`:
 
 The loss
 ========
-:func:`~xnns.common.train.losses.weighted_loss` combines the per-property
+:func:`~xnn.common.train.losses.weighted_loss` combines the per-property
 mean-squared errors:
 
 .. math::
@@ -78,7 +78,7 @@ available; it is dramatically more data-efficient than energies alone.
 Devices and batching
 ====================
 ``cfg.device = "auto" | "cpu" | "cuda" | "cuda:0"`` is resolved by
-:func:`~xnns.common.train.trainer.resolve_device`. Batching is by graph
+:func:`~xnn.common.train.trainer.resolve_device`. Batching is by graph
 concatenation (see :ref:`data`); ``data.batch_size = 1`` disables batch
 training entirely.
 
@@ -99,7 +99,7 @@ Single node, all (or ``N``) GPUs:
 
 .. code-block:: bash
 
-   torchrun --nproc-per-node 2 -m xnns train --config train.yaml
+   torchrun --nproc-per-node 2 -m xnn train --config train.yaml
 
 Multi-node (one such command per node, e.g. from a Slurm step):
 
@@ -107,11 +107,11 @@ Multi-node (one such command per node, e.g. from a Slurm step):
 
    torchrun --nnodes 2 --nproc-per-node 4 \
             --rdzv-backend c10d --rdzv-endpoint "$HEAD_NODE":29500 \
-            -m xnns train --config train.yaml
+            -m xnn train --config train.yaml
 
 Hugging Face's ``accelerate launch`` works as well (it exports the same
 environment variables), e.g. ``accelerate launch --multi_gpu --num_processes 2
--m xnns train --config train.yaml``, but note that it acts purely as a
+-m xnn train --config train.yaml``, but note that it acts purely as a
 process launcher here: FSDP or DeepSpeed options in an accelerate config are
 not picked up, since the trainer deliberately uses DDP only. Sharded
 strategies cannot train forces or stress anyway: those losses back-propagate

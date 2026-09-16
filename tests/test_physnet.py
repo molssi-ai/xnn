@@ -15,11 +15,11 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import structure_to_graph
-from xnns.common.models import ForceStressOutput, available_models, build_model
-from xnns.dnn.models import d3
-from xnns.dnn.models.physnet import KEHALF, shifted_softplus
+from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph
+from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.dnn.models import d3
+from xnn.dnn.models.physnet import KEHALF, shifted_softplus
 
 
 @pytest.fixture(autouse=True)
@@ -199,7 +199,7 @@ def test_d3_matches_original_tf_values():
 
 
 def test_upstream_physnet_key_translation():
-    """Keys spelled as in the upstream train.py map onto the xnns names."""
+    """Keys spelled as in the upstream train.py map onto the xnn names."""
     cfg = from_dict({"model": {
         "name": "physnet",
         "num_features": 64, "num_basis": 32, "num_blocks": 4,

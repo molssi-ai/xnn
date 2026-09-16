@@ -4,7 +4,7 @@
 Run the Example Notebooks
 *************************
 
-The repository ships validation notebooks that check the xnns
+The repository ships validation notebooks that check the xnn
 implementations against the reference codes on real Argon MD data.
 
 .. tip::
@@ -40,21 +40,21 @@ the train/test and MD notebooks stay under ``examples/gnn/<model>/``:
        each numerically against the reference implementation, ending with a
        whole-model weight transplant.
    * - ``gnn/<model>/<model>_argon_train_test.ipynb``
-     - A full train/test pipeline on Argon MD data, run twice (xnns vs. the
+     - A full train/test pipeline on Argon MD data, run twice (xnn vs. the
        original code) and compared at every stage (losses, parity plots,
        errors).
    * - ``gnn/<model>/<model>_argon_density_md.ipynb``
      - Liquid-argon mass density from NPT molecular dynamics through ASE,
-       comparing xnns against the reference (identical weights → ~zero
+       comparing xnn against the reference (identical weights → ~zero
        difference, plus independently trained models).
 
 MACE additionally has ``recreate_mace_architecture.ipynb``, a
 step-by-step tutorial that rebuilds the MACE architecture block by block in
-*both* ``mace-torch`` and xnns, with the defining equations and architecture
+*both* ``mace-torch`` and xnn, with the defining equations and architecture
 figures.
 
 Every training / MD notebook loads its data through the dataset hub
-(:func:`~xnns.common.data.hub.base.load_dataset`) rather than reading files by
+(:func:`~xnn.common.data.hub.base.load_dataset`) rather than reading files by
 hand. The Argon set (shared by the MACE, NequIP, Allegro, CACE, and PhysNet
 notebooks) is bundled in the repository and loaded with
 ``load_dataset("argon_md", split=...)`` (no download; see :ref:`data`). The CACE
@@ -91,7 +91,7 @@ is a clean-room build from the manuscripts, so
 (embedding, Gaussian RBF, shifted softplus, cfconv, interaction blocks,
 readout/standardization) against an independent NumPy implementation of the
 papers' equations — nothing from schnetpack is used, and no extra dependency
-is needed (it runs with the plain ``xnns`` kernel).
+is needed (it runs with the plain ``xnn`` kernel).
 ``schnet_rmd17_train.ipynb`` trains the paper architecture on rMD17 ethanol
 (``load_dataset("rmd17", ...)``) with the paper's energy+force loss
 weighting, and ``schnet_ethanol_md.ipynb`` loads that checkpoint and runs
@@ -149,7 +149,7 @@ qualitatively -- a CC/CP/PP subset of the BioFragment dimer set, loaded with
 they are deliberately *not* used here.)
 
 Deployment over MDI (``examples/deploy/mdi_argon_md.ipynb``) trains a small
-MACE on the bundled Argon set, serves the checkpoint with the ``xnns mdi``
+MACE on the bundled Argon set, serves the checkpoint with the ``xnn mdi``
 command as a `MolSSI Driver Interface
 <https://github.com/MolSSI-MDI/MDI_Library>`_ engine, and drives NVE molecular
 dynamics from a minimal Python driver over TCP. It needs the ``mdi`` extra
@@ -161,5 +161,5 @@ engine from **LAMMPS** (``fix mdi/qm``) instead: NVE plus a LAMMPS-side radial
 distribution function, with the step-0 energy and pressure validated against
 direct evaluation. It additionally needs a LAMMPS executable built with the
 MDI package (``cmake -D PKG_MDI=yes``; serial is fine) available as ``lmp`` on
-``PATH`` or via the ``XNNS_LMP`` environment variable; it runs both codes as
+``PATH`` or via the ``XNN_LMP`` environment variable; it runs both codes as
 subprocesses, so no kernel restart is needed.

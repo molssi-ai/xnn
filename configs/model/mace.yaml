@@ -4,11 +4,11 @@
 # keys fall back to these same values inside `MACE.from_config`.
 #
 # Keys copied verbatim from an upstream MACE yaml also work: the key-translation
-# registry (xnns.common.config.translate) rewrites the original MACE spellings
+# registry (xnn.common.config.translate) rewrites the original MACE spellings
 # to these canonical names at config-load time -- r_max -> cutoff,
 # num_channels -> n_features, num_interactions -> n_interactions,
 # num_radial_basis/num_bessel -> n_rbf, num_cutoff_basis -> num_polynomial_cutoff,
-# atomic_numbers -> species, E0s -> atomic_energies. The xnns spelling wins if
+# atomic_numbers -> species, E0s -> atomic_energies. The xnn spelling wins if
 # both are given. MACE's string value forms are coerced too
 # (radial_MLP: "[64, 64, 64]", E0s: '{1: -13.6}' or a {Z: E0} mapping).
 name: mace
@@ -44,4 +44,4 @@ atomic_energies: null # E0s: per-element reference energies as a list aligned wi
 #    configs/train.yaml under the optim/data/top-level sections, not here.
 #  - scaling / mean / std (ScaleShiftMACE), compute_avg_num_neighbors, heads /
 #    multihead fine-tuning, foundation models, swa/ema, and enable_cueq are not
-#    implemented in xnns; such keys land in `ModelConfig.extra` and are ignored.
+#    implemented in xnn; such keys land in `ModelConfig.extra` and are ignored.

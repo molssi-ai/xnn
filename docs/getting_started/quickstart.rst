@@ -4,7 +4,7 @@
 Quickstart
 **********
 
-The fastest way to see xnns in action is the bundled quickstart script, which
+The fastest way to see xnn in action is the bundled quickstart script, which
 builds toy data, trains a small SchNet for a few epochs, and predicts energies
 and forces with the trained model:
 
@@ -17,7 +17,7 @@ present). The rest of this page walks through exactly what the script does.
 
 1. Build data as plain dictionaries
 ===================================
-xnns consumes structures as plain dictionaries with keys ``pos`` and
+xnn consumes structures as plain dictionaries with keys ``pos`` and
 ``atomic_numbers`` (and optionally ``cell``, ``pbc``, ``energy``, ``forces``,
 ``stress``). The quickstart generates a toy set of small random H/C/O
 structures with a smooth synthetic target, just to have a learnable signal:
@@ -45,27 +45,27 @@ structures with a smooth synthetic target, just to have a learnable signal:
            out.append(s)
        return out
 
-:class:`~xnns.common.data.dataset.AtomicDataset` converts each dictionary into
-an :class:`~xnns.common.data.atomic_data.AtomicGraph`, the single data object
-every xnns model consumes. Real data loads just as easily: any ASE-readable
+:class:`~xnn.common.data.dataset.AtomicDataset` converts each dictionary into
+an :class:`~xnn.common.data.atomic_data.AtomicGraph`, the single data object
+every xnn model consumes. Real data loads just as easily: any ASE-readable
 file format (extxyz, CIF, VASP, ...) with
 ``AtomicDataset.from_file("trajectory.extxyz", cutoff)``, and standard
 benchmark datasets download in one line with
-:func:`~xnns.common.data.hub.base.load_dataset` (e.g.
+:func:`~xnn.common.data.hub.base.load_dataset` (e.g.
 ``load_dataset("rmd17", molecule="aspirin", cutoff=5.0)``); see :ref:`data`.
 
 2. Configure and train
 ======================
-Everything in xnns funnels through one
-:class:`~xnns.common.config.schema.Config` dataclass, one dataset class, and
+Everything in xnn funnels through one
+:class:`~xnn.common.config.schema.Config` dataclass, one dataset class, and
 one trainer. The quickstart trains a small SchNet, but any registered model
 name works here:
 
 .. code-block:: python
 
-   from xnns.common.config import Config
-   from xnns.common.data import AtomicDataset
-   from xnns.common.train import Trainer
+   from xnn.common.config import Config
+   from xnn.common.data import AtomicDataset
+   from xnn.common.train import Trainer
 
    cfg = Config()
    cfg.model.name = "schnet"        # schnet|hdnnp|ani|physnet|nequip|mace|allegro|cace|bamboo
@@ -88,7 +88,7 @@ checkpoints to ``cfg.output_dir`` (default ``runs/exp``).
 3. Predict energies and forces
 ==============================
 The trainer wraps the model in
-:class:`~xnns.common.models.outputs.ForceStressOutput`, which adds
+:class:`~xnn.common.models.outputs.ForceStressOutput`, which adds
 conservative forces (and optionally stress) by automatic differentiation of
 the predicted energy. ``trainer.module`` is that trained, wrapped model,
 ready for inference:
@@ -119,34 +119,34 @@ Run end to end, the script prints something like::
 
 The pieces also work on their own
 =================================
-Each layer of xnns is independently importable: data, featurizers, and
+Each layer of xnn is independently importable: data, featurizers, and
 models compose but do not require each other:
 
 .. code-block:: python
 
    # Data on its own
-   from xnns.common.data import AtomicDataset, build_neighbor_list
+   from xnn.common.data import AtomicDataset, build_neighbor_list
    ds = AtomicDataset(structures, cutoff=5.0)
    graph = ds[0]
 
    # Featurizers on their own (AtomicGraph -> model inputs)
-   from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
-   from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
+   from xnn.dnn.featurizers import AEV, RadialSymmetryFunctions
+   from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
    descriptor = AEV(species=[1, 6, 8])(graph)              # (N, D) invariant AEV
    edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)  # equivariant edges
 
    # Models on their own
-   from xnns.common.models import build_model, ForceStressOutput, available_models
+   from xnn.common.models import build_model, ForceStressOutput, available_models
    model = ForceStressOutput(build_model(cfg.model))
 
 From the command line
 =====================
-The same workflow is available through the ``xnns`` command:
+The same workflow is available through the ``xnn`` command:
 
 .. code-block:: bash
 
-   xnns train --config configs/train.yaml --set optim.epochs=50
-   xnns export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
+   xnn train --config configs/train.yaml --set optim.epochs=50
+   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
 
 Next steps
 ==========

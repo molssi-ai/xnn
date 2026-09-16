@@ -4,7 +4,7 @@
 Transplant Weights from Upstream Codes
 **************************************
 
-Every state-of-the-art model from the literature, which is implemented in xnns,
+Every state-of-the-art model from the literature, which is implemented in xnn,
 is verified against its reference code by weight transplant: MACE, NequIP,
 Allegro, CACE, PhysNet, ANI, BAMBOO, and the LES long-range add-on all load
 upstream weights and reproduce the upstream energies and forces to round-off
@@ -17,13 +17,13 @@ implementation of the papers' equations
 
 The pattern
 ===========
-1. Build the xnns model with the *same architecture hyperparameters* as the
+1. Build the xnn model with the *same architecture hyperparameters* as the
    upstream model (cutoff, ``l_max``/``max_ell``, channels, layers, radial
    basis size, ``avg_num_neighbors``, per-species energies/scales).
-2. Map the upstream state dict onto the xnns parameter names.
+2. Map the upstream state dict onto the xnn parameter names.
 3. ``load_state_dict`` and verify on a batch.
 
-Transplants work in *both* directions: the same mapping loads xnns-trained
+Transplants work in *both* directions: the same mapping loads xnn-trained
 weights back into the reference code (see the lock-step MD example below).
 
 How much work step 2 is depends on the model:
@@ -44,8 +44,8 @@ How much work step 2 is depends on the model:
   transplant into the :meth:`ANI.ani1x` / :meth:`ANI.ani1ccx` /
   :meth:`ANI.ani2x` presets, for a single network or the full 8-model
   ensemble.
-- **BAMBOO / LES**: plain name maps onto the xnns modules; for BAMBOO note
-  the documented force-convention difference (xnns returns the conservative
+- **BAMBOO / LES**: plain name maps onto the xnn modules; for BAMBOO note
+  the documented force-convention difference (xnn returns the conservative
   ``-dE/dr``, equal to upstream ``forces + qeq_force``).
 
 Worked examples
@@ -65,7 +65,7 @@ transplants and check every intermediate tensor:
   ``cace`` package, ~1e-16 relative in energies and forces, molecular and
   periodic.
 - ``physnet_verification.ipynb``: transplants the TF1 graph's variables into
-  the pure-PyTorch xnns model; energies, forces, and corrected charges match
+  the pure-PyTorch xnn model; energies, forces, and corrected charges match
   to ~1e-15 (float64).
 - ``ani_verification.ipynb``: transplants torchani's pretrained ANI-1x /
   ANI-1ccx / ANI-2x ensembles; the AEV matches element for element to ~1e-16,
@@ -78,18 +78,18 @@ transplants and check every intermediate tensor:
   ~1e-16 in float64 and the whole model to float32 round-off.
 
 A reverse transplant in production: the MD notebook
-``examples/dnn/physnet/physnet_argon_density_md.ipynb`` loads *xnns-trained*
+``examples/dnn/physnet/physnet_argon_density_md.ipynb`` loads *xnn-trained*
 PhysNet weights back into the original TF1 graph and propagates both engines
 through the same NVE trajectory in lock step.
 
 The classical force fields need no transplant machinery at all: the force
 field *is* its parameter library, and the library format is the standard
 SEAMM ``.frc`` force-field file (:ref:`howto-forcefield-files`).
-:class:`~xnns.ffnn.models.reaxff.ReaxFF` loads the published fields shipped
-with xnns and ReaxFF-nn JSON libraries directly, and
+:class:`~xnn.ffnn.models.reaxff.ReaxFF` loads the published fields shipped
+with xnn and ReaxFF-nn JSON libraries directly, and
 ``ReaxFF.export_library()`` writes trained parameters back out as ``.frc``
 (classical) or JSON (with network weights).
-:class:`~xnns.ffnn.models.opls.OPLS` likewise loads the OPLS-AA
+:class:`~xnn.ffnn.models.opls.OPLS` likewise loads the OPLS-AA
 distribution and its variants from ``.frc`` files -- typing structures with
 the SMARTS templates those files carry -- and ``OPLS.export_library()``
 round-trips trained parameters through ``save_frc`` or the native JSON.

@@ -4,7 +4,7 @@
 User Guide
 **********
 
-Reference information for working with xnns: the data pipeline, the models
+Reference information for working with xnn: the data pipeline, the models
 and their options, the configuration system, training, deployment, and the
 command line.
 

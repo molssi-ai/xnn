@@ -14,10 +14,10 @@ pytest.importorskip("e3nn")
 import torch.nn.functional as F  # noqa: E402
 from e3nn import o3  # noqa: E402
 
-from xnns.common.config import from_dict  # noqa: E402
-from xnns.common.data import structure_to_graph  # noqa: E402
-from xnns.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
-from xnns.gnn.models.nequip import _Gate, nequip_hidden_irreps  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import structure_to_graph  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
+from xnn.gnn.models.nequip import _Gate, nequip_hidden_irreps  # noqa: E402
 
 SPECIES = [1, 6, 8]
 
@@ -128,7 +128,7 @@ def test_per_species_scale_shift():
 def test_nequip_scriptable_and_lammps_export(tmp_path):
     """NequIP must torch.jit.script cleanly and the LAMMPS artifact must
     reproduce the eager model's energy and forces on a periodic system."""
-    from xnns.common.deploy import export_to_lammps
+    from xnn.common.deploy import export_to_lammps
 
     model = _build(n_layers=2, l_max=2).eval()
     g = _graph(n=6, cutoff=5.0, periodic=True)
@@ -147,7 +147,7 @@ def test_nequip_scriptable_and_lammps_export(tmp_path):
 
 
 def test_upstream_nequip_key_translation():
-    """Keys copied verbatim from an upstream NequIP yaml map to xnns names."""
+    """Keys copied verbatim from an upstream NequIP yaml map to xnn names."""
     cfg = from_dict({"model": {
         "name": "nequip",
         "r_max": 4.5, "num_layers": 4, "num_features": 8, "num_basis": 10,
@@ -168,7 +168,7 @@ def test_upstream_nequip_key_translation():
     assert m.atom_ref.weight[1].item() == -13.6
     assert m.atom_scale[8].item() == 3.0
 
-    # the xnns canonical spelling wins when both are present
+    # the xnn canonical spelling wins when both are present
     both = from_dict({"model": {"name": "nequip", "cutoff": 4.0, "r_max": 9.0}})
     assert both.model.cutoff == 4.0
 

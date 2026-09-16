@@ -10,18 +10,18 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.benchmark import (
+from xnn.common.benchmark import (
     BenchmarkConfig, from_dict, run_benchmark, Benchmark,
     register_metric, get_metric, available_metrics, score,
     register_writer, available_writers, write_all, format_table,
 )
-from xnns.common.benchmark.metrics import mae, mse, rmse, collect_predictions
-from xnns.common.benchmark.report import columns
-from xnns.common.benchmark.energy import (
+from xnn.common.benchmark.metrics import mae, mse, rmse, collect_predictions
+from xnn.common.benchmark.report import columns
+from xnn.common.benchmark.energy import (
     build_e0_lookup, fit_atomic_energies, dataset_structures,
 )
-from xnns.common.config import from_dict as cfg_from_dict
-from xnns.common.models import build_model, ForceStressOutput
+from xnn.common.config import from_dict as cfg_from_dict
+from xnn.common.models import build_model, ForceStressOutput
 
 
 # --------------------------------------------------------------------------- #
@@ -55,7 +55,7 @@ def _model_spec(label=None, **over):
 def _make_checkpoint(path, spec=None):
     """Build the model for ``spec`` and save its (random) weights as a checkpoint.
 
-    Mirrors what ``xnns train`` writes (``{"model": state_dict}``) without the
+    Mirrors what ``xnn train`` writes (``{"model": state_dict}``) without the
     training cost -- benchmarking only needs weights to load and score.
     """
     spec = spec or _model_spec()
@@ -286,7 +286,7 @@ def test_fit_atomic_energies_recovers_known_e0s():
 
 
 def test_dataset_structures_reads_atomicdataset(tmp_path):
-    from xnns.common.data import AtomicDataset
+    from xnn.common.data import AtomicDataset
     ds = AtomicDataset.from_file(_write_dataset(tmp_path / "d.extxyz"), 4.0)
     structs = dataset_structures(ds)
     assert len(structs) == 12
@@ -295,7 +295,7 @@ def test_dataset_structures_reads_atomicdataset(tmp_path):
 
 def test_atomization_leaves_difference_metrics_invariant():
     """Subtracting the same E0 offset from pred and ref cannot change MAE/RMSE."""
-    from xnns.common.data import AtomicDataset, collate
+    from xnn.common.data import AtomicDataset, collate
     from torch.utils.data import DataLoader
 
     structs = [{"pos": np.random.default_rng(i).uniform(0, 4, (4, 3)),
@@ -442,7 +442,7 @@ def test_benchmark_honors_per_target_metrics(tmp_path):
 
 
 def test_architecture_read_from_checkpoint(tmp_path):
-    # A checkpoint written by xnns embeds its Config, so the entry needs no
+    # A checkpoint written by xnn embeds its Config, so the entry needs no
     # architecture -- just the checkpoint (and an optional label).
     data = _write_dataset(tmp_path / "data.extxyz")
     ckpt = _make_checkpoint(tmp_path / "m.pt", _model_spec())
@@ -517,7 +517,7 @@ def test_dataset_shared_per_cutoff(tmp_path):
 
 def test_cli_benchmark(tmp_path):
     import yaml
-    from xnns.common.cli import main
+    from xnn.common.cli import main
     data = _write_dataset(tmp_path / "data.extxyz")
     ckpt = _make_checkpoint(tmp_path / "m.pt")
     out_dir = tmp_path / "out"
