@@ -69,7 +69,7 @@ What is covered
        forces vs. finite differences, minimum-image bonded terms and
        periodic stress, batching, size extensivity, trainable-group
        selection and training steps, shared-force-field gradients,
-       native-JSON and GROMACS ``.itp`` library readers, key translation
+       native-JSON and SEAMM ``.frc`` library readers, key translation
    * - ``test_hub.py`` / ``test_ase_io.py`` / ``test_benchmark.py`` /
        ``test_trainer_distributed.py``
      - dataset hub builders and caching, ASE file I/O, the benchmark

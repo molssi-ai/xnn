@@ -119,8 +119,8 @@ forces) and exports the result as a portable ``ffield.json``, and
 trained library and analyses the reactive descriptors (bond orders, EEM
 charges, a smooth bond-dissociation scan). Both notebooks also benchmark the
 **original classical ReaxFF**: the published C/H/O combustion field
-(``ffield.reax.cho``, Chenoweth *et al.* 2008) runs in the same ``ReaxFF``
-class straight from the standard ``ffield`` text format, giving the
+(``ReaxFF("CHO_cho_2008")``, Chenoweth *et al.* 2008, shipped in the SEAMM
+``.frc`` format) runs in the same ``ReaxFF`` class, giving the
 published-parameter baseline for the test-set metrics and the
 bond-dissociation scan. No third-party ReaxFF code is required (see the
 fidelity notes in the documentation).
