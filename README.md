@@ -1,33 +1,18 @@
 # xnns
 
-Machine-learning interatomic potentials in PyTorch, for **molecular and
-periodic** systems behind a single coherent PyTorch interface.
+Machine-learning interatomic potentials for **molecules and materials** behind a
+single coherent PyTorch interface.
 
 ## Installation
 
 ```
-pip install -e .            # core (torch, numpy, pyyaml)
-pip install -e ".[ase]"     # + ASE calculator
-pip install -e ".[gnn]"     # + e3nn for NequIP/MACE/Allegro
-pip install -e ".[hydra]"   # + Hydra/OmegaConf config
+pip install -e .             # core (torch, numpy, pyyaml)
+pip install -e ".[ase]"      # + ASE calculator
+pip install -e ".[gnn]"      # + e3nn for NequIP/MACE/Allegro
+pip install -e ".[hydra]"    # + Hydra/OmegaConf config
 pip install -e ".[examples]" # + ASE, e3nn, mace-torch, nequip, jupyter (runs the notebooks)
 pip install -e ".[all]"
 ```
-
-The `examples` notebooks validate xnns models against their reference
-implementations. For example, the MACE implementation in xnns is validated
-against that of [ACEsuit/mace](https://github.com/ACEsuit/mace) (`mace-torch`),
-the NequIP implementation is validated against that of
-[mir-group/nequip](https://github.com/mir-group/nequip) and Allegro is validated
-against [mir-group/allegro](https://github.com/mir-group/allegro), which pin
-`e3nn==0.4.4`; xnns has been thoroughly tested on this pin. The BAMBOO graph
-equivariant transformer is validated block-by-block against
-[bytedance/bamboo](https://github.com/bytedance/bamboo). SchNet is built and
-verified directly against the manuscripts' equations (block-by-block, in
-`examples/fidelity_checks/schnet_verification.ipynb`). The `pyproject.toml` also
-carries a `uv` setup that reproduces the GPU `.venv` that was used to create the
-notebooks (we adopted `torch 2.5.1+cu121` from the PyTorch cu121 index that are
-compatible with CUDA-12.x drivers).
 
 ## Quick start
 
@@ -66,80 +51,9 @@ pre-wrapping is required:
 train_set = AtomicDataset.from_file("trajectory.extxyz", cutoff=4.0)
 ```
 
-## Package layout
+## Design principles
 
-The package is organized **by model family** (`gnn`, `cnn`, `dnn`, `ffnn`, `hybrid`),
-with shared resources factored into the `common` modules and reusable
-transformer building blocks in `transformer`. An object (e.g., function, module
-etc.) lives with the model family that uses it, or with `common` if more than
-one family needs it. Of course, layers are designed as stand-alone entities and
-can be imported on their own.
-
-```
-src/xnns/
-├── __main__.py                 `python -m xnns` entry point
-├── common/                     shared across all model families
-│   ├── data/                   - common data abstractions
-│   │   └── …                     + AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, ASE I/O
-│   ├── featurizers/            - common featurizers
-│   │   └── …                     + Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
-│   ├── config/                 - one dataclass schema; loaders for yaml / argparse / hydra
-│   │   └── …                     + schema, loaders, translate, coerce
-│   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum, shifted_softplus)
-│   │   └── …                     + base, registry, outputs, les, ops
-│   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
-│   │   └── …                     + trainer, losses
-│   ├── benchmark/              - score pre-trained models on a dataset (metrics, atomization energy, report writers)
-│   │   └── …                     + config, runner, metrics, energy, report
-│   ├── deploy/                 - ASE Calculator, and LAMMPS/TorchScript export
-│   │   └── …                     + ase_calculator, lammps
-│   └── cli/                    - the `xnns` command-line interface
-│       └── main.py
-├── gnn/                        graph potentials
-│   ├── featurizers/            - GNN featurizers
-│   │   └── …                     + spherical, cartesian, radial, cutoff
-│   └── models/                 - base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
-│       └── …                     + base, blocks, nequip, mace, allegro, cace
-├── cnn/                        continuous-filter conv net
-│   └── models/                 - schnet
-├── dnn/                        descriptor + per-element networks, and PhysNet
-│   ├── featurizers/            - DNN featurizers
-│   │   └── …                     + symmetry functions, AEV
-│   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
-│       └── …
-├── ffnn/                       learnable classical force fields
-│   └── models/                 - reaxff, ffield, opls, oplslib, topology
-│       └── …                     + ReaxFF / ReaxFF-nn reactive force field, OPLS / L-OPLS fixed-topology
-│                                   force field, parameter-library I/O (ffield, OPLS JSON, GROMACS .itp)
-├── transformer/                shared graph-transformer building blocks
-│   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
-│   └── featurizers/            - ExpNormalSmearing radial basis
-└── hybrid/                     GNN + transformer potentials with a physics energy split
-    └── models/                 - bamboo (BAMBOO graph equivariant transformer), dispersion (D3(CSO))
-        └── …
-```
-
-```python
-# Data (structures dict -> AtomicGraph)
-from xnns.common.data import AtomicDataset, build_neighbor_list
-ds = AtomicDataset(structures, cutoff=5.0)
-graph = ds[0]
-
-# Featurizers (AtomicGraph -> model inputs)
-from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
-from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
-# (N, D) invariant per-atom AEV
-descriptor = AEV(species=[1, 6, 8])(graph)
-# Equivariant edge attributes
-edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)
-
-# Models (model inputs -> energy)
-from xnns.common.models import build_model, ForceStressOutput, available_models
-# Any registered model + autograd forces/stress
-model = ForceStressOutput(build_model(cfg.model))
-```
-
-Four ideas hold xnns together:
+Four ideas hold `xnn` together:
 
 1. **Unified data object.** Every model consumes an `AtomicGraph` and returns
    `{"node_energy", "energy"}`. Molecular vs. periodic is invisible to models:
@@ -163,6 +77,27 @@ Four ideas hold xnns together:
    `@register_model("name")` + a `from_config` classmethod makes a model usable
    from any of YAML / argparse / Hydra, which all funnel into one
    `Config` dataclass.
+
+
+```python
+# Data (structures dict -> AtomicGraph)
+from xnns.common.data import AtomicDataset, build_neighbor_list
+ds = AtomicDataset(structures, cutoff=5.0)
+graph = ds[0]
+
+# Featurizers (AtomicGraph -> model inputs)
+from xnns.dnn.featurizers import AEV, RadialSymmetryFunctions
+from xnns.gnn.featurizers import SphericalHarmonicEdgeEmbedding
+# (N, D) invariant per-atom AEV
+descriptor = AEV(species=[1, 6, 8])(graph)
+# Equivariant edge attributes
+edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)
+
+# Models (model inputs -> energy)
+from xnns.common.models import build_model, ForceStressOutput, available_models
+# Any registered model + autograd forces/stress
+model = ForceStressOutput(build_model(cfg.model))
+```
 
 ## Config frontends (interchangeable)
 
@@ -227,7 +162,7 @@ The benchmark builds models with the same `Config` and model registry as a
 single run; new metrics and output formats plug in via `@register_metric` and
 `@register_writer`, mirroring `@register_model`.
 
-## Models and fidelity
+## Available models
 
 | Model | Family | Featurizers | State |
 |---|---|---|---|
@@ -243,41 +178,124 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | ReaxFF / ReaxFF-nn | ffnn | bond orders + EEM charges (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 | OPLS / OPLS-AA / L-OPLS | ffnn | fixed valence topology (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 
-## Examples
 
-Runnable notebooks are grouped into separate directories based on model family
-types within `examples/<xnn>` (`pip install -e ".[examples]"`) where `x` refers
-to the architecture types (e.g., `g` in `gnn` for graph neural networks, `d` in
-`dnn` for deep neural networks, and `c` in `cnn` for convolutional neural
-networks): each holds a `<model>_argon_train_test.ipynb` and a
-`<model>_argon_density_md.ipynb` (LES has `les_molecular_dimers.ipynb`; ANI has
-`examples/dnn/ani/ani_rmd17_train.ipynb` and `ani1_dataset.ipynb`). Every
-training/MD notebook pulls its data through the one-line dataset hub
-(`load_dataset("argon_md")`, `load_dataset("rmd17", ...)`, `load_dataset("ani1",
-...)`, `load_dataset("lode_dimers", subset="bio_scan")`). The `ffnn` family
-trains the ReaxFF-nn reactive force field on rMD17 and analyses its bond orders,
-EEM charges and bond dissociation (`examples/ffnn/reaxff/`), benchmarking
-throughout against the original classical ReaxFF with published parameters (the
-Chenoweth 2008 C/H/O combustion field, run directly from the standard `ffield`
-text format), and validates the OPLS fixed-topology force field against its own
-literature (`examples/ffnn/opls/`): Table 1 of the 1996 OPLS-AA paper is
-reproduced with a relaxed dihedral driver, and the L-OPLS hydrocarbon torsion
-refit of Siu et al. (2012) is re-derived by gradient descent
-(`trainable=("dihedral_v",)`). The block-by-block numerical verifications against the upstream
-codes are collected under `examples/fidelity_checks/` as
-`<model>_verification.ipynb`. **ReaxFF is the exception:** the authors'
-reference implementation of ReaxFF-nn is AGPL-licensed, so no verification
-notebook or test depending on it (and no code derived from it) is distributed
-with this MIT-licensed code base; the implementation follows the published
-equations, was checked against that implementation during development without
-redistributing anything from it, and ships with self-contained
-equation-by-equation tests instead (`tests/test_reaxff.py`; see the fidelity
-notes in the documentation). OPLS is verified against OpenMM (an independent
-MD engine, optional dependency) in `examples/fidelity_checks/opls_verification.ipynb`
-and `tests/test_opls.py`. The `examples/quickstart.py` module presents a
-minimal train/predict workflow on toy-data.
+<details> <!-- Start Package layout -->
+<summary><h2 style="display:inline-block">Package layout</h2></summary>
 
-## Extension points
+The package is organized **by model family** (`gnn`, `cnn`, `dnn`, `ffnn`, `hybrid`),
+with shared resources factored into the `common` modules and reusable
+transformer building blocks in `transformer`. An object (e.g., function, module
+etc.) lives with the model family that uses it, or with `common` if more than
+one family needs it. Of course, layers are designed as stand-alone entities and
+can be imported on their own.
+
+```
+src/xnns/
+├── __main__.py                 `python -m xnns` entry point
+├── common/                     shared across all model families
+│   ├── data/                   - common data abstractions
+│   │   └── …                     + AtomicGraph (the one data object), PBC neighbor list, AtomicDataset, ASE I/O
+│   ├── featurizers/            - common featurizers
+│   │   └── …                     + Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
+│   ├── config/                 - one dataclass schema; loaders for yaml / argparse / hydra
+│   │   └── …                     + schema, loaders, translate, coerce
+│   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum, shifted_softplus)
+│   │   └── …                     + base, registry, outputs, les, ops
+│   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
+│   │   └── …                     + trainer, losses
+│   ├── benchmark/              - score pre-trained models on a dataset (metrics, atomization energy, report writers)
+│   │   └── …                     + config, runner, metrics, energy, report
+│   ├── deploy/                 - ASE Calculator, and LAMMPS/TorchScript export
+│   │   └── …                     + ase_calculator, lammps
+│   └── cli/                    - the `xnns` command-line interface
+│       └── main.py
+├── gnn/                        graph potentials
+│   ├── featurizers/            - GNN featurizers
+│   │   └── …                     + spherical, cartesian, radial, cutoff
+│   └── models/                 - base (GNNPotential, EquivariantGNN), blocks, nequip, mace, allegro, cace
+│       └── …                     + base, blocks, nequip, mace, allegro, cace
+├── cnn/                        continuous-filter conv net
+│   └── models/                 - schnet
+├── dnn/                        descriptor + per-element networks, and PhysNet
+│   ├── featurizers/            - DNN featurizers
+│   │   └── …                     + symmetry functions, AEV
+│   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
+│       └── …
+├── ffnn/                       learnable classical force fields
+│   ├── common/                 - frc (SEAMM .frc force-field files: reader, resolver, writer, registry),
+│   │                             typing (SMARTS atom typing), elements
+│   ├── data/                   - shipped parameter files: oplsaa.frc, lopls.frc, oplsaa_1996.frc, reaxff/*.frc
+│   └── models/                 - reaxff, ffield, opls, oplslib, topology
+│       └── …                     + ReaxFF / ReaxFF-nn reactive force field, OPLS / L-OPLS fixed-topology
+│                                   force field, the .frc <-> model parameter bridges
+├── transformer/                shared graph-transformer building blocks
+│   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
+│   └── featurizers/            - ExpNormalSmearing radial basis
+└── hybrid/                     GNN + transformer potentials with a physics energy split
+    └── models/                 - bamboo (BAMBOO graph equivariant transformer), dispersion (D3(CSO))
+        └── …
+```
+
+</details> <!-- End Package layout -->
+
+<details> <!-- Start Examples -->
+<summary><h2 style="display:inline-block">Examples</h2></summary>
+
+Runnable, pre-executed notebooks live under `examples/` (`pip install -e
+".[examples]"`). They are grouped by model family, where the leading letter of
+`<xnn>` names the architecture type (`gnn` graph, `cnn` convolutional, `dnn`
+deep/descriptor, `ffnn` force-field, `hybrid` mixed):
+
+- **Per-model training and MD** (`examples/<xnn>/<model>/`):
+  + `<model>_argon_train_test.ipynb` and `<model>_argon_density_md.ipynb` for
+    MACE, NequIP, Allegro, CACE and PhysNet.
+  + `schnet_rmd17_train.ipynb` and `schnet_ethanol_md.ipynb` for SchNet.
+  + `ani_rmd17_train.ipynb` plus the `ani1*_dataset.ipynb` / `ani2x_dataset.ipynb`
+    dataset walk-throughs for ANI.
+  + `les_molecular_dimers.ipynb` for the LES long-range wrapper (charged and
+    polar dimers) and `recreate_mace_architecture.ipynb` for a block-by-block
+    MACE rebuild.
+  + `bamboo_dimer_electrostatics.ipynb` and `bamboo_charge_analysis.ipynb` for
+    the hybrid BAMBOO model.
+- **Force fields** (`examples/ffnn/`):
+  + `reaxff/reaxff_rmd17_train_test.ipynb` trains the ReaxFF-nn reactive force
+    field on rMD17 and `reaxff/reaxff_md_bond_orders.ipynb` analyses its bond
+    orders, EEM charges and bond dissociation in MD. Both benchmark against the
+    published classical Chenoweth 2008 C/H/O field, loaded from the shipped
+    SEAMM `.frc` file (`ReaxFF("CHO_cho_2008")`).
+  + `opls/opls_conformational_energetics.ipynb` reproduces Table 1 of the 1996
+    OPLS-AA paper with a relaxed dihedral driver, typing every molecule from
+    coordinates with the SMARTS templates of `oplsaa.frc`.
+  + `opls/opls_lopls_torsion_refit.ipynb` re-derives the L-OPLS hydrocarbon
+    torsion refit of Siu et al. (2012) by gradient descent
+    (`trainable=("dihedral_v",)`) and writes the trained field back out as a
+    `.frc` file.
+- **Data and deployment:**
+  + `data/load_dataset_tutorial.ipynb` covers the one-line dataset hub used by
+    every training notebook (`load_dataset("argon_md")`, `load_dataset("rmd17",
+    ...)`, `load_dataset("ani1", ...)`, `load_dataset("lode_dimers",
+    subset="bio_scan")`).
+  + `deploy/mdi_argon_md.ipynb` and `deploy/mdi_argon_lammps.ipynb` drive a
+    trained model from an external MD code through the MDI engine.
+  + `examples/quickstart.py` is a minimal train/predict script on toy data.
+- **Fidelity checks** (`examples/fidelity_checks/<model>_verification.ipynb`):
+  + Block-by-block numerical comparisons against the upstream codes for MACE,
+    NequIP, Allegro, CACE, SchNet, PhysNet, ANI, BAMBOO and LES.
+  + OPLS is verified against OpenMM (an independent MD engine, optional
+    dependency) in `opls_verification.ipynb` and `tests/test_opls.py`.
+  + **ReaxFF is the exception:** the authors' reference implementation of
+    ReaxFF-nn is AGPL-licensed, so no verification notebook or test depending
+    on it (and no code derived from it) is distributed with this MIT-licensed
+    code base. The implementation follows the published equations, was checked
+    against that implementation during development without redistributing
+    anything from it, and ships with self-contained equation-by-equation tests
+    instead (`tests/test_reaxff.py`; see the fidelity notes in the
+    documentation).
+
+</details> <!-- End Examples -->
+
+<details> <!-- Start Extension points -->
+<summary><h2 style="display:inline-block">Extension points</h2></summary>
 
 - **Implement a new model:** 
   + Pick your model family package (`gnn` / `cnn` / `dnn`/ `ffnn`,  or add one)
@@ -287,8 +305,8 @@ minimal train/predict workflow on toy-data.
   method.
   + register your model implementation using `@register_model` decorator.
   + Add a YAML config file for your model `configs/model/<name>.yaml`. 
-  + For TorchScript/LAMMPS export, it is important to expose a scriptable
   + Import the family package so the model registers.
+  + For TorchScript/LAMMPS export, it is important to expose a scriptable
   `node_energy(atomic_numbers, edge_index, edge_vec)` core (SchNet shows the
   pattern; e3nn models need e3nn's JIT support for this).
 - **Add a new featurizer:**
@@ -296,3 +314,5 @@ minimal train/predict workflow on toy-data.
   `forward(data)`. Put the resulting featurizer module in the
   `common/featurizers/` if shared by more than one model family or under the
   using family's `featurizers/` if it is only used by that one model family.
+
+</details> <!-- End Extension points -->
