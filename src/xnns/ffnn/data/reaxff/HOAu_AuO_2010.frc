@@ -1,0 +1,223 @@
+!MolSSI forcefield 1
+
+
+#define reaxff/HOAu_AuO_2010
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  ---------------
+2025.04.03      1  metadata                         HOAu_AuO_2010
+2025.04.03      1  reaxff_general_parameters        HOAu_AuO_2010
+2025.04.03      1  reaxff_atomic_parameters_1-8     HOAu_AuO_2010
+2025.04.03      1  reaxff_atomic_parameters_9-16    HOAu_AuO_2010
+2025.04.03      1  reaxff_atomic_parameters_17-24   HOAu_AuO_2010
+2025.04.03      1  reaxff_atomic_parameters_25-32   HOAu_AuO_2010
+2025.04.03      1  reaxff_bond_parameters_1-8       HOAu_AuO_2010
+2025.04.03      1  reaxff_bond_parameters_9-16      HOAu_AuO_2010
+2025.04.03      1  reaxff_off-diagonal_parameters   HOAu_AuO_2010
+2025.04.03      1  reaxff_angle_parameters          HOAu_AuO_2010
+2025.04.03      1  reaxff_torsion_parameters        HOAu_AuO_2010
+2025.04.03      1  reaxff_hydrogen-bond_parameters  HOAu_AuO_2010
+
+
+#metadata HOAu_AuO_2010
+
+!Version      Ref   Parameter       Value   Description
+!---------  -----  ------------  ---------  --------------------------------------
+2025.04.03      1   ff_form      reaxff     The functional form of the forcefield
+2025.04.03      1   charges      qeq/reaxff How charges should be handled
+
+
+#reaxff_general_parameters HOAu_AuO_2010
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.03      1   BO_cutoff      0.1     Cutoff for bond order (*100)
+2025.04.03      1     Pboc,1      50       Overcoordination parameter 1
+2025.04.03      1     Pboc,2       9.5469  Overcoordination parameter 2
+2025.04.03      1     Pcoa,2      26.5405  Valency angle conjugation parameter
+2025.04.03      1     Pcoa,3       2.6962  Valency angle conjugation parameter
+2025.04.03      1     Pcoa,4       2.1365  Valency angle conjugation parameter
+2025.04.03      1     Pcot,2       2.1645  Conjugation
+2025.04.03      1      Pfe1        2.8793  Fe dimer correction?
+2025.04.03      1     Plp,1        6.0891  Valency angle/lone pair parameter
+2025.04.03      1    Povun,3      50       Overcoordination parameter
+2025.04.03      1    Povun,4       0.6991  Overcoordination parameter
+2025.04.03      1    Povun,6       1.0588  Over/undercoordination parameter 6
+2025.04.03      1    Povun,7      12.1176  Over/undercoordination parameter 7
+2025.04.03      1    Povun,8      13.3056  Over/undercoordination parameter 8
+2025.04.03      1     Ppen,2       6.929   Double bond/angle parameter
+2025.04.03      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.04.03      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.04.03      1     Ptor,2       5.7796  Torsion/BO parameter
+2025.04.03      1     Ptor,3      10       Torsion overcoordination
+2025.04.03      1     Ptor,4       1.9487  Torsion overcoordination
+2025.04.03      1    Ptrip,1     -60.5044  Triple bond stabilization parameter 1
+2025.04.03      1    Ptrip,2       4.6     Triple bond stabilisation parameter 2
+2025.04.03      1    Ptrip,3       6.8702  Triple bond stabilisation parameter
+2025.04.03      1    Ptrip,4       1.7224  Triple bond stabilisation parameter
+2025.04.03      1    Pval,10       2.0384  Valency angle parameter
+2025.04.03      1     Pval,7      33.8667  Valency undercoordination
+2025.04.03      1     Pval,8       1.8512  Valency/lone pair parameter
+2025.04.03      1     Pval,9       1.0563  Valency angle
+2025.04.03      1     PvdW,1       1.5591  vdWaals shielding
+2025.04.03      1  Rtaper,lower    0       Lower Taper-radius
+2025.04.03      1  Rtaper,upper   10       Upper Taper-radius
+2025.04.03      1      kc2        60.485   C2-correction
+2025.04.03      1   not_used_1     6.1431  Not used
+2025.04.03      1   not_used_2    -2.4837  Not used
+2025.04.03      1   not_used_3    -1.2327  Conjugation 0 (not used)
+2025.04.03      1   not_used_4     0.5     Not used
+2025.04.03      1   not_used_5    20       Not used
+2025.04.03      1   not_used_6     5       Molecular energy (not used)
+2025.04.03      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 HOAu_AuO_2010
+
+!Version      Ref   Center     Acore,2     C_i    Dij    Ecore,2      Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  -----  ---------  -------  --------  --------  --------
+2025.04.03      1     H              0  1.0698  0.093          0  61.6606    2.4197    3.0408    0.0003
+2025.04.03      1     O              0  0.9745  0.1            0  59.0626    0.764     3.5027    0.0021
+2025.04.03      1     Au             0  0.8563  0.373          0  92.507     5.2294    6.2293    0.1542
+
+
+#reaxff_atomic_parameters_9-16 HOAu_AuO_2010
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.04.03      1     H             1   0        -19.4571        0      4.2733    2.8793      0.893   -0.1
+2025.04.03      1     O             2   0.4056    -3.55         37.5    2.9       2.9225      1.245    1.0548
+2025.04.03      1     Au            0   0        -24.8303        0      2.9867    2.5791      2.0074  -1
+
+
+#reaxff_atomic_parameters_17-24 HOAu_AuO_2010
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.04.03      1     H         -0.1             0  1.355       1            1     1             1   8.223
+2025.04.03      1     O          0.9049          0  2.389       2            4     4             6   9.73
+2025.04.03      1     Au        -1               0  2.1413      1            1     6.2998        1  12.1061
+
+
+#reaxff_atomic_parameters_25-32 HOAu_AuO_2010
+
+!Version      Ref   Center     alpha_e    beta     chi     eta    gamma    gamma,w        m    not_used_1
+!---------  -----  --------  ---------  ------  ------  ------  -------  ---------  -------  ------------
+2025.04.03      1     H              0  1.0338  3.7248  9.6093   0.8203    33.2894    1.008       121.125
+2025.04.03      1     O              0  1.0493  8.5     8.3122   1.0898    13.8449   15.999       116.077
+2025.04.03      1     Au             0  1.0338  6       5.6481   0.9623     2.1635  196.966         0
+
+
+#reaxff_bond_parameters_1-8 HOAu_AuO_2010
+
+!Version      Ref   I    J     13_boc    De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  -------  ----------  ----------  -------  -------  -------  -------
+2025.04.03      1   H    H          1        0      0          153.393  -0.46     6.25     6.0552   1
+2025.04.03      1   O    H          1        0      0          160      -0.5725   1.115    4.279    1
+2025.04.03      1   O    O          1      145     50.8293     142.286   0.2506   0.3451   5.5     -0.1055
+2025.04.03      1  Au    H          1        0      0          100.169  -0.2641   8.0163   9.3297   1
+2025.04.03      1  Au    O          1        0      0          120.181  -0.009    0.0577   6.1034  -0.2
+2025.04.03      1  Au   Au          0        0      0          142.681  -0.01     0.2903   5.2066  -0.2
+
+
+#reaxff_bond_parameters_9-16 HOAu_AuO_2010
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2    ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  -----
+2025.04.03      1   H    H         0      0     6       -0.079      0.73               1             0      0
+2025.04.03      1   O    H         0      0     6       -0.092      0.5626             0             0      0
+2025.04.03      1   O    O         9     -0.1  29.7503  -0.1225     0.6051             1             0      1
+2025.04.03      1  Au    H         0      0     6       -0.1717     0.1273             1             0      0
+2025.04.03      1  Au    O        15     -0.2  16       -0.1541     0.1884             1             0      1
+2025.04.03      1  Au   Au        15     -0.2  16       -0.1517     0.3663             1             0      0
+
+
+#reaxff_off-diagonal_parameters HOAu_AuO_2010
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.04.03      1   O    H   0.0283       -1          -1      0.9215  1.2885   10.919
+2025.04.03      1  Au    H   0.1644       -1          -1      1.7     1.3669   12.093
+2025.04.03      1  Au    O   0.1645       -1          -1      1.6576  1.8867    9.843
+
+
+#reaxff_angle_parameters HOAu_AuO_2010
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.04.03      1   H    H     H         0         0   27.9213    5.8635    1.04      0         0
+2025.04.03      1   O    H     H         0         0    8.5744    3         1.0421    0         0
+2025.04.03      1   O    H     O         0         0   15         2.89      2.8774    0         0
+2025.04.03      1  Au    H     H         0         0    1         1         1.25      1.0001    0
+2025.04.03      1  Au    H     O         0         0    5         2         1.25      1         0
+2025.04.03      1  Au    H    Au         0         0   10         1         1.25      1         0
+2025.04.03      1   H    O     H         0         0    9.8453    2.272     1.58      2.8635   85.8
+2025.04.03      1   O    O     H         0         0   50         2         1.168     1        75.6935
+2025.04.03      1   O    O     O         0        50   30.4554    0.9953    1.0783    1.631    80.7324
+2025.04.03      1  Au    O     H         0         0   10         1         1.25      1.05     70
+2025.04.03      1  Au    O     O         0         0   36.3302    1.5083    1.5506    1        80.3915
+2025.04.03      1  Au    O    Au         0         0    2.8512    8         1         0.5       0.1
+2025.04.03      1   H   Au     H         0         0   20         1         1.25      1        90
+2025.04.03      1   O   Au     H         0         0   10         2         1.25      1        30
+2025.04.03      1   O   Au     O         0         0    7.6175    6.273     1.0917    0.5      14.1302
+2025.04.03      1  Au   Au     H         0         0   10         1         1.25      1        80
+2025.04.03      1  Au   Au     O         0         0   15.5303    0.5696    1.522     0.1       6.7044
+
+
+#reaxff_torsion_parameters HOAu_AuO_2010
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1      V2       V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  ------  -------  ------------  ------------
+2025.04.03      1   *    H     H    *   -1.2327    0        0        0       0                  0             0
+2025.04.03      1   *    O     H    *   -1.2327   -2.5415   0        0.1     0.02               0             0
+2025.04.03      1   H    O     O    H   -1        -2.5      2.5     -4       0.9                0             0
+2025.04.03      1   O    O     O    H   -1        -2.5      0.8302  -4      -0.7763             0             0
+2025.04.03      1   O    O     O    O   -1        -2.5     -2.5     -4       1                  0             0
+2025.04.03      1  Au    O     O    H    0        -5        0        0       0                  0             0
+2025.04.03      1  Au    O     O   Au    0        -5        0        0       0                  0             0
+2025.04.03      1   *    O     O    *   -1        -5.1903   0.5511  25.415   1.133              0             0
+2025.04.03      1  Au   Au     O    H    0        -5        0        0.01    0.01               0             0
+
+
+#reaxff_hydrogen-bond_parameters HOAu_AuO_2010
+
+!Version      Ref   I    J     K    Ehb    Phb3    Rhb    Thb
+!---------  -----  ---  ---  ---  -----  ------  -----  -----
+2025.04.03      1   O    H     O  -3.58    19.5   2.12   1.45
+
+#reference 1
+@Author SEAMM
+@Date 2025-04-03
+ReaxFF forcefield translated from Reax format
+
+DATE: 2011-02-18 CONTRIBUTOR: Aidan Thompson, athomps@sandia.gov CITATION: Joshi et al, J Mat Chem, 20, 10431-10437 (2010) COMMENT: Reactive MD-force field: Au-Au: Keith, J. A. et al. Phys Rev B 2010, 81, 235404; Joshi, K. et al., J. Mat. Chem 2010, 20, 10431-10437
+
+@bibtex @article{PhysRevB.81.235404,
+  title = {Reactive forcefield for simulating gold surfaces and nanoparticles},
+  author = {Keith, John A. and Fantauzzi, Donato and Jacob, Timo and van Duin, Adri C. T.},
+  journal = {Phys. Rev. B},
+  volume = {81},
+  issue = {23},
+  pages = {235404},
+  numpages = {8},
+  year = {2010},
+  month = {Jun},
+  publisher = {American Physical Society},
+  doi = {10.1103/PhysRevB.81.235404},
+  url = {https://link.aps.org/doi/10.1103/PhysRevB.81.235404}
+}
+
+@bibtex @article{C0JM01556C,
+author ="Joshi, Kaushik and van Duin, Adri C. T. and Jacob, Timo",
+title  ="Development of a ReaxFF description of gold oxides and initial application to cold welding of partially oxidized gold surfaces",
+journal  ="J. Mater. Chem.",
+year  ="2010",
+volume  ="20",
+issue  ="46",
+pages  ="10431-10437",
+publisher  ="The Royal Society of Chemistry",
+doi  ="10.1039/C0JM01556C",
+url  ="http://dx.doi.org/10.1039/C0JM01556C",
+abstract  ="We present the ReaxFF reactive force field methodology for modeling a gold–oxygen binary system. The force field parameters were fitted against a data set including equations of state{,} heats of formation and binding energies derived from DFT calculations. The trained force field was then used to study the diffusion properties of oxygen on a gold surface. The diffusion study shows that oxygen atoms have a relatively low mobility on the gold surface. We also present a prospective application of this force field by performing molecular dynamics simulations studying the effect of oxidation level on contact strength of a cold welded joint. The results indicate that low levels of oxidation can significantly impact the joint cohesive energy."}
+
+#end

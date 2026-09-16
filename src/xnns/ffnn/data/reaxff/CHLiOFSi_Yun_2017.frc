@@ -1,0 +1,322 @@
+!MolSSI forcefield 1
+
+#define reaxff/CHLiOFSi_Yun_2017
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  -----------------
+2025.04.06      1  metadata			    CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_general_parameters        CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_atomic_parameters_1-8     CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_atomic_parameters_9-16    CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_atomic_parameters_17-24   CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_atomic_parameters_25-32   CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_bond_parameters_1-8       CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_bond_parameters_9-16      CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_off-diagonal_parameters   CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_angle_parameters          CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_torsion_parameters        CHLiOFSi_Yun_2017
+2025.04.06      1  reaxff_hydrogen-bond_parameters  CHLiOFSi_Yun_2017
+
+
+#metadata CHLiOFSi_Yun_2017
+
+!Version      Ref   Parameter       Value   Description
+!---------  -----  ------------  ---------  --------------------------------------
+2025.04.06      1   ff_form      reaxff     The functional form of the forcefield
+2025.04.06      1   charges      qeq/reaxff How charges should be handled
+
+#reaxff_general_parameters CHLiOFSi_Yun_2017
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.06      1   BO_cutoff      0.001   Cutoff for bond order (*100)
+2025.04.06      1     Pboc,1      50       Overcoordination parameter 1
+2025.04.06      1     Pboc,2       9.5469  Overcoordination parameter 2
+2025.04.06      1     Pcoa,2      26.5405  Valency angle conjugation parameter
+2025.04.06      1     Pcoa,3       2.6962  Valency angle conjugation parameter
+2025.04.06      1     Pcoa,4       2.1365  Valency angle conjugation parameter
+2025.04.06      1     Pcot,2       2.1645  Conjugation
+2025.04.06      1      Pfe1        2.8793  Fe dimer correction?
+2025.04.06      1     Plp,1        6.0891  Valency angle/lone pair parameter
+2025.04.06      1    Povun,3      50       Overcoordination parameter
+2025.04.06      1    Povun,4       0.6991  Overcoordination parameter
+2025.04.06      1    Povun,6       1.0588  Over/undercoordination parameter 6
+2025.04.06      1    Povun,7      12.1176  Over/undercoordination parameter 7
+2025.04.06      1    Povun,8      13.3056  Over/undercoordination parameter 8
+2025.04.06      1     Ppen,2       6.929   Double bond/angle parameter
+2025.04.06      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.04.06      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.04.06      1     Ptor,2       5.7796  Torsion/BO parameter
+2025.04.06      1     Ptor,3      10       Torsion overcoordination
+2025.04.06      1     Ptor,4       1.9487  Torsion overcoordination
+2025.04.06      1    Ptrip,1     -70.5044  Triple bond stabilization parameter 1
+2025.04.06      1    Ptrip,2       4.6     Triple bond stabilisation parameter 2
+2025.04.06      1    Ptrip,3       6.8702  Triple bond stabilisation parameter
+2025.04.06      1    Ptrip,4       1.7224  Triple bond stabilisation parameter
+2025.04.06      1    Pval,10       2.0384  Valency angle parameter
+2025.04.06      1     Pval,7      33.8667  Valency undercoordination
+2025.04.06      1     Pval,8       1.8512  Valency/lone pair parameter
+2025.04.06      1     Pval,9       1.0563  Valency angle
+2025.04.06      1     PvdW,1       1.5591  vdWaals shielding
+2025.04.06      1  Rtaper,lower    0       Lower Taper-radius
+2025.04.06      1  Rtaper,upper   10       Upper Taper-radius
+2025.04.06      1      kc2        60.485   C2-correction
+2025.04.06      1   not_used_1     6.1431  Not used
+2025.04.06      1   not_used_2    -2.4837  Not used
+2025.04.06      1   not_used_3    -1.2327  Conjugation 0 (not used)
+2025.04.06      1   not_used_4     0.5     Not used
+2025.04.06      1   not_used_5    20       Not used
+2025.04.06      1   not_used_6     5       Molecular energy (not used)
+2025.04.06      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 CHLiOFSi_Yun_2017
+
+!Version      Ref   Center     Acore,2     C_i     Dij    Ecore,2       Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  ------  ---------  --------  --------  --------  --------
+2025.04.06      1     H              0  1.0698  0.0419        0     62.4879    3.3517    1.9771    0.7571
+2025.04.06      1     Li            13  0.8563  0.0905        0.2   37.5       6.9107    5.4409    0.1973
+2025.04.06      1     C              0  0.8563  0.1853        0    199.03     34.7289    8.6991   13.3894
+2025.04.06      1     O             13  0.9745  0.1           0.2   59.0626    0.764     3.5027    0.0021
+2025.04.06      1     F              0  0       0.0442        0      1.5       4.1799    6.9821    1.0561
+2025.04.06      1     Si            13  0.8563  0.211         0.2  104        23.8188    9.0751    0.8381
+
+
+#reaxff_atomic_parameters_9-16 CHLiOFSi_Yun_2017
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.04.06      1     H             1   0        -15.7683     0         2.1488    2.8793      0.7853  -0.1
+2025.04.06      1     Li            0   0        -25          0         2.2989    2.8103      1.9205  -0.1
+2025.04.06      1     C             0   0         -2.8983    33.2433    2.5       2.9663      1.3825   1.1359
+2025.04.06      1     O             2   0.4056    -3.55      37.5       2.9       2.9225      1.245    1.0548
+2025.04.06      1     F             0  35         -2.2869    62.1473    2.734     3.0013      1.2705  -0.1
+2025.04.06      1     Si            0   0         -4.1684    21.7115    2.0754    2.5791      2.2902   1.2962
+
+
+#reaxff_atomic_parameters_17-24 CHLiOFSi_Yun_2017
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.04.06      1     H         -0.1           0    1.5904      1            1          1        1   9.3557
+2025.04.06      1     Li        -1             1.3  1.8896      1            1          1        1   9.9084
+2025.04.06      1     C          1.2104        0    1.9133      4            4          4        4   9.7602
+2025.04.06      1     O          0.9049        1.3  2.389       2            4          4        6   9.73
+2025.04.06      1     F         -1             0    1.41        1            4          4        7  11.6107
+2025.04.06      1     Si        -1             1.4  1.8354      4            4          4        4  11.1336
+
+
+#reaxff_atomic_parameters_25-32 CHLiOFSi_Yun_2017
+
+!Version      Ref   Center     alpha_e    beta      chi      eta    gamma    gamma,w        m    not_used_1
+!---------  -----  --------  ---------  ------  -------  -------  -------  ---------  -------  ------------
+2025.04.06      1     H              0  1.0338   5.32     7.4366   1.0206     5.0518   1.008       121.125
+2025.04.06      1     Li             0  1.0338  -6.4188  15        0.4668     1.0896   6.941         0
+2025.04.06      1     C              0  1.0564   5.8678   7        0.9        2.1346  12            79.5548
+2025.04.06      1     O              0  1.0493   8.5      8.3122   1.0898    13.8449  15.999       116.077
+2025.04.06      1     F              0  1.0493  15.4329  17.3228   0.0135     5.4481  18.9984        0.1252
+2025.04.06      1     Si             0  1.0338   4.2033   5.5558   0.5947     3.1831  28.06        139.931
+
+
+#reaxff_bond_parameters_1-8 CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J     13_boc     De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  --------  ----------  ----------  -------  -------  -------  -------
+2025.04.06      1   H    H          1    0           0         156.097   -0.1377   2.9907   4.8358   1
+2025.04.06      1  Li    H          0    0           0          63.4649   0.0294   0.309    5.1033   0
+2025.04.06      1  Li   Li          0    0           0          55.1128   0.1708   1.4206   4.1293   0
+2025.04.06      1   C    H          1    0           0         170.232   -0.5931   5.2267   6.8315   1
+2025.04.06      1   C   Li          0    0           0          10.054    0.3005   0.2679   7.5211  -0.2534
+2025.04.06      1   C    C          1  100.04       80         156.595   -0.8157   0.4527   6.8316  -0.1
+2025.04.06      1   O    H          1    0           0         160       -0.5725   1.115    4.279    1
+2025.04.06      1   O   Li          0   -0.02        0          78.3666  -1        0.2022   7.8656  -0.25
+2025.04.06      1   O    C          1   31.8847     89.5456    224.829   -1.4925   0.7387   6.4319  -0.7228
+2025.04.06      1   O    O          1  145          50.8293    142.286    0.2506   0.3451   5.5     -0.1055
+2025.04.06      1   F    H          1    0           0         260.689   -0.669    8.8937   9.2031   1
+2025.04.06      1   F   Li          1    0           0         223.475   -0.5818   4.557    3.225    0
+2025.04.06      1   F    C          1    0           0         166.88     0.4753   3.1303   7.1188  -0.25
+2025.04.06      1   F    O          1    0           0          99.9065  -1        0.5928   8.4278   1
+2025.04.06      1   F    F          1    0           0          59.2824   0.6972   0.6978   7.8828  -0.25
+2025.04.06      1  Si    H          1    0           0         101.184   -0.1751   7.3549   7.908    1
+2025.04.06      1  Si   Li          0    0           0          23.1963   1        0.0812   6.0525   0
+2025.04.06      1  Si    C          1   50.1197      0          94.5912  -0.5712   2.3951   5.4278  -1.1892
+2025.04.06      1  Si    O          1    5           0         274.834   -0.5884   9.9772   8.479   -0.2572
+2025.04.06      1  Si    F          1    0           0         284.861   -0.868    3.5449   6.038   -0.25
+2025.04.06      1  Si   Si          1   85.8146     30          61.1127  -0.8197   0.1307   8.2374  -0.8055
+
+
+#reaxff_bond_parameters_9-16 CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2     ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  ------
+2025.04.06      1   H    H    0        0        6       -0.0593     0.824              1             0  0
+2025.04.06      1  Li    H   12        0        6       -0.08       0.4868             1             0  0
+2025.04.06      1  Li   Li   12        0.3     26       -0.1361     0.5445             1             0  0
+2025.04.06      1   C    H    0        0        6       -0.05       0.714              1             0  0
+2025.04.06      1   C   Li   12.0019  -0.3      6       -0.1143     0.2953             1             0  0
+2025.04.06      1   C    C    9.2605  -0.4591  37.7369  -0.075      0.4235             1             0  1
+2025.04.06      1   O    H    0        0        6       -0.092      0.5626             0             0  0
+2025.04.06      1   O   Li   11.9965   0.3      6       -0.1276     0.3228             1             0  0
+2025.04.06      1   O    C    5.1953  -0.085   13.4838  -0.1175     1.1008             1             0  0
+2025.04.06      1   O    O    9       -0.1     29.7503  -0.1225     0.6051             1             0  1
+2025.04.06      1   F    H    0        0        6       -0.3966     2.3211             1             0  0
+2025.04.06      1   F   Li   12        0       26       -0.1        0.9275             1             0  0
+2025.04.06      1   F    C   15       -0.5     35       -0.9475     1.3151             1             0  1
+2025.04.06      1   F    O    0        0        6       -0.1318     0.7194             1             0  0
+2025.04.06      1   F    F   25       -0.35    35       -0.115      0.9146             1             0  1
+2025.04.06      1  Si    H    0        0        6       -0.045      1.1044             1             0  0
+2025.04.06      1  Si   Li   12        0.3     26       -0.1142     0.5185             1             0  0
+2025.04.06      1  Si    C    8.6403  -0.5558  17.2117  -0.1028     0.0308             1             0  1
+2025.04.06      1  Si    O   28.8153  -0.3     36       -0.113      0.2131             1             0  6.0658
+2025.04.06      1  Si    F   15       -0.5     35       -0.1198     1.4117             1             0  1
+2025.04.06      1  Si   Si    7.1248  -0.3     16       -0.0674     0.1386             1             0  0
+
+
+#reaxff_off-diagonal_parameters CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.04.06      1  Li    H   0.2966  -1          -1           1.1989  1.255   10.292
+2025.04.06      1   C    H   0.1219  -1          -1           1.1203  1.4      9.8442
+2025.04.06      1   C   Li   0.061   -1          -1           1.2079  1.5665  11.4404
+2025.04.06      1   O    H   0.0283  -1          -1           0.9215  1.2885  10.919
+2025.04.06      1   O   Li   0.079   -1           1           1.8165  2.2      9.0491
+2025.04.06      1   O    C   0.1893   1.0384      1.0646      1.3608  1.7076  10.297
+2025.04.06      1   F    H   0.0702  -1          -1           1.0722  1.1145  12.1833
+2025.04.06      1   F   Li   0.0495  -1          -1           0.9415  1.2573  15.6983
+2025.04.06      1   F    C   0.0749  -1          -1           1.6315  1.7702  12.043
+2025.04.06      1   F    O   0.1293  -1          -1           1.341   1.3773  11.4683
+2025.04.06      1  Si    H   0.1035  -1          -1           1.3977  1.3327  11.5963
+2025.04.06      1  Si   Li   0.1271   1           1           1.7156  2.009   11.5659
+2025.04.06      1  Si    C   0.5876   1.6946     -1           1.4988  1.3349  13.4198
+2025.04.06      1  Si    O   0.1836   1.2375     -1           1.7073  1.9157  10.907
+2025.04.06      1  Si    F   0.0996  -1          -1           1.5077  1.5863  13.3401
+
+
+#reaxff_angle_parameters CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.04.06      1   H    H     H         0    0        27.9213    5.8635    1.04      0         0
+2025.04.06      1   C    H     H         0    0         0         6         1.04      0         0
+2025.04.06      1   C    H     C         0    0         3.411     7.735     1.04      0         0
+2025.04.06      1   O    H     H         0    0         8.5744    3         1.0421    0         0
+2025.04.06      1   O    H     C         0    0        25         3         1.04      1         0
+2025.04.06      1   O    H     O         0    0        15         2.89      2.8774    0         0
+2025.04.06      1  Si    H     H         0    0         0.01      1         2         1         0
+2025.04.06      1  Si    H     C         0    0         2.5       1         1.25      1         0
+2025.04.06      1  Si    H     O         0    0         5         1         1.25      1         0
+2025.04.06      1  Si    H    Si         0    0         4.4216    0.8596    1         0.9624    0
+2025.04.06      1   O   Li     C         0    0         0.01      1         1         1         0
+2025.04.06      1   O   Li     O         0    0         0         1         1         1        60
+2025.04.06      1   F   Li     F         0    0        38.494     1.6737    1.3107    5.0138   85.2677
+2025.04.06      1   H    C     H         0    0        25.354     3.4508    3         0.005    70.084
+2025.04.06      1   C    C     H         0    0        14.3185    6.2977    1.153     0.5645   65.2527
+2025.04.06      1   C    C     C         0   15.4141   22.0695    1.6286    1.8089    1.7959   67.2326
+2025.04.06      1   O    C    Li         0    0         0.01      3.842     1.8902    2.0653   99.6399
+2025.04.06      1   O    C     C         0    1        59.3577    5         1.3538    1.8747   94.2903
+2025.04.06      1   O    C     O         0    1        23.9117    5         2.8723    0.0499   86.8971
+2025.04.06      1   F    C     C         0    0        44.0627    0.4803    0.6875    0.1357   35.0676
+2025.04.06      1   F    C     F         0    0        41.7871    0.4774    0.6548    0.2704   90.2886
+2025.04.06      1  Si    C     H         0    0        13.8347    2.4952    1.04      1        72.5949
+2025.04.06      1  Si    C     C         0    0        23.2816    2.747     2.2246    2.0166   70.8533
+2025.04.06      1  Si    C    Si         0    0        18.9333    1.8833    2.3646    0.2981   50.9317
+2025.04.06      1   H    O     H         0    0         9.8453    2.272     1.58      2.8635   85.8
+2025.04.06      1  Li    O    Li         0    0         6.4512    4         2.8079    1        67.5247
+2025.04.06      1   C    O     H         0    0        13.1217    4.4734    3         0.8433   70.1101
+2025.04.06      1   C    O    Li         0    0         6.7756    0.268     1         3.8836   98.9874
+2025.04.06      1   C    O     C         0    0        39.3271    5         2.7534    3.0156   49.8324
+2025.04.06      1   O    O     H         0    0        50         2         1.168     1        75.6935
+2025.04.06      1   O    O    Li         0    0        30         2         1         1        81.6233
+2025.04.06      1   O    O     C         0   68.1072   32.2258    1.7397    1.7777    0.9888   81.9029
+2025.04.06      1   O    O     O         0   50        30.4554    0.9953    1.0783    1.631    80.7324
+2025.04.06      1   F    O     O         0    0        30.3751    2.0217    2.9301    1.7756   73.0506
+2025.04.06      1   F    O     F         0    0        15.1409    1.147     2.4012    0.2045   86.4972
+2025.04.06      1  Si    O     H         0    0         6.6857    1.6689    1.04      2.5771   90
+2025.04.06      1  Si    O    Li         0    0         8.4441    2.512     1         1        62.6634
+2025.04.06      1  Si    O     O         0    0        24.3937    0.5       3         1.7208   92.1207
+2025.04.06      1  Si    O    Si         0    0         4.735     1.3544    1.04      1.4627   82.3364
+2025.04.06      1  Li    F    Li         0    0        39.5963    1.5406    1.2226    5.0016   75.9308
+2025.04.06      1   C    F     C         0    0        33.5783    0.1356    0.9612    0.2024   82.4766
+2025.04.06      1   F    F     C         0    0        25.186     1.095     0.9638    0.1315    2.034
+2025.04.06      1   H   Si     H         0    0        11.485     4.6606    1.0902    1.5647   70.7499
+2025.04.06      1   C   Si     H         0    0        14.8347    2.4952    1.04      1        72.5949
+2025.04.06      1   C   Si     C         0    0        20.9406    1.8375    2.1195    0.2981   69.9335
+2025.04.06      1   O   Si     H         0    0        40         1.8782    1.129     4        73.6998
+2025.04.06      1   O   Si     O         0    0        34.914     1.0801    2.2206    0.1632   79.5581
+2025.04.06      1   F   Si     F         0    0        38.541     1.3735    2.2216    4.9517   79.164
+2025.04.06      1  Si   Si     H         0    0        19.4239    2.3592    1         0.2029   68.5501
+2025.04.06      1  Si   Si     C         0    0        19.6964    2.0703    1.04      1.0031   69.3369
+2025.04.06      1  Si   Si     O         0    0        18.3879    5.8529    1.231     1.7361   86.3294
+2025.04.06      1  Si   Si    Si         0    0        19.5195    0.9624    1.2636    0.1      66.2921
+
+
+#reaxff_torsion_parameters CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1        V2       V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  --------  -------  ------------  ------------
+2025.04.06      1   *    H     H    *    0         0        0         0        0                  0             0
+2025.04.06      1   *    C     H    *    0         0        0         0        0                  0             0
+2025.04.06      1   H    C     C    H   -2.0697   -5.0019  -0.177    30.0252   0.434              0             0
+2025.04.06      1   C    C     C    H   -1.9002   -4.6391  -0.25     31.2596   0.1709             0             0
+2025.04.06      1   C    C     C    C   -2.2047   -4.7057  -0.25     11.5822   0.1899             0             0
+2025.04.06      1   O    C     C    H   -1        -8.1074  -0.5       8.1082   0.171              0             0
+2025.04.06      1   O    C     C    C   -1        -9       -0.5       5       -0.5                0             0
+2025.04.06      1   O    C     C    O   -1        -4.9622  -1.4477   16.6853   0.6461             0             0
+2025.04.06      1   F    C     C    C   -1.7255  -22.6501   0        42.3172   3.4546             0             0
+2025.04.06      1   F    C     C    F   -1.7255   -4.0257   0        75.5402  -0.7497             0             0
+2025.04.06      1   *    C     C    *    0         0        0         0        0                  0             0
+2025.04.06      1   *    O     H    *    0        -2.5415   0         0.1      0.02               0             0
+2025.04.06      1   H    O     C    H   -3        -4.2274  -2.4875   70.8145   0.7582             0             0
+2025.04.06      1   H    O     C    C   -1        -6.1481   1.2044   80       -0.3139             0             0
+2025.04.06      1   H    O     C    O   -3        -5.5315  -2.5      70.3345  -1                  0             0
+2025.04.06      1   C    O     C    H   -2.9807   -2.7733  -2.5      31.0191   0.6165             0             0
+2025.04.06      1   C    O     C    C   -1        -2.6326  -0.23     46.8253  -0.2848             0             0
+2025.04.06      1   C    O     C    O   -3        -4.7499  -1.2244   77.8133  -0.4738             0             0
+2025.04.06      1   O    O     C    H   -2.8      -3.6877  -1.4383   80        1                  0             0
+2025.04.06      1   O    O     C    C   -2        -9       -0.0002   20.1851   0.1601             0             0
+2025.04.06      1   O    O     C    O   -2        -9       -0.1583   20        1.5                0             0
+2025.04.06      1   C    O     O    H   -2.9759   -5.6657  -2.1289   12.8382   1                  0             0
+2025.04.06      1   C    O     O    C   -2        -4.4848   0.0002   80       -1.5                0             0
+2025.04.06      1   O    O     O    H   -1        -2.5      0.8302   -4       -0.7763             0             0
+2025.04.06      1   O    O     O    C   -1        -2.5      2.5     -25        1                  0             0
+2025.04.06      1   O    O     O    O   -1        -2.5     -2.5      -4        1                  0             0
+2025.04.06      1   *    O     O    *   -1        -5.1903   0.5511   25.415    1.133              0             0
+2025.04.06      1   *    F    Li    *   -0.0578   -0.0007   0.0336    0.6333  -0.0621             0             0
+2025.04.06      1   *    F     C    *    0        -4        4        45.8264   0.9                0             0
+2025.04.06      1   *    F     F    *    0        -4        4        45.8264   0.9                0             0
+2025.04.06      1   *   Si     H    *    0        -2.4847   0         0        0.12               0             0
+2025.04.06      1   *   Si     F    *    0        -4.7157   4.7334   44.7693   1.2361             0             0
+2025.04.06      1   H   Si    Si    H    0        -2.4426   0         0        0.064              0             0
+2025.04.06      1  Si   Si    Si    H    0        -2.4426   0         0        0.1587             0             0
+
+
+#reaxff_hydrogen-bond_parameters CHLiOFSi_Yun_2017
+
+!Version      Ref   I    J     K    Ehb    Phb3    Rhb    Thb
+!---------  -----  ---  ---  ---  -----  ------  -----  -----
+2025.04.06      1   O    H     O  -3.58    19.5   2.12   1.45
+2025.04.06      1   F    H     O  -2       19.5   2.12   1.45
+
+#reference 1
+@Author SEAMM
+@Date 2025-04-06
+ReaxFF forcefield translated from Reax format
+
+Reactive MD-force field: C/H/O/Si/Li/F force field Apr 2017
+
+
+@bibtex @article{10.1021/acs.jpclett.7b00898, 
+year = {2017}, 
+title = {{Simulation Protocol for Prediction of a Solid-Electrolyte Interphase on the Silicon-based Anodes of a Lithium-Ion Battery: ReaxFF Reactive Force Field}}, 
+author = {Yun, Kang-Seop and Pai, Sung Jin and Yeo, Byung Chul and Lee, Kwang-Ryeol and Kim, Sun-Jae and Han, Sang Soo}, 
+journal = {The Journal of Physical Chemistry Letters}, 
+issn = {1948-7185}, 
+doi = {10.1021/acs.jpclett.7b00898}, 
+pmid = {28593754}, 
+abstract = {{We propose the ReaxFF reactive force field as a simulation protocol for predicting the evolution of solid-electrolyte interphase (SEI) components such as gases (C2H4, CO, CO2, CH4, and C2H6), and inorganic (Li2CO3, Li2O, and LiF) and organic (ROLi and ROCO2Li: R = −CH3 or −C2H5) products that are generated by the chemical reactions between the anodes and liquid electrolytes. ReaxFF was developed from ab initio results, and a molecular dynamics simulation with ReaxFF realized the prediction of SEI formation under real experimental conditions and with a reasonable computational cost. We report the effects on SEI formation of different kinds of Si anodes (pristine Si and SiO x ), of the different types and compositions of various carbonate electrolytes, and of the additives. From the results, we expect that ReaxFF will be very useful for the development of novel electrolytes or additives and for further advances in Li-ion battery technology.}}, 
+pages = {2812--2818}, 
+number = {13}, 
+volume = {8}, 
+}
+#end

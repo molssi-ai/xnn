@@ -1,0 +1,199 @@
+!MolSSI forcefield 1
+
+
+#define reaxff/HOZn_ZNOH_2010
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  ----------------
+2025.04.04      1  metadata                         HOZn_ZNOH_2010
+2025.04.04      1  reaxff_general_parameters        HOZn_ZNOH_2010
+2025.04.04      1  reaxff_atomic_parameters_1-8     HOZn_ZNOH_2010
+2025.04.04      1  reaxff_atomic_parameters_9-16    HOZn_ZNOH_2010
+2025.04.04      1  reaxff_atomic_parameters_17-24   HOZn_ZNOH_2010
+2025.04.04      1  reaxff_atomic_parameters_25-32   HOZn_ZNOH_2010
+2025.04.04      1  reaxff_bond_parameters_1-8       HOZn_ZNOH_2010
+2025.04.04      1  reaxff_bond_parameters_9-16      HOZn_ZNOH_2010
+2025.04.04      1  reaxff_off-diagonal_parameters   HOZn_ZNOH_2010
+2025.04.04      1  reaxff_angle_parameters          HOZn_ZNOH_2010
+2025.04.04      1  reaxff_torsion_parameters        HOZn_ZNOH_2010
+2025.04.04      1  reaxff_hydrogen-bond_parameters  HOZn_ZNOH_2010
+
+
+#metadata HOZn_ZNOH_2010
+
+!Version      Ref   Parameter       Value   Description
+!---------  -----  ------------  ---------  --------------------------------------
+2025.04.04      1   ff_form      reaxff     The functional form of the forcefield
+2025.04.04      1   charges      qeq/reaxff How charges should be handled
+
+
+#reaxff_general_parameters HOZn_ZNOH_2010
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.04      1   BO_cutoff      0.1     Cutoff for bond order (*100)
+2025.04.04      1     Pboc,1      50       Overcoordination parameter 1
+2025.04.04      1     Pboc,2       9.5469  Overcoordination parameter 2
+2025.04.04      1     Pcoa,2      26.5405  Valency angle conjugation parameter
+2025.04.04      1     Pcoa,3       2.6962  Valency angle conjugation parameter
+2025.04.04      1     Pcoa,4       2.1365  Valency angle conjugation parameter
+2025.04.04      1     Pcot,2       2.1645  Conjugation
+2025.04.04      1      Pfe1        2.8793  Fe dimer correction?
+2025.04.04      1     Plp,1        6.0891  Valency angle/lone pair parameter
+2025.04.04      1    Povun,3      50       Overcoordination parameter
+2025.04.04      1    Povun,4       0.6991  Overcoordination parameter
+2025.04.04      1    Povun,6       1.0588  Over/undercoordination parameter 6
+2025.04.04      1    Povun,7      12.1176  Over/undercoordination parameter 7
+2025.04.04      1    Povun,8      13.3056  Over/undercoordination parameter 8
+2025.04.04      1     Ppen,2       6.929   Double bond/angle parameter
+2025.04.04      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.04.04      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.04.04      1     Ptor,2       5.7796  Torsion/BO parameter
+2025.04.04      1     Ptor,3      10       Torsion overcoordination
+2025.04.04      1     Ptor,4       1.9487  Torsion overcoordination
+2025.04.04      1    Ptrip,1     -70.5044  Triple bond stabilization parameter 1
+2025.04.04      1    Ptrip,2       4.6     Triple bond stabilisation parameter 2
+2025.04.04      1    Ptrip,3       6.8702  Triple bond stabilisation parameter
+2025.04.04      1    Ptrip,4       1.7224  Triple bond stabilisation parameter
+2025.04.04      1    Pval,10       2.0384  Valency angle parameter
+2025.04.04      1     Pval,7      33.8667  Valency undercoordination
+2025.04.04      1     Pval,8       1.8512  Valency/lone pair parameter
+2025.04.04      1     Pval,9       1.0563  Valency angle
+2025.04.04      1     PvdW,1       1.5591  vdWaals shielding
+2025.04.04      1  Rtaper,lower    0       Lower Taper-radius
+2025.04.04      1  Rtaper,upper   10       Upper Taper-radius
+2025.04.04      1      kc2        60.485   C2-correction
+2025.04.04      1   not_used_1     6.1431  Not used
+2025.04.04      1   not_used_2    -2.4837  Not used
+2025.04.04      1   not_used_3    -1.2327  Conjugation 0 (not used)
+2025.04.04      1   not_used_4     0.5     Not used
+2025.04.04      1   not_used_5    20       Not used
+2025.04.04      1   not_used_6     5       Molecular energy (not used)
+2025.04.04      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 HOZn_ZNOH_2010
+
+!Version      Ref   Center     Acore,2     C_i     Dij    Ecore,2       Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  ------  ---------  --------  --------  --------  --------
+2025.04.04      1     H              0  1.0698  0.093           0   61.6606    2.4197    3.0408    0.0003
+2025.04.04      1     O              0  0.9745  0.1             0   59.0626    0.764     3.5027    0.0021
+2025.04.04      1     Zn             0  0       0.2998          0  266.484    10.126     5.343     0.759
+
+
+#reaxff_atomic_parameters_9-16 HOZn_ZNOH_2010
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.04.04      1     H             1   0        -19.4571     0         4.2733    2.8793      0.893   -0.1
+2025.04.04      1     O             2   0.4056    -3.55      37.5       2.9       2.9225      1.245    1.0548
+2025.04.04      1     Zn            0   0         -3.0614     0.0078    2.1158    2.5791      1.8862  -1.6836
+
+
+#reaxff_atomic_parameters_17-24 HOZn_ZNOH_2010
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.04.04      1     H         -0.1             0   1.355      1            1     1             1   8.223
+2025.04.04      1     O          0.9049          0   2.389      2            4     4             6   9.73
+2025.04.04      1     Zn        -1.2             0   1.92       2            2     6.2998        2  11.5134
+
+
+#reaxff_atomic_parameters_25-32 HOZn_ZNOH_2010
+
+!Version      Ref   Center     alpha_e    beta     chi     eta    gamma    gamma,w       m    not_used_1
+!---------  -----  --------  ---------  ------  ------  ------  -------  ---------  ------  ------------
+2025.04.04      1     H              0  1.0338  3.7248  9.6093   0.8203    33.2894   1.008       121.125
+2025.04.04      1     O              0  1.0493  8.5     8.3122   1.0898    13.8449  15.999       116.077
+2025.04.04      1     Zn             0  1.0338  2.0219  5.7915   0.4828    18.3776  65.39          0
+
+
+#reaxff_bond_parameters_1-8 HOZn_ZNOH_2010
+
+!Version      Ref   I    J     13_boc    De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  -------  ----------  ----------  -------  -------  -------  -------
+2025.04.04      1   H    H          1        0      0         153.393   -0.46     6.25     6.0552   1
+2025.04.04      1   O    H          1        0      0         160       -0.5725   1.115    4.279    1
+2025.04.04      1   O    O          1      145     50.8293    142.286    0.2506   0.3451   5.5     -0.1055
+2025.04.04      1  Zn    H          1        0      0           0        0        0.5      8       -0.5
+2025.04.04      1  Zn    O          0        0      0         159.976   -0.4548   1.3099   4.6717  -0.5
+2025.04.04      1  Zn   Zn          0        0      0          38.4643  -0.6944   0.5059   6.0333  -0.2
+
+
+#reaxff_bond_parameters_9-16 HOZn_ZNOH_2010
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2    ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  -----
+2025.04.04      1   H    H         0      0     6       -0.079      0.73               1             0      0
+2025.04.04      1   O    H         0      0     6       -0.092      0.5626             0             0      0
+2025.04.04      1   O    O         9     -0.1  29.7503  -0.1225     0.6051             1             0      1
+2025.04.04      1  Zn    H        30     -0.5  50       -0.2        0.5                1             0      0
+2025.04.04      1  Zn    O        25     -0.5  35       -0.4787     0.0375             0             0      0
+2025.04.04      1  Zn   Zn        15     -0.2  16       -0.0814     0.2129             0             0      0
+
+
+#reaxff_off-diagonal_parameters HOZn_ZNOH_2010
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.04.04      1   O    H   0.0283       -1          -1      0.9215  1.2885  10.919
+2025.04.04      1  Zn    H   0.0987       -1          -1      0.1     1.8227  12.0654
+2025.04.04      1  Zn    O   0.2744       -1          -1      1.9804  2.1414   9.7703
+
+
+#reaxff_angle_parameters HOZn_ZNOH_2010
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.04.04      1   H    H     H         0         0   27.9213    5.8635    1.04      0         0
+2025.04.04      1   O    H     H         0         0    8.5744    3         1.0421    0         0
+2025.04.04      1   O    H     O         0         0   15         2.89      2.8774    0         0
+2025.04.04      1   H    O     H         0         0    9.8453    2.272     1.58      2.8635   85.8
+2025.04.04      1   O    O     H         0         0   50         2         1.168     1        75.6935
+2025.04.04      1   O    O     O         0        50   30.4554    0.9953    1.0783    1.631    80.7324
+2025.04.04      1  Zn    O     H         0         0    9.9016    2.3157    2.377     0.4543   77.5446
+2025.04.04      1  Zn    O     O         0         0   20         0.5       2         1        60
+2025.04.04      1  Zn    O    Zn         0         0   32.3525    0.2657    1.1       0.4403   37.5284
+2025.04.04      1   O   Zn     O         0         0   38.9915    0.7072    2.6162    2        10.879
+2025.04.04      1  Zn   Zn     O         0         0   30.3241    0.2697    3.0708    2        16.9624
+
+
+#reaxff_torsion_parameters HOZn_ZNOH_2010
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1        V2    V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  --------  ----  ------------  ------------
+2025.04.04      1   H    O     O    H        -1   -2.6189   2.25     -6.2288     1             0             0
+2025.04.04      1   O    O     O    H        -1   -2.5      0.4723  -12.4144    -1             0             0
+2025.04.04      1   O    O     O    O        -1   -2.5     -2.5     -25          1             0             0
+
+
+#reaxff_hydrogen-bond_parameters HOZn_ZNOH_2010
+
+!Version      Ref   I    J     K    Ehb    Phb3    Rhb    Thb
+!---------  -----  ---  ---  ---  -----  ------  -----  -----
+2025.04.04      1   O    H     O  -3.58    19.5   2.12   1.45
+
+#reference 1
+@Author SEAMM
+@Date 2025-04-04
+ReaxFF forcefield translated from Reax format
+
+Import from LAMMPS examples/reaxff/ZnOH2
+
+DATE: 2011-02-18 CONTRIBUTOR: Aidan Thompson, athomps@sandia.gov CITATION: Raymand, van Duin, Spangberg, Goddard and Hermansson, Surf Sci, 604, 741-752 (2010) COMMENT: Reactive MD-force field: water/zinc: Raymand, D.; van Duin, A. C. T.; Spangberg, D.; Goddard, W. A.; Hermansson, K. Surface Science 2010, 604, 9-10, 741-752.
+
+@bibtex @article{RAYMAND2010741,
+title = {Water adsorption on stepped ZnO surfaces from MD simulation},
+journal = {Surface Science},
+volume = {604},
+number = {9},
+pages = {741-752},
+year = {2010},
+issn = {0039-6028},
+doi = {https://doi.org/10.1016/j.susc.2009.12.012},
+url = {https://www.sciencedirect.com/science/article/pii/S0039602809007766},
+author = {David Raymand and Adri C.T. {van Duin} and Daniel Spångberg and William A. Goddard and Kersti Hermansson},
+keywords = {Zinc oxide, Water, Solid–gas interfaces, Construction and use of effective interatomic interactions, Molecular dynamics, Density-functional calculations},
+abstract = {This work presents a ReaxFF reactive force-field for use in molecular dynamics simulations of the ZnO–water system. The force-field parameters were fitted to a data-set of energies, geometries and charges derived from quantum-mechanical B3LYP calculations. The presented ReaxFF model provides a good fit to the QM reference data for the ZnO–water system that was present in the data-set. The force-field has been used to study how water is adsorbed, molecularly or dissociatively, at monolayer coverage on flat and stepped ZnO surfaces, at three different temperatures (10 K, 300 K, and 600 K). The stepped surfaces were created by introducing steps along the (0001)-direction on the (101¯0)-surface. Equilibrium between molecular and dissociated water was observed on the (101¯0) terraces, resulting in a half dissociated, half molecular water monolayer. The equilibrium between dissociated and molecular water on the surface was found to be reached quickly (<10ps). When water molecules desorb and the coverage falls, the 1:1 water–hydroxyl ratio is maintained on (101¯0) terraces, while steps remain largely hydroxylated. The results show that structures that promote hydrogen bonding are favored and that the presence of steps promotes an increased level of hydroxylation in the water monolayers.}
+}
+#end

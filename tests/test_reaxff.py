@@ -9,8 +9,9 @@ third-party reference cannot be redistributed (see the fidelity notes in the
 documentation). Also covered: EEM charge equilibration (analytic two-atom
 solution, neutrality, total-charge constraint), autograd forces against
 finite differences, rotation/translation invariance, size extensivity,
-batching, valence/torsion enumeration, trainability, library round-trips and
-config plumbing.
+batching, valence/torsion enumeration, trainability, library round-trips
+(ReaxFF-nn JSON and the SEAMM ``.frc`` format), the shipped published fields
+and config plumbing.
 """
 import math
 
@@ -22,7 +23,8 @@ from xnns.common.config import from_dict
 from xnns.common.data import AtomicDataset, collate, structure_to_graph
 from xnns.common.models import ForceStressOutput, build_model
 from xnns.ffnn.models import ReaxFF, read_ffield, template_library
-from xnns.ffnn.models.ffield import default_pair_cutoff
+from xnns.ffnn.models.ffield import (default_pair_cutoff, dedup_torsion_types,
+                                     resolve_torsion, to_forcefield)
 from xnns.ffnn.models.reaxff import (KCAL_TO_EV, KE, nonbonded_taper,
                                      reverse_edge_permutation, taper_up)
 
@@ -450,84 +452,96 @@ def test_library_json_roundtrip(tmp_path):
     assert abs(float(model2(g)["energy"][0]) - e1) < 1e-12
 
 
-def test_text_ffield_reader(tmp_path):
-    """A minimal standard ffield text library parses into the same keys."""
-    from xnns.ffnn.models.ffield import (GENERAL_PARAMS, SPECIES_LINES,
-                                         BOND_LINES, ANGLE_PARAMS,
-                                         TORSION_PARAMS)
-    lib = template_library(["C", "H"], nn=False)
-    p = lib.p
-    lines = ["! test library", f"{len(GENERAL_PARAMS)} ! general"]
-    for name in GENERAL_PARAMS:
-        lines.append(f"{p.get(name, 0.0):10.4f} ! {name}")
-    lines.append("2 ! species")
-    lines += ["!"] * (len(SPECIES_LINES) - 1)
-    for sp in ("C", "H"):
-        for il, names in enumerate(SPECIES_LINES):
-            head = f"{sp} " if il == 0 else " "
-            lines.append(head + " ".join(f"{p.get(f'{n}_{sp}', 0.0):9.4f}"
-                                         for n in names))
-    lines.append("3 ! bonds")
-    lines += ["!"] * (len(BOND_LINES) - 1)
-    for i, j, bd in ((1, 1, "C-C"), (1, 2, "C-H"), (2, 2, "H-H")):
-        for il, names in enumerate(BOND_LINES):
-            head = f"{i} {j} " if il == 0 else " "
-            lines.append(head + " ".join(f"{p.get(f'{n}_{bd}', 0.0):9.4f}"
-                                         for n in names))
-    lines.append("0 ! off-diagonal")
-    lines.append("1 ! angles")
-    lines.append("2 1 2 " + " ".join(f"{p.get(f'{n}_H-C-H', 0.0):9.4f}"
-                                     for n in ANGLE_PARAMS))
-    lines.append("1 ! torsions")
-    lines.append("0 1 1 0 " + " ".join(f"{p.get(f'{n}_X-C-C-X', 0.0):9.4f}"
-                                       for n in TORSION_PARAMS[:5]))
-    lines.append("0 ! hydrogen bonds")
-    path = tmp_path / "ffield"
-    path.write_text("\n".join(lines) + "\n")
-
+def test_frc_roundtrip_of_template_library(tmp_path):
+    """A classical library survives a trip through the .frc format exactly."""
+    lib = template_library(["C", "H", "O"], nn=False)
+    path = to_forcefield(lib, name="reaxff/template_CHO").write(tmp_path / "t.frc")
     parsed = read_ffield(str(path))
-    assert parsed.spec == ["C", "H"]
-    assert parsed.bonds == ["C-C", "C-H", "H-H"]
-    assert parsed.angs == ["H-C-H"] and parsed.torp == ["X-C-C-X"]
-    assert abs(parsed.p["Desi_C-H"] - round(p["Desi_C-H"], 4)) < 1e-9
-    assert parsed.p["acut"] == pytest.approx(1e-4)
-    model = ReaxFF(parsed, nn=False)          # constructs and evaluates
-    g = _graph([[0, 0, 0], [1.1, 0, 0]], [6, 1], model.cutoff)
-    assert torch.isfinite(model(g)["energy"]).all()
+    assert parsed.name == "reaxff/template_CHO"
+    assert parsed.spec == lib.spec and parsed.bonds == lib.bonds
+    assert parsed.angs == lib.angs and parsed.torp == lib.torp
+    assert parsed.hbs == lib.hbs
+    shared = set(lib.p) & set(parsed.p)
+    assert shared >= {k for k in lib.p if not k.startswith("n.u.")}
+    assert max(abs(lib.p[k] - parsed.p[k]) for k in shared) == 0.0
+    # the seed's own thresholds survive (published fields, with zeros in
+    # those slots, get the customary 1e-4 instead)
+    assert parsed.p["acut"] == lib.p["acut"] == 0.001
+    assert read_ffield("CHO_cho_2008").p["acut"] == pytest.approx(1e-4)
+    # and the models agree
+    g = _graph(*_methanol(), 10.0)
+    e1 = ReaxFF(lib, nn=False)(g)["energy"]
+    e2 = ReaxFF(parsed, nn=False)(g)["energy"]
+    assert float((e1 - e2).abs()) < 1e-10
+    # network weights cannot go in a .frc file
+    with pytest.raises(ValueError):
+        to_forcefield(template_library(["C", "H"], nn=True))
 
 
 def test_published_ffield_parses():
-    """The published CHO combustion field parses with the documented layout.
+    """The published CHO combustion field loads from its shipped .frc file.
 
-    Guards the text reader's column mapping against a real, externally
-    authored ``ffield`` file (the synthetic reader test above is written in
-    the reader's own conventions, so it cannot catch a swapped column).
-    Reference values are read off the file's per-column comments.
+    Guards the SEAMM-name -> ReaxFF-parameter map against a real, externally
+    authored field. Reference values are read off the file's own column
+    headers (bond and angle keys keep the file's orientation).
     """
-    import pathlib
-    path = (pathlib.Path(__file__).resolve().parents[1]
-            / "examples" / "ffnn" / "reaxff" / "ffield.reax.cho")
-    if not path.exists():
-        pytest.skip("examples/ffnn/reaxff/ffield.reax.cho not present")
-    lib = read_ffield(str(path))
-    assert lib.spec == ["C", "H", "O"]
-    assert lib.bonds == ["C-C", "C-H", "H-H", "C-O", "O-O", "H-O"]
+    lib = read_ffield("CHO_cho_2008")
+    assert lib.name == "reaxff/CHO_cho_2008"
+    assert lib.spec == ["H", "C", "O"]
+    assert set(lib.bonds) == {"H-H", "C-H", "C-C", "O-H", "O-C", "O-O"}
     assert lib.hbs == ["O-H-O"]
     p = lib.p
-    assert p["vdw1"] == pytest.approx(1.5591)          # general block
-    assert p["rosi_C"] == pytest.approx(1.3825)        # species line 1
-    assert p["gammaw_O"] == pytest.approx(7.7719)      # species line 2
-    assert p["ropp_C"] == pytest.approx(1.2104)        # species line 3
-    assert p["ovun2_H"] == pytest.approx(-15.7683)     # species line 4
-    assert p["Desi_C-H"] == pytest.approx(170.2316)    # bond line 1
-    assert p["bo1_C-C"] == pytest.approx(-0.0750)      # bond line 2
-    assert p["rvdw_C-O"] == pytest.approx(1.8523)      # off-diagonal
-    assert p["theta0_C-C-C"] == pytest.approx(67.2326)  # angle block
-    assert p["rohb_O-H-O"] == pytest.approx(1.9682)    # hbond block
-    assert p["Dehb_O-H-O"] == pytest.approx(-4.4628)
+    assert p["vdw1"] == pytest.approx(1.5591)          # general: PvdW,1
+    assert p["cutoff"] == pytest.approx(0.1)           # general: BO_cutoff
+    assert p["rosi_C"] == pytest.approx(1.3825)        # atomic: R0,alpha
+    assert p["gammaw_O"] == pytest.approx(7.7719)      # atomic: gamma,w
+    assert p["ropp_C"] == pytest.approx(1.2104)        # atomic: R0,pi-pi
+    assert p["ovun2_H"] == pytest.approx(-15.7683)     # atomic: Povun,2
+    assert p["Desi_C-H"] == pytest.approx(170.232)     # bond: De,sigma
+    assert p["bo1_C-C"] == pytest.approx(-0.0750)      # bond: Pbo_1
+    assert p["rvdw_O-C"] == pytest.approx(1.8523)      # off-diagonal: RvdW
+    assert p["theta0_C-C-C"] == pytest.approx(67.2326)  # angle: Theta0
+    assert p["rohb_O-H-O"] == pytest.approx(1.9682)    # hbond: Rhb
+    assert p["Dehb_O-H-O"] == pytest.approx(-4.4628)   # hbond: Ehb
+    # the heat increments are carried but, as in LAMMPS, not part of the energy
+    assert lib.heat_increment["C"] == pytest.approx(199.03)
+    assert "atomic_C" in p and p["atomic_C"] == pytest.approx(0.0)
     model = ReaxFF(lib, nn=False)
     g = _graph([[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]], [6, 1], model.cutoff)
     assert torch.isfinite(model(g)["energy"]).all()
+
+
+def test_all_shipped_reaxff_fields_load():
+    """Every ReaxFF field shipped with xnns parses and builds a model."""
+    from xnns.ffnn.common import list_forcefields
+    names = [n for n in list_forcefields() if n.startswith("reaxff/")]
+    assert len(names) >= 12
+    for name in names:
+        lib = read_ffield(name)
+        assert lib.spec and lib.bonds
+        ReaxFF(lib, nn=False)
+
+
+def test_torsion_types_keep_central_bond_distinct():
+    """``C-O-C-H`` and ``H-O-C-C`` are different torsions and both are kept.
+
+    Published fields list them with different parameters; only the full
+    reversal ``l-k-j-i`` is a duplicate, and the lookup prefers the reversal
+    over a central-bond swap.
+    """
+    assert dedup_torsion_types(["C-O-C-H", "H-O-C-C", "H-C-O-C"]) \
+        == ["C-O-C-H", "H-O-C-C"]
+    p = {"V2_C-O-C-H": 1.0, "V2_H-O-C-C": 2.0, "V2_X-C-C-X": 9.0}
+    torp = ["C-O-C-H", "H-O-C-C", "X-C-C-X"]
+    assert resolve_torsion(p, torp, "C-O-C-H", "V2") == 1.0
+    assert resolve_torsion(p, torp, "H-C-O-C", "V2") == 1.0    # reversal
+    assert resolve_torsion(p, torp, "C-C-O-H", "V2") == 2.0    # reversal
+    assert resolve_torsion(p, torp, "H-C-C-H", "V2") == 9.0    # wildcard
+    assert resolve_torsion(p, torp, "H-O-O-H", "V2") == 0.0
+    lib = read_ffield("CHO_cho_2008")
+    assert len(lib.torp) == 26
+    assert resolve_torsion(lib.p, lib.torp, "C-O-C-H", "V2") \
+        != resolve_torsion(lib.p, lib.torp, "H-O-C-C", "V2")
 
 
 def test_default_pair_cutoffs():
@@ -559,6 +573,12 @@ def test_from_config_and_key_translation(tmp_path):
     pos, z = _methanol()
     out = model(_graph(pos, z, model.cutoff))
     assert torch.isfinite(out["energy"]).all()
+    # a shipped .frc field by name, through the translated "frc" key
+    cfg2 = from_dict({"model": {"name": "reaxff", "frc": "CHO_cho_2008",
+                                "cutoff": 10.0}})
+    model2 = build_model(cfg2.model)
+    assert model2.species == ["H", "C", "O"]
+    assert torch.isfinite(model2(_graph(pos, z, 10.0))["energy"]).all()
 
 
 def test_dataset_training_smoke(tmp_path):

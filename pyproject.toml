@@ -54,11 +54,15 @@ examples = [
     "nbconvert",
     "nbformat",
     "openmm>=8.0",
+    "rdkit>=2023.9",
 ]
 # The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
 ani = ["torchani==2.2.4", "h5py>=3.0"]
 # The OPLS fidelity notebook and parity test compare against OpenMM.
-opls = ["openmm>=8.0"]
+# classical force fields: RDKit assigns atom types from the SMARTS templates
+# in .frc force-field files
+ffnn = ["rdkit>=2023.9"]
+opls = ["openmm>=8.0", "rdkit>=2023.9"]
 all = [
     "ase>=3.22",
     "e3nn>=0.4.4",
@@ -84,6 +88,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "xnns.dnn.models" = ["*.npz"]   # Grimme D3 reference tables (PhysNet)
+# force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
+"xnns.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 
 # ---------------------------------------------------------------------------
 # uv configuration -- reproduces the .venv the notebooks were created with.

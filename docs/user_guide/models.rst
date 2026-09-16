@@ -346,18 +346,21 @@ differentiable EEM solve (so autograd forces stay conservative). ``forward``
 additionally returns ``"charges"`` and the full per-term energy decomposition
 (``"e_bond"``, ``"e_angle"``, ``"e_vdw"``, ...).
 
-The model is fully specified by a parameter library — a standard ``ffield``
-text file or a ReaxFF-nn JSON library (:mod:`xnns.ffnn.models.ffield`) — and
-the whole functional form is differentiable, so any parameter group can be
-refit by gradient descent (``trainable=...``); in nn mode the network weights
-are always trainable. :func:`~xnns.ffnn.models.ffield.template_library`
-builds a generic seed library for training from scratch, and
-``ReaxFF.export_library()`` writes a trained force field back to a portable
-JSON file. Every energy term is verified against the published equations
+The model is fully specified by a parameter library — a published field in
+the SEAMM ``.frc`` force-field format (a dozen ship with xnns, e.g.
+``ReaxFF("CHO_cho_2008")``; see :ref:`howto-forcefield-files`) or a
+ReaxFF-nn JSON library (:mod:`xnns.ffnn.models.ffield`) — and the whole
+functional form is differentiable, so any parameter group can be refit by
+gradient descent (``trainable=...``); in nn mode the network weights are
+always trainable. :func:`~xnns.ffnn.models.ffield.template_library` builds a
+generic seed library for training from scratch, and
+``ReaxFF.export_library()`` writes a trained force field back out — as a
+``.frc`` file for a classical field, or as JSON when it carries network
+weights. Every energy term is verified against the published equations
 (see :ref:`fidelity` for why no third-party comparison is distributed).
 
 Key options (defaults in parentheses): ``ffield`` (required), the parameter
-library path; ``cutoff`` (10.0), the nonbonded vdW/Coulomb/EEM cutoff and
+library — a shipped field by name, a ``.frc`` path or a JSON path; ``cutoff`` (10.0), the nonbonded vdW/Coulomb/EEM cutoff and
 neighbor-list radius; ``species`` (all in the library); ``nn`` (on iff the
 library carries network weights); ``messages`` (the library's value), the
 message-passing steps; ``hb_short``/``hb_long`` (6.75/7.5), the
@@ -382,27 +385,36 @@ additionally returns ``"charges"`` and the per-term decomposition
 
 Unlike ReaxFF, OPLS needs a fixed molecular topology: a
 :class:`~xnns.ffnn.models.topology.MolecularTopology` holds the per-atom
-OPLS type names and the bond list (guessed from covalent radii by
-:func:`~xnns.ffnn.models.topology.guess_bonds` if not given) and derives the
-angles, dihedrals, exclusions and 1,4 pairs. The topology binds to the model
-instance, so every structure the model evaluates — a training batch of
-conformers, an MD trajectory — is a conformation of that system; bonded
+OPLS type names and the bond list and derives the angles, dihedrals,
+exclusions and 1,4 pairs. ``OPLS.from_atoms(atoms, "oplsaa")`` builds all of
+it from a structure: bonds are perceived with RDKit and the atom types are
+assigned from the **SMARTS templates** the parameter file carries
+(:func:`~xnns.ffnn.common.typing.assign_atom_types`), so the force field's
+own type names never have to be spelled out. The topology binds to the
+model instance, so every structure the model evaluates — a training batch
+of conformers, an MD trajectory — is a conformation of that system; bonded
 terms use minimum-image displacements, so molecules may wrap across periodic
-boundaries. Parameters come from an :class:`~xnns.ffnn.models.oplslib.OPLSLibrary`:
-built-in curated sets (``"oplsaa"``, ``"oplsaa-1996"`` with the paper's
-original alkane torsions, ``"lopls"``), the native JSON format, or GROMACS
-``oplsaa.ff``-style ``.itp`` files (translated at load time: kJ/mol to
-kcal/mol, Ryckaert-Bellemans to Fourier torsions). Any parameter group can
-be refit by gradient descent (``trainable=("dihedral_v", "charge", ...)``),
-several models (different molecules) can share one
+boundaries. Parameters come from an :class:`~xnns.ffnn.models.oplslib.OPLSLibrary`
+read from a SEAMM ``.frc`` force-field file (:ref:`howto-forcefield-files`):
+the OPLS-AA distribution ships with xnns (``"oplsaa"``; ``"CL&P"`` and
+``"oplsaa+"`` add the ionic-liquid extension, loadable with
+``strict=False`` since their tabulated ``PF6-`` angle is not implemented),
+together with ``"oplsaa-1996"`` (the paper's original alkane and alcohol
+torsions, which reproduce its Table 1) and ``"lopls"``; the native JSON
+format round-trips trained parameters. Any parameter group can be refit by
+gradient descent (``trainable=("dihedral_v", "charge", ...)``), several
+models (different molecules) can share one
 :class:`~xnns.ffnn.models.opls.OPLSForceField` to fit transferable
 parameters jointly, and ``export_library()`` writes the trained values back
-to a portable JSON library. The implementation is verified against OpenMM
-to ~1e-7 kJ/mol and against Table 1 of the 1996 paper (see :ref:`fidelity`).
+to a ``.frc`` file (``save_frc``) or JSON. The implementation is verified
+against OpenMM to ~1e-7 kJ/mol and against Table 1 of the 1996 paper (see
+:ref:`fidelity`).
 
 Key options (defaults in parentheses): ``library`` (required), the parameter
-source; ``topology`` (required), a topology JSON path or inline ``types`` +
-``bonds`` (+ ``impropers``/``improper_keys``); ``cutoff`` (10.0), the
+source (a shipped variant name, a ``.frc`` path or a JSON path);
+``topology`` (required), a topology JSON path or inline ``types`` + ``bonds``
+(+ ``impropers``; improper parameters resolve by class pattern, or are placed
+automatically at trigonal centers); ``cutoff`` (10.0), the
 Lennard-Jones/Coulomb cutoff and neighbor-list radius (1,4 pairs are
 cutoff-independent); ``switch_width`` (0.0), a quintic switching window at
 the cutoff; ``fudge_lj``/``fudge_qq`` (the library's, 0.5 for OPLS), the 1,4
