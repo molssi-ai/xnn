@@ -8,6 +8,19 @@ the next one, `#define` sections compose named force-field variants out of
 labelled parameter sections, and `#templates` carries the SMARTS patterns that
 assign atom types to a structure.
 
+## Format version
+
+The trailing number of the header line is the **format version**: the
+version of the file grammar, not of the parameters. `!MolSSI forcefield 1`
+means format version 1, which is the current and so far only version SEAMM
+has published; every file in this directory declares it, and it is the
+version `xnn.ffnn.common.frc` implements and writes
+(`FRC_FORMAT_VERSION`). The reader exposes it as `FrcFile.format_version`
+and warns if a file declares a newer number. Parameter versions are a
+separate thing: every data row and every `#define` row carries a `Version`
+column (a date such as `2023.01.29` or a dotted number), and the reader
+always uses the newest version of each entry.
+
 ## Vendored from SEAMM (BSD-3-Clause)
 
 `oplsaa.frc` and everything under `reaxff/` are copied verbatim from
@@ -16,8 +29,14 @@ assign atom types to a structure.
     commit 764a20139712834a9266dc069f7abda1a4652efa (2025-05-26)
 
 and are redistributed under the BSD-3-Clause license of that project, see
-`LICENSE-SEAMM`. The scientific provenance of each parameter set is recorded
-in the `#reference` sections of the files themselves.
+`LICENSE-SEAMM`. That commit is the latest one touching SEAMM's data
+directory: on 2026-09-16 every vendored file was checked byte-for-byte
+(git blob hash) against the `main` branch and found identical, so these are
+the current SEAMM versions, all format version 1. To re-check, compare the
+files against
+`https://api.github.com/repos/molssi-seamm/forcefield_step/contents/forcefield_step/data`.
+The scientific provenance of each parameter set is recorded in the
+`#reference` sections of the files themselves.
 
 | file | `#define` names | contents |
 |---|---|---|
