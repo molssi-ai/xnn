@@ -12,9 +12,17 @@ structure (see :mod:`xnn.ffnn.common.typing`).
 
 Grammar
 -------
-A file opens with a ``!MolSSI forcefield 1`` line (older files say
-``!BIOSYM``). Everything else is organised in sections that start at a line
-beginning with ``#`` and run to the next such line::
+A file opens with a ``!MolSSI forcefield 1`` line: the word after ``!`` names
+the file's dialect (``MolSSI`` today, ``BIOSYM`` in the Biosym-era files the
+format descends from), and the trailing number is the **format version**,
+that is the version of the file grammar, not of the parameters inside. The
+current and only published format version is 1, which is what this module
+implements and writes (:data:`FRC_FORMAT_VERSION`); a file declaring a newer
+number is still parsed, with a warning. Parameter versions live elsewhere: in
+the ``Version`` column of every data row and ``#define`` row (a date or a
+dotted number), and the reader always keeps the newest one per key.
+Everything else is organised in sections that start at a line beginning with
+``#`` and run to the next such line::
 
     #<kind> <label>            e.g.  #quadratic_bond oplsaa
 
@@ -72,7 +80,30 @@ except ImportError:  # pragma: no cover - packaging ships with setuptools
 
 logger = logging.getLogger(__name__)
 
-FRC_HEADER = "!MolSSI forcefield 1"
+FRC_FORMAT_VERSION = 1
+"""The ``.frc`` format version this module reads and writes (the trailing
+number of the ``!MolSSI forcefield 1`` header). SEAMM has published only
+version 1 so far; every file shipped in :mod:`xnn.ffnn.data` declares it."""
+FRC_HEADER = f"!MolSSI forcefield {FRC_FORMAT_VERSION}"
+
+
+def parse_header(line: str) -> tuple[str, str, Optional[int]]:
+    """Split a ``!<dialect> <kind> <version>`` header line.
+
+    Returns ``(dialect, kind, version)``, e.g. ``("MolSSI", "forcefield", 1)``
+    for the standard header or ``("BIOSYM", "forcefield", 1)`` for a legacy
+    Biosym file. Missing or non-numeric parts come back as ``""`` / ``None``.
+    """
+    words = line.strip()[1:].split() if line.strip().startswith("!") else []
+    dialect = words[0] if words else ""
+    kind = words[1] if len(words) > 1 else ""
+    version: Optional[int] = None
+    if len(words) > 2:
+        try:
+            version = int(words[2])
+        except ValueError:
+            version = None
+    return dialect, kind, version
 WILDCARD = "*"
 
 
@@ -658,7 +689,13 @@ class FrcFile:
     path : Path
         The top-level file.
     header : str
-        The first line.
+        The first line, verbatim.
+    header_dialect : str
+        The word after ``!`` in the header (``"MolSSI"``, or ``"BIOSYM"`` for
+        legacy files).
+    format_version : int or None
+        The format version declared by the header (the trailing number, 1 for
+        every current file); ``None`` if the header carries no number.
     sections : dict
         ``(kind, label) -> Section`` for every parameter section read.
     defines : dict
@@ -676,6 +713,8 @@ class FrcFile:
         self.path = Path(path)
         self.include_dirs = [Path(d) for d in include_dirs]
         self.header = ""
+        self.header_dialect = ""
+        self.format_version: Optional[int] = None
         self.version_lines: list[str] = []
         self.sections: dict[tuple, Section] = {}
         self.defines: dict[str, Define] = {}
@@ -731,9 +770,22 @@ class FrcFile:
         lines = path.read_text(encoding="utf-8").splitlines()
         if top:
             self.header = lines[0].strip() if lines else ""
-            if not self.header.startswith("!"):
-                logger.warning("%s: expected a '!MolSSI forcefield 1' header, "
-                               "got %r", path, self.header)
+            self.header_dialect, kind, self.format_version = parse_header(self.header)
+            if not self.header.startswith("!") or kind != "forcefield":
+                logger.warning("%s: expected a '%s' header, got %r",
+                               path, FRC_HEADER, self.header)
+            elif self.format_version is None:
+                logger.warning("%s: header %r carries no format version; "
+                               "assuming version %d", path, self.header,
+                               FRC_FORMAT_VERSION)
+            elif self.format_version > FRC_FORMAT_VERSION:
+                logger.warning("%s declares .frc format version %d, newer than "
+                               "the version %d this reader implements; parsing "
+                               "it as version %d", path, self.format_version,
+                               FRC_FORMAT_VERSION, FRC_FORMAT_VERSION)
+            else:
+                logger.debug("%s: %s forcefield file, format version %d",
+                             path, self.header_dialect, self.format_version)
         start = 1 if top else 0
         # split into blocks at '#' lines
         i = start
