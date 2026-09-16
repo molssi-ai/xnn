@@ -286,14 +286,18 @@ reactive force field of van Duin *et al.* (*J. Phys. Chem. A* 105, 9396,
 standard form reviewed by Senftle *et al.* 2016) and the machine-learned
 ReaxFF-nn variant (Guo *et al.*, *Comput. Mater. Sci.* 172, 109393, 2020;
 Xue *et al.*, *PCCP* 23, 19457, 2021), including the conventions required to
-evaluate published parameter libraries (``ffield`` text and ReaxFF-nn JSON):
+evaluate published parameter libraries (SEAMM ``.frc`` files and ReaxFF-nn
+JSON):
 kcal/mol units and their per-term application rules, off-diagonal
 combination rules, torsion wildcards, hydrogen-bond defaults, and the
 bond-order switching behavior the libraries were trained under.
 
 The classical evaluation was additionally cross-checked against standalone
 LAMMPS ``pair_style reaxff`` on the published C/H/O combustion field
-(Chenoweth *et al.* 2008, read from the standard ``ffield`` text format):
+(Chenoweth *et al.* 2008; xnns ships SEAMM's ``.frc`` translation of it,
+which rounds eight bond-energy parameters to three decimals -- ``De`` values
+differ from the LAMMPS ``ffield.reax.cho`` by up to 4e-4 kcal/mol, about
+3e-5 eV on a small molecule, and nothing else differs):
 per-term energies agree at the level set by the two codes' different
 bond-list truncation conventions (nonbonded van der Waals and Coulomb terms
 to ~1e-6 eV; bond, angle, and total energies to ~0.1 percent), and forces
@@ -354,10 +358,16 @@ established two independent ways:
   exactly. The hexane gauche-trans gap of the built-in ``"lopls"`` library
   matches the published refit (~2 kJ/mol vs OPLS-AA's ~5).
 
-Documented conventions: the built-in ``"oplsaa"`` set carries the alkane
-torsions of the standard OPLS-AA distribution (a late-1999 revision by the
-Jorgensen lab); ``"oplsaa-1996"`` restores the paper's original values,
-which are what Table 1 was computed with. Parameters use the thermochemical
+Documented conventions: ``"oplsaa"`` is SEAMM's OPLS-AA distribution, whose
+alkane torsions are the late-1999 revision by the Jorgensen lab and whose
+``H-C-O-H`` torsion (``V3`` = 0.352 kcal/mol) and ``C-C-C-O`` torsion differ
+from the 1996 paper as well; ``"oplsaa-1996"`` restores the paper's values
+(alkanes from Supporting Information Table 7, ``H-C-O-H`` ``V3`` = 0.45 and
+``C-C-C-O`` as distributed with GROMACS), which are what Table 1 was computed
+with -- with them every Table 1 entry is reproduced to 0.01 kcal/mol. Atom
+types are assigned from the file's SMARTS templates, so the SEAMM type names
+(``opls_80`` for an alkane CH3 carbon, not GROMACS' ``opls_135``) never need
+to be known. Parameters use the thermochemical
 calorie (4.184 kJ exactly) and the CODATA Coulomb constant, matching the
 kJ-based ecosystem (BOSS/GROMACS/OpenMM) in which OPLS parameters are
 distributed — ReaxFF keeps its own historical Fortran-era constants for

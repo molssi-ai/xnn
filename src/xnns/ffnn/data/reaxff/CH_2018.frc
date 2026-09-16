@@ -1,0 +1,162 @@
+!MolSSI forcefield 1
+
+
+#define reaxff/CH_2018
+
+!Version      Ref  Section                         Label
+!---------  -----  ------------------------------  -----------------
+2025.03.24      1  metadata                        CH_2018
+2025.03.24      1  reaxff_general_parameters       CH_2018
+2025.03.24      1  reaxff_atomic_parameters_1-8    CH_2018
+2025.03.24      1  reaxff_atomic_parameters_9-16   CH_2018
+2025.03.24      1  reaxff_atomic_parameters_17-24  CH_2018
+2025.03.24      1  reaxff_atomic_parameters_25-32  CH_2018
+2025.03.24      1  reaxff_bond_parameters_1-8      CH_2018
+2025.03.24      1  reaxff_bond_parameters_9-16     CH_2018
+2025.03.24      1  reaxff_off-diagonal_parameters  CH_2018
+2025.03.24      1  reaxff_angle_parameters         CH_2018
+2025.03.24      1  reaxff_torsion_parameters       CH_2018
+
+
+#metadata CH_2018
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.03.24      1   ff_form        reaxff  The functional form of the forcefield
+2025.03.24      1   charges        none     How charges should be handled
+
+
+#reaxff_general_parameters CH_2018
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.03.24      1   BO_cutoff      0.1     Cutoff for bond order (*100)
+2025.03.24      1     Pboc,1      50       Overcoordination parameter 1
+2025.03.24      1     Pboc,2       9.5469  Overcoordination parameter 2
+2025.03.24      1     Pcoa,2      26.5405  Valency angle conjugation parameter
+2025.03.24      1     Pcoa,3       2.6962  Valency angle conjugation parameter
+2025.03.24      1     Pcoa,4       2.1365  Valency angle conjugation parameter
+2025.03.24      1     Pcot,2       2.1645  Conjugation
+2025.03.24      1      Pfe1        0       Fe dimer correction?
+2025.03.24      1     Plp,1        6.0891  Valency angle/lone pair parameter
+2025.03.24      1    Povun,3      50       Overcoordination parameter
+2025.03.24      1    Povun,4       0.6991  Overcoordination parameter
+2025.03.24      1    Povun,6       1.0588  Over/undercoordination parameter 6
+2025.03.24      1    Povun,7      12.1176  Over/undercoordination parameter 7
+2025.03.24      1    Povun,8      13.3056  Over/undercoordination parameter 8
+2025.03.24      1     Ppen,2       6.929   Double bond/angle parameter
+2025.03.24      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.03.24      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.03.24      1     Ptor,2       5.7796  Torsion/BO parameter
+2025.03.24      1     Ptor,3      10       Torsion overcoordination
+2025.03.24      1     Ptor,4       1.9487  Torsion overcoordination
+2025.03.24      1    Ptrip,1     -70.1292  Triple bond stabilization parameter 1
+2025.03.24      1    Ptrip,2       4.6     Triple bond stabilisation parameter 2
+2025.03.24      1    Ptrip,3       6.663   Triple bond stabilisation parameter
+2025.03.24      1    Ptrip,4       1.5105  Triple bond stabilisation parameter
+2025.03.24      1    Pval,10       2.0384  Valency angle parameter
+2025.03.24      1     Pval,7      33.8667  Valency undercoordination
+2025.03.24      1     Pval,8       1.8512  Valency/lone pair parameter
+2025.03.24      1     Pval,9       1.0563  Valency angle
+2025.03.24      1     PvdW,1       1.5591  vdWaals shielding
+2025.03.24      1  Rtaper,lower    0       Lower Taper-radius
+2025.03.24      1  Rtaper,upper    7       Upper Taper-radius
+2025.03.24      1      kc2        70       C2-correction
+2025.03.24      1   not_used_1     6.1431  Not used
+2025.03.24      1   not_used_2     0       Not used
+2025.03.24      1   not_used_3     0       Conjugation 0 (not used)
+2025.03.24      1   not_used_4     0       Not used
+2025.03.24      1   not_used_5     0       Not used
+2025.03.24      1   not_used_6     0       Molecular energy (not used)
+2025.03.24      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 CH_2018
+
+!Version      Ref   Center     Acore,2     C_i     Dij    Ecore,2       Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  ------  ---------  --------  --------  --------  --------
+2025.03.24      1     H         9.1813  1.0698  0.0531     0.2395   62.4879   10.0956    1.7831    1.5343
+2025.03.24      1     C        10.761   0.8563  0.2705     0.934   199.03     34.7987   25.5946   33.8858
+
+
+#reaxff_atomic_parameters_9-16 CH_2018
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.03.24      1     H             1        0   -39.1433     0              2    1.4937      0.8431  -0.1
+2025.03.24      1     C             0        0    -3.2763    33.2433         4    1.1829      1.5807   1.3561
+
+
+#reaxff_atomic_parameters_17-24 CH_2018
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.03.24      1     H         -0.1        1.473   1.7993      1            1          1        1   5.1365
+2025.03.24      1     C          1.2857     1.8737  2.1339      4            4          4        4   7.0578
+
+
+#reaxff_atomic_parameters_25-32 CH_2018
+
+!Version      Ref   Center     alpha_e    beta    chi    eta    gamma    gamma,w       m    not_used_1
+!---------  -----  --------  ---------  ------  -----  -----  -------  ---------  ------  ------------
+2025.03.24      1     H              0  1.0338      1      7   1.0206     2.3597   1.008      121.125
+2025.03.24      1     C              0  1.0564      1      7   0.9        2.203   12           79.5548
+
+
+#reaxff_bond_parameters_1-8 CH_2018
+
+!Version      Ref   I    J     13_boc    De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  -------  ----------  ----------  -------  -------  -------  -------
+2025.03.24      1   H    H          1   0           0          166.993  -0.2894  22.4216   5.025    1
+2025.03.24      1   C    H          1   0           0          142.279  -0.791    8.9091   9.1526   1
+2025.03.24      1   C    C          1  78.5316     96.1991     143.897  -0.6337   1.0466   7.4059  -0.6287
+
+
+#reaxff_bond_parameters_9-16 CH_2018
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2    ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  -----
+2025.03.24      1   H    H    0        0        9       -0.1025     0.7986             1             0      0
+2025.03.24      1   C    H    0        0        7.6804  -0.1759     0.6354             1             0      0
+2025.03.24      1   C    C    8.3354  -1.0884  19.6513  -0.141      0.4644             1             0      1
+
+
+#reaxff_off-diagonal_parameters CH_2018
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.03.24      1   C    H   0.0384       -1          -1      1.4872  1.4571   8.0036
+
+
+#reaxff_angle_parameters CH_2018
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.03.24      1   H    H     H    0         0        27.9213    5.8635    1.04      0         0
+2025.03.24      1   C    H     H    0         0        40         1         9.0719    3.2849    0
+2025.03.24      1   C    H     C    0         0        33.4427    5.0679   10         1.1188    0
+2025.03.24      1   H    C     H    0         0        32.2568    1.7885    9.976     2.1528   70.6653
+2025.03.24      1   C    C     H    0         0         8.8776    9.16      4.3449    0.3144   65.9137
+2025.03.24      1   C    C     C   -0.9012   18.8775   26.8666    1.3549    1.8087    4.6851   66.993
+
+
+#reaxff_torsion_parameters CH_2018
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1       V2      V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  -------  ------  ------------  ------------
+2025.03.24      1   *    H     H    *    0         0        0        0       0                  0             0
+2025.03.24      1   *    C     H    *    0         0        0        0       0                  0             0
+2025.03.24      1   H    C     C    H   -7.8729   -2.9569   0.1629  22.7282  0.3893             0             0
+2025.03.24      1   C    C     C    H   -2.0485   -3.8205  -0.4619  27.883   0.2611             0             0
+2025.03.24      1   C    C     C    C   -1.49     -3.763    0.05    17.1779  0.1145             0             0
+2025.03.24      1   *    C     C    *   -2        -4        0       50       0.3                0             0
+
+#reference 1
+@Author SEAMM
+@Date 2025-03-24
+ReaxFF forcefield translated from Reax format
+
+DATE: 2017-11-20 CONTRIBUTOR: Michal Kanski michal.kanski@uj.edu.pl CITATION: Michal Kanski, Dawid Maciazek, Zbigniew Postawa, Adri C.T. van Duin, Chowdhury Ashraf, and Barbara J. Garrison Development of a Charge-Implicit ReaxFF Potential for Hydrocarbon Systems, J. Phys. Chem. Lett., 2018, 9, pp 359–363,  DOI: 10.1021/acs.jpclett.7b03155
+
+
+#end

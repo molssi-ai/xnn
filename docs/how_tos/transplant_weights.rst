@@ -83,14 +83,16 @@ PhysNet weights back into the original TF1 graph and propagates both engines
 through the same NVE trajectory in lock step.
 
 The classical force fields need no transplant machinery at all: the force
-field *is* its parameter library. :class:`~xnns.ffnn.models.reaxff.ReaxFF`
-loads ``ffield`` text and ReaxFF-nn JSON libraries directly, and
-``ReaxFF.export_library()`` writes trained parameters back out in the same
-portable format. :class:`~xnns.ffnn.models.opls.OPLS` likewise loads its
-built-in sets, native JSON libraries, and GROMACS ``oplsaa.ff``-style
-``.itp`` files (translated to OPLS conventions at load time), and
-``OPLS.export_library()`` round-trips trained parameters through the native
-JSON format.
+field *is* its parameter library, and the library format is the standard
+SEAMM ``.frc`` force-field file (:ref:`howto-forcefield-files`).
+:class:`~xnns.ffnn.models.reaxff.ReaxFF` loads the published fields shipped
+with xnns and ReaxFF-nn JSON libraries directly, and
+``ReaxFF.export_library()`` writes trained parameters back out as ``.frc``
+(classical) or JSON (with network weights).
+:class:`~xnns.ffnn.models.opls.OPLS` likewise loads the OPLS-AA
+distribution and its variants from ``.frc`` files -- typing structures with
+the SMARTS templates those files carry -- and ``OPLS.export_library()``
+round-trips trained parameters through ``save_frc`` or the native JSON.
 
 Tests
 =====

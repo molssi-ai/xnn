@@ -18,6 +18,7 @@ see :ref:`background`, and for complete reference information see the
    benchmark_models
    use_upstream_configs
    ase_md
+   forcefield_files
    export_lammps
    transplant_weights
    run_examples

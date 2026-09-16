@@ -177,7 +177,9 @@ class MolecularTopology:
         impropers : sequence of (int, int, int, int), optional
             Improper dihedrals, in evaluation order.
         improper_keys : sequence of str, optional
-            Improper type key per improper (same length as ``impropers``).
+            Exact improper type key per improper (same length as
+            ``impropers``). Leave empty to let the force field resolve each
+            improper from the classes of its atoms (center third).
 
         Returns
         -------
@@ -208,10 +210,11 @@ class MolecularTopology:
             norm_bonds.append(key)
         norm_bonds.sort()
 
-        if len(impropers) != len(improper_keys):
+        if improper_keys and len(impropers) != len(improper_keys):
             raise ValueError("impropers and improper_keys must have the same "
                              f"length (got {len(impropers)} and "
-                             f"{len(improper_keys)})")
+                             f"{len(improper_keys)}); leave improper_keys "
+                             "empty to resolve impropers by atom class")
 
         neighbors: list[list[int]] = [[] for _ in range(n)]
         for i, j in norm_bonds:
@@ -259,11 +262,12 @@ class MolecularTopology:
                    exclusions=sorted(excl), pairs14=sorted(pairs14))
 
     @classmethod
-    def from_ase(cls, atoms, types: Sequence[str],
+    def from_ase(cls, atoms, types: Optional[Sequence[str]] = None,
                  bonds: Optional[Sequence[Sequence[int]]] = None,
                  scale: float = 1.2,
                  impropers: Sequence[Sequence[int]] = (),
-                 improper_keys: Sequence[str] = ()) -> "MolecularTopology":
+                 improper_keys: Sequence[str] = (), *,
+                 forcefield=None, charge: int = 0) -> "MolecularTopology":
         """Build a topology for an ASE ``Atoms`` object.
 
         Parameters
@@ -271,15 +275,23 @@ class MolecularTopology:
         atoms : ase.Atoms
             The structure (used for positions, atomic numbers, and the cell
             when bonds are guessed).
-        types : sequence of str
-            Per-atom type names, in ``atoms`` order.
+        types : sequence of str, optional
+            Per-atom type names, in ``atoms`` order. When omitted,
+            ``forcefield`` must be given and the types are assigned from its
+            SMARTS templates (:func:`~xnns.ffnn.common.typing.assign_atom_types`).
         bonds : sequence of (int, int), optional
-            Explicit bond list; when omitted, bonds are guessed with
-            :func:`guess_bonds`.
+            Explicit bond list; when omitted, bonds are perceived by RDKit
+            together with the typing when ``forcefield`` is given, else
+            guessed from covalent radii with :func:`guess_bonds`.
         scale : float, optional
             Covalent-radius multiplier for bond guessing, by default 1.2.
         impropers, improper_keys : sequence, optional
             Improper dihedrals and their type keys (see :meth:`from_bonds`).
+        forcefield : ForceField, OPLSLibrary or str, optional
+            Source of typing templates (a resolved force field, a library
+            read from a ``.frc`` file, or a spec such as ``"oplsaa"``).
+        charge : int, optional
+            Total charge, for bond-order perception.
 
         Returns
         -------
@@ -289,8 +301,18 @@ class MolecularTopology:
         Raises
         ------
         ValueError
-            If ``types`` does not match the number of atoms.
+            If ``types`` does not match the number of atoms, or neither
+            ``types`` nor ``forcefield`` is given.
         """
+        if types is None:
+            if forcefield is None:
+                raise ValueError("give per-atom types, or a forcefield whose "
+                                 "templates assign them")
+            from ..common.typing import assign_atom_types, perceive_bonds
+            types, mol = assign_atom_types(atoms, forcefield, charge=charge,
+                                           bonds=bonds, return_mol=True)
+            if bonds is None:
+                bonds = perceive_bonds(mol)
         if len(types) != len(atoms):
             raise ValueError(f"got {len(types)} types for {len(atoms)} atoms")
         if bonds is None:

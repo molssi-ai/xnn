@@ -60,9 +60,9 @@ from xnns.common.data import AtomicGraph
 from xnns.common.models import InteratomicPotential, register_model
 from xnns.common.models.ops import scatter_sum
 
-from .oplslib import (OPLSLibrary, read_opls, builtin_library,
-                      resolve_bond_type, resolve_angle_type,
-                      resolve_dihedral_type, KCAL_TO_EV)
+from .oplslib import (OPLSLibrary, read_opls, resolve_bond_type,
+                      resolve_angle_type, resolve_dihedral_type,
+                      resolve_improper_type, KCAL_TO_EV)
 from .topology import MolecularTopology, read_topology
 
 # Coulomb constant e^2 / (4 pi eps_0) in eV * Angstrom: the OpenMM/CODATA
@@ -84,8 +84,10 @@ def _as_library(source: Union[OPLSLibrary, str, Path]) -> OPLSLibrary:
     Parameters
     ----------
     source : OPLSLibrary, str or Path
-        A parsed library, a built-in set name (``"oplsaa"``, ``"lopls"``),
-        or a path (native JSON / GROMACS ``.itp`` source).
+        A parsed library, or anything :func:`~xnns.ffnn.models.oplslib.read_opls`
+        accepts: a built-in variant name (``"oplsaa"``, ``"oplsaa-1996"``,
+        ``"lopls"``, ``"CL&P"``), a ``.frc`` path (``"file.frc:variant"`` to
+        pick one of several), or a native JSON path.
 
     Returns
     -------
@@ -94,10 +96,7 @@ def _as_library(source: Union[OPLSLibrary, str, Path]) -> OPLSLibrary:
     """
     if isinstance(source, OPLSLibrary):
         return source
-    if isinstance(source, str) and source.lower().replace("-", "").replace(
-            "_", "") in ("oplsaa", "oplsaa1996", "lopls"):
-        return builtin_library(source)
-    return read_opls(source)
+    return read_opls(str(source))
 
 
 def _geometric_mean(x: Tensor, y: Tensor) -> Tensor:
@@ -176,7 +175,14 @@ class OPLSForceField(nn.Module):
 
         self.type_names = list(lib.atom_types)
         self._type_index = {n: i for i, n in enumerate(self.type_names)}
-        self.type_cls = [lib.atom_types[n]["cls"] for n in self.type_names]
+        # per-term equivalence classes (a .frc equivalence table may point a
+        # type at different classes for bonds, angles, torsions and oops)
+        self.type_cls = [lib.cls(n, "bond") for n in self.type_names]
+        self.type_cls_angle = [lib.cls(n, "angle") for n in self.type_names]
+        self.type_cls_torsion = [lib.cls(n, "torsion") for n in self.type_names]
+        self.type_cls_oop = [lib.cls(n, "oop") for n in self.type_names]
+        self.templates = dict(lib.templates)
+        self.fragments = dict(lib.fragments)
         at = [lib.atom_types[n] for n in self.type_names]
         self.register_buffer("type_z", torch.tensor(
             [int(a["element"]) for a in at], dtype=torch.long))
@@ -194,6 +200,7 @@ class OPLSForceField(nn.Module):
         self._angle_index = {k: i for i, k in enumerate(self.angle_keys)}
         self._dihedral_index = {k: i for i, k in
                                 enumerate(self.dihedral_keys)}
+        self._improper_types = dict(lib.improper_types)
         self._improper_index = {k: i for i, k in
                                 enumerate(self.improper_keys)}
 
@@ -321,13 +328,17 @@ class OPLSForceField(nn.Module):
                            f"{self.name!r}")
         return self._dihedral_index[key]
 
-    def resolve_improper(self, key: str) -> int:
-        """Improper-type row for the exact key ``key``.
+    def resolve_improper(self, *args) -> int:
+        """Improper-type row, by exact key or by class quadruple.
 
         Parameters
         ----------
-        key : str
-            The improper type key (e.g. ``"Z-CM-X-Y"``).
+        *args : str
+            Either one opaque key (``"Z-CM-X-Y"``, from a topology's
+            ``improper_keys``), or four atom classes ``i, j, k, l`` with
+            ``k`` the trigonal center, matched against the library's
+            ``"I-J-K-L"`` patterns (``X`` wildcards) in SEAMM's precedence
+            order (:func:`~xnns.ffnn.models.oplslib.resolve_improper_type`).
 
         Returns
         -------
@@ -337,12 +348,24 @@ class OPLSForceField(nn.Module):
         Raises
         ------
         KeyError
-            If the library has no such improper type.
+            If nothing in the library matches.
         """
-        if key not in self._improper_index:
-            raise KeyError(f"no improper type {key!r} in library "
-                           f"{self.name!r}")
+        if len(args) == 1:
+            key = args[0]
+            if key not in self._improper_index:
+                raise KeyError(f"no improper type {key!r} in library "
+                               f"{self.name!r}")
+            return self._improper_index[key]
+        i, j, k, l = args
+        key = resolve_improper_type(self._improper_types, i, j, k, l)
+        if key is None:
+            raise KeyError(f"no improper type for {i}-{j}-{k}-{l} (center "
+                           f"{k}) in library {self.name!r}")
         return self._improper_index[key]
+
+    def improper_defined(self, i: str, j: str, k: str, l: str) -> bool:
+        """Whether an improper pattern exists for the class quadruple."""
+        return resolve_improper_type(self._improper_types, i, j, k, l) is not None
 
     # ------------------------------------------------------------------
     # export
@@ -361,7 +384,12 @@ class OPLSForceField(nn.Module):
         atom_types = {}
         for i, name in enumerate(self.type_names):
             atom_types[name] = {
-                "cls": self.type_cls[i], "element": int(self.type_z[i]),
+                "cls": self.type_cls[i], "cls_nonbond": name,
+                "cls_bond": self.type_cls[i],
+                "cls_angle": self.type_cls_angle[i],
+                "cls_torsion": self.type_cls_torsion[i],
+                "cls_oop": self.type_cls_oop[i],
+                "element": int(self.type_z[i]),
                 "mass": float(self.type_mass[i]),
                 "charge": float(P["charge"][i]),
                 "sigma": float(P["sigma"][i]),
@@ -380,7 +408,8 @@ class OPLSForceField(nn.Module):
                             for i, k in enumerate(self.dihedral_keys)},
             improper_types={k: {"v2": float(P["improper_v2"][i]) / KCAL_TO_EV}
                             for i, k in enumerate(self.improper_keys)},
-            fudge_lj=self.fudge_lj, fudge_qq=self.fudge_qq, name=self.name)
+            fudge_lj=self.fudge_lj, fudge_qq=self.fudge_qq, name=self.name,
+            templates=dict(self.templates), fragments=dict(self.fragments))
 
 
 @register_model("opls")
@@ -397,8 +426,9 @@ class OPLS(InteratomicPotential):
     Parameters
     ----------
     ffield : OPLSLibrary, OPLSForceField, str or Path
-        The parameter library -- a parsed :class:`OPLSLibrary`, a built-in
-        set name (``"oplsaa"``, ``"lopls"``), a file path, or an existing
+        The parameter library -- a parsed :class:`OPLSLibrary`, a variant
+        shipped with xnns (``"oplsaa"``, ``"oplsaa-1996"``, ``"lopls"``,
+        ``"CL&P"``), a ``.frc`` or native JSON path, or an existing
         :class:`OPLSForceField` to *share* parameters with other models.
     topology : MolecularTopology, str or Path
         The system's topology (or a path to a topology JSON file).
@@ -419,6 +449,12 @@ class OPLS(InteratomicPotential):
         If ``True``, stash the intermediate tensors of the last evaluation
         (bond lengths, angles, dihedral cosines, per-interaction energies)
         in ``self.intermediates``. Default ``False``.
+    auto_impropers : bool, optional
+        When the topology lists no impropers, place one improper at every
+        three-connected atom whose classes match an ``improper_opls`` pattern
+        of the library (the SEAMM convention; centers without a pattern get
+        none). Default ``True``. Explicitly listed impropers are always used
+        as given.
 
     Notes
     -----
@@ -437,10 +473,12 @@ class OPLS(InteratomicPotential):
                  fudge_lj: Optional[float] = None,
                  fudge_qq: Optional[float] = None,
                  trainable: Union[Sequence[str], str] = (),
-                 keep_intermediates: bool = False):
+                 keep_intermediates: bool = False,
+                 auto_impropers: bool = True):
         super().__init__()
         self.ff = ffield if isinstance(ffield, OPLSForceField) \
             else OPLSForceField(ffield, trainable=trainable)
+        self.auto_impropers = bool(auto_impropers)
         self.cutoff = float(cutoff)
         self.switch_width = float(switch_width)
         if not 0.0 <= self.switch_width < self.cutoff:
@@ -456,6 +494,48 @@ class OPLS(InteratomicPotential):
         self._bind_topology(
             topology if isinstance(topology, MolecularTopology)
             else read_topology(topology))
+
+    @classmethod
+    def from_atoms(cls, structure, ffield: Union[OPLSLibrary, str, Path] = "oplsaa",
+                   *, charge: int = 0,
+                   bonds: Optional[Sequence[Sequence[int]]] = None,
+                   **kwargs) -> "OPLS":
+        """Build an OPLS model for a structure, typing it with the library's
+        SMARTS templates.
+
+        Bonding is perceived from the coordinates (or taken from ``bonds``),
+        atom types are assigned by :func:`~xnns.ffnn.common.typing.assign_atom_types`,
+        and the topology is derived from the perceived bonds -- so nothing
+        about the force field's own type names has to be known in advance.
+
+        Parameters
+        ----------
+        structure : object
+            An ``ase.Atoms``, a ``(positions, atomic_numbers)`` pair, a dict
+            with ``"pos"`` / ``"atomic_numbers"``, an RDKit molecule or a
+            SMILES string.
+        ffield : OPLSLibrary, str or Path, optional
+            The parameter library (must carry templates); default
+            ``"oplsaa"``.
+        charge : int, optional
+            Total charge of the structure (for bond-order perception).
+        bonds : sequence of (int, int), optional
+            Known connectivity; bond orders are then perceived, not bonds.
+        **kwargs
+            Forwarded to the constructor (``cutoff``, ``trainable``, ...).
+
+        Returns
+        -------
+        OPLS
+            The model, bound to the derived topology.
+        """
+        from ..common.typing import assign_atom_types, perceive_bonds
+        lib = ffield if isinstance(ffield, OPLSForceField) else _as_library(ffield)
+        source = lib if isinstance(lib, OPLSForceField) else lib
+        types, mol = assign_atom_types(structure, source, charge=charge,
+                                       bonds=bonds, return_mol=True)
+        top = MolecularTopology.from_bonds(types, perceive_bonds(mol))
+        return cls(lib, top, **kwargs)
 
     # ------------------------------------------------------------------
     # topology binding
@@ -493,14 +573,41 @@ class OPLS(InteratomicPotential):
 
         t_idx = [gather(ff.type_index, name) for name in top.types]
         cls = [ff.type_cls[i] for i in t_idx]
+        cls_a = [ff.type_cls_angle[i] for i in t_idx]
+        cls_t = [ff.type_cls_torsion[i] for i in t_idx]
+        cls_o = [ff.type_cls_oop[i] for i in t_idx]
         b_type = [gather(ff.resolve_bond, cls[i], cls[j])
                   for i, j in top.bonds]
-        a_type = [gather(ff.resolve_angle, cls[i], cls[j], cls[k])
+        a_type = [gather(ff.resolve_angle, cls_a[i], cls_a[j], cls_a[k])
                   for i, j, k in top.angles]
-        d_type = [gather(ff.resolve_dihedral, cls[i], cls[j], cls[k], cls[l])
-                  for i, j, k, l in top.dihedrals]
-        i_type = [gather(ff.resolve_improper, key)
-                  for key in top.improper_keys]
+        d_type = [gather(ff.resolve_dihedral, cls_t[i], cls_t[j], cls_t[k],
+                         cls_t[l]) for i, j, k, l in top.dihedrals]
+        impropers = [tuple(int(x) for x in im) for im in top.impropers]
+        if top.improper_keys:
+            i_type = [gather(ff.resolve_improper, key)
+                      for key in top.improper_keys]
+        elif impropers:
+            i_type = [gather(ff.resolve_improper, cls_o[i], cls_o[j], cls_o[k],
+                             cls_o[l]) for i, j, k, l in impropers]
+        elif self.auto_impropers:
+            # one improper per three-connected center, outer atoms in index
+            # order, center third (SEAMM's setup_topology); centers the
+            # library has no pattern for get none
+            neighbors: dict[int, list[int]] = {}
+            for i, j in top.bonds:
+                neighbors.setdefault(i, []).append(j)
+                neighbors.setdefault(j, []).append(i)
+            i_type = []
+            for m, nb in sorted(neighbors.items()):
+                if len(nb) != 3:
+                    continue
+                n1, n2, n3 = sorted(nb)
+                if ff.improper_defined(cls_o[n1], cls_o[n2], cls_o[m], cls_o[n3]):
+                    impropers.append((n1, n2, m, n3))
+                    i_type.append(ff.resolve_improper(cls_o[n1], cls_o[n2],
+                                                      cls_o[m], cls_o[n3]))
+        else:
+            i_type = []
         if missing:
             raise KeyError("the topology needs parameters the library does "
                            "not provide:\n  " + "\n  ".join(missing))
@@ -521,7 +628,8 @@ class OPLS(InteratomicPotential):
         buf("dihedral_index", [list(d) for d in top.dihedrals], (-1, 4))
         self.dihedral_index = self.dihedral_index.t().contiguous()
         buf("dihedral_type", d_type, (-1,))
-        buf("improper_index", [list(im) for im in top.impropers], (-1, 4))
+        self.impropers = impropers
+        buf("improper_index", [list(im) for im in impropers], (-1, 4))
         self.improper_index = self.improper_index.t().contiguous()
         buf("improper_type", i_type, (-1,))
         buf("pair14_index", [list(p) for p in top.pairs14], (-1, 2))
@@ -810,10 +918,10 @@ class OPLS(InteratomicPotential):
         """Construct an :class:`OPLS` model from a core model config.
 
         Core field: ``cfg.cutoff`` is the nonbonded cutoff. Everything else
-        is read from ``cfg.extra``: ``library`` (required; a built-in set
-        name, native JSON path or GROMACS ``.itp`` source) and either
-        ``topology`` (path to a topology JSON file) or ``types`` +
-        ``bonds`` (+ optional ``impropers`` / ``improper_keys``) inline.
+        is read from ``cfg.extra``: ``library`` (required; a variant shipped
+        with xnns such as ``oplsaa``, a ``.frc`` path or a native JSON path)
+        and either ``topology`` (path to a topology JSON file) or ``types``
+        + ``bonds`` (+ optional ``impropers`` / ``improper_keys``) inline.
         Optional: ``switch_width``, ``fudge_lj``, ``fudge_qq``,
         ``trainable``. Alternative spellings used by other MD packages are
         translated by :mod:`xnns.common.config.translate`.
@@ -844,8 +952,8 @@ class OPLS(InteratomicPotential):
         library = extra.get("library")
         if library is None:
             raise ValueError("OPLS needs a parameter library: set "
-                             "model.library to 'oplsaa', 'lopls', a native "
-                             "JSON path or a GROMACS .itp source")
+                             "model.library to 'oplsaa', 'lopls', 'CL&P', a "
+                             ".frc path or a native JSON path")
         topo_path = extra.get("topology")
         if topo_path is not None:
             topology: MolecularTopology = read_topology(topo_path)

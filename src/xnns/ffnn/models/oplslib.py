@@ -1,27 +1,22 @@
-"""OPLS parameter libraries: native JSON, GROMACS ``.itp`` and built-in sets.
+"""OPLS parameter libraries: the SEAMM ``.frc`` format and native JSON.
 
 An OPLS model (Jorgensen, Maxwell & Tirado-Rives, *J. Am. Chem. Soc.* 118,
 11225, 1996) is fully specified by a parameter library: per-atom-type
 nonbonded parameters (partial charge, Lennard-Jones sigma / epsilon) plus
-bonded parameters keyed by *atom class* (the bonded type, e.g. ``CT`` for an
-sp3 carbon) -- harmonic bonds and angles, Fourier proper dihedrals and
-``V2``-only improper dihedrals. Three sources are supported:
+bonded parameters keyed by the *equivalent* atom types of each term --
+harmonic bonds and angles, Fourier proper dihedrals and ``V2``-only improper
+dihedrals. Two sources are supported:
 
+* the MolSSI/SEAMM ``.frc`` force-field format (:mod:`xnns.ffnn.common.frc`).
+  The OPLS-AA distribution ships with xnns as ``oplsaa.frc`` (variants
+  ``"oplsaa"``, ``"CL&P"``, ``"oplsaa+"``), together with ``"lopls"`` (Siu,
+  Pluhackova & Boeckmann, *JCTC* 8, 1459, 2012) and ``"oplsaa-1996"`` (the
+  paper's original alkane torsions) layered over it. A ``.frc`` library
+  carries the SMARTS **templates** that assign its atom types to a structure
+  (:mod:`xnns.ffnn.common.typing`, :meth:`~xnns.ffnn.models.opls.OPLS.from_atoms`);
 * the **native JSON** format of this module (:func:`read_opls` /
-  :meth:`OPLSLibrary.save`), a direct dump of :class:`OPLSLibrary` in OPLS
-  units -- kcal/mol, Angstrom, degrees, Fourier coefficients;
-* **GROMACS** ``oplsaa.ff``-style ``.itp`` files (``ffnonbonded.itp`` /
-  ``ffbonded.itp`` / ``forcefield.itp``), the most common distribution of
-  OPLS parameters. The reader translates at load time -- kJ/mol to kcal/mol,
-  nm to Angstrom, Ryckaert-Bellemans torsion coefficients back to the OPLS
-  Fourier form -- so that everything downstream sees one canonical
-  convention;
-* **built-in curated subsets** (:func:`builtin_library`): ``"oplsaa"``, the
-  published OPLS-AA parameters for alkanes, alkenes, benzene rings and
-  monoalcohols (Jorgensen et al. 1996 and later revisions from the Jorgensen
-  lab, as tabulated in the standard OPLS-AA distribution), and ``"lopls"``,
-  the L-OPLS reparameterization for long hydrocarbons (Siu, Pluhackova &
-  Boeckmann, *J. Chem. Theory Comput.* 8, 1459, 2012, Table 2).
+  :meth:`OPLSLibrary.save`), a direct dump of :class:`OPLSLibrary` used to
+  round-trip trained parameters.
 
 Energies are converted from kcal/mol to eV only when the model assembles its
 parameter tensors, mirroring :mod:`xnns.ffnn.models.ffield`.
@@ -31,23 +26,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 
-# kJ/mol -> kcal/mol (thermochemical calorie), the GROMACS unit translation.
+from ..common.elements import CHEMICAL_SYMBOLS, atomic_number
+
+# kJ/mol -> kcal/mol (thermochemical calorie).
 KCAL_PER_KJ = 1.0 / 4.184
 # kcal/mol -> eV as 4.184 (exact) / 96.48533212331 (CODATA 2018 kJ/mol per
 # eV). OPLS parameters are defined in the thermochemical-kcal / kJ ecosystem
 # (BOSS, GROMACS, OpenMM), so this choice makes xnns energies agree with
-# those codes to their own constant precision. (ReaxFF keeps its historical
-# Fortran-era constant in reaxff.py for ffield compatibility; the two differ
-# by 8e-6 relative.)
+# those codes to their own precision; it differs from ReaxFF's historical
+# constant by ~8e-6 relative, deliberately.
 KCAL_TO_EV = 4.336410424180094e-2
 
-# Atomic masses (u) for the common organic elements, used to infer the
-# element of a GROMACS atom type when the file omits the atomic number.
-_MASS_TO_Z = ((1.008, 1), (12.011, 6), (14.007, 7), (15.999, 8), (18.998, 9),
-              (28.086, 14), (30.974, 15), (32.06, 16), (35.45, 17),
-              (79.904, 35), (126.9, 53))
+WILDCARD = "X"
+_TERMS = ("nonbond", "bond", "angle", "torsion", "oop")
 
 
 def fourier_to_rb(v: Sequence[float]) -> list[float]:
@@ -116,19 +109,23 @@ class OPLSLibrary:
     """A parsed OPLS parameter library, in OPLS units.
 
     All energies are kcal/mol, lengths Angstrom, angles degrees. Bonded
-    parameters are keyed by atom *class* strings joined with ``-``
-    (``"CT-CT"``, ``"CT-CT-HC"``, ``"CT-CT-CT-CT"``); dihedral keys may use
-    the wildcard class ``X`` (``"X-CM-CM-X"``).
+    parameters are keyed by the *equivalent* atom types of the term joined
+    with ``-`` (``"opls_18-opls_18"``, ``"opls_85-opls_18-opls_18-opls_85"``),
+    exactly as a ``.frc`` file keys them; dihedral and improper keys may use
+    the wildcard ``X`` (``"X-opls_86-opls_86-X"``). Every atom type records,
+    per term, which equivalent type its parameters are looked up under
+    (``cls_bond`` etc.; ``cls`` is a synonym of ``cls_bond``).
 
     Parameters and attributes
     -------------------------
     atom_types : dict[str, dict]
-        ``name -> {"cls", "element", "mass", "charge", "sigma", "epsilon",
-        "comment"}`` where ``cls`` is the bonded class, ``element`` the
+        ``name -> {"cls", "cls_nonbond", "cls_bond", "cls_angle",
+        "cls_torsion", "cls_oop", "element", "mass", "charge", "sigma",
+        "epsilon", "connections", "comment"}`` where ``element`` is the
         atomic number and ``sigma`` / ``epsilon`` the Lennard-Jones
-        parameters.
+        parameters (Angstrom, kcal/mol).
     bond_types : dict[str, dict]
-        ``"A-B" -> {"k", "r0"}`` for ``E = k (r - r0)^2`` (note: OPLS/AMBER
+        ``"A-B" -> {"k", "r0"}`` for ``E = k (r - r0)^2`` (OPLS/AMBER
         convention, *without* the 1/2).
     angle_types : dict[str, dict]
         ``"A-B-C" -> {"k", "theta0"}`` for ``E = k (theta - theta0)^2`` with
@@ -137,11 +134,11 @@ class OPLSLibrary:
         ``"A-B-C-D" -> {"v": [V0, V1, V2, V3, V4]}`` Fourier coefficients
         (see :func:`fourier_to_rb` for the energy expression).
     improper_types : dict[str, dict]
-        ``key -> {"v2"}`` for the improper energy ``V2/2 (1 - cos 2 phi)``;
-        keys are opaque strings referenced by
-        :attr:`~xnns.ffnn.models.topology.MolecularTopology.improper_keys`
-        (the GROMACS-style names ``"O-C-X-Y"``, ``"Z-CM-X-Y"``, ... in the
-        built-in sets).
+        ``"I-J-K-L" -> {"v2"}`` for the improper energy ``V2/2 (1 - cos 2
+        phi)``, with ``K`` the central atom and ``X`` wildcards, resolved by
+        :func:`resolve_improper_type`. Libraries written before this format
+        may carry opaque keys referenced from
+        :attr:`~xnns.ffnn.models.topology.MolecularTopology.improper_keys`.
     fudge_lj, fudge_qq : float
         Scaling factors for 1,4 Lennard-Jones and Coulomb interactions
         (0.5 and 0.5 for OPLS).
@@ -149,6 +146,17 @@ class OPLSLibrary:
         A short label for the parameter set.
     references : list[str]
         Literature provenance of the parameters.
+    templates : dict
+        SMARTS atom-typing templates (``type -> {"smarts", "description",
+        ...}``) when the library came from a ``.frc`` file; consumed by
+        :func:`~xnns.ffnn.common.typing.assign_atom_types`.
+    fragments : dict
+        Whole-molecule typing fragments, likewise.
+    metadata : dict
+        The ``#metadata`` entries (``ff_form``, ``charges``).
+    notes : list[str]
+        Anything the reader had to fill in (e.g. atom types with no
+        Lennard-Jones entry, set to zero).
     """
 
     atom_types: dict = field(default_factory=dict)
@@ -160,6 +168,28 @@ class OPLSLibrary:
     fudge_qq: float = 0.5
     name: str = "opls"
     references: list = field(default_factory=list)
+    templates: dict = field(default_factory=dict)
+    fragments: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+
+    def cls(self, type_name: str, term: str = "bond") -> str:
+        """The equivalent type used for ``term`` by an atom type.
+
+        Parameters
+        ----------
+        type_name : str
+            An atom type of the library.
+        term : str
+            ``"nonbond"``, ``"bond"``, ``"angle"``, ``"torsion"`` or ``"oop"``.
+
+        Returns
+        -------
+        str
+            The class (equivalent type); the type itself when unspecified.
+        """
+        entry = self.atom_types[type_name]
+        return str(entry.get(f"cls_{term}", entry.get("cls", type_name)))
 
     def save(self, path: Union[str, Path]) -> None:
         """Write the library as native JSON (read back by :func:`read_opls`).
@@ -174,9 +204,19 @@ class OPLSLibrary:
                 "atom_types": self.atom_types, "bond_types": self.bond_types,
                 "angle_types": self.angle_types,
                 "dihedral_types": self.dihedral_types,
-                "improper_types": self.improper_types}
+                "improper_types": self.improper_types,
+                "templates": self.templates, "fragments": self.fragments,
+                "metadata": self.metadata}
         Path(path).write_text(json.dumps(data, indent=1, sort_keys=True)
                               + "\n")
+
+    def save_frc(self, path: Union[str, Path], name: Optional[str] = None,
+                 version: str = "1.0") -> Path:
+        """Write the library as a ``.frc`` force-field file.
+
+        See :func:`to_forcefield`.
+        """
+        return to_forcefield(self, name=name, version=version).write(path)
 
 
 # ----------------------------------------------------------------------
@@ -253,30 +293,55 @@ def resolve_dihedral_type(dihedral_types: dict, a: str, b: str, c: str,
         if len(pattern) != 4:
             continue
         for cand in (quad, quad[::-1]):
-            if all(p == "X" or p == q for p, q in zip(pattern, cand)):
-                score = sum(p != "X" for p in pattern)
+            if all(p == WILDCARD or p == q for p, q in zip(pattern, cand)):
+                score = sum(p != WILDCARD for p in pattern)
                 if score > best_score or (score == best_score
                                           and key < best_key):
                     best_key, best_score = key, score
     return best_key
 
 
+def improper_key(i: str, j: str, k: str, l: str) -> str:
+    """Canonical improper key: outer classes sorted, central ``k`` third."""
+    a, b, c = sorted((i, j, l))
+    return f"{a}-{b}-{k}-{c}"
+
+
+def resolve_improper_type(improper_types: dict, i: str, j: str, k: str,
+                          l: str) -> Optional[str]:
+    """Find the improper-type key for the class quadruple, ``k`` central.
+
+    Follows the precedence of SEAMM's force-field reader: the exact triple
+    of outer classes first, then one outer wildcard (each position), then
+    two, then all three. Outer classes are order-insensitive.
+
+    Parameters
+    ----------
+    improper_types : dict
+        The library's improper-type table (``"I-J-K-L"`` keys, ``X``
+        wildcards).
+    i, j, k, l : str
+        Atom classes; ``k`` is the trigonal center.
+
+    Returns
+    -------
+    str or None
+        The matching key, or ``None``.
+    """
+    X = WILDCARD
+    for pat in ((i, j, l), (X, j, l), (i, X, l), (i, j, X),
+                (X, X, l), (X, j, X), (i, X, X), (X, X, X)):
+        key = improper_key(pat[0], pat[1], k, pat[2])
+        if key in improper_types:
+            return key
+    return None
+
+
 # ----------------------------------------------------------------------
 # readers
 # ----------------------------------------------------------------------
 def _read_json(path: Path) -> OPLSLibrary:
-    """Read the native JSON library format.
-
-    Parameters
-    ----------
-    path : Path
-        The JSON file.
-
-    Returns
-    -------
-    OPLSLibrary
-        The parsed library.
-    """
+    """Read the native JSON library format."""
     data = json.loads(path.read_text())
     return OPLSLibrary(
         atom_types=data.get("atom_types", {}),
@@ -287,482 +352,281 @@ def _read_json(path: Path) -> OPLSLibrary:
         fudge_lj=float(data.get("fudge_lj", 0.5)),
         fudge_qq=float(data.get("fudge_qq", 0.5)),
         name=data.get("name", path.stem),
-        references=list(data.get("references", [])))
+        references=list(data.get("references", [])),
+        templates=dict(data.get("templates", {})),
+        fragments=dict(data.get("fragments", {})),
+        metadata=dict(data.get("metadata", {})))
 
 
-def _element_from_mass(mass: float) -> int:
-    """Guess the atomic number from an atomic mass.
+def from_forcefield(ff, strict: bool = True) -> OPLSLibrary:
+    """Build an :class:`OPLSLibrary` from a resolved ``.frc`` force field.
 
-    Parameters
-    ----------
-    mass : float
-        Atomic mass in u.
-
-    Returns
-    -------
-    int
-        The atomic number of the closest tabulated element (0 for a
-        massless virtual site).
-    """
-    if mass < 0.5:
-        return 0
-    return min(_MASS_TO_Z, key=lambda mz: abs(mz[0] - mass))[1]
-
-
-def _itp_lines(paths: Iterable[Path]):
-    """Iterate over the meaningful lines of GROMACS ``.itp`` files.
-
-    Comments are stripped; ``[ section ]`` headers switch the section;
-    ``#define improper_*`` macros are passed through as pseudo-lines in the
-    ``"improper_defines"`` section.
+    Atom types come from ``#atom_types``; their per-term classes from
+    ``#equivalence`` (identity when absent); charges and Lennard-Jones
+    parameters are looked up through the nonbond equivalence, with any
+    ``@type`` (``rmin-eps``, ``A-B``, ...) and ``@units`` converted to
+    sigma/epsilon in Angstrom and kcal/mol. Bonded tables are copied under
+    their canonical keys with ``*`` written as ``X``.
 
     Parameters
     ----------
-    paths : iterable of Path
-        The files to read, in order.
-
-    Yields
-    ------
-    tuple[str, list[str]]
-        ``(section, tokens)`` per content line.
-    """
-    section = ""
-    for path in paths:
-        for raw in path.read_text().splitlines():
-            line = raw.split(";")[0].strip()
-            if not line:
-                continue
-            if line.startswith("["):
-                section = line.strip("[] ").strip().lower()
-                continue
-            if line.startswith("#define") and "improper_" in line:
-                yield "improper_defines", line.split()
-                continue
-            if line.startswith("#"):
-                continue
-            yield section, line.split()
-
-
-def read_gromacs_opls(source: Union[str, Path, Sequence[Union[str, Path]]]
-                      ) -> OPLSLibrary:
-    """Read OPLS parameters from GROMACS ``oplsaa.ff``-style ``.itp`` files.
-
-    Accepts a force-field directory (reads ``forcefield.itp``,
-    ``ffnonbonded.itp`` and ``ffbonded.itp`` from it, each optional) or an
-    explicit list of ``.itp`` files. Units and functional forms are
-    translated to the OPLS conventions of :class:`OPLSLibrary`: kJ/mol to
-    kcal/mol, nm to Angstrom, GROMACS ``k/2 (r-r0)^2`` harmonics to the OPLS
-    ``k (r-r0)^2`` convention, Ryckaert-Bellemans (function 3) dihedrals to
-    Fourier coefficients, and the ``#define improper_*`` periodic macros to
-    ``V2`` improper types. Duplicate type keys keep the first definition.
-
-    Parameters
-    ----------
-    source : str, Path or sequence thereof
-        Force-field directory or ``.itp`` file(s).
+    ff : xnns.ffnn.common.frc.ForceField
+        A force field of the OPLS functional form: ``quadratic_bond``,
+        ``quadratic_angle``, ``torsion_opls``, ``improper_opls`` and a
+        ``nonbond(12-6)`` section with geometric combination.
+    strict : bool, optional
+        If ``True`` (default) refuse a force field that also carries
+        functional forms the OPLS model does not implement (e.g. the
+        ``tabulated_angle`` of the CL&P ``PF6-`` anion). If ``False``, load
+        it anyway, ignore those sections and record them in ``notes``; the
+        library is then correct for every structure that uses none of the
+        skipped types.
 
     Returns
     -------
     OPLSLibrary
-        The translated library.
+        The library, including the file's SMARTS templates.
 
     Raises
     ------
     ValueError
-        If the ``[ defaults ]`` section declares a non-geometric combination
-        rule (the library would not be an OPLS force field), or an improper
-        macro is not a multiplicity-2, 180-degree-phase torsion.
-    FileNotFoundError
-        If no input file exists.
+        If the nonbond combination rule is not geometric (the OPLS model
+        hard-codes geometric mixing), or a bonded section of a functional
+        form the OPLS model does not implement is present.
     """
-    if isinstance(source, (str, Path)):
-        src = Path(source)
-        if src.is_dir():
-            paths = [src / n for n in ("forcefield.itp", "ffnonbonded.itp",
-                                       "ffbonded.itp")]
-            paths = [p for p in paths if p.exists()]
-        else:
-            paths = [src]
-    else:
-        paths = [Path(p) for p in source]
-    if not paths:
-        raise FileNotFoundError(f"no .itp files found in {source}")
-    for p in paths:
-        if not p.exists():
-            raise FileNotFoundError(str(p))
+    lib = OPLSLibrary(name=ff.name)
+    lib.metadata = dict(ff.metadata)
+    lib.templates = dict(ff.templates)
+    lib.fragments = dict(ff.fragments)
+    lib.references = [r.text for r in ff.references_used()]
 
-    lib = OPLSLibrary(name="gromacs-opls",
-                      references=["translated from GROMACS .itp files"])
-    for section, parts in _itp_lines(paths):
-        if section == "defaults" and len(parts) >= 2:
-            comb = parts[1]
-            if comb != "3":
-                raise ValueError(
-                    f"combination rule {comb} is not the geometric rule "
-                    "(3) of OPLS; refusing to translate this force field")
-            if len(parts) >= 5:
-                lib.fudge_lj = float(parts[3])
-                lib.fudge_qq = float(parts[4])
-        elif section == "atomtypes" and len(parts) >= 6:
-            # `name [class] [at.num] mass charge ptype sigma epsilon`;
-            # the particle-type column anchors the layout.
-            name = parts[0]
-            if name in lib.atom_types:
-                continue
-            ptype = [i for i in range(3, len(parts) - 2)
-                     if parts[i] in ("A", "S", "V", "D")]
-            if not ptype:
-                continue
-            ip = ptype[-1]
-            mass, charge = float(parts[ip - 2]), float(parts[ip - 1])
-            sigma, eps = float(parts[ip + 1]), float(parts[ip + 2])
-            cls, z = name, None
-            for tok in parts[1:ip - 2]:
-                if _is_number(tok):
-                    z = int(float(tok))
-                else:
-                    cls = tok
-            lib.atom_types[name] = {
-                "cls": cls, "element": z if z is not None
-                else _element_from_mass(mass),
-                "mass": mass, "charge": charge, "sigma": sigma * 10.0,
-                "epsilon": eps * KCAL_PER_KJ, "comment": ""}
-        elif section == "bondtypes" and len(parts) >= 5:
-            a, b, func, b0, kb = parts[:5]
-            key = f"{a}-{b}"
-            if func == "1" and resolve_bond_type(lib.bond_types, a, b) is None:
-                lib.bond_types[key] = {
-                    "k": 0.5 * float(kb) * KCAL_PER_KJ / 100.0,
-                    "r0": float(b0) * 10.0}
-        elif section == "angletypes" and len(parts) >= 6:
-            a, b, c, func, th0, k = parts[:6]
-            key = f"{a}-{b}-{c}"
-            if func == "1" and resolve_angle_type(lib.angle_types,
-                                                  a, b, c) is None:
-                lib.angle_types[key] = {"k": 0.5 * float(k) * KCAL_PER_KJ,
-                                        "theta0": float(th0)}
-        elif section == "dihedraltypes" and len(parts) >= 11:
-            a, b, c, d, func = parts[:5]
-            if func != "3":
-                continue
-            key = f"{a}-{b}-{c}-{d}"
-            if key in lib.dihedral_types or f"{d}-{c}-{b}-{a}" \
-                    in lib.dihedral_types:
-                continue
-            cs = [float(x) * KCAL_PER_KJ for x in parts[5:11]]
-            lib.dihedral_types[key] = {"v": rb_to_fourier(cs)}
-        elif section == "improper_defines" and len(parts) >= 5:
-            # `#define improper_O_C_X_Y  180.0  43.932  2`
-            name = parts[1].removeprefix("improper_").replace("_", "-")
-            phase, k, mult = float(parts[2]), float(parts[3]), int(parts[4])
-            if mult != 2 or abs(phase - 180.0) > 1.0e-6:
-                raise ValueError(f"improper macro {parts[1]} is not the "
-                                 "OPLS V2 form (multiplicity 2, phase 180)")
-            if name not in lib.improper_types:
-                # k (1 + cos(2 phi - 180)) == (2k)/2 (1 - cos 2 phi)
-                lib.improper_types[name] = {"v2": 2.0 * k * KCAL_PER_KJ}
+    unsupported = [k for k in ff.sections
+                   if k in ("simple_fourier_angle", "tabulated_angle",
+                            "quartic_bond", "quartic_angle", "torsion_1",
+                            "torsion_3", "buckingham", "nonbond(9-6)",
+                            "wilson_out_of_plane")]
+    if unsupported:
+        detail = {k: len(ff.sections[k]) for k in unsupported}
+        if strict:
+            raise ValueError(
+                f"force field {ff.name!r} uses functional forms the OPLS "
+                f"model does not implement: {detail} (section: rows). Pass "
+                "strict=False to load it without those sections, if your "
+                "structures use none of the affected types")
+        for k, n in detail.items():
+            lib.notes.append(f"ignored section {k} ({n} rows): functional "
+                             "form not implemented by the OPLS model")
+    if "nonbond(12-6)" in ff.sections and ff.combination() != "geometric":
+        raise ValueError(f"force field {ff.name!r} uses the "
+                         f"{ff.combination()!r} combination rule; OPLS "
+                         "requires geometric")
+
+    for name, at in ff.atom_types.items():
+        entry = {f"cls_{t}": ff.equivalent(name, t) for t in _TERMS}
+        entry["cls"] = entry["cls_bond"]
+        try:
+            entry["element"] = atomic_number(str(at.get("El", "")))
+        except KeyError:
+            entry["element"] = 0
+        entry["mass"] = float(at.get("Mass", 0.0))
+        conns = at.get("connections", 0)
+        try:
+            entry["connections"] = int(conns)
+        except (TypeError, ValueError):      # e.g. "Dummy" for virtual sites
+            entry["connections"] = 0
+        entry["comment"] = str(at.get("Comment", ""))
+        entry["charge"] = ff.charge(name)
+        lj = ff.nonbond(name)
+        if lj is None:
+            lj = (0.0, 0.0)
+            lib.notes.append(f"atom type {name} has no nonbond(12-6) entry; "
+                             "sigma = epsilon = 0")
+        entry["sigma"], entry["epsilon"] = float(lj[0]), float(lj[1])
+        lib.atom_types[name] = entry
+
+    def key_of(key) -> str:
+        return "-".join(WILDCARD if x == "*" else x for x in key)
+
+    for key, row in ff.rows("quadratic_bond").items():
+        lib.bond_types[key_of(key)] = {"k": float(row.values["K2"]),
+                                       "r0": float(row.values["R0"])}
+    for key, row in ff.rows("quadratic_angle").items():
+        lib.angle_types[key_of(key)] = {"k": float(row.values["K2"]),
+                                        "theta0": float(row.values["Theta0"])}
+    for key, row in ff.rows("torsion_opls").items():
+        v = row.values
+        lib.dihedral_types[key_of(key)] = {
+            "v": [0.0, float(v["V1"]), float(v["V2"]), float(v["V3"]),
+                  float(v.get("V4", 0.0))]}
+    for key, row in ff.rows("improper_opls").items():
+        lib.improper_types[key_of(key)] = {"v2": float(row.values["V2"])}
     return lib
 
 
-def _is_number(token: str) -> bool:
-    """Whether ``token`` parses as a float.
+def to_forcefield(lib: OPLSLibrary, name: Optional[str] = None,
+                  version: str = "1.0"):
+    """Write an :class:`OPLSLibrary` as an in-memory ``.frc`` file.
+
+    The inverse of :func:`from_forcefield`: atom types, equivalences,
+    charges, ``nonbond(12-6)`` (sigma-eps, geometric), the four bonded
+    tables, the templates and fragments, a ``#metadata`` and a ``#define``.
+    Dihedral ``V0`` constants are not representable in ``torsion_opls`` and
+    are dropped (they do not affect forces or energy differences).
 
     Parameters
     ----------
-    token : str
-        The token.
+    lib : OPLSLibrary
+        The library.
+    name : str, optional
+        The ``#define`` name; default ``lib.name``.
+    version : str, optional
+        Version stamp of every row.
 
     Returns
     -------
-    bool
-        ``True`` if ``float(token)`` succeeds.
+    xnns.ffnn.common.frc.FrcFile
+        Save it with ``.write(path)``.
     """
-    try:
-        float(token)
-        return True
-    except ValueError:
-        return False
+    from ..common.frc import FrcFile, Define, Reference, make_section
+    name = name or lib.name or "opls"
+    label = name
+    frc = FrcFile.empty()
+
+    def sym(z):
+        return CHEMICAL_SYMBOLS[int(z)] if 0 < int(z) < len(CHEMICAL_SYMBOLS) else "X"
+
+    def split(key):
+        return tuple("*" if x == WILDCARD else x for x in key.split("-"))
+
+    sections = [
+        make_section("metadata", label, ["Parameter"], ["Value", "Description"],
+                     [(("ff_form",), {"Value": lib.metadata.get("ff_form", "oplsaa"),
+                                      "Description": "The functional form of the forcefield"}),
+                      (("charges",), {"Value": lib.metadata.get("charges", "point"),
+                                      "Description": "How charges should be handled"})],
+                     version=version),
+        make_section("atom_types", label, ["Type"],
+                     ["Mass", "El", "connections", "Comment"],
+                     [((n,), {"Mass": float(a.get("mass", 0.0)),
+                              "El": sym(a.get("element", 0)),
+                              "connections": int(a.get("connections", 0) or 0),
+                              "Comment": str(a.get("comment", ""))})
+                      for n, a in lib.atom_types.items()], version=version),
+        make_section("equivalence", label, ["Type"],
+                     ["NonB", "Bond", "Angle", "Torsion", "OOP"],
+                     [((n,), {"NonB": lib.cls(n, "nonbond"), "Bond": lib.cls(n, "bond"),
+                              "Angle": lib.cls(n, "angle"),
+                              "Torsion": lib.cls(n, "torsion"),
+                              "OOP": lib.cls(n, "oop")})
+                      for n in lib.atom_types], version=version),
+        make_section("charges", label, ["I"], ["Q"],
+                     [((n,), {"Q": float(a.get("charge", 0.0))})
+                      for n, a in lib.atom_types.items()
+                      if lib.cls(n, "nonbond") == n], version=version),
+        make_section("nonbond(12-6)", label, ["I"], ["sigma", "eps"],
+                     [((n,), {"sigma": float(a.get("sigma", 0.0)),
+                              "eps": float(a.get("epsilon", 0.0))})
+                      for n, a in lib.atom_types.items()
+                      if lib.cls(n, "nonbond") == n], version=version,
+                     annotations=["E = 4 * eps(ij) * [(sigma(ij)/r(ij))**12 - "
+                                  "(sigma(ij)/r(ij))**6]"],
+                     modifiers={"type": [["sigma-eps"]],
+                                "combination": [["geometric"]]}),
+        make_section("quadratic_bond", label, ["I", "J"], ["R0", "K2"],
+                     [(split(k), {"R0": float(v["r0"]), "K2": float(v["k"])})
+                      for k, v in lib.bond_types.items()], version=version,
+                     annotations=["E = K2 * (R - R0)^2"]),
+        make_section("quadratic_angle", label, ["I", "J", "K"], ["Theta0", "K2"],
+                     [(split(k), {"Theta0": float(v["theta0"]), "K2": float(v["k"])})
+                      for k, v in lib.angle_types.items()], version=version,
+                     annotations=["E = K2 * (Theta - Theta0)^2"]),
+        make_section("torsion_opls", label, ["I", "J", "K", "L"],
+                     ["V1", "V2", "V3", "V4"],
+                     [(split(k), {"V1": float(v["v"][1]), "V2": float(v["v"][2]),
+                                  "V3": float(v["v"][3]),
+                                  "V4": float(v["v"][4]) if len(v["v"]) > 4 else 0.0})
+                      for k, v in lib.dihedral_types.items()], version=version,
+                     annotations=["E = 1/2*V1*[1 + cos(phi)] + 1/2*V2*[1 - cos(2*phi)]"
+                                  " + 1/2*V3*[1 + cos(3*phi)] + 1/2*V4*[1 - cos(4*phi)]"]),
+        make_section("improper_opls", label, ["I", "J", "K", "L"], ["V2"],
+                     [(split(k), {"V2": float(v["v2"])})
+                      for k, v in lib.improper_types.items()
+                      if len(k.split("-")) == 4], version=version,
+                     annotations=["E = 1/2*V2*[1 - cos(2*phi)]", "k is the central atom"]),
+    ]
+    from ..common.frc import Section
+    if lib.templates:
+        tsec = Section(kind="templates", label=label)
+        tsec.data = {t: {str(e.get("version", version)):
+                         {k: v for k, v in e.items() if k != "version"}}
+                     for t, e in lib.templates.items()}
+        sections.append(tsec)
+    if lib.fragments:
+        fsec = Section(kind="fragments", label=label)
+        fsec.data = {t: {str(e.get("version", version)):
+                         {k: v for k, v in e.items() if k != "version"}}
+                     for t, e in lib.fragments.items()}
+        sections.append(fsec)
+    for sec in sections:
+        frc.sections[(sec.kind, sec.label)] = sec
+    define = Define(name=name)
+    for sec in sections:
+        define.entries.append((version, "1", sec.kind, [label]))
+    frc.defines[name] = define
+    text = "\n".join(lib.references) or f"OPLS parameters exported from xnns ({name})."
+    frc.references[("<memory>", "1")] = Reference(number="1", text=text, author="xnns")
+    return frc
 
 
-def read_opls(source: Union[str, Path, Sequence[Union[str, Path]]]
-              ) -> OPLSLibrary:
-    """Read an OPLS parameter library from disk.
-
-    Dispatches on the input: a ``.json`` file is read as the native format,
-    anything else (a GROMACS force-field directory or ``.itp`` file(s)) goes
-    through :func:`read_gromacs_opls`.
+def read_opls(source: Union[str, Path], strict: bool = True) -> OPLSLibrary:
+    """Read an OPLS parameter library.
 
     Parameters
     ----------
-    source : str, Path or sequence thereof
-        Library file, force-field directory, or list of ``.itp`` files.
+    source : str or Path
+        A ``.json`` file in the native format, or a ``.frc`` force-field spec
+        understood by :func:`~xnns.ffnn.common.frc.find_forcefield`: a
+        variant shipped with xnns by name (``"oplsaa"``, ``"oplsaa-1996"``,
+        ``"lopls"``, ``"CL&P"``, ``"oplsaa+"``), a ``.frc`` path, or
+        ``"<path>.frc:<variant>"``.
+    strict : bool, optional
+        See :func:`from_forcefield`.
 
     Returns
     -------
     OPLSLibrary
         The parsed library.
     """
-    if isinstance(source, (str, Path)):
-        path = Path(source)
-        if path.suffix.lower() == ".json":
-            return _read_json(path)
-    return read_gromacs_opls(source)
+    s = str(source)
+    if s.lower().endswith(".json"):
+        return _read_json(Path(s))
+    from ..common.frc import read_forcefield
+    return from_forcefield(read_forcefield(s), strict=strict)
 
 
-# ----------------------------------------------------------------------
-# built-in parameter sets
-# ----------------------------------------------------------------------
-# OPLS-AA subset for alkanes, alkenes, benzene rings and monoalcohols.
-# Values are the published OPLS-AA parameters (Jorgensen, Maxwell &
-# Tirado-Rives, JACS 118, 11225, 1996, and later revisions from the
-# Jorgensen lab), in kcal/mol / Angstrom / degrees, exactly as tabulated in
-# the standard OPLS-AA distribution. Atom-type numbering follows the
-# original ffoplsaa convention.
-#   name: (class, Z, mass, charge/e, sigma/A, epsilon/kcal, comment)
-_OPLSAA_ATOM_TYPES = {
-    "opls_135": ("CT", 6, 12.011, -0.18, 3.5, 0.066, "methyl C, alkanes"),
-    "opls_136": ("CT", 6, 12.011, -0.12, 3.5, 0.066, "methylene C, alkanes"),
-    "opls_137": ("CT", 6, 12.011, -0.06, 3.5, 0.066, "methine C, alkanes"),
-    "opls_138": ("CT", 6, 12.011, -0.24, 3.5, 0.066, "methane C"),
-    "opls_139": ("CT", 6, 12.011, 0.0, 3.5, 0.066, "quaternary C, alkanes"),
-    "opls_140": ("HC", 1, 1.008, 0.06, 2.5, 0.03, "H on alkane C"),
-    "opls_141": ("CM", 6, 12.011, 0.0, 3.55, 0.076,
-                 "disubstituted sp2 C, alkenes"),
-    "opls_142": ("CM", 6, 12.011, -0.115, 3.55, 0.076,
-                 "monosubstituted sp2 C, alkenes"),
-    "opls_143": ("CM", 6, 12.011, -0.23, 3.55, 0.076,
-                 "terminal =CH2 C, alkenes"),
-    "opls_144": ("HC", 1, 1.008, 0.115, 2.42, 0.03, "H on alkene C"),
-    "opls_145": ("CA", 6, 12.011, -0.115, 3.55, 0.07, "benzene C (12-site)"),
-    "opls_146": ("HA", 1, 1.008, 0.115, 2.42, 0.03, "benzene H (12-site)"),
-    "opls_154": ("OH", 8, 15.9994, -0.683, 3.12, 0.17, "monoalcohol O"),
-    "opls_155": ("HO", 1, 1.008, 0.418, 0.0, 0.0, "monoalcohol H(O)"),
-    "opls_156": ("HC", 1, 1.008, 0.04, 2.5, 0.03, "methanol H(C)"),
-    "opls_157": ("CT", 6, 12.011, 0.145, 3.5, 0.066, "alcohol CH3 / CH2"),
-    "opls_158": ("CT", 6, 12.011, 0.205, 3.5, 0.066, "alcohol CH"),
-    "opls_159": ("CT", 6, 12.011, 0.265, 3.5, 0.066, "alcohol C"),
-}
+def builtin_library(name: str = "oplsaa", strict: bool = True) -> OPLSLibrary:
+    """Return one of the parameter sets shipped with xnns.
 
-# "A-B": (k / kcal mol^-1 A^-2, r0 / A) for E = k (r - r0)^2.
-_OPLSAA_BOND_TYPES = {
-    "CT-CT": (268.0, 1.529), "CT-HC": (340.0, 1.09),
-    "CM-CM": (549.0, 1.34), "CM-C=": (549.0, 1.34), "C=-C=": (385.0, 1.46),
-    "CM-CT": (317.0, 1.51), "C=-CT": (317.0, 1.51),
-    "CM-HC": (340.0, 1.08), "C=-HC": (340.0, 1.08),
-    "CA-CA": (469.0, 1.4), "CA-CT": (317.0, 1.51), "CA-HA": (367.0, 1.08),
-    "CA-CM": (427.0, 1.433), "CA-OH": (450.0, 1.364), "CM-OH": (450.0, 1.37),
-    "CT-OH": (320.0, 1.41), "HO-OH": (553.0, 0.945),
-}
-
-# "A-B-C": (k / kcal mol^-1 rad^-2, theta0 / deg) for E = k (th - th0)^2.
-_OPLSAA_ANGLE_TYPES = {
-    "CT-CT-CT": (58.35, 112.7), "CT-CT-HC": (37.5, 110.7),
-    "HC-CT-HC": (33.0, 107.8),
-    "CT-CT-OH": (50.0, 109.5), "HC-CT-OH": (35.0, 109.5),
-    "CT-OH-HO": (55.0, 108.5),
-    "CM-CM-CT": (70.0, 124.0), "CM-C=-C=": (70.0, 124.0),
-    "CM-C=-CT": (70.0, 124.0), "C=-C=-CT": (70.0, 124.0),
-    "CT-CM-C=": (70.0, 124.0), "CM-CT-CM": (63.0, 112.4),
-    "CM-CM-HC": (35.0, 120.0), "CM-C=-HC": (35.0, 120.0),
-    "C=-CM-HC": (35.0, 120.0), "C=-C=-HC": (35.0, 120.0),
-    "CT-CM-HC": (35.0, 117.0), "HC-CM-HC": (35.0, 117.0),
-    "CT-CM-CT": (70.0, 130.0), "CM-CT-CT": (63.0, 111.1),
-    "CM-CT-HC": (35.0, 109.5), "C=-CT-HC": (35.0, 109.5),
-    "CM-CT-OH": (50.0, 109.5), "CM-CM-OH": (70.0, 123.0),
-    "C=-CM-OH": (70.0, 123.0), "CM-OH-HO": (35.0, 109.0),
-    "CA-CA-CA": (63.0, 120.0), "CA-CA-HA": (35.0, 120.0),
-    "CA-CA-CT": (70.0, 120.0), "CA-CT-HC": (35.0, 109.5),
-    "CA-CT-CT": (63.0, 114.0), "CA-CT-CA": (40.0, 109.5),
-    "CM-CT-CA": (40.0, 109.5), "CA-CA-CM": (70.0, 124.0),
-    "CA-CM-CT": (85.0, 119.7), "CA-CM-C=": (85.0, 117.0),
-    "CA-CM-CM": (85.0, 117.0), "CA-CM-HC": (35.0, 123.3),
-    "CA-CA-OH": (70.0, 120.0), "CA-CT-OH": (50.0, 109.5),
-    "CA-OH-HO": (35.0, 113.0),
-}
-
-# "A-B-C-D": (V0, V1, V2, V3, V4) / kcal mol^-1 (X = wildcard).
-_OPLSAA_DIHEDRAL_TYPES = {
-    "CT-CT-CT-CT": (0.0, 1.3, -0.05, 0.2, 0.0),
-    "CT-CT-CT-HC": (0.0, 0.0, 0.0, 0.3, 0.0),
-    "HC-CT-CT-HC": (0.0, 0.0, 0.0, 0.3, 0.0),
-    "CT-CT-CT-OH": (0.0, 1.711, -0.5, 0.663, 0.0),
-    "HC-CT-CT-OH": (0.0, 0.0, 0.0, 0.468, 0.0),
-    "CT-CT-OH-HO": (0.0, -0.356, -0.174, 0.492, 0.0),
-    "HC-CT-OH-HO": (0.0, 0.0, 0.0, 0.45, 0.0),
-    "OH-CT-CT-OH": (0.0, 9.066, 0.0, 0.0, 0.0),
-    "X-CM-CM-X": (0.0, 0.0, 14.0, 0.0, 0.0),
-    "CM-C=-C=-CM": (0.0, 1.423, 4.055, 0.858, 0.0),
-    "CM-C=-C=-CT": (0.0, 0.0, 0.0, -0.372, 0.0),
-    "CM-C=-C=-HC": (0.0, 0.0, 0.0, -0.372, 0.0),
-    "CT-C=-C=-HC": (0.0, 0.0, 0.0, 0.3, 0.0),
-    "HC-C=-C=-HC": (0.0, 0.0, 0.0, 0.3, 0.0),
-    "CT-C=-CM-CT": (0.0, 0.0, 14.0, 0.0, 0.0),
-    "CT-C=-CM-HC": (0.0, 0.0, 14.0, 0.0, 0.0),
-    "CT-CM-C=-HC": (0.0, 0.0, 14.0, 0.0, 0.0),
-    "HC-C=-CM-HC": (0.0, 0.0, 14.0, 0.0, 0.0),
-    "CM-CM-CT-CT": (0.0, 0.346, 0.405, -0.904, 0.0),
-    "C=-CM-CT-CT": (0.0, 0.346, 0.405, -0.904, 0.0),
-    "CM-CM-CT-HC": (0.0, 0.0, 0.0, -0.372, 0.0),
-    "HC-CM-CT-HC": (0.0, 0.0, 0.0, 0.318, 0.0),
-    "CT-CM-CT-CT": (0.0, 2.817, -0.169, 0.543, 0.0),
-    "CT-CM-CT-HC": (0.0, 0.0, 0.0, 0.3, 0.0),
-    "CM-CT-CT-CT": (0.0, 1.3, -0.05, 0.2, 0.0),
-    "CM-CT-CT-HC": (0.0, 0.0, 0.0, 0.366, 0.0),
-    "CM-CT-CT-OH": (0.0, 1.711, -0.5, 0.663, 0.0),
-    "CT-CM-CT-OH": (0.0, 1.711, -0.5, 0.663, 0.0),
-    "HC-CM-CT-OH": (0.0, 0.0, 0.0, 0.468, 0.0),
-    "CM-CT-OH-HO": (0.0, -0.9, 0.0, 0.0, 0.0),
-    "C=-CT-OH-HO": (0.0, -0.9, 0.0, 0.0, 0.0),
-    "CM-CM-CT-OH": (0.0, 0.5, 0.0, 0.0, 0.0),
-    "C=-CM-CT-OH": (0.0, 0.5, 0.0, 0.0, 0.0),
-    "X-CA-CA-X": (0.0, 0.0, 7.25, 0.0, 0.0),
-    "CA-CA-CT-X": (0.0, 0.0, 0.0, 0.0, 0.0),
-    "CA-CA-CT-HC": (0.0, 0.0, 0.0, 0.0, 0.0),
-    "CA-CA-CT-CT": (0.0, 0.0, 0.0, 0.0, 0.0),
-    "CA-CA-CT-OH": (0.0, 0.0, 0.0, 0.0, 0.0),
-    "CA-CT-CT-CT": (0.0, 1.3, -0.05, 0.2, 0.0),
-    "CA-CT-CT-HC": (0.0, 0.0, 0.0, 0.462, 0.0),
-    "CA-CT-CT-OH": (0.0, 1.711, -0.5, 0.663, 0.0),
-    "CA-CT-OH-HO": (0.0, -0.9, 0.0, 0.0, 0.0),
-    "CA-CA-CM-CM": (0.0, 1.241, 3.353, -0.286, 0.0),
-    "C=-CM-CA-CA": (0.0, 1.241, 3.353, -0.286, 0.0),
-    "CA-CA-CM-CT": (0.0, 0.205, -0.531, 0.0, 0.0),
-    "CA-CA-OH-HO": (0.0, 0.0, 1.682, 0.0, 0.0),
-}
-
-# key: V2 / kcal mol^-1 for E = V2/2 (1 - cos 2 phi); keys follow the
-# GROMACS macro names (second field = the trigonal center's class family).
-_OPLSAA_IMPROPER_TYPES = {
-    "O-C-X-Y": 21.0, "Z-N-X-Y": 2.0, "Z-CM-X-Y": 30.0, "Z-CA-X-Y": 2.2,
-}
-
-# L-OPLS (Siu, Pluhackova & Boeckmann, JCTC 8, 1459, 2012, Table 2):
-# refit hydrocarbon torsions (given in kJ/mol; converted below), new
-# per-connectivity nonbonded types with adjusted charges and a reduced
-# epsilon for methylene hydrogens. Bonds / angles / everything else are the
-# unchanged OPLS-AA values.
-#   name: (class, Z, mass, charge/e, sigma/A, epsilon/(kJ/mol), comment)
-_LOPLS_ATOM_TYPES = {
-    "lopls_CT_CH3": ("CT", 6, 12.011, -0.222, 3.5, 0.276144, "alkane CH3 C"),
-    "lopls_CT_CH2": ("CT", 6, 12.011, -0.148, 3.5, 0.276144, "alkane CH2 C"),
-    "lopls_CM_CH": ("CM", 6, 12.011, -0.16, 3.55, 0.317984, "alkene CH C"),
-    "lopls_HC_CH3": ("HC", 1, 1.008, 0.074, 2.5, 0.12552, "CH3 hydrogen"),
-    "lopls_HC_CH2": ("HC", 1, 1.008, 0.074, 2.5, 0.11, "CH2 hydrogen"),
-    "lopls_HC_CH": ("HC", 1, 1.008, 0.16, 2.42, 0.12552, "alkene hydrogen"),
-}
-
-# "A-B-C-D": (V0, V1, V2, V3, V4) / kJ mol^-1 (converted below).
-_LOPLS_DIHEDRAL_TYPES = {
-    "CT-CT-CT-CT": (-0.305938, 2.697394, -0.896807, 0.74567, 0.0),
-    "X-CM-CM-X": (0.0, 0.0, 51.2551, 0.0, 0.0),
-    "CM-CM-CT-CT": (-1.49571, -3.368171, 1.34679, -0.4321105, 0.0),
-    "CM-CT-CT-CT": (1.843356, 2.017484, 0.562197, 0.74369, 0.0),
-}
-
-
-def _oplsaa_library() -> OPLSLibrary:
-    """Assemble the built-in OPLS-AA subset library.
-
-    Returns
-    -------
-    OPLSLibrary
-        The curated OPLS-AA subset.
-    """
-    atom_types = {name: {"cls": t[0], "element": t[1], "mass": t[2],
-                         "charge": t[3], "sigma": t[4], "epsilon": t[5],
-                         "comment": t[6]}
-                  for name, t in _OPLSAA_ATOM_TYPES.items()}
-    return OPLSLibrary(
-        atom_types=atom_types,
-        bond_types={k: {"k": v[0], "r0": v[1]}
-                    for k, v in _OPLSAA_BOND_TYPES.items()},
-        angle_types={k: {"k": v[0], "theta0": v[1]}
-                     for k, v in _OPLSAA_ANGLE_TYPES.items()},
-        dihedral_types={k: {"v": list(v)}
-                        for k, v in _OPLSAA_DIHEDRAL_TYPES.items()},
-        improper_types={k: {"v2": v}
-                        for k, v in _OPLSAA_IMPROPER_TYPES.items()},
-        name="oplsaa",
-        references=["Jorgensen, Maxwell & Tirado-Rives, JACS 118, 11225 "
-                    "(1996)", "Kaminski et al., J. Phys. Chem. B 105, 6474 "
-                    "(2001)"])
-
-
-def _lopls_library() -> OPLSLibrary:
-    """Assemble the built-in L-OPLS library (OPLS-AA base + Siu 2012 refit).
-
-    Returns
-    -------
-    OPLSLibrary
-        The L-OPLS library.
-    """
-    lib = _oplsaa_library()
-    lib.name = "lopls"
-    lib.references = ["Siu, Pluhackova & Boeckmann, JCTC 8, 1459 (2012)",
-                      "base parameters: Jorgensen, Maxwell & Tirado-Rives, "
-                      "JACS 118, 11225 (1996)"]
-    for name, t in _LOPLS_ATOM_TYPES.items():
-        lib.atom_types[name] = {"cls": t[0], "element": t[1], "mass": t[2],
-                                "charge": t[3], "sigma": t[4],
-                                "epsilon": t[5] * KCAL_PER_KJ,
-                                "comment": t[6]}
-    for key, v in _LOPLS_DIHEDRAL_TYPES.items():
-        lib.dihedral_types[key] = {"v": [x * KCAL_PER_KJ for x in v]}
-    return lib
-
-
-def _oplsaa_1996_library() -> OPLSLibrary:
-    """The built-in OPLS-AA subset with the original 1996 alkane torsions.
-
-    The current OPLS-AA distribution carries slightly revised alkane
-    torsional parameters (a late-1999 update from the Jorgensen lab); this
-    variant restores the three alkane torsions of the original paper
-    (JACS 118, 11225, 1996, Supporting Information Table 7), which
-    reproduce the conformational energies of the paper's Table 1 exactly.
-
-    Returns
-    -------
-    OPLSLibrary
-        The 1996-torsion variant.
-    """
-    lib = _oplsaa_library()
-    lib.name = "oplsaa-1996"
-    lib.dihedral_types["CT-CT-CT-CT"] = {"v": [0.0, 1.740, -0.157, 0.279,
-                                               0.0]}
-    lib.dihedral_types["CT-CT-CT-HC"] = {"v": [0.0, 0.0, 0.0, 0.366, 0.0]}
-    lib.dihedral_types["HC-CT-CT-HC"] = {"v": [0.0, 0.0, 0.0, 0.318, 0.0]}
-    return lib
-
-
-def builtin_library(name: str = "oplsaa") -> OPLSLibrary:
-    """Return one of the built-in curated parameter sets.
-
-    ``"oplsaa"`` covers alkanes, alkenes, benzene rings and monoalcohols
-    with the published OPLS-AA parameters; ``"oplsaa-1996"`` is that set
-    with the original 1996 alkane torsions (reproduces Table 1 of the
-    paper); ``"lopls"`` is the base set with the L-OPLS long-hydrocarbon
-    refit of Siu et al. (2012) layered on top (new ``lopls_*`` atom types
-    and refit ``CT-CT-CT-CT`` / alkene torsions).
+    ``"oplsaa"`` is the OPLS-AA distribution (SEAMM's ``oplsaa.frc``), with
+    the alkane torsions of its late-1999 revision; ``"oplsaa-1996"`` restores
+    the original 1996 alkane torsions (reproduces Table 1 of the paper);
+    ``"lopls"`` layers the L-OPLS long-hydrocarbon refit of Siu et al. (2012)
+    on top (new ``lopls_*`` atom types and refit alkane / alkene torsions);
+    ``"CL&P"`` is the Canongia Lopes & Padua ionic-liquid extension and
+    ``"oplsaa+"`` the union of everything. See
+    :func:`~xnns.ffnn.common.frc.list_forcefields` for the full list.
 
     Parameters
     ----------
     name : str, optional
-        ``"oplsaa"`` (default), ``"oplsaa-1996"`` or ``"lopls"``.
+        The variant name, by default ``"oplsaa"``.
+    strict : bool, optional
+        See :func:`from_forcefield`; ``"CL&P"`` and ``"oplsaa+"`` need
+        ``strict=False`` because of the tabulated ``PF6-`` angle.
 
     Returns
     -------
     OPLSLibrary
         A fresh library instance (safe to modify).
-
-    Raises
-    ------
-    KeyError
-        For an unknown library name.
     """
-    builders = {"oplsaa": _oplsaa_library, "oplsaa1996": _oplsaa_1996_library,
-                "lopls": _lopls_library}
-    key = name.lower().replace("-", "").replace("_", "")
-    if key not in builders:
-        raise KeyError(f"unknown built-in OPLS library {name!r} "
-                       f"(available: {sorted(builders)})")
-    return builders[key]()
+    return read_opls(name, strict=strict)

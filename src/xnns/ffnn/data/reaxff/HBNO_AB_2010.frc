@@ -1,0 +1,253 @@
+!MolSSI forcefield 1
+
+
+#define reaxff/HBNO_AB_2010
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  --------------
+2025.04.03      1  metadata                         HBNO_AB_2010
+2025.04.03      1  reaxff_general_parameters        HBNO_AB_2010
+2025.04.03      1  reaxff_atomic_parameters_1-8     HBNO_AB_2010
+2025.04.03      1  reaxff_atomic_parameters_9-16    HBNO_AB_2010
+2025.04.03      1  reaxff_atomic_parameters_17-24   HBNO_AB_2010
+2025.04.03      1  reaxff_atomic_parameters_25-32   HBNO_AB_2010
+2025.04.03      1  reaxff_bond_parameters_1-8       HBNO_AB_2010
+2025.04.03      1  reaxff_bond_parameters_9-16      HBNO_AB_2010
+2025.04.03      1  reaxff_off-diagonal_parameters   HBNO_AB_2010
+2025.04.03      1  reaxff_angle_parameters          HBNO_AB_2010
+2025.04.03      1  reaxff_torsion_parameters        HBNO_AB_2010
+2025.04.03      1  reaxff_hydrogen-bond_parameters  HBNO_AB_2010
+
+
+#metadata HBNO_AB_2010
+
+!Version      Ref   Parameter       Value   Description
+!---------  -----  ------------  ---------  --------------------------------------
+2025.04.03      1   ff_form      reaxff     The functional form of the forcefield
+2025.04.03      1   charges      qeq/reaxff How charges should be handled
+
+
+#reaxff_general_parameters HBNO_AB_2010
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.03      1   BO_cutoff      0.01    Cutoff for bond order (*100)
+2025.04.03      1     Pboc,1      50       Overcoordination parameter 1
+2025.04.03      1     Pboc,2       9.4514  Overcoordination parameter 2
+2025.04.03      1     Pcoa,2      56.6636  Valency angle conjugation parameter
+2025.04.03      1     Pcoa,3       1.4155  Valency angle conjugation parameter
+2025.04.03      1     Pcoa,4       0.7151  Valency angle conjugation parameter
+2025.04.03      1     Pcot,2       2.1861  Conjugation
+2025.04.03      1      Pfe1        2.8793  Fe dimer correction?
+2025.04.03      1     Plp,1        5.8971  Valency angle/lone pair parameter
+2025.04.03      1    Povun,3      12.5819  Overcoordination parameter
+2025.04.03      1    Povun,4       2.7425  Overcoordination parameter
+2025.04.03      1    Povun,6       1.0701  Over/undercoordination parameter 6
+2025.04.03      1    Povun,7      11.9083  Over/undercoordination parameter 7
+2025.04.03      1    Povun,8      13.3822  Over/undercoordination parameter 8
+2025.04.03      1     Ppen,2       6.929   Double bond/angle parameter
+2025.04.03      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.04.03      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.04.03      1     Ptor,2       5.8374  Torsion/BO parameter
+2025.04.03      1     Ptor,3      10       Torsion overcoordination
+2025.04.03      1     Ptor,4       1.882   Torsion overcoordination
+2025.04.03      1    Ptrip,1     -24.671   Triple bond stabilization parameter 1
+2025.04.03      1    Ptrip,2      15       Triple bond stabilisation parameter 2
+2025.04.03      1    Ptrip,3       6.5     Triple bond stabilisation parameter
+2025.04.03      1    Ptrip,4       3       Triple bond stabilisation parameter
+2025.04.03      1    Pval,10       2.0384  Valency angle parameter
+2025.04.03      1     Pval,7      33.8667  Valency undercoordination
+2025.04.03      1     Pval,8       2.1533  Valency/lone pair parameter
+2025.04.03      1     Pval,9       1.0563  Valency angle
+2025.04.03      1     PvdW,1       1.5591  vdWaals shielding
+2025.04.03      1  Rtaper,lower    0       Lower Taper-radius
+2025.04.03      1  Rtaper,upper   10       Upper Taper-radius
+2025.04.03      1      kc2        50       C2-correction
+2025.04.03      1   not_used_1     6.1431  Not used
+2025.04.03      1   not_used_2    -2.4837  Not used
+2025.04.03      1   not_used_3    -1.2327  Conjugation 0 (not used)
+2025.04.03      1   not_used_4     0.5     Not used
+2025.04.03      1   not_used_5    20       Not used
+2025.04.03      1   not_used_6     5       Molecular energy (not used)
+2025.04.03      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 HBNO_AB_2010
+
+!Version      Ref   Center     Acore,2     C_i     Dij    Ecore,2      Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  ------  ---------  -------  --------  --------  --------
+2025.04.03      1     H             10  1.0698  0.0616        0.1  59.5599    4.8714    6.1752    0.0009
+2025.04.03      1     B             12  0       0.05          0.1  -2.37      6.8208    4.0943    1.0943
+2025.04.03      1     N             10  0.9745  0.1375        0.1  -2.37      2.7645    2.5862    2.6432
+2025.04.03      1     O             12  0.9745  0.088         0.1  68.6129    1.4404   42.5068    0.0713
+
+
+#reaxff_atomic_parameters_9-16 HBNO_AB_2010
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.04.03      1     H             1   0        -15.7683     0         2.1504    2.8793      0.6867  -0.1
+2025.04.03      1     B             0   0         -3.6082     7.2404    1.8       2.8413      1.3484   1
+2025.04.03      1     N             2  29.92      -6.434     27.4217    2.6491    2.8793      1.552    1.2641
+2025.04.03      1     O             2  16.0134    -3.5965    29.5271    2.5       2.9225      1.5423   1.2611
+
+
+#reaxff_atomic_parameters_17-24 HBNO_AB_2010
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.04.03      1     H         -0.1           0.6  1.3525      1            1          1        1   9.3858
+2025.04.03      1     B         -1.3           1.4  1.8276      3            3          3        3  12.4662
+2025.04.03      1     N          1.0972        1.4  1.7695      3            4          4        5  10.0677
+2025.04.03      1     O          0.9909        1.4  2.0514      2            4          4        6  10.2186
+
+
+#reaxff_atomic_parameters_25-32 HBNO_AB_2010
+
+!Version      Ref   Center     alpha_e    beta     chi     eta    gamma    gamma,w       m    not_used_1
+!---------  -----  --------  ---------  ------  ------  ------  -------  ---------  ------  ------------
+2025.04.03      1     H              0  1.0338  6.5362  7.0327   0.7492     5.0013   1.008       121.125
+2025.04.03      1     B              0  1.0564  6.8775  6.702    0.9088     2.6721  10.811        80
+2025.04.03      1     N              0  1.0183  8.1308  7        1          7.6886  14           100
+2025.04.03      1     O              0  1.0493  8.5     7.553    1.0184     7.7719  15.999       116.077
+
+
+#reaxff_bond_parameters_1-8 HBNO_AB_2010
+
+!Version      Ref   I    J     13_boc     De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  --------  ----------  ----------  -------  -------  -------  -------
+2025.04.03      1   H    H          1    0           0         165.702   -0.8238   6.5603   5.6991   1
+2025.04.03      1   B    H          1    0           0         177.41    -0.4601   9.2806   5.1245   0
+2025.04.03      1   B    B          1    0           0         109.102    1        0.8313   5.0065  -0.2
+2025.04.03      1   N    H          1    0           0         231.892   -0.7398   9.1469   5.7202   1
+2025.04.03      1   N    B          1   94.2037      0         143.971    0.2868   0.5585   6.5248  -0.2935
+2025.04.03      1   N    N          1   85.8215    151.815     104.587   -0.9395   0.3279   5.6414  -0.4426
+2025.04.03      1   O    H          1    0           0         207.791   -0.877    1.1523   5.3078   1
+2025.04.03      1   O    B          1  114.697       0         235.237   -0.9      0.5237   6.0651  -0.2746
+2025.04.03      1   O    N          1  110.367      54.8984    144.421    0.738    1.1003   4.7532  -0.4323
+2025.04.03      1   O    O          1  192.459      40          83.4125  -1.1375   0.7782   6.6205  -0.5
+
+
+#reaxff_bond_parameters_9-16 HBNO_AB_2010
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2    ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  -----
+2025.04.03      1   H    H    0        0        6       -0.0113     0.3597             1             0      0
+2025.04.03      1   B    H    0       -0.3     25       -0.0722     0.4971             1             0      1
+2025.04.03      1   B    B   15       -0.25    25       -0.0691     0.1                1             0      1
+2025.04.03      1   N    H    0        0        6       -0.0491     0.4224             1             0      0
+2025.04.03      1   N    B   10.2737  -0.25    25       -0.165      0.1083             1             0      1
+2025.04.03      1   N    N    8.2367  -0.282   12.0357  -0.1884     1                  1             0      1
+2025.04.03      1   O    H    0        0        6       -0.057      0.4021             0             0      0
+2025.04.03      1   O    B   13.4037  -0.25    25       -0.0898     0.5534             1             0      1
+2025.04.03      1   O    N    6.4197  -0.1832  17.1494  -0.2384     0.5521             1             0      1
+2025.04.03      1   O    O    7       -0.121   22.4755  -0.1796     0.9926             1             0      1
+
+
+#reaxff_off-diagonal_parameters HBNO_AB_2010
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.04.03      1   B    H   0.0526  -1          -1           1.1648  1.501   11.2019
+2025.04.03      1   N    H   0.0367  -1          -1           0.9496  1.647   10.5106
+2025.04.03      1   N    B   0.0564   1.2073     -1           1.4037  1.7     10.7561
+2025.04.03      1   O    H   0.0422  -1          -1           0.895   1.8     10.3041
+2025.04.03      1   O    B   0.096    1.2435     -1           1.3579  2.1711  10.3073
+2025.04.03      1   O    N   0.1102   1.0927      1.0039      1.2076  1.9459  10.1207
+
+
+#reaxff_angle_parameters HBNO_AB_2010
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.04.03      1   H    H     H    0              0   27.9213    5.8635    1.04      0         0
+2025.04.03      1   B    H     H    0              0    5.0019    1         1.5       0         0
+2025.04.03      1   B    H     B    0              0    5         1         1.04      1         0
+2025.04.03      1   N    H     H    0              0   10.0019    1         1.04      0         0
+2025.04.03      1   N    H     B    0              0    9.698     1         1.04      1         0
+2025.04.03      1   N    H     N    0              0    5         2         1.04      0         0
+2025.04.03      1   O    H     H    0              0    0.0019    6         1.04      0         0
+2025.04.03      1   O    H     B    0              0    2.5       0.1       2.8604    1.674     0
+2025.04.03      1   O    H     N    0              0    0.0019    6         1.04      0         0
+2025.04.03      1   O    H     O    0              0    0.0019    6         1.04      0         0
+2025.04.03      1   H    B     H    0              0   14.6089    2.3811    3         3        62.5987
+2025.04.03      1   B    B     H    0              0   32.2012    4.7029    1.04      3        55
+2025.04.03      1   B    B     B    0              0   35         3         1.01      1.5      70
+2025.04.03      1   N    B     H    0              0    2.5       0.1       2.2627    0.1      55
+2025.04.03      1   N    B     B    0              0   40         6         1.04      3        50
+2025.04.03      1   N    B     N    0              0   38.0571    4.2562    1.3861    1.1083   72.3075
+2025.04.03      1   O    B     H    0              0   23.9782    6         1.6585    3        65
+2025.04.03      1   O    B     B    0              0   20         4         1.25      1        70
+2025.04.03      1   O    B     N    0              0   39.5652    6         1.6555    3        67.1161
+2025.04.03      1   O    B     O    0             35   25.319     6         3         3        50
+2025.04.03      1   H    N     H    0              0   27.9831    4.0538    1.2487    0.7544   85.5836
+2025.04.03      1   B    N     H    0              0   14.9131    0.529     1.04      0.1      55
+2025.04.03      1   B    N     B    0              0   30.87      0.8444    1.0576    3        50
+2025.04.03      1   N    N     H    0              0   24.255     2.3034    1.04      0.1      72.7618
+2025.04.03      1   N    N     B    0              0   40         4         1.25      1        70
+2025.04.03      1   N    N     N    0              0   20.6158    3.9104    1.05      1.7772   73.9146
+2025.04.03      1   O    N     H    0              0   44.1822    1.7374    1.0369    0.078    84.8524
+2025.04.03      1   O    N     B    0              0   30         2         1.25      1        70
+2025.04.03      1   O    N     N   -0.9193         0   45         1.1304    1.05      1.7772   76.8384
+2025.04.03      1   O    N     O  -30.2047         0   45         1.1167    1.05      1.7772   80.6417
+2025.04.03      1   H    O     H    0              0   14.568     2.0061    1.3652    0.5136   79.2872
+2025.04.03      1   B    O     H    0              0    9.2973    0.781     3         2.0787   72.5977
+2025.04.03      1   B    O     B    0              0   34.0172    6         1.04      3        60.2683
+2025.04.03      1   N    O     H    0              0   44.9886    1.447     1.05      0.2904   77.8084
+2025.04.03      1   N    O     B    0              0   30         2         1.25      1        70
+2025.04.03      1   N    O     N    0              0   45         1.7305    1.0783    0.4537   74.9511
+2025.04.03      1   O    O     H    0              0   45.0568    7.5       1.05      2        70.9309
+2025.04.03      1   O    O     B    0              0   50         1.5928    1.04      1.4924   90
+2025.04.03      1   O    O     N    0              0   14.7823    5.2059    1.0783    0.4537   81.8855
+2025.04.03      1   O    O     O  -10              0   16.3789    2.2172    1.3765    0.4537   90
+
+
+#reaxff_torsion_parameters HBNO_AB_2010
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1        V2       V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  --------  -------  ------------  ------------
+2025.04.03      1   *    H     H    *         0    0        0         0        0                  0             0
+2025.04.03      1   *    B     B    *         0   -7.5      0.25     50        0.3                0             0
+2025.04.03      1   *    N     H    *         0   -2.5415   0         0.1      0.02               0             0
+2025.04.03      1   *    N     B    *         0   -5.4735  -2        19.3351   0.3228             0             0
+2025.04.03      1   *    N     N    *        -2   -3.3327  -2        24.4048  -0.1617             0             0
+2025.04.03      1   *    O     H    *         0   -2.5415   0         0.1      0.02               0             0
+2025.04.03      1   *    O     B    *         0   -2.5     -1.9522   50       -0.5                0             0
+2025.04.03      1   *    O     N    *        -2   -9        1.3934   72.0073  -0.2804             0             0
+2025.04.03      1   B    O     O    B         0   -5        2        75        0.3                0             0
+2025.04.03      1   *    O     O    *         0   -5        0.0002  150        0.3                0             0
+
+
+#reaxff_hydrogen-bond_parameters HBNO_AB_2010
+
+!Version      Ref   I    J     K      Ehb    Phb3     Rhb    Thb
+!---------  -----  ---  ---  ---  -------  ------  ------  -----
+2025.04.03      1   N    H     N  -2.5002      15  2           3
+2025.04.03      1   N    H     O  -2.5         15  2           3
+2025.04.03      1   O    H     N  -2.5         15  2           3
+2025.04.03      1   O    H     O  -2.5         15  2.0347      3
+
+#reference 1
+@Author SEAMM
+@Date 2025-04-03
+ReaxFF forcefield translated from Reax format
+
+import from LAMMPS examples/reaxff/AB
+
+DATE: 2011-02-18 CONTRIBUTOR: Aidan Thompson, athomps@sandia.gov CITATION: Weismiller, van Duin,  Lee, Yetter, J Phys Chem A, 114, 5485-5492 (2010) COMMENT: Reactive MD-force field for Ammonia Borane: Weismiller, M.R.; van Duin, A.C.T.; Lee, J.; Yetter, R.A. J. Phys. Chem. A 2010, 114, 5485-5492
+
+@bibtex @article{doi:10.1021/jp100136c,
+author = {Weismiller, Michael R. and van Duin, Adri C. T. and Lee, Jongguen and Yetter, Richard A.},
+title = {ReaxFF Reactive Force Field Development and Applications for Molecular Dynamics Simulations of Ammonia Borane Dehydrogenation and Combustion},
+journal = {The Journal of Physical Chemistry A},
+volume = {114},
+number = {17},
+pages = {5485-5492},
+year = {2010},
+doi = {10.1021/jp100136c},
+note ={PMID: 20384351},
+URL = {https://doi.org/10.1021/jp100136c},
+eprint = {https://doi.org/10.1021/jp100136c}
+}
+
+#end
