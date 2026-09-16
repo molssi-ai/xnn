@@ -106,8 +106,15 @@ neural libraries keep using the JSON format of
 
 The format in brief
 ===================
-A file opens with ``!MolSSI forcefield 1``. Everything else is organised in
-sections that start at a ``#`` line and run to the next one::
+A file opens with ``!MolSSI forcefield 1``: the word after ``!`` is the
+dialect (``MolSSI``, or ``BIOSYM`` in legacy files) and the trailing number
+is the *format version*, the version of the file grammar. Version 1 is the
+current and only published one; it is what xnn implements and writes
+(:data:`~xnn.ffnn.common.frc.FRC_FORMAT_VERSION`), every shipped file
+declares it, :class:`~xnn.ffnn.common.frc.FrcFile` exposes it as
+``format_version``, and a newer number is parsed with a warning. It is not a parameter version: those sit in the ``Version``
+column of every row (see below), and the newest wins. Everything else is
+organised in sections that start at a ``#`` line and run to the next one::
 
    #quadratic_bond oplsaa          <- kind, label
 
