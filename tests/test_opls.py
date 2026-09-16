@@ -8,6 +8,13 @@ Ryckaert-Bellemans conversion is checked against the L-OPLS paper's own
 table (Siu et al., JCTC 8, 1459, 2012, Table 2), which lists both forms of
 the same torsions. The relaxed ethane rotational barrier is checked against
 Table 1 of the 1996 paper (3.01 kcal/mol) when ASE is available.
+
+Parameters come from the OPLS-AA distribution shipped as a SEAMM ``.frc``
+file, whose atom-type names are used throughout (``opls_80`` alkane CH3
+carbon, ``opls_81`` CH2, ``opls_85`` H on carbon, ``opls_88``/``opls_89``
+ethylene, ``opls_96``/``opls_97``/``opls_99`` alcohol O / H / C); bonded
+parameters are keyed by the equivalent types (``opls_18`` alkane carbon,
+``opls_86`` alkene carbon, ``opls_5``/``opls_7`` alcohol O / H).
 """
 import json
 import math
@@ -21,10 +28,12 @@ from xnns.common.train import weighted_loss
 from xnns.ffnn.models import (OPLS, OPLSForceField, MolecularTopology,
                               builtin_library, guess_bonds, read_opls,
                               read_topology, fourier_to_rb, rb_to_fourier)
-from xnns.ffnn.models.oplslib import KCAL_TO_EV
+from xnns.ffnn.models.oplslib import (KCAL_TO_EV, resolve_improper_type,
+                                      improper_key)
 from xnns.ffnn.models.opls import KE
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
+CT, HC, CM, OH, HO = "opls_18", "opls_85", "opls_86", "opls_5", "opls_7"
 
 
 @pytest.fixture(autouse=True)
@@ -57,8 +66,7 @@ def _butane():
            [1.65, 1.96, -0.88], [1.65, 1.96, 0.88],
            [3.98, 0.44, 0.0], [3.98, 1.96, 0.88], [3.98, 1.96, -0.88]]
     z = [6, 6, 6, 6] + [1] * 10
-    types = ["opls_135", "opls_136", "opls_136", "opls_135"] \
-        + ["opls_140"] * 10
+    types = ["opls_80", "opls_81", "opls_81", "opls_80"] + ["opls_85"] * 10
     bonds = [(0, 1), (1, 2), (2, 3), (0, 4), (0, 5), (0, 6), (1, 7), (1, 8),
              (2, 9), (2, 10), (3, 11), (3, 12), (3, 13)]
     return pos, z, types, bonds
@@ -88,6 +96,26 @@ def _chain4(phi_deg, r=1.529, ang_deg=112.7):
     return torch.stack([p0, p1, p2, p3])
 
 
+def _ethylene(pyramid_deg=0.0, explicit_impropers=True):
+    """Ethylene with one H rotated out of plane by ``pyramid_deg``."""
+    d, dh = 1.34, 1.08
+    ang = math.radians(120.0)
+    phi = math.radians(pyramid_deg)
+    pos = [[0.0, 0.0, 0.0], [d, 0.0, 0.0]]
+    pos += [[-dh * math.cos(math.pi - ang), dh * math.sin(math.pi - ang), 0],
+            [-dh * math.cos(math.pi - ang), -dh * math.sin(math.pi - ang), 0]]
+    y = dh * math.sin(math.pi - ang)
+    pos += [[d + dh * math.cos(math.pi - ang),
+             y * math.cos(phi), y * math.sin(phi)],
+            [d + dh * math.cos(math.pi - ang), -y, 0.0]]
+    types = ["opls_88", "opls_88"] + ["opls_89"] * 4
+    bonds = [(0, 1), (0, 2), (0, 3), (1, 4), (1, 5)]
+    # impropers resolve by the classes of their atoms (center third)
+    impropers = [(2, 3, 0, 1), (4, 5, 1, 0)] if explicit_impropers else ()
+    top = MolecularTopology.from_bonds(types, bonds, impropers=impropers)
+    return pos, [6, 6, 1, 1, 1, 1], top
+
+
 # ----------------------------------------------------------------------
 # registration, topology derivation, libraries
 # ----------------------------------------------------------------------
@@ -107,8 +135,8 @@ def test_topology_derivation_counts():
     assert len(top.exclusions) == 13 + 24
     # 2-methyl-2-propanol has 30 dihedrals (paper, "Results"): 9 H-C-C-O,
     # 18 H-C-C-C and 3 H-O-C-C
-    types2 = (["opls_159"] + ["opls_157"] * 3 + ["opls_154"]
-              + ["opls_140"] * 9 + ["opls_155"])
+    types2 = (["opls_101"] + ["opls_80"] * 3 + ["opls_96"]
+              + ["opls_85"] * 9 + ["opls_97"])
     bonds2 = [(0, 1), (0, 2), (0, 3), (0, 4),
               (1, 5), (1, 6), (1, 7), (2, 8), (2, 9), (2, 10),
               (3, 11), (3, 12), (3, 13), (4, 14)]
@@ -135,20 +163,26 @@ def test_topology_validation_and_roundtrip(tmp_path):
     assert back.pairs14 == top.pairs14
 
 
-def test_builtin_libraries_are_neutral_molecules():
+def test_shipped_libraries_are_neutral_molecules():
     lib = builtin_library("oplsaa")
     q = {n: t["charge"] for n, t in lib.atom_types.items()}
     # butane: 2 CH3 + 2 CH2
-    assert abs(2 * (q["opls_135"] + 3 * q["opls_140"])
-               + 2 * (q["opls_136"] + 2 * q["opls_140"])) < 1e-12
+    assert abs(2 * (q["opls_80"] + 3 * q["opls_85"])
+               + 2 * (q["opls_81"] + 2 * q["opls_85"])) < 1e-12
     # ethanol: CH3 + CH2(O) + OH
-    assert abs(q["opls_135"] + 3 * q["opls_140"] + q["opls_157"]
-               + 2 * q["opls_140"] + q["opls_154"] + q["opls_155"]) < 1e-12
+    assert abs(q["opls_80"] + 3 * q["opls_85"] + q["opls_99"]
+               + 2 * q["opls_85"] + q["opls_96"] + q["opls_97"]) < 1e-12
     # L-OPLS pentadecane-style CH2/CH3 groups are neutral too
     lq = {n: t["charge"]
           for n, t in builtin_library("lopls").atom_types.items()}
     assert abs(lq["lopls_CT_CH3"] + 3 * lq["lopls_HC_CH3"]) < 1e-12
     assert abs(lq["lopls_CT_CH2"] + 2 * lq["lopls_HC_CH2"]) < 1e-12
+    # the classes behind the alkane types
+    assert lib.cls("opls_80") == CT and lib.cls("opls_80", "oop") == CT
+    assert lib.cls("opls_85", "torsion") == HC
+    assert lib.atom_types["opls_80"]["element"] == 6
+    assert lib.atom_types["opls_80"]["cls_nonbond"] == "opls_80"
+    assert len(lib.templates) == 572 and lib.metadata["ff_form"] == "oplsaa"
 
 
 def test_rb_fourier_conversion_against_lopls_table():
@@ -161,6 +195,10 @@ def test_rb_fourier_conversion_against_lopls_table():
     assert max(abs(a - b) for a, b in zip(back, rb)) < 1e-6
     with pytest.raises(ValueError):
         rb_to_fourier([0, 0, 0, 0, 0, 1.0])
+    # the shipped lopls.frc carries the same torsion (kJ -> kcal, V0 dropped)
+    v = builtin_library("lopls").dihedral_types[f"{CT}-{CT}-{CT}-{CT}"]["v"]
+    assert v[0] == 0.0
+    assert max(abs(a - b / 4.184) for a, b in zip(v[1:4], fourier[1:4])) < 1e-9
 
 
 def test_library_json_roundtrip(tmp_path):
@@ -169,6 +207,7 @@ def test_library_json_roundtrip(tmp_path):
     back = read_opls(tmp_path / "lopls.json")
     assert back.atom_types == lib.atom_types
     assert back.dihedral_types == lib.dihedral_types
+    assert back.templates == lib.templates
     assert back.fudge_lj == lib.fudge_lj
     # energies are identical through a round trip
     pos, z, types, bonds = _butane()
@@ -179,41 +218,48 @@ def test_library_json_roundtrip(tmp_path):
     assert float((e1 - e2).abs()) < 1e-12
 
 
-def test_gromacs_itp_reader(tmp_path):
-    # a synthetic .itp source in the oplsaa.ff layout; values chosen so the
-    # translated numbers are easy to verify by hand
-    (tmp_path / "forcefield.itp").write_text(
-        "[ defaults ]\n; geometric combining, half-strength 1,4 pairs\n"
-        "1 3 yes 0.5 0.5\n")
-    (tmp_path / "ffnonbonded.itp").write_text(
-        "[ atomtypes ]\n"
-        " opls_135   CT  6  12.01100  -0.18  A  3.50000e-01  2.76144e-01\n"
-        " opls_140   HC  1   1.00800   0.06  A  2.50000e-01  1.25520e-01\n")
-    (tmp_path / "ffbonded.itp").write_text(
-        "[ bondtypes ]\n"
-        "  CT    CT      1    0.15290   224262.4\n"
-        "[ angletypes ]\n"
-        "  CT     CT     CT      1   112.700    488.273\n"
-        "[ dihedraltypes ]\n"
-        "  CT  CT  CT  CT  3  2.92880 -1.46440 0.20920 -1.67360 "
-        "0.00000 0.00000\n"
-        "#define improper_Z_CM_X_Y       180.0     62.76000   2\n")
-    lib = read_opls(tmp_path)
-    at = lib.atom_types["opls_135"]
-    assert at["cls"] == "CT" and at["element"] == 6
-    assert abs(at["sigma"] - 3.5) < 1e-12
-    assert abs(at["epsilon"] - 0.066) < 1e-6
-    assert abs(lib.bond_types["CT-CT"]["k"] - 268.0) < 1e-3
-    assert abs(lib.bond_types["CT-CT"]["r0"] - 1.529) < 1e-12
-    assert abs(lib.angle_types["CT-CT-CT"]["k"] - 58.35) < 1e-3
-    v = lib.dihedral_types["CT-CT-CT-CT"]["v"]
-    assert max(abs(a - b) for a, b in
-               zip(v, [0.0, 1.3, -0.05, 0.2, 0.0])) < 1e-4
-    assert abs(lib.improper_types["Z-CM-X-Y"]["v2"] - 30.0) < 1e-6
-    # a Lorentz-Berthelot force field is not OPLS
-    (tmp_path / "forcefield.itp").write_text("[ defaults ]\n1 2 yes 0.5 0.5\n")
-    with pytest.raises(ValueError):
-        read_opls(tmp_path)
+def test_frc_library_roundtrip_and_spec_forms(tmp_path):
+    lib = builtin_library("oplsaa")
+    path = lib.save_frc(tmp_path / "mine.frc", name="mine")
+    back = read_opls(str(path))
+    assert back.name == "mine"
+    assert back.bond_types == lib.bond_types
+    assert back.angle_types == lib.angle_types
+    assert back.dihedral_types == lib.dihedral_types
+    assert back.improper_types == lib.improper_types
+    assert back.templates == lib.templates
+    for n, a in lib.atom_types.items():
+        b = back.atom_types[n]
+        for key in ("charge", "sigma", "epsilon", "mass"):
+            assert b[key] == pytest.approx(a[key], abs=1e-9), (n, key)
+        for term in ("nonbond", "bond", "angle", "torsion", "oop"):
+            assert back.cls(n, term) == lib.cls(n, term)
+    pos, z, types, bonds = _butane()
+    top = MolecularTopology.from_bonds(types, bonds)
+    g = _graph(pos, z, 20.0)
+    assert float((OPLS(lib, top, cutoff=20.0)(g)["energy"]
+                  - OPLS(str(path), top, cutoff=20.0)(g)["energy"]).abs()) \
+        < 1e-12
+    # "<path>.frc:<variant>" and shipped names are the same thing
+    from xnns.ffnn.common import builtin_data_dir
+    spec = f"{builtin_data_dir() / 'oplsaa.frc'}:oplsaa"
+    assert read_opls(spec).bond_types == lib.bond_types
+    with pytest.raises(FileNotFoundError):
+        read_opls("no-such-library")
+
+
+def test_strict_refuses_unimplemented_forms():
+    # CL&P carries a tabulated PF6- angle the OPLS model has no term for
+    with pytest.raises(ValueError, match="tabulated_angle"):
+        builtin_library("CL&P")
+    clp = builtin_library("CL&P", strict=False)
+    assert any("tabulated_angle" in n for n in clp.notes)
+    # per-term equivalences differ for the CL&P types
+    assert clp.cls("CE", "bond") == CT and clp.cls("CE", "oop") == "C2"
+    assert clp.cls("FB", "nonbond") == "FB" and clp.cls("FB", "bond") == "F"
+    plus = builtin_library("oplsaa+", strict=False)
+    assert len(plus.atom_types) > len(builtin_library("oplsaa").atom_types)
+    assert plus.fragments
 
 
 # ----------------------------------------------------------------------
@@ -221,7 +267,7 @@ def test_gromacs_itp_reader(tmp_path):
 # ----------------------------------------------------------------------
 def test_bond_energy_equation():
     lib = builtin_library("oplsaa")
-    top = MolecularTopology.from_bonds(["opls_135", "opls_135"], [(0, 1)])
+    top = MolecularTopology.from_bonds(["opls_80", "opls_80"], [(0, 1)])
     model = OPLS(lib, top, cutoff=10.0, keep_intermediates=True)
     r = 1.6
     out = model(_graph([[0, 0, 0], [r, 0, 0]], [6, 6], 10.0))
@@ -237,7 +283,7 @@ def test_bond_energy_equation():
 def test_lj_coulomb_dimer_analytic():
     # two atoms with no bond: the full eq 1 with geometric combining rules
     lib = builtin_library("oplsaa")
-    top = MolecularTopology.from_bonds(["opls_135", "opls_140"], [])
+    top = MolecularTopology.from_bonds(["opls_80", "opls_85"], [])
     model = OPLS(lib, top, cutoff=10.0)
     r = 3.2
     out = model(_graph([[0, 0, 0], [r, 0, 0]], [6, 1], 10.0))
@@ -253,7 +299,7 @@ def test_lj_coulomb_dimer_analytic():
 def test_angle_energy_equation():
     lib = builtin_library("oplsaa")
     top = MolecularTopology.from_bonds(
-        ["opls_135", "opls_136", "opls_135"], [(0, 1), (1, 2)])
+        ["opls_80", "opls_81", "opls_80"], [(0, 1), (1, 2)])
     model = OPLS(lib, top, cutoff=10.0, keep_intermediates=True)
     theta = math.radians(100.0)
     r = 1.529
@@ -269,7 +315,7 @@ def test_angle_energy_equation():
 
 def test_torsion_fourier_and_14_scaling():
     lib = builtin_library("oplsaa")
-    top = MolecularTopology.from_bonds(["opls_135"] * 4,
+    top = MolecularTopology.from_bonds(["opls_80"] * 4,
                                        [(0, 1), (1, 2), (2, 3)])
     model = OPLS(lib, top, cutoff=20.0, keep_intermediates=True)
     for phi in (0.0, 60.0, 100.0, 180.0):
@@ -291,31 +337,11 @@ def test_torsion_fourier_and_14_scaling():
         assert abs(float(out["e_lj"]) + float(out["e_coulomb"])) < 1e-14
 
 
-def _ethylene(pyramid_deg=0.0):
-    """Ethylene with one H rotated out of plane by ``pyramid_deg``."""
-    d, dh = 1.34, 1.08
-    ang = math.radians(120.0)
-    phi = math.radians(pyramid_deg)
-    pos = [[0.0, 0.0, 0.0], [d, 0.0, 0.0]]
-    pos += [[-dh * math.cos(math.pi - ang), dh * math.sin(math.pi - ang), 0],
-            [-dh * math.cos(math.pi - ang), -dh * math.sin(math.pi - ang), 0]]
-    # H on C1, one of them rotated about the C=C axis by phi
-    y, zc = dh * math.sin(math.pi - ang), 0.0
-    pos += [[d + dh * math.cos(math.pi - ang),
-             y * math.cos(phi), y * math.sin(phi)],
-            [d + dh * math.cos(math.pi - ang), -y, 0.0]]
-    types = ["opls_143", "opls_143"] + ["opls_144"] * 4
-    bonds = [(0, 1), (0, 2), (0, 3), (1, 4), (1, 5)]
-    impropers = [(2, 3, 0, 1), (4, 5, 1, 0)]
-    top = MolecularTopology.from_bonds(types, bonds, impropers=impropers,
-                                       improper_keys=["Z-CM-X-Y"] * 2)
-    return pos, [6, 6, 1, 1, 1, 1], top
-
-
 def test_improper_dihedral_equation():
     lib = builtin_library("oplsaa")
     pos, z, top = _ethylene(0.0)
     model = OPLS(lib, top, cutoff=20.0, keep_intermediates=True)
+    assert model.impropers == [(2, 3, 0, 1), (4, 5, 1, 0)]
     out = model(_graph(pos, z, 20.0))
     assert abs(float(out["e_improper"])) < 1e-10   # planar: both minima
     # planar ethylene also has zero X-CM-CM-X torsional energy
@@ -323,12 +349,53 @@ def test_improper_dihedral_equation():
     pos2, z, top = _ethylene(25.0)
     out2 = model(_graph(pos2, z, 20.0))
     # e_improper = sum V2/2 (1 - cos 2 phi) over the distorted center's
-    # improper, recomputed from the model's own dihedral cosines
+    # improper, recomputed from the model's own dihedral cosines; V2 = 30
+    # is the library's X-X-opls_86-X pattern (alkene carbon center)
     cos = model.intermediates["improper_cos"]
     expect = sum(0.5 * 30.0 * KCAL_TO_EV * (1 - (2 * float(c) ** 2 - 1))
                  for c in cos)
     assert abs(float(out2["e_improper"]) - expect) < 1e-12
     assert float(out2["e_improper"]) > 1e-4
+
+
+def test_auto_impropers_at_trigonal_centers():
+    # no impropers listed: one is placed at every three-connected atom whose
+    # classes match a library pattern (both ethylene carbons here), with the
+    # outer atoms in index order and the center third
+    pos, z, top = _ethylene(25.0, explicit_impropers=False)
+    auto = OPLS("oplsaa", top, cutoff=20.0)
+    assert auto.impropers == [(1, 2, 0, 3), (0, 4, 1, 5)]
+    assert float(auto(_graph(pos, z, 20.0))["e_improper"]) > 1e-4
+    off = OPLS("oplsaa", top, cutoff=20.0, auto_impropers=False)
+    assert off.impropers == []
+    assert abs(float(off(_graph(pos, z, 20.0))["e_improper"])) < 1e-14
+    # a center without any pattern (sp3 carbons have none) gets nothing
+    pos_b, z_b, types, bonds = _butane()
+    assert OPLS("oplsaa", MolecularTopology.from_bonds(types, bonds),
+                cutoff=20.0).impropers == []
+    # legacy opaque keys still resolve exactly
+    lib = builtin_library("oplsaa")
+    lib.improper_types["my-key"] = {"v2": 1.0}
+    top_k = MolecularTopology.from_bonds(
+        top.types, top.bonds, impropers=[(2, 3, 0, 1)], improper_keys=["my-key"])
+    m = OPLS(lib, top_k, cutoff=20.0)
+    assert m.impropers == [(2, 3, 0, 1)]
+    assert m.ff.improper_keys[m.ff.resolve_improper("my-key")] == "my-key"
+
+
+def test_improper_pattern_precedence():
+    table = {improper_key("X", "X", CM, "X"): {"v2": 30.0},
+             improper_key(HC, "X", CM, "X"): {"v2": 5.0},
+             improper_key(HC, HC, CM, CT): {"v2": 1.0}}
+    assert resolve_improper_type(table, HC, HC, CM, CT) \
+        == improper_key(HC, HC, CM, CT)
+    assert resolve_improper_type(table, CT, HC, CM, HC) \
+        == improper_key(HC, HC, CM, CT)            # outer order is free
+    assert resolve_improper_type(table, HC, CT, CM, CT) \
+        == improper_key(HC, "X", CM, "X")
+    assert resolve_improper_type(table, CT, CT, CM, CT) \
+        == improper_key("X", "X", CM, "X")
+    assert resolve_improper_type(table, CT, CT, CT, CT) is None
 
 
 def test_dihedral_wildcard_resolution():
@@ -344,10 +411,10 @@ def test_dihedral_wildcard_resolution():
 def test_missing_parameters_are_reported_together():
     lib = builtin_library("oplsaa")
     top = MolecularTopology.from_bonds(
-        ["opls_154", "opls_154"], [(0, 1)])   # O-O bond: no OH-OH bond type
+        ["opls_97", "opls_97"], [(0, 1)])   # H(O)-H(O) bond: no such type
     with pytest.raises(KeyError) as err:
         OPLS(lib, top, cutoff=10.0)
-    assert "OH-OH" in str(err.value)
+    assert f"{HO}-{HO}" in str(err.value)
     with pytest.raises(KeyError) as err:
         OPLS(lib, MolecularTopology.from_bonds(["nope"], []), cutoff=10.0)
     assert "nope" in str(err.value)
@@ -449,7 +516,7 @@ def test_periodic_minimum_image_and_stress():
 
 def test_switching_function():
     lib = builtin_library("oplsaa")
-    top = MolecularTopology.from_bonds(["opls_135", "opls_135"], [])
+    top = MolecularTopology.from_bonds(["opls_80", "opls_80"], [])
     plain = OPLS(lib, top, cutoff=10.0)
     switched = OPLS(lib, top, cutoff=10.0, switch_width=2.0)
     r = 9.0
@@ -486,7 +553,7 @@ def test_relaxed_ethane_barrier_matches_paper():
                         dh * math.sin(math.pi - ang) * math.cos(phi),
                         dh * math.sin(math.pi - ang) * math.sin(phi)])
     atoms = ase.Atoms(numbers=[6, 6] + [1] * 6, positions=pos)
-    types = ["opls_135"] * 2 + ["opls_140"] * 6
+    types = ["opls_80"] * 2 + ["opls_85"] * 6
     top = MolecularTopology.from_bonds(types, guess_bonds(pos, [6, 6] + [1] * 6))
     model = OPLS("oplsaa-1996", top, cutoff=30.0)
     energies = {}
@@ -501,6 +568,11 @@ def test_relaxed_ethane_barrier_matches_paper():
         energies[target] = at.get_potential_energy() * EV_TO_KCAL
     barrier = energies[0.0] - energies[60.0]
     assert abs(barrier - 3.01) < 0.02   # Table 1: 3.01 kcal/mol
+    # oplsaa-1996 restores the paper's alcohol torsion too (H-C-O-H V3 = 0.45)
+    l96 = builtin_library("oplsaa-1996")
+    assert l96.dihedral_types[f"{HC}-{CT}-{OH}-{HO}"]["v"][3] == 0.45
+    assert builtin_library("oplsaa").dihedral_types[
+        f"{HC}-{CT}-{OH}-{HO}"]["v"][3] == 0.352
 
 
 def test_openmm_parity():
@@ -588,6 +660,32 @@ def test_openmm_parity():
 
 
 # ----------------------------------------------------------------------
+# SMARTS typing entry points (RDKit)
+# ----------------------------------------------------------------------
+def test_from_atoms_reproduces_hand_typed_model():
+    pytest.importorskip("rdkit")
+    pos, z, types, bonds = _butane()
+    hand = OPLS("oplsaa", MolecularTopology.from_bonds(types, bonds), cutoff=20.0)
+    auto = OPLS.from_atoms((pos, z), "oplsaa", cutoff=20.0)
+    assert auto.topology.types == types
+    assert auto.topology.bonds == hand.topology.bonds
+    g = _graph(pos, z, 20.0)
+    assert float((auto(g)["energy"] - hand(g)["energy"]).abs()) < 1e-12
+    # L-OPLS retypes the hydrocarbon: charges and the C-C-C-C torsion change,
+    # bonds do not. (The fixture is an exact anti conformer, where every OPLS
+    # torsion is zero, so twist the last carbon out of plane first.)
+    lo = OPLS.from_atoms((pos, z), "lopls", cutoff=20.0)
+    assert set(lo.topology.types) == {"lopls_CT_CH3", "lopls_CT_CH2",
+                                      "lopls_HC_CH3", "lopls_HC_CH2"}
+    twisted = [list(p) for p in pos]
+    twisted[3][2] += 0.8
+    gt = _graph(twisted, z, 20.0)
+    assert abs(float(lo(gt)["e_torsion"]) - float(hand(gt)["e_torsion"])) > 1e-4
+    assert abs(float(lo(gt)["e_coulomb"]) - float(hand(gt)["e_coulomb"])) > 1e-4
+    assert abs(float(lo(gt)["e_bond"]) - float(hand(gt)["e_bond"])) < 1e-12
+
+
+# ----------------------------------------------------------------------
 # training, shared parameters, config
 # ----------------------------------------------------------------------
 def test_trainable_selection_and_gradients():
@@ -636,7 +734,7 @@ def test_shared_forcefield_accumulates_gradients():
     pos, z, types, bonds = _butane()
     butane = OPLS(ff, MolecularTopology.from_bonds(types, bonds),
                   cutoff=20.0)
-    eth_types = ["opls_135"] * 2 + ["opls_140"] * 6
+    eth_types = ["opls_80"] * 2 + ["opls_85"] * 6
     eth_bonds = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 5), (1, 6), (1, 7)]
     eth_pos = [[0, 0, 0], [1.53, 0, 0],
                [-0.4, 1.0, 0], [-0.4, -0.5, 0.9], [-0.4, -0.5, -0.9],
@@ -653,17 +751,22 @@ def test_shared_forcefield_accumulates_gradients():
     assert float((ff.params["dihedral_v"].grad - g1).abs().max()) > 0.0
 
 
-def test_export_library_roundtrip():
+def test_export_library_roundtrip(tmp_path):
     model, pos, z = _butane_model()
     lib = model.export_library()
-    assert abs(lib.bond_types["CT-CT"]["k"] - 268.0) < 1e-9
-    assert abs(lib.angle_types["CT-CT-CT"]["theta0"] - 112.7) < 1e-9
-    assert abs(lib.dihedral_types["CT-CT-CT-CT"]["v"][1] - 1.3) < 1e-9
+    assert abs(lib.bond_types[f"{CT}-{CT}"]["k"] - 268.0) < 1e-9
+    assert abs(lib.angle_types[f"{CT}-{CT}-{CT}"]["theta0"] - 112.7) < 1e-9
+    assert abs(lib.dihedral_types[f"{CT}-{CT}-{CT}-{CT}"]["v"][1] - 1.3) < 1e-9
+    assert lib.templates == builtin_library("oplsaa").templates
     pos_t, z_t, types, bonds = _butane()
     top = MolecularTopology.from_bonds(types, bonds)
     e1 = float(model(_graph(pos, z, 20.0))["energy"])
     e2 = float(OPLS(lib, top, cutoff=20.0)(_graph(pos, z, 20.0))["energy"])
     assert abs(e1 - e2) < 1e-12
+    # ... and through a .frc file
+    path = lib.save_frc(tmp_path / "exported.frc")
+    e3 = float(OPLS(str(path), top, cutoff=20.0)(_graph(pos, z, 20.0))["energy"])
+    assert abs(e1 - e3) < 1e-12
 
 
 def test_masses_property():
@@ -695,9 +798,9 @@ def test_from_config_and_key_translation(tmp_path):
     direct = float(OPLS("oplsaa", top, cutoff=12.0)(
         _graph(pos, z, 12.0))["energy"])
     assert abs(e - direct) < 1e-12
-    # inline types + bonds also work
+    # inline types + bonds also work, and "frc" is a spelling of "library"
     cfg2 = from_dict({"model": {
-        "name": "opls", "cutoff": 12.0, "library": "oplsaa",
+        "name": "opls", "cutoff": 12.0, "frc": "oplsaa",
         "types": types, "bonds": [list(b) for b in bonds]}})
     assert abs(float(build_model(cfg2.model)(
         _graph(pos, z, 12.0))["energy"]) - direct) < 1e-12
