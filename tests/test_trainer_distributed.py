@@ -17,9 +17,9 @@ import torch
 _SCRIPT = """
 import numpy as np
 
-from xnns.common.config import Config
-from xnns.common.data import AtomicDataset
-from xnns.common.train import Trainer
+from xnn.common.config import Config
+from xnn.common.data import AtomicDataset
+from xnn.common.train import Trainer
 
 rng = np.random.default_rng(0)
 structs = [{"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 6, 8, 1],

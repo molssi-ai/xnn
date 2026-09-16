@@ -5,7 +5,7 @@ Examples
 ********
 
 Every example notebook in the repository's `examples/
-<https://github.com/molssi-ai/xnns/tree/main/examples>`_ directory, rendered
+<https://github.com/molssi-ai/xnn/tree/main/examples>`_ directory, rendered
 with its executed outputs (training curves, parity plots, MD observables, and
 the fidelity tables) so you can read them without running anything. To run
 one yourself, see :ref:`howto-examples` for the required environments and
@@ -145,7 +145,7 @@ Deployment: MDI (common)
 
 Serving a trained checkpoint as a `MolSSI Driver Interface
 <https://github.com/MolSSI-MDI/MDI_Library>`_ engine: train on the hub argon
-data, launch ``xnns mdi``, validate the wire protocol against direct
+data, launch ``xnn mdi``, validate the wire protocol against direct
 evaluation, and drive NVE molecular dynamics from a minimal Python driver.
 The companion notebook then replaces the Python driver with **LAMMPS**
 (``fix mdi/qm``): same engine, production driver, with LAMMPS-side
@@ -162,7 +162,7 @@ agnostic, so the same workflow serves any family's checkpoint.
 Fidelity checks
 ===============
 
-Block-by-block numerical verification of each xnns implementation against its
+Block-by-block numerical verification of each xnn implementation against its
 upstream reference (see :ref:`fidelity` for the summary of what matches and to
 what precision). SchNet is the exception that proves the rule: a clean-room
 build verified against the manuscripts' equations instead of a reference code.

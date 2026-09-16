@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# xnns documentation build configuration file.
+# xnn documentation build configuration file.
 #
 # The look and feel follows the MolSSI SEAMM documentation
 # (https://molssi-seamm.github.io): pydata-sphinx-theme with the MolSSI
@@ -34,7 +34,7 @@ templates_path = ["_templates"]
 source_suffix = {".rst": "restructuredtext"}
 master_doc = "index"
 
-project = "xnns"
+project = "xnn"
 copyright = "2026, The Molecular Sciences Software Institute"
 author = "The Molecular Sciences Software Institute"
 
@@ -122,10 +122,10 @@ html_theme_options = {
         "image_dark": "molssi_ai_logo.png",
         "molssi_light": "molssi_main_logo.png",
         "molssi_dark": "molssi_main_logo_inverted_white.png",
-        "alt_text": "xnns - MolSSI-AI",
+        "alt_text": "xnn - MolSSI-AI",
     },
     "announcement": (
-        "xnns is under active development (pre-1.0): APIs may change between "
+        "xnn is under active development (pre-1.0): APIs may change between "
         "releases. Feedback and contributions are welcome."
     ),
     "show_toc_level": 2,
@@ -148,12 +148,12 @@ html_theme_options = {
     "icon_links": [
         {
             "name": "GitHub",
-            "url": "https://github.com/molssi-ai/xnns",
+            "url": "https://github.com/molssi-ai/xnn",
             "icon": "fa-brands fa-github",
             "type": "fontawesome",
         },
         # A PyPI icon belongs here once the package is published; pypi.org
-        # currently 404s for xnns, so linking it would be a dead icon.
+        # currently 404s for xnn, so linking it would be a dead icon.
         {
             "name": "MolSSI",
             "url": "https://molssi.org",
@@ -184,4 +184,4 @@ html_favicon = "_static/molssi_ai_icon.png"
 html_show_sphinx = False
 html_show_copyright = False
 
-htmlhelp_basename = "xnnsdoc"
+htmlhelp_basename = "xnndoc"

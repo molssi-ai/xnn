@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xnns"
+name = "xnn"
 version = "0.1.0"
 description = "Machine-learning interatomic potentials in PyTorch for molecular and periodic systems"
 readme = "README.md"
@@ -20,9 +20,9 @@ ase = ["ase>=3.22"]
 # HDF5 reader for the ANI-1 dataset hub builder (pyanitools .h5 files).
 hub = ["h5py>=3.0"]
 # NOTE: relaxed from >=0.5 -- the example notebooks compare against ACEsuit/mace
-# (mace-torch), which pins e3nn==0.4.4. xnns runs fine on 0.4.4 (all tests pass).
+# (mace-torch), which pins e3nn==0.4.4. xnn runs fine on 0.4.4 (all tests pass).
 gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
-# MolSSI Driver Interface engine (xnns mdi); MPI method also needs mpi4py.
+# MolSSI Driver Interface engine (xnn mdi); MPI method also needs mpi4py.
 mdi = ["pymdi>=1.4"]
 # Cell-list neighbor lists. Optional -- the built-in reference implementation is
 # used without it -- but that one is quadratic, so this is what makes anything
@@ -81,15 +81,15 @@ all = [
 ]
 
 [project.scripts]
-xnns = "xnns.common.cli:main"
+xnn = "xnn.common.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"xnns.dnn.models" = ["*.npz"]   # Grimme D3 reference tables (PhysNet)
+"xnn.dnn.models" = ["*.npz"]   # Grimme D3 reference tables (PhysNet)
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
-"xnns.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
+"xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 
 # ---------------------------------------------------------------------------
 # uv configuration -- reproduces the .venv the notebooks were created with.

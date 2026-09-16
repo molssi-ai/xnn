@@ -6,7 +6,7 @@ Installation
 
 Requirements
 ============
-xnns requires Python 3.10 or later. The core package depends only on
+xnn requires Python 3.10 or later. The core package depends only on
 ``torch`` (>= 2.0), ``numpy`` and ``pyyaml``; everything else is optional.
 
 Installing from source
@@ -15,8 +15,8 @@ Clone the repository and install with ``pip``:
 
 .. code-block:: bash
 
-   git clone https://github.com/molssi-ai/xnns.git
-   cd xnns
+   git clone https://github.com/molssi-ai/xnn.git
+   cd xnn
    pip install -e .
 
 Optional extras
@@ -46,23 +46,23 @@ you need:
      - the E(3)-equivariant models: NequIP, MACE, Allegro
    * - ``ase``
      - ``ase >= 3.22``
-     - :class:`~xnns.common.deploy.ase_calculator.XNNSCalculator` and reading
-       structure files with the ``xnns`` command line
+     - :class:`~xnn.common.deploy.ase_calculator.XNNCalculator` and reading
+       structure files with the ``xnn`` command line
    * - ``hydra``
      - ``hydra-core``, ``omegaconf``
-     - the :func:`~xnns.common.config.loaders.from_hydra` config frontend
+     - the :func:`~xnn.common.config.loaders.from_hydra` config frontend
    * - ``dev``
      - ``pytest``
      - running ``pytest tests/``
    * - ``examples``
      - ase, e3nn, ``mace-torch``, ``nequip``, ``allegro``, matplotlib, jupyter
-     - the validation notebooks in ``examples/gnn/``, which benchmark xnns
+     - the validation notebooks in ``examples/gnn/``, which benchmark xnn
        against the reference implementations
 
 .. note::
 
    The ``examples`` extra pins ``mace-torch==0.3.16`` and ``nequip==0.6.2``,
-   which in turn pin ``e3nn==0.4.4``. xnns itself runs fine on that pin (all
+   which in turn pin ``e3nn==0.4.4``. xnn itself runs fine on that pin (all
    tests pass), so the extras can coexist in one environment.
 
 GPU installation with uv
@@ -89,10 +89,10 @@ or check quickly from Python:
 
 .. code-block:: python
 
-   import xnns
-   from xnns.common.models import available_models
+   import xnn
+   from xnn.common.models import available_models
 
-   print(xnns.__version__)
+   print(xnn.__version__)
    print(available_models())   # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet']
 
 The GNN models (NequIP, MACE, Allegro, etc.) only appear in the registry when

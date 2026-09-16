@@ -21,7 +21,7 @@ From Python
 
 .. code-block:: python
 
-   from xnns.common.deploy import export_to_lammps, export_torchscript
+   from xnn.common.deploy import export_to_lammps, export_torchscript
 
    # LAMMPS wrapper
    export_to_lammps(model, cutoff=5.0, path="deployed.pt")
@@ -30,7 +30,7 @@ From Python
    export_torchscript(model, path="model_ts.pt")
 
 ``export_to_lammps`` wraps the model in
-:class:`~xnns.common.deploy.lammps.LAMMPSWrapper`, which defines the tensor
+:class:`~xnn.common.deploy.lammps.LAMMPSWrapper`, which defines the tensor
 application binary interface (ABI) expected by the LAMMPS pair styles
 (positions, atomic numbers, edge index, and edge vectors in; per-atom and total
 energies out).
@@ -40,8 +40,8 @@ From the command line
 
 .. code-block:: bash
 
-   xnns export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
-   xnns export --config configs/train.yaml --ckpt runs/exp/best.pt --to torchscript
+   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
+   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to torchscript
 
 Using the exported model in LAMMPS
 ==================================
@@ -49,12 +49,12 @@ Pair the exported ``.pt`` file with the matching C++ pair style, following
 the `pair_nequip <https://github.com/mir-group/pair_nequip>`_ /
 `pair_allegro <https://github.com/mir-group/pair_allegro>`_ /
 pair_mace pattern. The tensor interface is defined in one place
-(``src/xnns/common/deploy/lammps.py``), so a single pair style covers every
-exportable xnns model.
+(``src/xnn/common/deploy/lammps.py``), so a single pair style covers every
+exportable xnn model.
 
 .. note::
 
    For NequIP, TorchScript export required a scriptable, bit-exact stand-in
-   for e3nn's ``Gate`` (``xnns.gnn.models.nequip._Gate``); the e3nn 0.4.4
+   for e3nn's ``Gate`` (``xnn.gnn.models.nequip._Gate``); the e3nn 0.4.4
    original cannot be scripted on torch 2.x. This is transparent to users:
    the substitution is numerically identical.

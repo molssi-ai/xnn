@@ -1,4 +1,4 @@
-"""The SEAMM ``.frc`` force-field format (:mod:`xnns.ffnn.common.frc`).
+"""The SEAMM ``.frc`` force-field format (:mod:`xnn.ffnn.common.frc`).
 
 Grammar and resolution are checked on a small synthetic file that exercises
 every construct the shipped files use -- ``#define`` with versions and
@@ -11,10 +11,10 @@ eye.
 """
 import pytest
 
-from xnns.ffnn.common import (FrcFile, read_frc, find_forcefield,
+from xnn.ffnn.common import (FrcFile, read_frc, find_forcefield,
                               list_forcefields, convert_units,
                               builtin_data_dir)
-from xnns.ffnn.common.frc import (canonical_key, nonbond_to_sigma_eps,
+from xnn.ffnn.common.frc import (canonical_key, nonbond_to_sigma_eps,
                                   parse_version, read_forcefield, make_section)
 
 BASE = """!MolSSI forcefield 1
@@ -274,7 +274,7 @@ def test_include_splices_sections(tmp_path):
         "#include part.frc\n#end\n")
     ff = read_frc(tmp_path / "main.frc").forcefield()
     assert ff.charge("zz") == 0.5
-    # local: resolves against include_dirs, then the xnns data directory
+    # local: resolves against include_dirs, then the xnn data directory
     (tmp_path / "main2.frc").write_text(
         "!MolSSI forcefield 1\n#define m\n!V R F L\n1.0 1 charges extra\n#end\n"
         "#include local:part.frc\n#end\n")

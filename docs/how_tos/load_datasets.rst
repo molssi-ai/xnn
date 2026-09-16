@@ -6,7 +6,7 @@ Download an Upstream Dataset
 
 The dataset hub downloads and preprocesses standard benchmark datasets in a
 single line, HuggingFace ``load_dataset()``-style. It handles the download,
-caching, MD5 verification, unit conversion, and conversion into xnns structure
+caching, MD5 verification, unit conversion, and conversion into xnn structure
 dictionaries, so you can go straight to training. See :ref:`data` for the full
 reference and ``examples/data/load_dataset_tutorial.ipynb`` for a runnable
 walkthrough.
@@ -16,7 +16,7 @@ List what is available
 
 .. code-block:: python
 
-   from xnns.common.data import load_dataset, list_datasets
+   from xnn.common.data import load_dataset, list_datasets
 
    list_datasets()     # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'rmd17']
 
@@ -36,14 +36,14 @@ Dataset-specific options are passed as keyword arguments (here, we use rMD17's
 Get a training-ready ``AtomicDataset``
 ======================================
 Passing the ``cutoff`` argument to ``load_dataset()`` allows it to return each
-data split as an :class:`~xnns.common.data.dataset.AtomicDataset` (neighbour
+data split as an :class:`~xnn.common.data.dataset.AtomicDataset` (neighbour
 graphs built on demand), ready for a PyTorch ``DataLoader`` or the
-:class:`~xnns.common.train.trainer.Trainer`:
+:class:`~xnn.common.train.trainer.Trainer`:
 
 .. code-block:: python
 
    from torch.utils.data import DataLoader
-   from xnns.common.data import collate
+   from xnn.common.data import collate
 
    ds = load_dataset("rmd17", molecule="aspirin", cutoff=5.0)
    loader = DataLoader(ds["train"], batch_size=16, shuffle=True, collate_fn=collate)
@@ -84,7 +84,7 @@ the paper's per-molecule 80/10/10 partition:
 ANI-1x dataset
 --------------
 The ``ani1x`` set is the active-learning training data behind the
-:meth:`~xnns.dnn.models.ani.ANI.ani1x` preset (see `Smith, J.; et al. Chem.
+:meth:`~xnn.dnn.models.ani.ANI.ani1x` preset (see `Smith, J.; et al. Chem.
 Phys. 148, 241733 (2018) <https://doi.org/10.1063/1.5023802>`_ and `Smith, J.;
 et al. Sci. Data 7, 134 (2020) <https://doi.org/10.1038/s41597-020-0473-z>`_ for
 details). The dataset involves ~5 M conformations with wB97X **energies and
@@ -103,7 +103,7 @@ The per-conformation NaN entries are dropped automatically:
 ANI-1ccx dataset
 ----------------
 The ``ani1ccx`` set is the coupled-cluster companion behind the
-:meth:`~xnns.dnn.models.ani.ANI.ani1ccx` preset (see `Smith, J.; et al.
+:meth:`~xnn.dnn.models.ani.ANI.ani1ccx` preset (see `Smith, J.; et al.
 chemrxiv.6744440.v1 (2018) <https://doi.org/10.26434/chemrxiv.6744440.v1>`_ and
 `Smith, J.; et al. Sci. Data 7, 134 (2020)
 <https://doi.org/10.1038/s41597-020-0473-z>`_ for details). The dataset contains
@@ -122,7 +122,7 @@ call above but under its own name:
 ANI-2x dataset
 --------------
 The ``ani2x`` set is the seven-element training data behind the
-:meth:`~xnns.dnn.models.ani.ANI.ani2x` preset (see `Devereux C.; et al. JCTC 16,
+:meth:`~xnn.dnn.models.ani.ANI.ani2x` preset (see `Devereux C.; et al. JCTC 16,
 4192 (2020) <https://doi.org/10.1021/acs.jctc.0c00121>`_). The dataset contains
 ~9.6 M conformations with wB97X/6-31G* **energies and forces** for
 H/C/N/O/S/F/Cl. It is a separate 3.7 GB pyanitools HDF5 download from Zenodo (it
@@ -178,8 +178,8 @@ Data caching
 ============
 Data downloads land under ``datasets/<name>/`` in the repository by default. You
 can direct the data storage to another location per call by setting the
-``cache_dir`` argument or globally with the ``XNNS_DATASETS`` (or
-``XNNS_CACHE``) environment variable:
+``cache_dir`` argument or globally with the ``XNN_DATASETS`` (or
+``XNN_CACHE``) environment variable:
 
 .. code-block:: python
 

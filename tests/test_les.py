@@ -1,9 +1,9 @@
 """Tests for the Latent Ewald Summation (LES) long-range add-on.
 
-Covers the :class:`~xnns.common.models.les.EwaldSummation` math (exact
+Covers the :class:`~xnn.common.models.les.EwaldSummation` math (exact
 rotation/translation/lattice-shift invariance, cubic and triclinic cells,
 ``1/r`` and ``1/r^6`` kernels, the analytic two-charge limit), the
-:class:`~xnns.common.models.les.LatentEwald` wrapper around **every**
+:class:`~xnn.common.models.les.LatentEwald` wrapper around **every**
 registered model (the ``node_features`` contract), batching consistency, the
 ``model.extra["long_range"]`` config hook, and -- when the original ``cace``
 package is installed -- machine-precision parity against its
@@ -15,9 +15,9 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import structure_to_graph, collate
-from xnns.common.models import (
+from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph, collate
+from xnn.common.models import (
     EwaldSummation,
     ForceStressOutput,
     LatentEwald,
@@ -165,7 +165,7 @@ def test_wraps_every_model(name):
 def test_batching_matches_single_structures(periodic):
     """A batch equals per-structure evaluation (periodic and molecular).
 
-    Mixed periodic/molecular batches are not covered: xnns ``collate`` keeps
+    Mixed periodic/molecular batches are not covered: xnn ``collate`` keeps
     optional fields (like ``cell``) only when present in every structure.
     """
     pytest.importorskip("e3nn")
@@ -231,7 +231,7 @@ def test_parity_vs_original_ewald():
     float64 against upstream's dtype-safe orthorhombic reference loop and its
     real-space fallback; float32 against the full triclinic forward (the code
     path used in production, which is float32-only upstream). ``dl`` is
-    chosen so no k shell lies exactly on the cutoff (where xnns resolves
+    chosen so no k shell lies exactly on the cutoff (where xnn resolves
     floating-point ties consistently and upstream truncates).
     """
     pytest.importorskip("cace")
@@ -255,7 +255,7 @@ def test_parity_vs_original_ewald():
                - float(pot6.sum())) < 1e-12
 
     # self-interaction removal agrees for 1-channel q (upstream over-subtracts
-    # the total once per channel for multi-channel q; xnns subtracts it once)
+    # the total once per channel for multi-channel q; xnn subtracts it once)
     q1 = q[:, :1]
     potr, _ = EwaldPotential(dl=1.9, remove_self_interaction=True).compute_potential(pos, q1, box)
     miner = EwaldSummation(dl=1.9, remove_self_interaction=True)

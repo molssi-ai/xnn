@@ -1,0 +1,57 @@
+!MolSSI forcefield 1
+
+! OPLS-AA as published: the current OPLS-AA distribution (oplsaa.frc) carries
+! revised torsions -- the alkane terms from a late-1999 update by the
+! Jorgensen lab, and two alcohol terms (H-C-O-H, C-C-C-O) from a later
+! revision. This variant restores the values of the original paper
+! (Jorgensen, Maxwell & Tirado-Rives, JACS 118, 11225, 1996, Supporting
+! Information Table 7), which are what its Table 1 conformational energies
+! were computed with; xnn reproduces that table with them to 0.01 kcal/mol.
+! Everything else is oplsaa.
+
+#define oplsaa-1996
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  --------------
+2026.09.15      1  metadata                         oplsaa
+2026.09.15      1  atom_types                       oplsaa
+2026.09.15      1  equivalence                      oplsaa
+2026.09.15      1  charges                          oplsaa
+2026.09.15      1  nonbond(12-6)                    oplsaa
+2026.09.15      1  quadratic_bond                   oplsaa
+2026.09.15      1  quadratic_angle                  oplsaa
+2026.09.15      1  torsion_opls                     oplsaa oplsaa-1996
+2026.09.15      1  improper_opls                    oplsaa
+2026.09.15      1  templates                        oplsaa
+#end
+
+#include local:oplsaa.frc
+
+#torsion_opls oplsaa-1996
+
+> E = 1/2*V1*[1 + cos(phi)] + 1/2*V2*[1 - cos(2*phi)]
+>   + 1/2*V3*[1 + cos(3*phi)] + 1/2*V4*[1 - cos(4*phi)]
+> The 1996 torsions (kcal/mol) that the current distribution revised.
+> Classes: opls_18 alkane C, opls_85 H on C, opls_5 alcohol O, opls_7 alcohol H.
+> The alkane rows are Table 7 of the paper's Supporting Information; the
+> alcohol rows are the values distributed with GROMACS' oplsaa.ff, which the
+> paper's Table 1 methanol/ethanol barriers require (H-C-O-H V3 = 0.45; the
+> current distribution has 0.352).
+
+!Version      Ref  I        J        K        L        V1      V2      V3     V4
+!---------  -----  -------  -------  -------  -------  ------  ------  -----  ---
+2026.09.15      1  opls_18  opls_18  opls_18  opls_18   1.740  -0.157  0.279  0.0
+2026.09.15      1  opls_18  opls_18  opls_18  opls_85   0.000   0.000  0.366  0.0
+2026.09.15      1  opls_85  opls_18  opls_18  opls_85   0.000   0.000  0.318  0.0
+2026.09.15      1  opls_85  opls_18  opls_5   opls_7    0.000   0.000  0.450  0.0
+2026.09.15      1  opls_18  opls_18  opls_18  opls_5    1.711  -0.500  0.663  0.0
+
+#reference 1
+@Author xnn
+@Date 2026-09-15
+Jorgensen, W. L.; Maxwell, D. S.; Tirado-Rives, J. Development and Testing of
+the OPLS All-Atom Force Field on Conformational Energetics and Properties of
+Organic Liquids. J. Am. Chem. Soc. 1996, 118, 11225-11236.
+DOI: 10.1021/ja9621760  (Supporting Information Table 7). Base: oplsaa.frc.
+
+#end

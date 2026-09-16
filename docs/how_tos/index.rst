@@ -4,7 +4,7 @@
 How-To Guides
 *************
 
-Practical recipes for common tasks. Each guide assumes xnns is installed
+Practical recipes for common tasks. Each guide assumes xnn is installed
 (see :ref:`installation`) and focuses on one job; for conceptual background
 see :ref:`background`, and for complete reference information see the
 :ref:`User Guide <user-guide>`.

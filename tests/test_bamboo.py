@@ -15,12 +15,12 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import structure_to_graph
-from xnns.common.models import ForceStressOutput, available_models, build_model
-from xnns.hybrid.models.bamboo import BAMBOO, ELE_FACTOR
-from xnns.transformer.attention import EdgeMultiheadAttention
-from xnns.transformer.featurizers import ExpNormalSmearing
+from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph
+from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.hybrid.models.bamboo import BAMBOO, ELE_FACTOR
+from xnn.transformer.attention import EdgeMultiheadAttention
+from xnn.transformer.featurizers import ExpNormalSmearing
 
 SPECIES = [3, 6, 7, 8, 9, 1]  # Li, C, N, O, F, H
 
@@ -170,7 +170,7 @@ def test_periodic_stress_runs():
 
 
 def test_batch_matches_single():
-    from xnns.common.data import collate
+    from xnn.common.data import collate
     model = _build()
     g1 = _graph(seed=1)
     g2 = _graph(seed=2)
@@ -182,7 +182,7 @@ def test_batch_matches_single():
 
 
 def test_upstream_bamboo_key_translation():
-    """Upstream nn_params/gnn_params spellings map to the xnns canonical names."""
+    """Upstream nn_params/gnn_params spellings map to the xnn canonical names."""
     cfg = from_dict({"model": {
         "name": "bamboo",
         "rcut": 6.0, "dim": 48, "num_rbf": 20, "n_layers": 4,
@@ -220,7 +220,7 @@ def test_ele_factor_constant():
 
 
 def _upstream_inputs(g, N, dtype):
-    """Build the upstream ``predict`` input dict from an xnns graph."""
+    """Build the upstream ``predict`` input dict from an xnn graph."""
     pos = g.pos.detach().to(dtype)
     src, dst = g.edge_index[0], g.edge_index[1]
     up_edge_index = torch.stack([dst, src], 0)  # upstream row=center, col=neighbor
@@ -303,7 +303,7 @@ def test_parity_vs_original_bamboo():
     assert (abs(float(xout["energy"][0]) - float(up_out["energy"][0]))
             / abs(float(up_out["energy"][0]))) < 1e-12
     assert (xout["charges"] - up_out["charge"]).abs().max() < 1e-12
-    # xnns gives the full conservative force = upstream (nn+coul) + qeq residual
+    # xnn gives the full conservative force = upstream (nn+coul) + qeq residual
     full = up_out["forces"] + up_out["qeq_force"]
     assert (xout["forces"].detach() - full).abs().max() < 1e-11
     assert (xout["dipole"][0] - up_out["dipole"][0]).abs().max() < 1e-11

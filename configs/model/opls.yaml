@@ -1,6 +1,6 @@
 name: opls
 cutoff: 10.0              # nonbonded (Lennard-Jones / Coulomb) cutoff; 1,4 pairs are cutoff-independent
-library: oplsaa           # parameter library: a variant shipped with xnns (oplsaa, oplsaa-1996, lopls, CL&P), a .frc path (file.frc:variant), or a native JSON path (required)
+library: oplsaa           # parameter library: a variant shipped with xnn (oplsaa, oplsaa-1996, lopls, CL&P), a .frc path (file.frc:variant), or a native JSON path (required)
 topology: null            # topology JSON written by MolecularTopology.save (or give types + bonds inline)
 types: null               # per-atom OPLS type names, e.g. [opls_80, opls_85, ...]; or build the topology with OPLS.from_atoms (SMARTS typing)
 bonds: null               # bond index pairs, e.g. [[0, 1], [0, 2]]

@@ -1,4 +1,4 @@
-"""Atom typing from ``.frc`` SMARTS templates (:mod:`xnns.ffnn.common.typing`).
+"""Atom typing from ``.frc`` SMARTS templates (:mod:`xnn.ffnn.common.typing`).
 
 Needs RDKit (the ``ffnn`` extra); skipped without it. The shipped OPLS-AA
 templates are applied to small molecules built from SMILES and from bare
@@ -12,9 +12,9 @@ import pytest
 
 pytest.importorskip("rdkit")
 
-from xnns.ffnn.common import (assign_atom_types, to_rdkit, perceive_bonds,
+from xnn.ffnn.common import (assign_atom_types, to_rdkit, perceive_bonds,
                               AtomTypingError, read_frc, read_forcefield)
-from xnns.ffnn.models import OPLS, MolecularTopology, read_opls
+from xnn.ffnn.models import OPLS, MolecularTopology, read_opls
 
 
 def _embedded(smiles, seed=1):

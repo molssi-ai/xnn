@@ -4,14 +4,14 @@
 Train a Model
 ****************************
 
-xnns has one configuration schema (the
-:class:`~xnns.common.config.schema.Config` dataclass) and three
+xnn has one configuration schema (the
+:class:`~xnn.common.config.schema.Config` dataclass) and three
 interchangeable frontends to fill it: YAML, argparse, and Hydra.
 
 Write a config file
 ===================
 A YAML training config sets the ``model``, ``data``, and ``optim`` sections
-(any key that is not a core :class:`~xnns.common.config.schema.ModelConfig`
+(any key that is not a core :class:`~xnn.common.config.schema.ModelConfig`
 field is folded into ``model.extra`` automatically):
 
 .. code-block:: yaml
@@ -51,26 +51,26 @@ data settings from ``configs/data/``.
 Train from Python
 =================
 The YAML config can be loaded in Python and passed to the
-:class:`~xnns.common.train.Trainer` to initiate the training loop.
+:class:`~xnn.common.train.Trainer` to initiate the training loop.
 
 .. code-block:: python
 
-   from xnns.common.config import from_yaml
-   from xnns.common.data import AtomicDataset
-   from xnns.common.train import Trainer
+   from xnn.common.config import from_yaml
+   from xnn.common.data import AtomicDataset
+   from xnn.common.train import Trainer
 
    cfg = from_yaml("my_train.yaml")
    Trainer(cfg, AtomicDataset(structures, cfg.model.cutoff)).fit()
 
 Train from the command line
 ===========================
-The ``xnns`` command reads the structure files named in ``data.train_path`` /
+The ``xnn`` command reads the structure files named in ``data.train_path`` /
 ``data.val_path`` with ASE (requires the ``ase`` extra) and runs the same
 trainer:
 
 .. code-block:: bash
 
-   xnns train --config my_train.yaml
+   xnn train --config my_train.yaml
 
 Override any key at the command line
 ====================================
@@ -79,23 +79,23 @@ generic while runs vary:
 
 .. code-block:: bash
 
-   xnns train --config my_train.yaml --set optim.epochs=50 model.cutoff=6.0
+   xnn train --config my_train.yaml --set optim.epochs=50 model.cutoff=6.0
 
 or from Python:
 
 .. code-block:: python
 
-   from xnns.common.config import from_argparse
+   from xnn.common.config import from_argparse
 
    cfg = from_argparse(["--config", "my_train.yaml", "--set", "model.cutoff=6.0"])
 
 Use Hydra
 =========
 With the ``hydra`` extra installed, an existing Hydra application can hand its
-``DictConfig`` object straight to xnns's ``Trainer``:
+``DictConfig`` object straight to xnn's ``Trainer``:
 
 .. code-block:: python
 
-   from xnns.common.config import from_hydra
+   from xnn.common.config import from_hydra
 
    cfg = from_hydra(hydra_dict_config)

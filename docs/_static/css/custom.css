@@ -145,33 +145,33 @@ h1, h2, h3, h4, h5, h6,
    -------------------------------------------------------------------------- */
 
 :root {
-	--xnns-molssi-red: #ed1c24;
-	--xnns-molssi-ink: #393536;
-	--xnns-molssi-white: #ffffff;
-	/* A lighter red for links on the ink ground: --xnns-molssi-red itself
+	--xnn-molssi-red: #ed1c24;
+	--xnn-molssi-ink: #393536;
+	--xnn-molssi-white: #ffffff;
+	/* A lighter red for links on the ink ground: --xnn-molssi-red itself
 	   only reaches ~3:1 there, short of the 4.5:1 body text needs. */
-	--xnns-molssi-red-on-ink: #ff8a8f;
+	--xnn-molssi-red-on-ink: #ff8a8f;
 }
 
 .bd-header-announcement {
-	background-color: var(--xnns-molssi-ink);
-	color: var(--xnns-molssi-white);
-	border-bottom: 3px solid var(--xnns-molssi-red);
+	background-color: var(--xnn-molssi-ink);
+	color: var(--xnn-molssi-white);
+	border-bottom: 3px solid var(--xnn-molssi-red);
 	font-size: 0.85rem;
 }
 
 .bd-header-announcement p,
 .bd-header-announcement .bd-header-announcement__content {
-	color: var(--xnns-molssi-white);
+	color: var(--xnn-molssi-white);
 }
 
 .bd-header-announcement a {
-	color: var(--xnns-molssi-white);
+	color: var(--xnn-molssi-white);
 	text-decoration: underline;
 }
 
 .bd-header-announcement a:hover {
-	color: var(--xnns-molssi-red-on-ink);
+	color: var(--xnn-molssi-red-on-ink);
 }
 
 /* --------------------------------------------------------------------------
@@ -184,12 +184,12 @@ h1, h2, h3, h4, h5, h6,
    -------------------------------------------------------------------------- */
 
 :root {
-	--xnns-page-width: clamp(60rem, 98vw, 132rem);
-	--xnns-content-width: clamp(45rem, 82vw, 100rem);
-	--xnns-sidebar-width: 17rem;
-	--xnns-sidebar-collapsed: 4rem;
-	--xnns-toc-width: 15rem;
-	--xnns-toc-collapsed: 3rem;
+	--xnn-page-width: clamp(60rem, 98vw, 132rem);
+	--xnn-content-width: clamp(45rem, 82vw, 100rem);
+	--xnn-sidebar-width: 17rem;
+	--xnn-sidebar-collapsed: 4rem;
+	--xnn-toc-width: 15rem;
+	--xnn-toc-collapsed: 3rem;
 }
 
 .bd-page-width,
@@ -197,13 +197,13 @@ h1, h2, h3, h4, h5, h6,
 .bd-header .bd-header__inner,
 .bd-footer .bd-footer__inner,
 .bd-footer-article {
-	max-width: var(--xnns-page-width) !important;
+	max-width: var(--xnn-page-width) !important;
 }
 
 .bd-main .bd-content,
 .bd-article-container,
 .bd-content .bd-article-container {
-	max-width: var(--xnns-content-width) !important;
+	max-width: var(--xnn-content-width) !important;
 	width: 100%;
 }
 
@@ -225,26 +225,26 @@ div.bd-article-container > article {
 
 @media (min-width: 960px) {
 	.bd-sidebar-primary {
-		flex: 0 0 var(--xnns-sidebar-width);
-		max-width: var(--xnns-sidebar-width);
+		flex: 0 0 var(--xnn-sidebar-width);
+		max-width: var(--xnn-sidebar-width);
 		transition: flex-basis 0.4s ease, max-width 0.4s ease;
 	}
 
 	.bd-sidebar-primary.pst-squeeze {
-		flex-basis: var(--xnns-sidebar-collapsed);
-		max-width: var(--xnns-sidebar-collapsed);
+		flex-basis: var(--xnn-sidebar-collapsed);
+		max-width: var(--xnn-sidebar-collapsed);
 	}
 
 	/* Hand the reclaimed space to the article; otherwise collapsing just
 	   re-centres the same column. The content cap reads this variable, so
 	   widening it here is enough. */
 	.bd-sidebar-primary.pst-squeeze ~ .bd-main {
-		--xnns-content-width: clamp(45rem, 96vw, 120rem);
+		--xnn-content-width: clamp(45rem, 96vw, 120rem);
 	}
 
 	.bd-sidebar-secondary {
-		flex: 0 0 var(--xnns-toc-width);
-		max-width: var(--xnns-toc-width);
+		flex: 0 0 var(--xnn-toc-width);
+		max-width: var(--xnn-toc-width);
 	}
 
 	/* On a short window the theme scrolls the sidebar to reveal the current
@@ -390,7 +390,7 @@ button.toggle-button {
    so collapsing hands the reclaimed space to the article.
    -------------------------------------------------------------------------- */
 
-#xnns-collapse-toc-button {
+#xnn-collapse-toc-button {
 	display: flex;
 	align-items: center;
 	gap: 0.5rem;
@@ -404,32 +404,32 @@ button.toggle-button {
 	cursor: pointer;
 }
 
-#xnns-collapse-toc-button:hover {
+#xnn-collapse-toc-button:hover {
 	background-color: var(--pst-color-surface);
 	color: var(--pst-color-link-hover);
 }
 
 /* The chevron points right while expanded (collapse -> move out of the way)
    and flips when collapsed. */
-#xnns-collapse-toc-button .pst-icon {
+#xnn-collapse-toc-button .pst-icon {
 	flex: 0 0 auto;
 	transition: transform 0.3s ease;
 }
 
-#xnns-collapse-toc-button[aria-expanded="false"] .pst-icon {
+#xnn-collapse-toc-button[aria-expanded="false"] .pst-icon {
 	transform: rotate(180deg);
 }
 
 /* Only one of the two labels shows at a time, matching the primary sidebar. */
-#xnns-collapse-toc-button .pst-expand-sidebar-label {
+#xnn-collapse-toc-button .pst-expand-sidebar-label {
 	display: none;
 }
 
-.xnns-toc-squeeze #xnns-collapse-toc-button .pst-collapse-sidebar-label {
+.xnn-toc-squeeze #xnn-collapse-toc-button .pst-collapse-sidebar-label {
 	display: none;
 }
 
-.xnns-toc-squeeze #xnns-collapse-toc-button .pst-expand-sidebar-label {
+.xnn-toc-squeeze #xnn-collapse-toc-button .pst-expand-sidebar-label {
 	display: none;
 }
 
@@ -445,10 +445,10 @@ button.toggle-button {
 	   plus the 1rem padding-left and border-left it puts on every
 	   .sidebar-secondary-item, together exceed the collapsed width, which
 	   laid the button out past the edge where overflow clipped it. */
-	.bd-sidebar-secondary.xnns-toc-squeeze {
-		width: var(--xnns-toc-collapsed);
-		flex-basis: var(--xnns-toc-collapsed);
-		max-width: var(--xnns-toc-collapsed);
+	.bd-sidebar-secondary.xnn-toc-squeeze {
+		width: var(--xnn-toc-collapsed);
+		flex-basis: var(--xnn-toc-collapsed);
+		max-width: var(--xnn-toc-collapsed);
 		padding-left: 0;
 		padding-right: 0;
 		overflow: hidden;
@@ -456,20 +456,20 @@ button.toggle-button {
 
 	/* The theme gives every entry the same class, and our button is first in
 	   secondary_sidebar_items -- so hide the rest by position. */
-	.xnns-toc-squeeze .sidebar-secondary-item:not(:first-child) {
+	.xnn-toc-squeeze .sidebar-secondary-item:not(:first-child) {
 		display: none;
 	}
 
 	/* Strip the item chrome from the button's own wrapper and centre it in
 	   what is left. */
-	.xnns-toc-squeeze .sidebar-secondary-item:first-child {
+	.xnn-toc-squeeze .sidebar-secondary-item:first-child {
 		display: flex;
 		justify-content: center;
 		border-left: 0;
 		padding: 0.25rem;
 	}
 
-	.xnns-toc-squeeze #xnns-collapse-toc-button {
+	.xnn-toc-squeeze #xnn-collapse-toc-button {
 		width: auto;
 		gap: 0;
 		padding: 0.35rem;
@@ -477,8 +477,8 @@ button.toggle-button {
 	}
 
 	/* Hand the reclaimed width to the article, as the primary sidebar does. */
-	.bd-main:has(.bd-sidebar-secondary.xnns-toc-squeeze) {
-		--xnns-content-width: clamp(45rem, 92vw, 116rem);
+	.bd-main:has(.bd-sidebar-secondary.xnn-toc-squeeze) {
+		--xnn-content-width: clamp(45rem, 92vw, 116rem);
 	}
 }
 
@@ -498,7 +498,7 @@ img.logo__image {
    does. */
 html[data-theme="dark"] .navbar-brand img,
 html[data-theme="dark"] img.logo__image {
-	background-color: var(--xnns-molssi-white);
+	background-color: var(--xnn-molssi-white);
 	border-radius: 0.5rem;
 	padding: 0.35rem 0.5rem;
 	box-sizing: border-box;

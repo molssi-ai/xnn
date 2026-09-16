@@ -14,7 +14,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import write
 from ase.stress import voigt_6_to_full_3x3_stress
 
-from xnns.common.data import AtomicDataset, atoms_to_structure, load_structures
+from xnn.common.data import AtomicDataset, atoms_to_structure, load_structures
 
 
 def _argon_frame(seed=0, L=8.0, n=16):

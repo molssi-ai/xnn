@@ -8,8 +8,8 @@ which is a wrong answer rather than an error.
 import pytest
 import torch
 
-from xnns.common.data import build_neighbor_list
-from xnns.common.data.neighborlist import _vesin_neighbor_list
+from xnn.common.data import build_neighbor_list
+from xnn.common.data.neighborlist import _vesin_neighbor_list
 
 pytest.importorskip("vesin_torch", reason="vesin is optional")
 
@@ -23,7 +23,7 @@ def edge_set(edge_index, cell_shifts):
 
 def reference(pos, cutoff, cell, pbc, self_interaction=False):
     """build_neighbor_list with the fast path disabled."""
-    import xnns.common.data.neighborlist as nl
+    import xnn.common.data.neighborlist as nl
 
     saved = nl._HAS_VESIN
     nl._HAS_VESIN = False

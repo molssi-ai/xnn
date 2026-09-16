@@ -14,13 +14,13 @@ checkpoint is missing.
 From the **repository root** (paths in the config are relative to it):
 
 ```bash
-xnns benchmark --config examples/benchmark/argon_benchmark.yaml
+xnn benchmark --config examples/benchmark/argon_benchmark.yaml
 ```
 
 or from Python:
 
 ```python
-from xnns.common.benchmark import from_yaml, run_benchmark
+from xnn.common.benchmark import from_yaml, run_benchmark
 
 rows = run_benchmark(from_yaml("examples/benchmark/argon_benchmark.yaml"))
 ```
@@ -42,13 +42,13 @@ mace     73048     0.0128105             0.0152518              0.00131497      
 physnet  200448    0.014039              0.0170653              0.00173706         0.00307508
 ```
 
-(Exact numbers depend on the checkpoints in each `runs/argon_xnns/` directory.)
+(Exact numbers depend on the checkpoints in each `runs/argon_xnn/` directory.)
 The `results.{csv,json,md}` files carry the same unit-annotated headers
 (`energy_mae [eV/atom]`, ...).
 
 ## How it works
 
-- **Architecture from the checkpoint.** Each xnns checkpoint embeds the
+- **Architecture from the checkpoint.** Each xnn checkpoint embeds the
   `Config` it was trained with, so every entry in the config is just a `label`
   and a `checkpoint` — the benchmark rebuilds the exact architecture from the
   checkpoint before loading the weights.
@@ -63,14 +63,14 @@ Override any config key on the command line with `--set`:
 
 ```bash
 # forces only
-xnns benchmark --config examples/benchmark/argon_benchmark.yaml \
+xnn benchmark --config examples/benchmark/argon_benchmark.yaml \
     --set "metrics={'forces': ['mae','rmse']}"
 
 # report atomization energy (fit the per-atom Ar reference from the data)
-xnns benchmark --config examples/benchmark/argon_benchmark.yaml --set atomic_energies=average
+xnn benchmark --config examples/benchmark/argon_benchmark.yaml --set atomic_energies=average
 
 # add MSE, keep MAE only for energy, and write only JSON
-xnns benchmark --config examples/benchmark/argon_benchmark.yaml \
+xnn benchmark --config examples/benchmark/argon_benchmark.yaml \
     --set "metrics={'energy': ['mae'], 'forces': ['mae','mse','rmse']}" "output.formats=['json']"
 ```
 
