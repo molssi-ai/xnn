@@ -5,9 +5,9 @@
 # and falls back to these same values inside `BAMBOO.from_config`.
 #
 # Keys copied from an upstream BAMBOO config also work: the key-translation
-# registry (xnns.common.config.translate) rewrites the original spellings to
+# registry (xnn.common.config.translate) rewrites the original spellings to
 # these canonical names -- rcut -> cutoff, dim -> n_features, num_rbf -> n_rbf,
-# n_layers -> n_interactions. The xnns spelling wins if both are given.
+# n_layers -> n_interactions. The xnn spelling wins if both are given.
 name: bamboo
 cutoff: 5.0              # rcut (semi-local GET cutoff, Angstrom)
 n_features: 64           # dim (node scalar feature width; divisible by num_heads)

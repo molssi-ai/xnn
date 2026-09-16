@@ -12,10 +12,10 @@ pytest.importorskip("e3nn")
 
 from e3nn import o3  # noqa: E402
 
-from xnns.common.config import from_dict  # noqa: E402
-from xnns.common.data import structure_to_graph  # noqa: E402
-from xnns.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
-from xnns.gnn.models.mace import SymmetricContraction, U_matrix_real  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import structure_to_graph  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
+from xnn.gnn.models.mace import SymmetricContraction, U_matrix_real  # noqa: E402
 
 SPECIES = [1, 6, 8]
 
@@ -123,7 +123,7 @@ def test_pair_repulsion_runs():
 def test_mace_scriptable_and_lammps_export(tmp_path):
     """MACE must torch.jit.script cleanly and the LAMMPS artifact must
     reproduce the eager model's energy and forces on a periodic system."""
-    from xnns.common.deploy import export_to_lammps
+    from xnn.common.deploy import export_to_lammps
 
     model = _build(T=2, max_L=1, max_ell=2).eval()
     # the scriptability placeholders must not leak into the state_dict
@@ -146,7 +146,7 @@ def test_mace_scriptable_and_lammps_export(tmp_path):
 
 def test_mace_lammps_export_t0_zero_forces(tmp_path):
     """T=0 (pure reference energy) must export and yield zero forces."""
-    from xnns.common.deploy import export_to_lammps
+    from xnn.common.deploy import export_to_lammps
 
     model = _build(T=0, max_L=0, max_ell=2).eval()
     path = str(tmp_path / "mace_t0.pt")
@@ -158,7 +158,7 @@ def test_mace_lammps_export_t0_zero_forces(tmp_path):
 
 
 def test_upstream_mace_key_translation():
-    """Keys copied verbatim from an upstream MACE yaml are translated to xnns names."""
+    """Keys copied verbatim from an upstream MACE yaml are translated to xnn names."""
     cfg = from_dict({"model": {
         "name": "mace",
         "r_max": 5.5, "num_channels": 8, "num_interactions": 3,
@@ -176,18 +176,18 @@ def test_upstream_mace_key_translation():
     assert m.atom_ref.weight[1].item() == -13.6
     assert m.atom_ref.weight[8].item() == -2000.0
 
-    # identical architecture whether xnns or upstream MACE names are used
-    xnns_names = from_dict({"model": {
+    # identical architecture whether xnn or upstream MACE names are used
+    xnn_names = from_dict({"model": {
         "name": "mace", "cutoff": 5.5, "n_features": 8, "n_interactions": 3,
         "n_rbf": 10, "num_polynomial_cutoff": 6, "species": [1, 8],
         "atomic_energies": [-13.6, -2000.0], "radial_MLP": [16, 16],
         "max_ell": 2, "max_L": 0,
     }})
-    m2 = build_model(xnns_names.model)
+    m2 = build_model(xnn_names.model)
     assert {k: v.shape for k, v in m.state_dict().items()} == \
            {k: v.shape for k, v in m2.state_dict().items()}
 
-    # the xnns canonical spelling wins when both are present
+    # the xnn canonical spelling wins when both are present
     both = from_dict({"model": {"name": "mace", "cutoff": 4.5, "r_max": 9.0}})
     assert both.model.cutoff == 4.5
 

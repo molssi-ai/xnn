@@ -4,7 +4,7 @@
 Developer Guide
 ***************
 
-How to extend xnns with new models and featurizers, run the test suite, and
+How to extend xnn with new models and featurizers, run the test suite, and
 build this documentation.
 
 .. toctree::

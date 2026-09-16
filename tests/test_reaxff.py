@@ -1,7 +1,7 @@
 """ReaxFF / ReaxFF-nn (``ffnn``): equation-level references and behavior.
 
 Every check here is self-contained: a small parameter library is built with
-:func:`~xnns.ffnn.models.ffield.template_library` and the model's terms are
+:func:`~xnn.ffnn.models.ffield.template_library` and the model's terms are
 compared against direct scalar evaluations of the published equations
 (van Duin et al., J. Phys. Chem. A 105, 9396, 2001; Xue et al., PCCP 23,
 19457, 2021) -- the clean-room convention this code base uses when a
@@ -19,13 +19,13 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import AtomicDataset, collate, structure_to_graph
-from xnns.common.models import ForceStressOutput, build_model
-from xnns.ffnn.models import ReaxFF, read_ffield, template_library
-from xnns.ffnn.models.ffield import (default_pair_cutoff, dedup_torsion_types,
+from xnn.common.config import from_dict
+from xnn.common.data import AtomicDataset, collate, structure_to_graph
+from xnn.common.models import ForceStressOutput, build_model
+from xnn.ffnn.models import ReaxFF, read_ffield, template_library
+from xnn.ffnn.models.ffield import (default_pair_cutoff, dedup_torsion_types,
                                      resolve_torsion, to_forcefield)
-from xnns.ffnn.models.reaxff import (KCAL_TO_EV, KE, nonbonded_taper,
+from xnn.ffnn.models.reaxff import (KCAL_TO_EV, KE, nonbonded_taper,
                                      reverse_edge_permutation, taper_up)
 
 
@@ -512,8 +512,8 @@ def test_published_ffield_parses():
 
 
 def test_all_shipped_reaxff_fields_load():
-    """Every ReaxFF field shipped with xnns parses and builds a model."""
-    from xnns.ffnn.common import list_forcefields
+    """Every ReaxFF field shipped with xnn parses and builds a model."""
+    from xnn.ffnn.common import list_forcefields
     names = [n for n in list_forcefields() if n.startswith("reaxff/")]
     assert len(names) >= 12
     for name in names:
@@ -583,7 +583,7 @@ def test_from_config_and_key_translation(tmp_path):
 
 def test_dataset_training_smoke(tmp_path):
     """ReaxFF-nn trains through the standard AtomicDataset/loss pipeline."""
-    from xnns.common.train.losses import weighted_loss
+    from xnn.common.train.losses import weighted_loss
     model = _model(nn=True)
     fs = ForceStressOutput(model)
     pos, z = _methanol()

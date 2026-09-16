@@ -22,15 +22,15 @@ import math
 import pytest
 import torch
 
-from xnns.common.data import AtomicDataset, collate, structure_to_graph
-from xnns.common.models import ForceStressOutput, available_models
-from xnns.common.train import weighted_loss
-from xnns.ffnn.models import (OPLS, OPLSForceField, MolecularTopology,
+from xnn.common.data import AtomicDataset, collate, structure_to_graph
+from xnn.common.models import ForceStressOutput, available_models
+from xnn.common.train import weighted_loss
+from xnn.ffnn.models import (OPLS, OPLSForceField, MolecularTopology,
                               builtin_library, guess_bonds, read_opls,
                               read_topology, fourier_to_rb, rb_to_fourier)
-from xnns.ffnn.models.oplslib import (KCAL_TO_EV, resolve_improper_type,
+from xnn.ffnn.models.oplslib import (KCAL_TO_EV, resolve_improper_type,
                                       improper_key)
-from xnns.ffnn.models.opls import KE
+from xnn.ffnn.models.opls import KE
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
 CT, HC, CM, OH, HO = "opls_18", "opls_85", "opls_86", "opls_5", "opls_7"
@@ -241,7 +241,7 @@ def test_frc_library_roundtrip_and_spec_forms(tmp_path):
                   - OPLS(str(path), top, cutoff=20.0)(g)["energy"]).abs()) \
         < 1e-12
     # "<path>.frc:<variant>" and shipped names are the same thing
-    from xnns.ffnn.common import builtin_data_dir
+    from xnn.ffnn.common import builtin_data_dir
     spec = f"{builtin_data_dir() / 'oplsaa.frc'}:oplsaa"
     assert read_opls(spec).bond_types == lib.bond_types
     with pytest.raises(FileNotFoundError):
@@ -399,7 +399,7 @@ def test_improper_pattern_precedence():
 
 
 def test_dihedral_wildcard_resolution():
-    from xnns.ffnn.models.oplslib import resolve_dihedral_type
+    from xnn.ffnn.models.oplslib import resolve_dihedral_type
     table = {"X-CM-CM-X": {}, "CT-CM-CM-CT": {}}
     assert resolve_dihedral_type(table, "CT", "CM", "CM", "CT") \
         == "CT-CM-CM-CT"
@@ -541,7 +541,7 @@ def test_relaxed_ethane_barrier_matches_paper():
     ase = pytest.importorskip("ase")
     from ase.constraints import FixInternals
     from ase.optimize import BFGS
-    from xnns.common.deploy import XNNSCalculator
+    from xnn.common.deploy import XNNCalculator
 
     d, dh = 1.529, 1.09
     ang = math.radians(110.7)
@@ -559,7 +559,7 @@ def test_relaxed_ethane_barrier_matches_paper():
     energies = {}
     for target in (60.0, 0.0):
         at = atoms.copy()
-        at.calc = XNNSCalculator(ForceStressOutput(model),
+        at.calc = XNNCalculator(ForceStressOutput(model),
                                  cutoff=model.cutoff)
         at.set_dihedral(2, 0, 1, 5, target, indices=[5, 6, 7])
         at.set_constraint(
@@ -583,7 +583,7 @@ def test_openmm_parity():
     mm = pytest.importorskip("openmm")
     import numpy as np
     import openmm.unit as u
-    from xnns.ffnn.models.oplslib import (resolve_angle_type,
+    from xnn.ffnn.models.oplslib import (resolve_angle_type,
                                           resolve_bond_type,
                                           resolve_dihedral_type)
 
@@ -776,8 +776,8 @@ def test_masses_property():
 
 
 def test_from_config_and_key_translation(tmp_path):
-    from xnns.common.config import from_dict
-    from xnns.common.models import build_model
+    from xnn.common.config import from_dict
+    from xnn.common.models import build_model
     pos, z, types, bonds = _butane()
     top = MolecularTopology.from_bonds(types, bonds)
     top.save(tmp_path / "top.json")

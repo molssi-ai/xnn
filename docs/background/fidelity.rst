@@ -4,15 +4,15 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-The literature models in xnns (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
+The literature models in xnn (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
 ANI, SchNet) are not approximations or "inspired-by" re-implementations: they
-are faithful, self-contained xnns-native reproductions of the reference codes,
+are faithful, self-contained xnn-native reproductions of the reference codes,
 verified numerically block by block and end to end. Models based on
 spherical-harmonic features will only need ``e3nn``: no additional packages such
 as  ``mace-torch``, ``nequip``, ``cuequivariance``, or ``opt_einsum_fx`` is
 required at the runtime. Furthermore, CACE, PhysNet, BAMBOO, ANI, and SchNet
 need no extra dependency at all. Moreover, PhysNet's original implementation in
-TensorFlow has been ported to xnns's ecosystem in pure PyTorch. The BAMBOO model
+TensorFlow has been ported to xnn's ecosystem in pure PyTorch. The BAMBOO model
 uses Cartesian vector channels, so, it does not need the e3nn package. The ANI
 model is written in pure PyTorch and use symmetry functions. The SchNet model is
 also written in plain PyTorch.
@@ -24,8 +24,8 @@ co-rotate, numerically, to the threshold of ~1e-7; see ``tests/test_gnn.py`` and
 
 MACE
 ====
-MACE in xnns reproduces the upstream `ACEsuit/mace
-<https://github.com/ACEsuit/mace>`_ (``mace-torch``). Notably, the xnns
+MACE in xnn reproduces the upstream `ACEsuit/mace
+<https://github.com/ACEsuit/mace>`_ (``mace-torch``). Notably, the xnn
 implementation reproduces:
 
 - the real ``RealAgnostic(Residual)InteractionBlock`` and the paper's
@@ -38,14 +38,14 @@ implementation reproduces:
   flexible (contrary to the original code, where the ``num_interactions``, T, is
   fixed to 2, our implementation allows for T to be set to 0, ..., N).
 
-The notebooks in ``examples/fidelity_checks`` verify the xnns's implementation
+The notebooks in ``examples/fidelity_checks`` verify the xnn's implementation
 and compare it against the upstream version block by block. The notebooks in
-``examples/gnn/mace/`` offer end to end examples which compare the xnns's MACE
+``examples/gnn/mace/`` offer end to end examples which compare the xnn's MACE
 implementation against ``mace-torch`` on argon molecular dynamics data.
 
 NequIP
 ======
-The NequIP model in xnns offers a faithful re-implementation of the upstream
+The NequIP model in xnn offers a faithful re-implementation of the upstream
 ``EnergyModel`` of `mir-group/nequip <https://github.com/mir-group/nequip>`_ and
 involves:
 
@@ -61,7 +61,7 @@ involves:
 Given the same weights it reproduces ``nequip`` to ~1e-16 in energies,
 forces, and stress (``tests/test_nequip.py``). TorchScript export required a
 scriptable, bit-exact stand-in for e3nn's ``Gate``
-(``xnns.gnn.models.nequip._Gate``), which the e3nn 0.4.4 original cannot
+(``xnn.gnn.models.nequip._Gate``), which the e3nn 0.4.4 original cannot
 provide on torch 2.x.
 
 Allegro
@@ -92,7 +92,7 @@ the Cartesian atomic cluster expansion, which needs no spherical
 harmonics or e3nn at all:
 
 - the Cartesian monomial angular basis
-  (:class:`~xnns.gnn.featurizers.cartesian.CartesianAngularBasis`,
+  (:class:`~xnn.gnn.featurizers.cartesian.CartesianAngularBasis`,
   evaluated with the same autograd-safe multiply recursion) and the exact
   multinomial symmetrization rules of upstream
   ``find_combo_vectors_nu{2,3,4}``, so B-feature ordering is identical;
@@ -106,7 +106,7 @@ harmonics or e3nn at all:
   normalized :math:`\mathbf{r}_i - \mathbf{r}_j` edge vectors, and the
   :math:`1/\sqrt{\langle n_\text{neigh}\rangle}` message normalization;
 - the linear + MLP readout on the concatenated per-layer B features; the
-  per-species reference energy lives in the standard xnns ``atom_ref``
+  per-species reference energy lives in the standard xnn ``atom_ref``
   (upstream subtracts it from the training labels instead).
 
 Given the same weights it reproduces ``cace`` to ~1e-16 (relative) in
@@ -129,7 +129,7 @@ implementation `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
   (``kehalf`` constant and the force-shifted long-range form included), and
   an independently written D3(BJ) dispersion module that reproduces the
   behavior of upstream's bundled Grimme D3 code exactly, with its reference
-  tables (shipped compressed in ``xnns/dnn/models/d3_tables.npz``) and
+  tables (shipped compressed in ``xnn/dnn/models/d3_tables.npz``) and
   softplus-learnable coefficients;
 - the shifted-softplus is evaluated in its exact form
   ``max(x, 0) + log1p(exp(-|x|))`` -- PyTorch's ``F.softplus`` goes linear
@@ -151,7 +151,7 @@ Roitberg, *Chem. Sci.* 2017), verified against `aiqm/torchani
 extra dependency):
 
 - the Atomic Environment Vector
-  (:class:`~xnns.dnn.featurizers.AEV`): element-resolved radial (Behler
+  (:class:`~xnn.dnn.featurizers.AEV`): element-resolved radial (Behler
   :math:`G^2`) and angular symmetry functions, bucketed by neighbour species
   and by the unordered neighbour-species pair in torchani's upper-triangular
   order, with the parameter grids laid out in torchani's ``(EtaR, ShfR)`` and
@@ -197,13 +197,13 @@ run with the same weights:
 - the atom-type embedding (eq. 3), the Gaussian radial basis
   :math:`e_k(r) = \exp(-\gamma (r - \mu_k)^2)` on the paper's grid
   (:math:`\gamma = 10` Å\ :sup:`-2`, centers every 0.1 Å — the shared
-  :class:`~xnns.common.featurizers.GaussianRBF` with an explicit ``gamma``);
+  :class:`~xnn.common.featurizers.GaussianRBF` with an explicit ``gamma``);
 - the continuous-filter convolution (eq. 2) with the two-dense-layer
   shifted-softplus filter-generating network, and the Fig. 2 interaction
   block (*atom-wise → cfconv → atom-wise → ssp → atom-wise*, residual,
   no weight sharing across the :math:`T` blocks);
 - the exact shifted softplus :math:`\ln(0.5 e^x + 0.5)` (shared with
-  PhysNet in :func:`~xnns.common.models.ops.shifted_softplus`), the
+  PhysNet in :func:`~xnn.common.models.ops.shifted_softplus`), the
   atom-wise :math:`F \to F/2 \to 1` readout with a zero-initialized head,
   and the DTNN per-atom energy standardization
   :math:`E_i = E_\sigma \hat E_i + E_\mu`;
@@ -222,14 +222,14 @@ BAMBOO
 ======
 A faithful, from-scratch re-implementation of `bytedance/bamboo
 <https://github.com/bytedance/bamboo>`_ (Gong *et al.* 2024), the graph
-equivariant transformer with a physics energy split, built on the xnns
+equivariant transformer with a physics energy split, built on the xnn
 abstractions with no upstream code vendored:
 
 - the multi-head QKV edge attention (the reusable
-  :class:`~xnns.transformer.attention.EdgeMultiheadAttention`), the
+  :class:`~xnn.transformer.attention.EdgeMultiheadAttention`), the
   scalar/vector GET layers with their inner-product coupling (first / middle /
   last variants), and the exponential-normal radial basis
-  (:class:`~xnns.transformer.featurizers.ExpNormalSmearing`);
+  (:class:`~xnn.transformer.featurizers.ExpNormalSmearing`);
 - the charge-equilibrium electrostatics: per-atom electronegativity/hardness
   energies from the initial embedding, charges squashed by ``tanh`` and
   conserved to the total charge, and the damped all-pairs Coulomb sum (whose
@@ -244,19 +244,19 @@ the dipole, and the component energies match to ~1e-15, block by block
 (``examples/fidelity_checks/bamboo_verification.ipynb``,
 ``tests/test_bamboo.py`` with a clone of the upstream repo via
 ``BAMBOO_UPSTREAM_PATH``). The one deliberate difference is the force
-convention: xnns returns the full conservative ``-dE/dr`` through
-:class:`~xnns.common.models.outputs.ForceStressOutput`, which equals the
+convention: xnn returns the full conservative ``-dE/dr`` through
+:class:`~xnn.common.models.outputs.ForceStressOutput`, which equals the
 upstream ``forces + qeq_force`` to ~1e-14; upstream reports only ``forces``
 (``nn + coul`` with charges held fixed) and regularises the
 charge-equilibrium residual ``qeq_force`` toward zero during training
 (Supplementary Theorem A.2). The optional D3(CSO) dispersion (off by default,
-as in the paper's DFT training) reuses xnns's standard Grimme-D3 reference
+as in the paper's DFT training) reuses xnn's standard Grimme-D3 reference
 tables with the CSO damping and is therefore not on the machine-precision
 path.
 
 Latent Ewald Summation (LES)
 ============================
-The long-range add-on :class:`~xnns.common.models.les.LatentEwald` is an
+The long-range add-on :class:`~xnn.common.models.les.LatentEwald` is an
 independently written implementation of the algorithm of the reference
 ``cace.modules.EwaldPotential`` (Cheng, *npj Comput Mater* 2025) and the
 ``cace-lr-fit`` training-script conventions, verified against them:
@@ -294,7 +294,7 @@ bond-order switching behavior the libraries were trained under.
 
 The classical evaluation was additionally cross-checked against standalone
 LAMMPS ``pair_style reaxff`` on the published C/H/O combustion field
-(Chenoweth *et al.* 2008; xnns ships SEAMM's ``.frc`` translation of it,
+(Chenoweth *et al.* 2008; xnn ships SEAMM's ``.frc`` translation of it,
 which rounds eight bond-energy parameters to three decimals -- ``De`` values
 differ from the LAMMPS ``ffield.reax.cho`` by up to 4e-4 kcal/mol, about
 3e-5 eV on a small molecule, and nothing else differs):
@@ -302,12 +302,12 @@ per-term energies agree at the level set by the two codes' different
 bond-list truncation conventions (nonbonded van der Waals and Coulomb terms
 to ~1e-6 eV; bond, angle, and total energies to ~0.1 percent), and forces
 match within a fraction of a percent. LAMMPS is used there only as an
-external oracle; nothing in xnns depends on it.
+external oracle; nothing in xnn depends on it.
 
 **Licensing note.** The authors' reference implementation of ReaxFF-nn is
 distributed under the AGPL, which is incompatible with redistributing any
 derived verification artifact alongside this MIT-licensed code base. During
-development the xnns implementation was checked term by term against that
+development the xnn implementation was checked term by term against that
 publicly available implementation (agreement at its float32 working
 precision on molecular and periodic CHNO systems, classical and neural
 variants alike), but **no fidelity notebook, test, or vendored code that
@@ -380,7 +380,7 @@ Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,
 weights can be transplanted in either direction (see
-:ref:`howto-transplant`), and the xnns implementations can serve as readable,
+:ref:`howto-transplant`), and the xnn implementations can serve as readable,
 single-dependency references for how these architectures actually work: the
 ``examples/fidelity_checks/<model>_verification.ipynb`` notebooks double as
 annotated tours of each architecture.

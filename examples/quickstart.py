@@ -6,10 +6,10 @@ pipeline is wired together. Run:  python examples/quickstart.py
 import numpy as np
 import torch
 
-from xnns.common.config import Config
-from xnns.common.data import AtomicDataset
-from xnns.common.train import Trainer
-from xnns.common.models import build_model, ForceStressOutput, available_models
+from xnn.common.config import Config
+from xnn.common.data import AtomicDataset
+from xnn.common.train import Trainer
+from xnn.common.models import build_model, ForceStressOutput, available_models
 
 
 def toy_structures(n=24, periodic=False):

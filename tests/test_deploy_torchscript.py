@@ -1,13 +1,13 @@
 """Tests for the self-contained TorchScript export.
 
 Covers the scriptable neighbor list (parity with the reference
-:func:`~xnns.common.data.build_neighbor_list` for molecular, orthorhombic,
+:func:`~xnn.common.data.build_neighbor_list` for molecular, orthorhombic,
 triclinic and unwrapped inputs), and the exported artifact itself: that it
 scripts, that it reproduces the eager model's energy/forces/stress, that its
 two entry points agree, and -- the point of the whole exercise -- that it loads
-and runs with ``xnns`` and ``e3nn`` blocked from import.
+and runs with ``xnn`` and ``e3nn`` blocked from import.
 
-Both a plain model and a :class:`~xnns.common.models.les.LatentEwald`-wrapped
+Both a plain model and a :class:`~xnn.common.models.les.LatentEwald`-wrapped
 one are exercised; the latter is what a long-range checkpoint deploys as.
 """
 import subprocess
@@ -18,14 +18,14 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import build_neighbor_list, structure_to_graph
-from xnns.common.deploy import (
+from xnn.common.config import from_dict
+from xnn.common.data import build_neighbor_list, structure_to_graph
+from xnn.common.deploy import (
     TorchScriptPotential,
     build_neighbor_list_ts,
     export_torchscript_potential,
 )
-from xnns.common.models import ForceStressOutput, build_model
+from xnn.common.models import ForceStressOutput, build_model
 
 CUTOFF = 4.0
 
@@ -209,10 +209,10 @@ def test_rejects_model_without_tensor_core():
         TorchScriptPotential(torch.nn.Linear(3, 3), CUTOFF)
 
 
-def test_artifact_runs_without_xnns(tmp_path):
-    """The whole point: load and run the artifact with xnns/e3nn unimportable.
+def test_artifact_runs_without_xnn(tmp_path):
+    """The whole point: load and run the artifact with xnn/e3nn unimportable.
 
-    Runs in a subprocess with an import hook that raises on ``xnns`` and
+    Runs in a subprocess with an import hook that raises on ``xnn`` and
     ``e3nn``, so any residual dependency of the serialized module shows up as
     a failure rather than being silently satisfied by the test environment.
     """
@@ -231,7 +231,7 @@ def test_artifact_runs_without_xnns(tmp_path):
         import sys
         class Block:
             def find_spec(self, name, path=None, target=None):
-                if name.split('.')[0] in ('xnns', 'e3nn'):
+                if name.split('.')[0] in ('xnn', 'e3nn'):
                     raise ImportError('BLOCKED ' + name)
                 return None
         sys.meta_path.insert(0, Block())

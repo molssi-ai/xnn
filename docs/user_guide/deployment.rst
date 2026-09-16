@@ -4,19 +4,19 @@
 Deployment
 **********
 
-Trained xnns models deploy in two ways: as an ASE calculator for Python
+Trained xnn models deploy in two ways: as an ASE calculator for Python
 workflows, and as TorchScript for production LAMMPS runs.
 
 ASE calculator
 ==============
-:class:`~xnns.common.deploy.ase_calculator.XNNSCalculator` (requires the
-``ase`` extra) makes any xnns model a standard ASE calculator:
+:class:`~xnn.common.deploy.ase_calculator.XNNCalculator` (requires the
+``ase`` extra) makes any xnn model a standard ASE calculator:
 
 .. code-block:: python
 
-   from xnns.common.deploy import XNNSCalculator
+   from xnn.common.deploy import XNNCalculator
 
-   atoms.calc = XNNSCalculator(model, cutoff=5.0)
+   atoms.calc = XNNCalculator(model, cutoff=5.0)
    atoms.get_potential_energy()
    atoms.get_forces()
 
@@ -26,22 +26,22 @@ molecular-dynamics recipe.
 
 TorchScript and LAMMPS export
 =============================
-:func:`~xnns.common.deploy.torchscript.export_torchscript_potential` writes a
+:func:`~xnn.common.deploy.torchscript.export_torchscript_potential` writes a
 **self-contained** ``.pt``: it is driven purely by tensors and carries its own
 neighbor list, so a consumer needs nothing but ``libtorch`` /
-``torch.jit.load`` -- no ``xnns`` import, no Python model code, no config file.
+``torch.jit.load`` -- no ``xnn`` import, no Python model code, no config file.
 
 .. code-block:: console
 
-   $ xnns export --ckpt runs/exp/best.pt --out deployed.pt
+   $ xnn export --ckpt runs/exp/best.pt --out deployed.pt
 
-``--config`` is optional: xnns-trained checkpoints embed their own
-:class:`~xnns.common.config.schema.Config`, so the architecture is recovered
+``--config`` is optional: xnn-trained checkpoints embed their own
+:class:`~xnn.common.config.schema.Config`, so the architecture is recovered
 from the checkpoint itself. The equivalent Python call is
 
 .. code-block:: python
 
-   from xnns.common.deploy import export_torchscript_potential
+   from xnn.common.deploy import export_torchscript_potential
 
    export_torchscript_potential(model, cutoff=5.0, path="deployed.pt")
 
@@ -56,7 +56,7 @@ The artifact exposes two entry points:
 
 ``forward_lammps(pos, edge_index, cell_shifts, atomic_numbers, cell)``
    The pair-style ABI, matching
-   :class:`~xnns.common.deploy.lammps.LAMMPSWrapper` and hence the
+   :class:`~xnn.common.deploy.lammps.LAMMPSWrapper` and hence the
    ``pair_nequip`` / ``pair_mace`` / ``pair_allegro`` pattern: the MD engine
    supplies the neighbor list it already has.
 
@@ -66,7 +66,7 @@ Loading it from any MD package is then:
 
    import torch
 
-   model = torch.jit.load("deployed.pt")          # no xnns needed
+   model = torch.jit.load("deployed.pt")          # no xnn needed
    out = model(pos, atomic_numbers, cell, pbc)
    energy, forces = out["energy"], out["forces"]
 
@@ -91,7 +91,7 @@ inference model:
   module. Use ``torch.no_grad()``, or no context manager at all.
 
 The cutoff and a ``long_range`` flag are embedded as extra files in the
-archive, so a consumer can introspect the artifact without xnns::
+archive, so a consumer can introspect the artifact without xnn::
 
    extra = {"cutoff": "", "long_range": ""}
    torch.jit.load("deployed.pt", _extra_files=extra)
@@ -99,24 +99,24 @@ archive, so a consumer can introspect the artifact without xnns::
 .. warning::
 
    **Long-range (LES) models must be driven with the whole system on one
-   rank.** :class:`~xnns.common.models.les.LatentEwald` adds an Ewald energy
+   rank.** :class:`~xnn.common.models.les.LatentEwald` adds an Ewald energy
    over latent charges, which is a *global* sum -- every atom's latent charge
    enters, with no cutoff -- so it does not decompose into a local, per-domain
    neighbor list. An MPI-decomposed pair style that only ever sees its own
    subdomain plus ghosts cannot reproduce the trained energy. Use ``forward``
    (or ``forward_lammps`` with a full-system neighbor list) via a
    single-rank run, ``fix external``, or the
-   :class:`~xnns.common.deploy.mdi_engine.MDIEngine`. The
+   :class:`~xnn.common.deploy.mdi_engine.MDIEngine`. The
    ``long_range`` metadata key records whether this applies.
 
 .. note::
 
    The built-in neighbor list is the brute-force ``O(S N^2)`` reference
-   algorithm, matching :func:`~xnns.common.data.build_neighbor_list`. It is
+   algorithm, matching :func:`~xnn.common.data.build_neighbor_list`. It is
    fine for molecular and modest periodic systems; for large cells, supply the
    engine's own neighbor list through ``forward_lammps``.
 
-The older :func:`~xnns.common.deploy.lammps.export_to_lammps` remains for the
+The older :func:`~xnn.common.deploy.lammps.export_to_lammps` remains for the
 short-range-only pair-style wrapper. A model is exportable when it provides
 the scriptable core
 ``node_energy(atomic_numbers, edge_index, edge_vec)`` and, for the
@@ -132,4 +132,4 @@ calculator (its energy is defined relative to a bound molecular topology,
 not per edge); with explicit hydrogens the customary timestep is 0.5-1 fs.
 
 See :ref:`howto-lammps` for the step-by-step guide, including the CLI form
-(``xnns export``).
+(``xnn export``).

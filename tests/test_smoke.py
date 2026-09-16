@@ -2,10 +2,10 @@
 import numpy as np
 import torch
 
-from xnns.common.config import Config, from_dict
-from xnns.common.data import AtomicDataset, structure_to_graph
-from xnns.common.models import build_model, ForceStressOutput, available_models
-from xnns.common.train import Trainer
+from xnn.common.config import Config, from_dict
+from xnn.common.data import AtomicDataset, structure_to_graph
+from xnn.common.models import build_model, ForceStressOutput, available_models
+from xnn.common.train import Trainer
 
 
 def _structs(periodic):

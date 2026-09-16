@@ -1,7 +1,7 @@
 """Helper for ``test_physnet.py::test_parity_vs_original_physnet``.
 
 Builds the original TF1 PhysNet graph (from a MMunibas/PhysNet clone, path in
-``sys.argv[1]``), transplants every variable into the xnns PhysNet, and
+``sys.argv[1]``), transplants every variable into the xnn PhysNet, and
 compares energies, forces, corrected charges, and the non-hierarchicality
 penalty on a toy molecule. Prints the worst absolute difference on the last
 stdout line; run in a subprocess because it patches ``sys.modules`` and
@@ -30,9 +30,9 @@ _nnmod.RBFLayer = lambda K, cutoff, scope=None: _OrigRBF(
 import torch  # noqa: E402
 
 torch.set_default_dtype(torch.float64)
-from xnns.common.config import from_dict  # noqa: E402
-from xnns.common.data import AtomicGraph  # noqa: E402
-from xnns.common.models import ForceStressOutput, build_model  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import AtomicGraph  # noqa: E402
+from xnn.common.models import ForceStressOutput, build_model  # noqa: E402
 
 F_DIM, K, SR_CUT, NB, NRA, NRI, NRO = 24, 16, 4.0, 3, 2, 3, 1
 

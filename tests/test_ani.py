@@ -14,18 +14,18 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.config import from_dict
-from xnns.common.data import structure_to_graph
-from xnns.common.data.neighborlist import build_neighbor_list
-from xnns.common.data import AtomicGraph
-from xnns.common.models import ForceStressOutput, available_models, build_model
-from xnns.dnn.featurizers import AEV
-from xnns.dnn.featurizers.aev import _angle_shifts, _even_shifts
-from xnns.dnn.featurizers.symmetry_functions import build_triplets
-from xnns.dnn.models.ani import (
+from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph
+from xnn.common.data.neighborlist import build_neighbor_list
+from xnn.common.data import AtomicGraph
+from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.dnn.featurizers import AEV
+from xnn.dnn.featurizers.aev import _angle_shifts, _even_shifts
+from xnn.dnn.featurizers.symmetry_functions import build_triplets
+from xnn.dnn.models.ani import (
     ANI, ANI1CCX_SELF_ENERGIES, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES,
     ANI2X_HIDDEN, ANI2X_SELF_ENERGIES)
-from xnns.dnn.featurizers.aev import ANI2X_SPECIES
+from xnn.dnn.featurizers.aev import ANI2X_SPECIES
 
 # H, C, N, O
 SPECIES = [1, 6, 7, 8]
@@ -203,7 +203,7 @@ def test_ani2x_architecture():
 
 def test_ani2x_energy_forces_on_halogens():
     """ANI-2x runs on an S/F/Cl-containing structure with finite forces."""
-    from xnns.dnn.models.ani import ANI as _ANI
+    from xnn.dnn.models.ani import ANI as _ANI
     model = ForceStressOutput(_ANI.ani2x())
     z = np.array([6, 16, 9, 17, 8, 7, 1, 1], dtype=np.int64)   # C S F Cl O N H H
     rng = np.random.default_rng(0)
@@ -274,7 +274,7 @@ def test_behler_parrinello_conventions():
 # torchani parity (only where torchani is installed)                          #
 # --------------------------------------------------------------------------- #
 
-def _xnns_graph(Z, pos, cutoff):
+def _xnn_graph(Z, pos, cutoff):
     Z = torch.as_tensor(Z, dtype=torch.long)
     pos = torch.as_tensor(pos, dtype=torch.float64)
     ei, cs = build_neighbor_list(pos, cutoff)
@@ -288,7 +288,7 @@ def _xnns_graph(Z, pos, cutoff):
     ("ani1", (4.6, 3.1, [16.0], 32, [8.0], [8.0], 8, 8)),
 ])
 def test_torchani_aev_parity(preset, grid):
-    """xnns AEV matches torchani.AEVComputer element-for-element."""
+    """xnn AEV matches torchani.AEVComputer element-for-element."""
     torchani = pytest.importorskip("torchani")
     Rcr, Rca, EtaR, nR, EtaA, Zeta, nA, nZ = grid
     t = lambda x: torch.tensor(x, dtype=torch.float64)
@@ -301,7 +301,7 @@ def test_torchani_aev_parity(preset, grid):
     Z = np.array([6, 7, 8, 1, 1, 1], dtype=np.int64)
     pos = rng.uniform(0, 3, (6, 3))
     idx = {1: 0, 6: 1, 7: 2, 8: 3}
-    x = aev(_xnns_graph(Z, pos, aev.cutoff))
+    x = aev(_xnn_graph(Z, pos, aev.cutoff))
     sp = torch.tensor([[idx[z] for z in Z]])
     _, ref = tani((sp, torch.as_tensor(pos[None])))
     assert torch.allclose(x, ref[0], atol=1e-10)
@@ -334,7 +334,7 @@ def test_torchani_energy_force_parity(preset, upstream):
     pos = rng.uniform(0, 3, (6, 3))
     idx = {1: 0, 6: 1, 7: 2, 8: 3}
 
-    g = _xnns_graph(Z, pos, xa.cutoff)
+    g = _xnn_graph(Z, pos, xa.cutoff)
     g.pos.requires_grad_(True)
     out = ForceStressOutput(xa)(g)
 
@@ -348,7 +348,7 @@ def test_torchani_energy_force_parity(preset, upstream):
 
 
 def test_torchani_ani2x_aev_parity():
-    """xnns ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
+    """xnn ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
     torchani = pytest.importorskip("torchani")
     t = lambda x: torch.tensor(x, dtype=torch.float64)
     tani = torchani.AEVComputer(
@@ -361,7 +361,7 @@ def test_torchani_ani2x_aev_parity():
     Z = np.array([6, 7, 8, 16, 9, 17, 1, 1], dtype=np.int64)
     pos = rng.uniform(0, 3, (8, 3))
     idx = {z: i for i, z in enumerate(ANI2X_SPECIES)}
-    x = aev(_xnns_graph(Z, pos, aev.cutoff))
+    x = aev(_xnn_graph(Z, pos, aev.cutoff))
     sp = torch.tensor([[idx[z] for z in Z]])
     _, ref = tani((sp, torch.as_tensor(pos[None])))
     assert torch.allclose(x, ref[0], atol=1e-10)
@@ -389,7 +389,7 @@ def test_torchani_ani2x_energy_force_parity():
     pos = rng.uniform(0, 3.5, (9, 3))
     idx = {z: i for i, z in enumerate(ANI2X_SPECIES)}
 
-    g = _xnns_graph(Z, pos, xa.cutoff)
+    g = _xnn_graph(Z, pos, xa.cutoff)
     g.pos.requires_grad_(True)
     out = ForceStressOutput(xa)(g)
 

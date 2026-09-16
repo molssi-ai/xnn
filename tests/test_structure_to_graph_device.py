@@ -9,7 +9,7 @@ caching graphs does not, and still gets CPU tensors.
 import pytest
 import torch
 
-from xnns.common.data import structure_to_graph
+from xnn.common.data import structure_to_graph
 
 CUT = 5.0
 

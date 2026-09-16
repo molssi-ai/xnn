@@ -7,7 +7,7 @@ Configuration
 One schema
 ==========
 All configuration funnels into a single dataclass tree
-(:mod:`xnns.common.config.schema`):
+(:mod:`xnn.common.config.schema`):
 
 .. list-table::
    :header-rows: 1
@@ -82,7 +82,7 @@ Frontends
 =========
 .. code-block:: python
 
-   from xnns.common.config import (
+   from xnn.common.config import (
        Config, from_dict, from_yaml, from_argparse, from_hydra,
        apply_overrides,
    )
@@ -112,7 +112,7 @@ Upstream key translation
 ========================
 Model keys copied verbatim from an upstream code's YAML also work: a
 per-model key-translation registry
-(:mod:`xnns.common.config.translate`) rewrites foreign spellings (MACE-CLI
+(:mod:`xnn.common.config.translate`) rewrites foreign spellings (MACE-CLI
 ``r_max`` / ``num_radial_basis`` / ``atomic_numbers`` / ``E0s``, NequIP
-``num_layers``, ...) to the xnns canonical names at load time. The xnns
+``num_layers``, ...) to the xnn canonical names at load time. The xnn
 spelling wins if both are given. See :ref:`howto-upstream-configs`.

@@ -3,7 +3,7 @@
 The core preprocessing (npz -> structure dicts, unit conversion, official
 splits, ``AtomicDataset`` wrapping) is exercised against a synthetic rMD17-shaped
 ``.npz`` by monkeypatching the downloader, so the suite stays offline. A single
-opt-in test actually hits figshare when ``XNNS_TEST_NETWORK=1``.
+opt-in test actually hits figshare when ``XNN_TEST_NETWORK=1``.
 """
 import os
 
@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 import torch
 
-from xnns.common.data import AtomicDataset, list_datasets, load_dataset
-from xnns.common.data.hub import (
+from xnn.common.data import AtomicDataset, list_datasets, load_dataset
+from xnn.common.data.hub import (
     ani1x, ani2x, default_cache_dir, lode_dimers, rmd17)
 
 # eV per kcal/mol, matching rmd17._KCAL_MOL_TO_EV.
@@ -155,8 +155,8 @@ def test_unknown_dataset_raises():
         load_dataset("nonexistent")
 
 
-@pytest.mark.skipif(os.environ.get("XNNS_TEST_NETWORK") != "1",
-                    reason="set XNNS_TEST_NETWORK=1 to download from figshare")
+@pytest.mark.skipif(os.environ.get("XNN_TEST_NETWORK") != "1",
+                    reason="set XNN_TEST_NETWORK=1 to download from figshare")
 def test_live_download(tmp_path):
     """End-to-end: really fetch a molecule + splits from figshare."""
     torch.set_default_dtype(torch.float64)
@@ -270,8 +270,8 @@ def test_lode_invalid_args(fake_lode, tmp_path, kwargs, match):
         load_dataset("lode_dimers", cache_dir=tmp_path, quiet=True, **kwargs)
 
 
-@pytest.mark.skipif(os.environ.get("XNNS_TEST_NETWORK") != "1",
-                    reason="set XNNS_TEST_NETWORK=1 to download from Materials Cloud")
+@pytest.mark.skipif(os.environ.get("XNN_TEST_NETWORK") != "1",
+                    reason="set XNN_TEST_NETWORK=1 to download from Materials Cloud")
 def test_lode_live_download(tmp_path):
     """End-to-end: really fetch the Xenon subset from Materials Cloud."""
     torch.set_default_dtype(torch.float64)

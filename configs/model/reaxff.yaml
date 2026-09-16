@@ -1,6 +1,6 @@
 name: reaxff
 cutoff: 10.0              # nonbonded (vdW / Coulomb / EEM) cutoff, the ReaxFF standard
-ffield: CHO_cho_2008      # parameter library: a ReaxFF field shipped with xnns (see list_forcefields), a .frc path, or a ReaxFF-nn JSON (required)
+ffield: CHO_cho_2008      # parameter library: a ReaxFF field shipped with xnn (see list_forcefields), a .frc path, or a ReaxFF-nn JSON (required)
 species: null             # subset of the library's species (default: all of them)
 nn: null                  # ReaxFF-nn neural bond blocks (default: on iff the library has weights)
 messages: null            # message-passing steps T (default: the library's value)

@@ -6,8 +6,8 @@ Data Pipeline
 
 AtomicGraph: the one data object
 ================================
-Every xnns model consumes an
-:class:`~xnns.common.data.atomic_data.AtomicGraph`, a dataclass holding one
+Every xnn model consumes an
+:class:`~xnn.common.data.atomic_data.AtomicGraph`, a dataclass holding one
 structure or a batch of structures:
 
 .. list-table::
@@ -46,17 +46,17 @@ structure or a batch of structures:
      - training targets (optional)
 
 Useful members: ``num_graphs``, ``num_nodes``, ``num_edges``, ``.to(device)``,
-and :meth:`~xnns.common.data.atomic_data.AtomicGraph.edge_vectors`, which
+and :meth:`~xnn.common.data.atomic_data.AtomicGraph.edge_vectors`, which
 computes ``pos[dst] - pos[src] + cell_shift @ cell``. It does so
 differentiably, so forces and stress can be obtained by autograd.
 
 Neighbor lists
 ==============
-:func:`~xnns.common.data.neighborlist.build_neighbor_list` builds the edges:
+:func:`~xnn.common.data.neighborlist.build_neighbor_list` builds the edges:
 
 .. code-block:: python
 
-   from xnns.common.data import build_neighbor_list
+   from xnn.common.data import build_neighbor_list
 
    edge_index, cell_shifts = build_neighbor_list(pos, cutoff=5.0)               # molecular
    edge_index, cell_shifts = build_neighbor_list(pos, 5.0, cell=cell, pbc=pbc)  # periodic
@@ -69,24 +69,24 @@ a model sees.
 
 Datasets and batching
 =====================
-:class:`~xnns.common.data.dataset.AtomicDataset` is a
+:class:`~xnn.common.data.dataset.AtomicDataset` is a
 ``torch.utils.data.Dataset`` over a list of structure dictionaries; it
 converts each to an ``AtomicGraph`` (via
-:func:`~xnns.common.data.dataset.structure_to_graph`) and caches the graphs:
+:func:`~xnn.common.data.dataset.structure_to_graph`) and caches the graphs:
 
 .. code-block:: python
 
-   from xnns.common.data import AtomicDataset, collate
+   from xnn.common.data import AtomicDataset, collate
 
    ds = AtomicDataset(structures, cutoff=5.0)
    graph = ds[0]
 
    batch = collate([ds[0], ds[1], ds[2]])   # one AtomicGraph holding 3 structures
 
-:func:`~xnns.common.data.dataset.collate` batches graphs by concatenation,
+:func:`~xnn.common.data.dataset.collate` batches graphs by concatenation,
 offsetting ``edge_index`` (the standard disconnected-graph trick), so a
 batch is itself just an ``AtomicGraph``. The
-:class:`~xnns.common.train.trainer.Trainer` uses it as the ``collate_fn`` of
+:class:`~xnn.common.train.trainer.Trainer` uses it as the ``collate_fn`` of
 its data loaders automatically.
 
 Loading ASE-native files (extxyz, CIF, VASP, ...)
@@ -95,7 +95,7 @@ Any file format ASE can read loads in one line (requires the ``ase`` extra):
 
 .. code-block:: python
 
-   from xnns.common.data import AtomicDataset
+   from xnn.common.data import AtomicDataset
 
    ds = AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
    ds = AtomicDataset.from_file("crystal.cif", cutoff=5.0)
@@ -115,7 +115,7 @@ key names explicitly (the CLI equivalents live in ``data.energy_key`` etc.):
                                 stress_key="REF_stress")
 
 ``Atoms`` objects already in memory go through
-:meth:`~xnns.common.data.dataset.AtomicDataset.from_atoms`:
+:meth:`~xnn.common.data.dataset.AtomicDataset.from_atoms`:
 
 .. code-block:: python
 
@@ -123,8 +123,8 @@ key names explicitly (the CLI equivalents live in ``data.energy_key`` etc.):
    ds = AtomicDataset.from_atoms(read("relaxed.cif"), cutoff=5.0)
 
 The underlying converters are public too:
-:func:`~xnns.common.data.ase_io.load_structures` (file → list of structure
-dicts) and :func:`~xnns.common.data.ase_io.atoms_to_structure` (one ``Atoms``
+:func:`~xnn.common.data.ase_io.load_structures` (file → list of structure
+dicts) and :func:`~xnn.common.data.ase_io.atoms_to_structure` (one ``Atoms``
 → one dict). The :ref:`command line <cli>` reads ``data.train_path`` /
 ``data.val_path`` through the same path. Positions do *not* need to be
 wrapped into the cell first: the neighbor-list builder handles unwrapped
@@ -138,7 +138,7 @@ unpacking, or unit conversion:
 
 .. code-block:: python
 
-   from xnns.common.data import load_dataset, list_datasets
+   from xnn.common.data import load_dataset, list_datasets
 
    list_datasets()                          # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'rmd17']
 
@@ -148,15 +148,15 @@ unpacking, or unit conversion:
    # one split, wrapped as a ready-to-train AtomicDataset
    train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)
 
-:func:`~xnns.common.data.hub.base.load_dataset` returns lists of
+:func:`~xnn.common.data.hub.base.load_dataset` returns lists of
 :ref:`structure dictionaries <structure-dicts>`: a mapping of splits when
 ``split`` is omitted, a single list otherwise. Pass ``cutoff=`` to get
-:class:`~xnns.common.data.dataset.AtomicDataset` objects instead, ready for a
+:class:`~xnn.common.data.dataset.AtomicDataset` objects instead, ready for a
 ``DataLoader``. Downloaded files are cached and MD5-verified under
 ``datasets/<name>/`` in the repository by default (override with ``cache_dir=``
-or the ``XNNS_DATASETS`` / ``XNNS_CACHE`` environment variable), and a tqdm
+or the ``XNN_DATASETS`` / ``XNN_CACHE`` environment variable), and a tqdm
 progress bar tracks both downloading and preprocessing.
-:func:`~xnns.common.data.hub.base.list_datasets` names what is registered:
+:func:`~xnn.common.data.hub.base.list_datasets` names what is registered:
 
 .. list-table::
    :header-rows: 1
@@ -186,7 +186,7 @@ progress bar tracks both downloading and preprocessing.
      - The ANI-1x training set (Smith *et al.* 2018/2020): ~5 M
        active-learning-selected conformations with wB97X **energies and forces**
        (and CCSD(T)/CBS energies) for H/C/N/O molecules. The data the
-       :meth:`~xnns.dnn.models.ani.ANI.ani1x` preset was trained on. One 5.6 GB
+       :meth:`~xnn.dnn.models.ani.ANI.ani1x` preset was trained on. One 5.6 GB
        HDF5 file is downloaded once; per-conformation NaN entries are dropped.
    * - ``ani1ccx``
      - ``max_molecules``, ``max_conformations``, ``split`` (``train`` / ``val``
@@ -194,7 +194,7 @@ progress bar tracks both downloading and preprocessing.
      - The ANI-1ccx training set (Smith *et al.* 2019/2020): ~500 k
        conformations with **CCSD(T)*/CBS coupled-cluster energies** (no forces),
        the intelligently selected ~10 % subset of ANI-1x that the
-       :meth:`~xnns.dnn.models.ani.ANI.ani1ccx` preset was transfer-learned on.
+       :meth:`~xnn.dnn.models.ani.ANI.ani1ccx` preset was transfer-learned on.
        Shares the ``ani1x`` release file and cache; nothing extra to download.
    * - ``ani2x``
      - ``n_atoms`` (int or list), ``forces``, ``max_groups``,
@@ -203,7 +203,7 @@ progress bar tracks both downloading and preprocessing.
      - The ANI-2x training set (Devereux *et al.* 2020): ~9.6 M conformations
        with wB97X/6-31G* **energies and forces** for the seven elements
        H/C/N/O/S/F/Cl. The data the
-       :meth:`~xnns.dnn.models.ani.ANI.ani2x` preset was trained on. One 3.7 GB
+       :meth:`~xnn.dnn.models.ani.ANI.ani2x` preset was trained on. One 3.7 GB
        pyanitools HDF5 file is downloaded once (Zenodo record 10108942), with
        top-level groups keyed by atom count; ``n_atoms`` selects those groups.
    * - ``argon_md``
@@ -225,7 +225,7 @@ progress bar tracks both downloading and preprocessing.
 
 A runnable, end-to-end walkthrough lives in
 ``examples/data/load_dataset_tutorial.ipynb``. To add your own dataset, register
-a :class:`~xnns.common.data.hub.base.DatasetBuilder`; see
+a :class:`~xnn.common.data.hub.base.DatasetBuilder`; see
 :ref:`developer-guide-extending`.
 
 .. _structure-dicts:
