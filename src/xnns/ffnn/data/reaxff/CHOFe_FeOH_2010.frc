@@ -1,0 +1,265 @@
+!MolSSI forcefield 1
+
+
+#define reaxff/CHOFe_FeOH_2010
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  ------------------
+2025.04.04      1  metadata                         CHOFe_FeOH_2010
+2025.04.04      1  reaxff_general_parameters        CHOFe_FeOH_2010
+2025.04.04      1  reaxff_atomic_parameters_1-8     CHOFe_FeOH_2010
+2025.04.04      1  reaxff_atomic_parameters_9-16    CHOFe_FeOH_2010
+2025.04.04      1  reaxff_atomic_parameters_17-24   CHOFe_FeOH_2010
+2025.04.04      1  reaxff_atomic_parameters_25-32   CHOFe_FeOH_2010
+2025.04.04      1  reaxff_bond_parameters_1-8       CHOFe_FeOH_2010
+2025.04.04      1  reaxff_bond_parameters_9-16      CHOFe_FeOH_2010
+2025.04.04      1  reaxff_off-diagonal_parameters   CHOFe_FeOH_2010
+2025.04.04      1  reaxff_angle_parameters          CHOFe_FeOH_2010
+2025.04.04      1  reaxff_torsion_parameters        CHOFe_FeOH_2010
+2025.04.04      1  reaxff_hydrogen-bond_parameters  CHOFe_FeOH_2010
+
+
+#metadata CHOFe_FeOH_2010
+
+!Version      Ref   Parameter       Value   Description
+!---------  -----  ------------  ---------  --------------------------------------
+2025.04.04      1   ff_form      reaxff     The functional form of the forcefield
+2025.04.04      1   charges      qeq/reaxff How charges should be handled
+
+
+#reaxff_general_parameters CHOFe_FeOH_2010
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.04      1   BO_cutoff      0.1     Cutoff for bond order (*100)
+2025.04.04      1     Pboc,1      50       Overcoordination parameter 1
+2025.04.04      1     Pboc,2       9.5469  Overcoordination parameter 2
+2025.04.04      1     Pcoa,2       1.6725  Valency angle conjugation parameter
+2025.04.04      1     Pcoa,3       0.7903  Valency angle conjugation parameter
+2025.04.04      1     Pcoa,4       1.7602  Valency angle conjugation parameter
+2025.04.04      1     Pcot,2       2.1645  Conjugation
+2025.04.04      1      Pfe1        2.8793  Fe dimer correction?
+2025.04.04      1     Plp,1        6.0891  Valency angle/lone pair parameter
+2025.04.04      1    Povun,3      50       Overcoordination parameter
+2025.04.04      1    Povun,4       0.6991  Overcoordination parameter
+2025.04.04      1    Povun,6       1.0588  Over/undercoordination parameter 6
+2025.04.04      1    Povun,7      12.1176  Over/undercoordination parameter 7
+2025.04.04      1    Povun,8      13.3056  Over/undercoordination parameter 8
+2025.04.04      1     Ppen,2       6.929   Double bond/angle parameter
+2025.04.04      1     Ppen,3       0.3989  Double bond/angle parameter: overcoord
+2025.04.04      1     Ppen,4       3.9954  Double bond/angle parameter: overcoord
+2025.04.04      1     Ptor,2       5.7796  Torsion/BO parameter
+2025.04.04      1     Ptor,3      10       Torsion overcoordination
+2025.04.04      1     Ptor,4       1.9487  Torsion overcoordination
+2025.04.04      1    Ptrip,1     -55.1978  Triple bond stabilization parameter 1
+2025.04.04      1    Ptrip,2       4.6     Triple bond stabilisation parameter 2
+2025.04.04      1    Ptrip,3       6.8702  Triple bond stabilisation parameter
+2025.04.04      1    Ptrip,4       1.7224  Triple bond stabilisation parameter
+2025.04.04      1    Pval,10       2.0384  Valency angle parameter
+2025.04.04      1     Pval,7      33.8667  Valency undercoordination
+2025.04.04      1     Pval,8       1.8512  Valency/lone pair parameter
+2025.04.04      1     Pval,9       1.0563  Valency angle
+2025.04.04      1     PvdW,1       1.5591  vdWaals shielding
+2025.04.04      1  Rtaper,lower    0       Lower Taper-radius
+2025.04.04      1  Rtaper,upper   10       Upper Taper-radius
+2025.04.04      1      kc2        60.485   C2-correction
+2025.04.04      1   not_used_1     6.1431  Not used
+2025.04.04      1   not_used_2    -2.4837  Not used
+2025.04.04      1   not_used_3    -1.2327  Conjugation 0 (not used)
+2025.04.04      1   not_used_4     0.5     Not used
+2025.04.04      1   not_used_5    20       Not used
+2025.04.04      1   not_used_6     5       Molecular energy (not used)
+2025.04.04      1   not_used_7     0       Molecular energy (not used)
+
+
+#reaxff_atomic_parameters_1-8 CHOFe_FeOH_2010
+
+!Version      Ref   Center     Acore,2     C_i     Dij    Ecore,2       Hat    Pboc,3    Pboc,4    Pboc,5
+!---------  -----  --------  ---------  ------  ------  ---------  --------  --------  --------  --------
+2025.04.04      1     H              0  1.0698  0.093           0   61.6606    2.4197    3.0408    0.0003
+2025.04.04      1     C              0  0.8563  0.1838          0  202.606    34.9289    8.9539   13.5366
+2025.04.04      1     O              0  0.9745  0.1             0   59.0626    0.764     3.5027    0.0021
+2025.04.04      1     Fe             0  0.8563  0.1274          0   66.4838    1        30         0
+
+
+#reaxff_atomic_parameters_9-16 CHOFe_FeOH_2010
+
+!Version      Ref   Center     Phbond    Plp,2    Povun,2    Povun,5    Pval,3    Pval,5    R0,alpha    R0,pi
+!---------  -----  --------  --------  -------  ---------  ---------  --------  --------  ----------  -------
+2025.04.04      1     H             1   0        -19.4571      0        4.2733    2.8793      0.893   -0.1
+2025.04.04      1     C             0   0         -2.8983     34.935    2.5       2.9663      1.3817   1.1341
+2025.04.04      1     O             2   0.4056    -3.55       37.5      2.9       2.9225      1.245    1.0548
+2025.04.04      1     Fe            0   0        -16.204       0        2.7917    2.5791      1.9506  -1
+
+
+#reaxff_atomic_parameters_17-24 CHOFe_FeOH_2010
+
+!Version      Ref   Center     R0,pi-pi    Rcore,2    RvdW    Val    Val,angle    Val,boc    Val,e    alpha
+!---------  -----  --------  ----------  ---------  ------  -----  -----------  ---------  -------  -------
+2025.04.04      1     H         -0.1             0  1.355       1            1          1        1   8.223
+2025.04.04      1     C          1.2114          0  1.8903      4            4          4        4   9.7559
+2025.04.04      1     O          0.9049          0  2.389       2            4          4        6   9.73
+2025.04.04      1     Fe        -1.2             0  2.0308      3            3          6        3  11.0534
+
+
+#reaxff_atomic_parameters_25-32 CHOFe_FeOH_2010
+
+!Version      Ref   Center     alpha_e    beta     chi     eta    gamma    gamma,w       m    not_used_1
+!---------  -----  --------  ---------  ------  ------  ------  -------  ---------  ------  ------------
+2025.04.04      1     H              0  1.0338  3.7248  9.6093   0.8203    33.2894   1.008      121.125
+2025.04.04      1     C              0  1.0564  5.9666  7        0.9        2.1346  12           79.5548
+2025.04.04      1     O              0  1.0493  8.5     8.3122   1.0898    13.8449  15.999      116.077
+2025.04.04      1     Fe             0  1.0338  1.2457  7.3021   0.7264     2.2637  55.845       18.3725
+
+
+#reaxff_bond_parameters_1-8 CHOFe_FeOH_2010
+
+!Version      Ref   I    J     13_boc     De,pi    De,pi-pi    De,sigma    Pbe,1    Pbe,2    Pbo,2    Pbo,3
+!---------  -----  ---  ---  --------  --------  ----------  ----------  -------  -------  -------  -------
+2025.04.04      1   H    H          1    0           0         153.393   -0.46     6.25     6.0552   1
+2025.04.04      1   C    H          1    0           0         169.476   -0.6083   5.229    6.9136   1
+2025.04.04      1   C    C          1   99.1897     78         158.2     -0.7738   0.459    6.7268  -0.1
+2025.04.04      1   O    H          1    0           0         160       -0.5725   1.115    4.279    1
+2025.04.04      1   O    C          1   82.6772     60.8077    164.43    -0.3739   0.4475   4.8734  -0.2288
+2025.04.04      1   O    O          1  145          50.8293    142.286    0.2506   0.3451   5.5     -0.1055
+2025.04.04      1  Fe    H          0    0           0         105.005   -0.0717   0.1      4.5062   1
+2025.04.04      1  Fe    C          1    0           0         133.051    1        0.235    4.5217  -0.35
+2025.04.04      1  Fe    O          1    0           0          65.7713   0.1366   0.9495   7.9897  -0.35
+2025.04.04      1  Fe   Fe          0    0           0          38.7471   0.3595   1        6.4477  -0.2
+
+
+#reaxff_bond_parameters_9-16 CHOFe_FeOH_2010
+
+!Version      Ref   I    J     Pbo,4    Pbo,5    Pbo,6    Pbo_1    Povun,1    not_used_1    not_used_2    ovc
+!---------  -----  ---  ---  -------  -------  -------  -------  ---------  ------------  ------------  -----
+2025.04.04      1   H    H    0        0        6       -0.079      0.73               1             0      0
+2025.04.04      1   C    H    0        0        6       -0.05       0.7652             1             0      0
+2025.04.04      1   C    C    9.1628  -0.455   37.6117  -0.0777     0.4147             1             0      1
+2025.04.04      1   O    H    0        0        6       -0.092      0.5626             0             0      0
+2025.04.04      1   O    C    7.025   -0.2351  10.5036  -0.1363     1                  1             0      0
+2025.04.04      1   O    O    9       -0.1     29.7503  -0.1225     0.6051             1             0      1
+2025.04.04      1  Fe    H    0        0        6       -0.1216     0.0505             1             0      0
+2025.04.04      1  Fe    C   15       -0.3     36       -0.1143     0.0673             1             0      1
+2025.04.04      1  Fe    O   15       -0.3     36       -0.0555     0.0494             1             0      1
+2025.04.04      1  Fe   Fe   15       -0.2     16       -0.0771     0.2749             1             0      0
+
+
+#reaxff_off-diagonal_parameters CHOFe_FeOH_2010
+
+!Version      Ref   I    J      Dij    R0,pi    R0,pi-pi    R0,sigma    RvdW    alpha
+!---------  -----  ---  ---  ------  -------  ----------  ----------  ------  -------
+2025.04.04      1   C    H   0.1239  -1          -1           1.121   1.4004   9.8467
+2025.04.04      1   O    H   0.0283  -1          -1           0.9215  1.2885  10.919
+2025.04.04      1   O    C   0.1345   1.1576      1.0637      1.2835  1.8422   9.7725
+2025.04.04      1  Fe    H   0.064   -1          -1           1.3517  1.6974  11.5167
+2025.04.04      1  Fe    C   0.1358  -1          -1           1.6096  1.8293  10.0425
+2025.04.04      1  Fe    O   0.0846  -1          -1           1.8339  1.4284  10.0808
+
+
+#reaxff_angle_parameters CHOFe_FeOH_2010
+
+!Version      Ref   I    J     K    Pcoa,1    Ppen,1    Pval,1    Pval,2    Pval,4    Pval,7    Theta0
+!---------  -----  ---  ---  ---  --------  --------  --------  --------  --------  --------  --------
+2025.04.04      1   H    H     H    0         0        27.9213    5.8635    1.04      0         0
+2025.04.04      1   C    H     H    0         0         0         6         1.04      0         0
+2025.04.04      1   C    H     C    0         0         3.411     7.735     1.04      0         0
+2025.04.04      1   O    H     H    0         0         8.5744    3         1.0421    0         0
+2025.04.04      1   O    H     C    0         0        25         3         1.04      1         0
+2025.04.04      1   O    H     O    0         0        15         2.89      2.8774    0         0
+2025.04.04      1  Fe    H     H    0         0        30         3.4094    1.5166    2.4379    0.1
+2025.04.04      1  Fe    H     O    0         0         4.6026    2.5343    1.1051    0.7284    0
+2025.04.04      1  Fe    H    Fe    0         0         8.2994    5.7832    1.7716    2.9873    0
+2025.04.04      1   H    C     H    0         0        25.2202    3.7312    2.75      0.005    70.2607
+2025.04.04      1   C    C     H    0         0        14.5234    6.2481    1.6255    0.5665   65.7758
+2025.04.04      1   C    C     C    0         6.2933   30.7029    0.7606    1.1244    0.718    59.0573
+2025.04.04      1   O    C     H    0         0        16.3141    5.273     1.4077    0.4448   65
+2025.04.04      1   O    C     C    0        58.6562    7.8968    2.6122    1.0338    3        53.9517
+2025.04.04      1   O    C     O  -25.3063  -50        44.2852    2.4177    2.7392    1.6334   76.9627
+2025.04.04      1  Fe    C     H    0         0        16.9204    4.1052    1.005     0.1      47.3695
+2025.04.04      1  Fe    C     C    0         0         2.8115    1.9262    1.4056    0.7602   59.8697
+2025.04.04      1  Fe    C     O    0         0        24.3753    3.9647    1.5314    0.1      18.8567
+2025.04.04      1  Fe    C    Fe    0         0        26.0015    1.0328    2.0576    0.2361   88.6279
+2025.04.04      1   H    O     H    0         0         9.8453    2.272     1.58      2.8635   85.8
+2025.04.04      1   C    O     H    0         0        13.1217    4.4734    3         0.8433   70.1101
+2025.04.04      1   C    O     C    0         0        42.551     0.7205    1.3096    2.9294   72.6199
+2025.04.04      1   O    O     H    0         0        50         2         1.168     1        75.6935
+2025.04.04      1   O    O     C    0        68.1072   32.2258    1.7397    1.7777    0.9888   81.9029
+2025.04.04      1   O    O     O    0        50        30.4554    0.9953    1.0783    3        80.7324
+2025.04.04      1  Fe    O     H    0         0        10.2025    0.7481    1         1.4521   59.4556
+2025.04.04      1  Fe    O     C    0         0        12.8684    1.4601    1         0.8757   90
+2025.04.04      1  Fe    O     O    0         0        32.633     1.7223    1.4351    1.0221   73.6721
+2025.04.04      1  Fe    O    Fe    0         0         4.8566    2.5768    1         0.7552   57.6787
+2025.04.04      1   H   Fe     H    0         0         6.6782    6.5943    1.5365    1.3895   34.1965
+2025.04.04      1   C   Fe     C    0         0         3.3035    0.2       1.0562    1.1221   29.1655
+2025.04.04      1   O   Fe     H    0         0        20.1868    4.7461    1.6752    0.1      34.0653
+2025.04.04      1   O   Fe     O    0         0         0.01      0.1392    2.1948    0.4968   79.7335
+2025.04.04      1  Fe   Fe     H    0         0        -6.997    24.3956    1.3672    0.7878  180
+2025.04.04      1  Fe   Fe     C    0         0        15.943     0.9664    1.1088    2.2242   25.4591
+2025.04.04      1  Fe   Fe     O    0         0         5.6268    4.0645    2.673     1.7794   65.7545
+
+
+#reaxff_torsion_parameters CHOFe_FeOH_2010
+
+!Version      Ref   I    J     K    L    Pcot,1    Ptor,1       V1        V2       V3    not_used_1    not_used_2
+!---------  -----  ---  ---  ---  ---  --------  --------  -------  --------  -------  ------------  ------------
+2025.04.04      1   *    H     H    *    0         0        0         0        0                  0             0
+2025.04.04      1   *    C     H    *    0         0        0         0        0                  0             0
+2025.04.04      1   H    C     C    H   -2.2677   -4.8923  -0.25     31.2081   0.4539             0             0
+2025.04.04      1   C    C     C    H   -2.1802   -4.9581  -0.25     29.2131   0.2945             0             0
+2025.04.04      1   C    C     C    C   -1.6      -6.3507  -0.25     34.7453   0.0288             0             0
+2025.04.04      1   O    C     C    H   -1        -4.6995   1.9159   19.8113   0.7914             0             0
+2025.04.04      1   O    C     C    C   -1        -2.5      1.2799   20.7787  -0.5249             0             0
+2025.04.04      1   O    C     C    O   -1        -4.9622  -1.4477   16.6853   0.6461             0             0
+2025.04.04      1   *    C     C    *   -2        -4        0        50        0.3                0             0
+2025.04.04      1   *    O     H    *    0        -2.5415   0         0.1      0.02               0             0
+2025.04.04      1   H    O     C    H   -3        -4.2274  -2.4875   70.8145   0.7582             0             0
+2025.04.04      1   H    O     C    C   -1        -6.1481   1.2044   80       -0.3139             0             0
+2025.04.04      1   H    O     C    O   -3        -5.5315  -2.5      70.3345  -1                  0             0
+2025.04.04      1   C    O     C    H   -2.9807   -2.7733  -2.5      31.0191   0.6165             0             0
+2025.04.04      1   C    O     C    C   -1        -2.5      0.4816   19.6316  -0.0057             0             0
+2025.04.04      1   C    O     C    O   -3        -4.5172  -1.139    78.0747  -0.0964             0             0
+2025.04.04      1   O    O     C    H   -2.8      -3.6877  -1.4383   80        1                  0             0
+2025.04.04      1   O    O     C    C   -2        -9       -0.0002   20.1851   0.1601             0             0
+2025.04.04      1   O    O     C    O   -2        -9       -0.1583   20        1.5                0             0
+2025.04.04      1   H    O     O    H   -1        -3.3961   2.5     -22.9397   0.6991             0             0
+2025.04.04      1   C    O     O    H   -2.9759   -5.6657  -2.1289   12.8382   1                  0             0
+2025.04.04      1   C    O     O    C   -2        -4.4848   0.0002   80       -1.5                0             0
+2025.04.04      1   O    O     O    H   -1        -2.5     -2.5      -2.5103  -1                  0             0
+2025.04.04      1   O    O     O    C   -1        -2.5      2.5     -25        1                  0             0
+2025.04.04      1   O    O     O    O   -1        -2.5     -2.5     -25        1                  0             0
+2025.04.04      1   *    O     O    *   -1        -5.1903   0.5511   25.415    1.133              0             0
+
+
+#reaxff_hydrogen-bond_parameters CHOFe_FeOH_2010
+
+!Version      Ref   I    J     K    Ehb    Phb3    Rhb    Thb
+!---------  -----  ---  ---  ---  -----  ------  -----  -----
+2025.04.04      1   O    H     O  -3.58    19.5   2.12   1.45
+
+#reference 1
+@Author SEAMM
+@Date 2025-04-04
+ReaxFF forcefield translated from Reax format
+
+imported from LAMMPS examples/reaxff/FeOH3
+
+DATE: 2011-02-18 CONTRIBUTOR: Aidan Thompson, athomps@sandia.gov CITATION: Aryanpour, van Duin and Kubicki, J Phys Chem A, 114, 6298-6307 (2010) COMMENT Reactive MD-force field: Fe/O/water: Aryanpour, M.; van Duin, A. C. T.; Kubicki, J. D. J. Phys. Chem. A 2010, 114, 6298-6307
+
+@bibtex @article{doi:10.1021/jp101332k,
+author = {Aryanpour, Masoud and van Duin, Adri C. T. and Kubicki, James D.},
+title = {Development of a Reactive Force Field for Iron−Oxyhydroxide Systems},
+journal = {The Journal of Physical Chemistry A},
+volume = {114},
+number = {21},
+pages = {6298-6307},
+year = {2010},
+doi = {10.1021/jp101332k},
+note ={PMID: 20455552},
+URL = {https://doi.org/10.1021/jp101332k},
+eprint = {https://doi.org/10.1021/jp101332k}
+}
+
+
+
+
+#end

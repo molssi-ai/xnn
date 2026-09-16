@@ -1,17 +1,22 @@
-"""ReaxFF parameter libraries: the standard ``ffield`` text format and JSON.
+"""ReaxFF parameter libraries: the SEAMM ``.frc`` format and ReaxFF-nn JSON.
 
 A ReaxFF model is fully specified by its parameter library. Two on-disk
 formats are supported:
 
-* the standard ReaxFF ``ffield`` text library (the format introduced with the
-  original Fortran code and shared by LAMMPS / GULP / AMS): a block of general
-  parameters followed by per-species, per-bond, off-diagonal, valence-angle,
-  torsion and hydrogen-bond blocks;
+* the MolSSI/SEAMM ``.frc`` force-field format (:mod:`xnns.ffnn.common.frc`),
+  in which the standard ReaxFF parameter blocks appear as named sections
+  (``#reaxff_general_parameters``, ``#reaxff_atomic_parameters_1-8`` ...
+  ``#reaxff_hydrogen-bond_parameters``) with every parameter identified by
+  name rather than by column position. Published fields translated to this
+  format ship with xnns (``ReaxFF("CHO_cho_2008")``; see
+  :func:`~xnns.ffnn.common.frc.list_forcefields`);
 * the JSON parameter-library format used by ReaxFF-nn parameter sets
   (Guo et al., *Comput. Mater. Sci.* 172, 109393, 2020; Xue et al., *PCCP*
   23, 19457, 2021), which stores the same parameters as a flat
   ``"<name>_<type>"`` dictionary plus the neural-network weight matrices and
-  the function/layer selectors.
+  the function/layer selectors. This is also the format
+  :meth:`FFieldLibrary.save` writes, since network weights have no place in
+  a ``.frc`` file.
 
 Parameters are kept in the flat naming convention of ReaxFF libraries
 (``"Desi_C-C"``, ``"val_C"``, ``"theta0_H-C-H"``, ...) and in the file's
@@ -27,22 +32,10 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
-# Chemical symbols indexed by atomic number (Z = index).
-CHEMICAL_SYMBOLS = (
-    "X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
-    "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn",
-    "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb",
-    "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
-    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
-    "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta",
-    "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At",
-    "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu",
-)
-
-SYMBOL_TO_Z = {sym: z for z, sym in enumerate(CHEMICAL_SYMBOLS) if z > 0}
+from ..common.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z  # noqa: F401  (re-exported)
 
 
 # Layout of the standard `ffield` text library (column -> parameter name).
@@ -147,6 +140,15 @@ class FFieldLibrary:
     mol_energy : dict[str, float]
         Per-molecule reference-energy offsets some ReaxFF-nn training
         workflows record (not used by the model; kept for round-tripping).
+    heat_increment : dict[str, float]
+        The per-species atomic heat increments (``Hat``, species line 3,
+        column 3 of the classical layout) as read from a ``.frc`` file. Kept
+        for round-tripping only: ReaxFF MD codes (LAMMPS) do not add them to
+        the energy, and neither does :class:`~xnns.ffnn.models.reaxff.ReaxFF`.
+    name : str
+        The force-field name (the ``#define`` of a ``.frc`` file).
+    references : list[str]
+        Provenance text of the parameters, when the file carries it.
     """
 
     p: dict
@@ -169,6 +171,9 @@ class FFieldLibrary:
     rcut: Optional[dict] = None
     rcuta: Optional[dict] = None
     mol_energy: dict = field(default_factory=dict)
+    heat_increment: dict = field(default_factory=dict)
+    name: str = ""
+    references: list = field(default_factory=list)
 
     @property
     def is_nn(self) -> bool:
@@ -252,11 +257,13 @@ def _scan_types(p: dict) -> tuple[list, list, list, list, list, list]:
 
 
 def dedup_torsion_types(torp: list) -> list:
-    """Drop torsion types that are index-permuted duplicates of another entry.
+    """Drop torsion types that are reversed spellings of an earlier entry.
 
-    A torsion ``i-j-k-l`` is equivalent to ``l-k-j-i`` (full reversal) and to
-    the central-bond swaps ``i-k-j-l`` / ``l-j-k-i``; only one spelling is
-    kept.
+    A torsion ``i-j-k-l`` is the same type as ``l-k-j-i`` (the full
+    reversal). Swapping only the two central atoms (``i-k-j-l``) is *not* an
+    equivalence -- it changes the central bond -- and published fields list
+    such pairs (``C-O-C-H`` and ``H-O-C-C``) with different parameters, so
+    both are kept.
 
     Parameters
     ----------
@@ -271,10 +278,8 @@ def dedup_torsion_types(torp: list) -> list:
     kept: list = []
     for tor in torp:
         t1, t2, t3, t4 = tor.split("-")
-        variants = {f"{t1}-{t3}-{t2}-{t4}", f"{t4}-{t3}-{t2}-{t1}",
-                    f"{t4}-{t2}-{t3}-{t1}"}
-        variants.discard(tor)
-        if not any(v in kept for v in variants):
+        rev = f"{t4}-{t3}-{t2}-{t1}"
+        if tor not in kept and rev not in kept:
             kept.append(tor)
     return kept
 
@@ -355,11 +360,14 @@ def complete_hbonds(p: dict, spec: list, hbs: list) -> None:
 
 
 def resolve_torsion(p: dict, torp: list, tor: str, key: str) -> float:
-    """Look up a torsion parameter, resolving permutations and wildcards.
+    """Look up a torsion parameter, resolving reversal and wildcards.
 
-    The lookup order matches the convention of ReaxFF codes: the exact type,
-    its central-bond swaps and reversal, then the ``X-j-k-X`` and ``X-k-j-X``
-    wildcards; unmatched types get ``0.0``.
+    The lookup order is that of ReaxFF codes (LAMMPS ``pair_style reaxff``):
+    the exact type, its reversal ``l-k-j-i``, then the ``X-j-k-X`` and
+    ``X-k-j-X`` wildcards. As a last resort the central-bond swaps
+    ``i-k-j-l`` / ``l-j-k-i`` are tried, so a type that a library spells
+    only that way still finds parameters; they never shadow an exact,
+    reversed or wildcard match. Unmatched types get ``0.0``.
 
     Parameters
     ----------
@@ -380,8 +388,8 @@ def resolve_torsion(p: dict, torp: list, tor: str, key: str) -> float:
     if tor in torp:
         return p.get(f"{key}_{tor}", 0.0)
     t1, t2, t3, t4 = tor.split("-")
-    for cand in (f"{t1}-{t3}-{t2}-{t4}", f"{t4}-{t3}-{t2}-{t1}",
-                 f"{t4}-{t2}-{t3}-{t1}", f"X-{t2}-{t3}-X", f"X-{t3}-{t2}-X"):
+    for cand in (f"{t4}-{t3}-{t2}-{t1}", f"X-{t2}-{t3}-X", f"X-{t3}-{t2}-X",
+                 f"{t1}-{t3}-{t2}-{t4}", f"{t4}-{t2}-{t3}-{t1}"):
         if cand in torp:
             return p.get(f"{key}_{cand}", 0.0)
     return 0.0
@@ -429,142 +437,377 @@ def _read_json(path: Path) -> FFieldLibrary:
     )
 
 
-def _read_text(path: Path) -> FFieldLibrary:
-    """Parse a standard ReaxFF ``ffield`` text library.
+# ----------------------------------------------------------------------
+# the SEAMM .frc format
+# ----------------------------------------------------------------------
+# SEAMM parameter names, in the column order of the classical ``ffield``
+# layout, so that ``zip(FRC_*, <positional xnns names>)`` is the name map.
+# Taken from SEAMM's own translation tables (seamm_ff_util.reaxff.metadata).
+FRC_GENERAL = (
+    "Pboc,1", "Pboc,2", "Pcoa,2", "Ptrip,4", "Ptrip,3", "kc2", "Povun,6",
+    "Ptrip,2", "Povun,7", "Povun,8", "Ptrip,1", "Rtaper,lower", "Rtaper,upper",
+    "Pfe1", "Pval,7", "Plp,1", "Pval,9", "Pval,10", "not_used_1", "Ppen,2",
+    "Ppen,3", "Ppen,4", "not_used_2", "Ptor,2", "Ptor,3", "Ptor,4",
+    "not_used_3", "Pcot,2", "PvdW,1", "BO_cutoff", "Pcoa,4", "Povun,4",
+    "Povun,3", "Pval,8", "not_used_4", "not_used_5", "not_used_6",
+    "not_used_7", "Pcoa,3",
+)
+FRC_ATOMIC = (
+    "R0,alpha", "Val", "m", "RvdW", "Dij", "gamma", "R0,pi", "Val,e",
+    "alpha", "gamma,w", "Val,angle", "Povun,5", "not_used_1", "chi", "eta",
+    "Phbond",
+    "R0,pi-pi", "Plp,2", "Hat", "Pboc,4", "Pboc,3", "Pboc,5", "C_i", "alpha_e",
+    "Povun,2", "Pval,3", "beta", "Val,boc", "Pval,5", "Rcore,2", "Ecore,2",
+    "Acore,2",
+)
+FRC_BOND = (
+    "De,sigma", "De,pi", "De,pi-pi", "Pbe,1", "Pbo,5", "13_boc", "Pbo,6",
+    "Povun,1",
+    "Pbe,2", "Pbo,3", "Pbo,4", "not_used_1", "Pbo_1", "Pbo,2", "ovc",
+    "not_used_2",
+)
+FRC_OFFDIAG = ("Dij", "RvdW", "alpha", "R0,sigma", "R0,pi", "R0,pi-pi")
+FRC_ANGLE = ("Theta0", "Pval,1", "Pval,2", "Pcoa,1", "Pval,7", "Ppen,1",
+             "Pval,4")
+FRC_TORSION = ("V1", "V2", "V3", "Ptor,1", "Pcot,1", "not_used_1",
+               "not_used_2")
+FRC_HBOND = ("Rhb", "Ehb", "Thb", "Phb3")
 
-    The layout follows the published format: a header line, the general
-    parameter block, then per-species (4 lines x 8 columns), per-bond
-    (2 x 8), off-diagonal, valence-angle, torsion and hydrogen-bond blocks
-    (see the ``*_LINES`` / ``*_PARAMS`` module constants for the column
-    meanings). ``acut`` / ``hbtol`` -- the bond-order thresholds of the
-    valence and hydrogen-bond terms -- are set to ``1e-4``, the customary
-    value for text libraries (JSON libraries carry their own).
+_XNNS_ATOMIC = tuple(n for line in SPECIES_LINES for n in line)
+_XNNS_BOND = tuple(n for line in BOND_LINES for n in line)
+
+# .frc name -> xnns name per block ("n.u." entries are dropped on read)
+GENERAL_FROM_FRC = dict(zip(FRC_GENERAL, GENERAL_PARAMS))
+ATOMIC_FROM_FRC = dict(zip(FRC_ATOMIC, _XNNS_ATOMIC))
+BOND_FROM_FRC = dict(zip(FRC_BOND, _XNNS_BOND))
+OFFDIAG_FROM_FRC = dict(zip(FRC_OFFDIAG, OFFDIAG_PARAMS))
+ANGLE_FROM_FRC = dict(zip(FRC_ANGLE, ANGLE_PARAMS))
+TORSION_FROM_FRC = dict(zip(FRC_TORSION, TORSION_PARAMS))
+HBOND_FROM_FRC = dict(zip(FRC_HBOND, HBOND_PARAMS))
+
+# customary valence / hydrogen-bond bond-order thresholds for published
+# fields, whose general block carries zeros in the corresponding slots
+_ACUT_DEFAULT = 1.0e-4
+_HBTOL_DEFAULT = 1.0e-4
+
+_REAXFF_SECTIONS = ("reaxff_general_parameters", "reaxff_atomic_parameters_1-8",
+                    "reaxff_atomic_parameters_9-16",
+                    "reaxff_atomic_parameters_17-24",
+                    "reaxff_atomic_parameters_25-32",
+                    "reaxff_bond_parameters_1-8", "reaxff_bond_parameters_9-16",
+                    "reaxff_off-diagonal_parameters", "reaxff_angle_parameters",
+                    "reaxff_torsion_parameters",
+                    "reaxff_hydrogen-bond_parameters")
+
+
+def _frc_wild(sym: str) -> str:
+    """``*`` (SEAMM wildcard) -> ``X`` (ReaxFF library wildcard)."""
+    return "X" if sym == "*" else sym
+
+
+def from_forcefield(ff) -> FFieldLibrary:
+    """Build a classical :class:`FFieldLibrary` from a resolved ``.frc`` force field.
+
+    Every value is copied as written (kcal/mol, Angstrom, degrees) under its
+    xnns name; bond, angle, torsion and hydrogen-bond types keep the
+    orientation of the file. Angle and torsion types listed in both
+    orientations are deduplicated (reversal only; see
+    :func:`dedup_torsion_types`).
 
     Parameters
     ----------
-    path : Path
-        Path to the text library.
+    ff : xnns.ffnn.common.frc.ForceField
+        A ReaxFF force field (``ff_form = reaxff``).
 
     Returns
     -------
     FFieldLibrary
-        The parsed library.
+        The library (``messages = 0``, no network weights).
+
+    Raises
+    ------
+    ValueError
+        If the force field has no ReaxFF parameter sections.
     """
-    lines = Path(path).read_text().splitlines()
+    missing = [k for k in _REAXFF_SECTIONS[:-1] if k not in ff.sections]
+    if missing:
+        raise ValueError(f"force field {ff.name!r} is not a ReaxFF field; "
+                         f"missing sections {missing}")
     p: dict = {}
-    n_general = int(lines[1].split()[0])
-    if n_general > len(GENERAL_PARAMS):
-        raise ValueError(f"ffield declares {n_general} general parameters; "
-                         f"at most {len(GENERAL_PARAMS)} are supported")
-    for i in range(n_general):
-        p[GENERAL_PARAMS[i]] = float(lines[2 + i].split()[0])
+    heat: dict = {}
 
-    row = 2 + n_general                      # first line of the species block
-    n_spec = int(lines[row].split()[0])
-    row += len(SPECIES_LINES)                # skip the 4 column-header lines
-    spec = []
-    for _ in range(n_spec):
-        cols = lines[row].split()
-        spec.append(cols[0])
-        for il, names in enumerate(SPECIES_LINES):
-            cols = lines[row + il].split()
-            first = 1 if il == 0 else 0      # first species line starts with the symbol
-            for ip, name in enumerate(names):
-                p[f"{name}_{spec[-1]}"] = float(cols[first + ip])
-        row += len(SPECIES_LINES)
+    for key, row in ff.rows("reaxff_general_parameters").items():
+        name = GENERAL_FROM_FRC.get(key[0])
+        if name and name != "n.u.":
+            p[name] = float(row.values["Value"])
 
-    n_bond = int(lines[row].split()[0])
-    row += len(BOND_LINES)
-    bonds = []
-    for _ in range(n_bond):
-        cols = lines[row].split()
-        bd = f"{spec[int(cols[0]) - 1]}-{spec[int(cols[1]) - 1]}"
-        bonds.append(bd)
-        for il, names in enumerate(BOND_LINES):
-            cols = lines[row + il].split()
-            first = 2 if il == 0 else 0      # first bond line starts with the two indices
-            for ip, name in enumerate(names):
-                p[f"{name}_{bd}"] = float(cols[first + ip])
-        row += len(BOND_LINES)
+    spec: list = []
+    for kind in _REAXFF_SECTIONS[1:5]:
+        for key, row in ff.rows(kind).items():
+            sym = key[0]
+            if sym not in spec:
+                spec.append(sym)
+            for col, val in row.values.items():
+                if col == "Hat":
+                    heat[sym] = float(val)
+                name = ATOMIC_FROM_FRC.get(col)
+                if name and name != "n.u.":
+                    p[f"{name}_{sym}"] = float(val)
 
-    n_offd = int(lines[row].split()[0])
-    row += 1
-    offd = []
-    for _ in range(n_offd):
-        cols = lines[row].split()
-        bd = f"{spec[int(cols[0]) - 1]}-{spec[int(cols[1]) - 1]}"
+    bonds: list = []
+    for kind in _REAXFF_SECTIONS[5:7]:
+        for key, row in ff.rows(kind).items():
+            bd = f"{key[0]}-{key[1]}"
+            if bd not in bonds:
+                bonds.append(bd)
+            for col, val in row.values.items():
+                name = BOND_FROM_FRC.get(col)
+                if name and name != "n.u.":
+                    p[f"{name}_{bd}"] = float(val)
+
+    offd: list = []
+    for key, row in ff.rows("reaxff_off-diagonal_parameters").items():
+        bd = f"{key[0]}-{key[1]}"
         offd.append(bd)
-        for ip, name in enumerate(OFFDIAG_PARAMS):
-            p[f"{name}_{bd}"] = float(cols[2 + ip])
-        row += 1
+        for col, val in row.values.items():
+            name = OFFDIAG_FROM_FRC.get(col)
+            if name:
+                p[f"{name}_{bd}"] = float(val)
 
-    n_ang = int(lines[row].split()[0])
-    row += 1
-    angs = []
-    for _ in range(n_ang):
-        cols = lines[row].split()
-        a = "-".join(spec[int(c) - 1] for c in cols[:3])
-        rev = "-".join(reversed(a.split("-")))
-        if a not in angs and rev not in angs:
-            angs.append(a)
-            for ip, name in enumerate(ANGLE_PARAMS):
-                p[f"{name}_{a}"] = float(cols[3 + ip])
-        row += 1
+    angs: list = []
+    for key, row in ff.rows("reaxff_angle_parameters").items():
+        a = "-".join(key)
+        rev = "-".join(reversed(key))
+        if a in angs or rev in angs:
+            continue
+        angs.append(a)
+        for col, val in row.values.items():
+            name = ANGLE_FROM_FRC.get(col)
+            if name:
+                p[f"{name}_{a}"] = float(val)
 
-    n_tor = int(lines[row].split()[0])
-    row += 1
-    torp = []
-    for _ in range(n_tor):
-        cols = lines[row].split()
-        names4 = ["X" if int(c) == 0 else spec[int(c) - 1] for c in cols[:4]]
-        tor = "-".join(names4)
-        t1, t2, t3, t4 = names4
-        variants = {f"{t4}-{t3}-{t2}-{t1}", f"{t1}-{t3}-{t2}-{t4}",
-                    f"{t4}-{t2}-{t3}-{t1}"}
-        if tor not in torp and not any(v in torp for v in variants):
-            torp.append(tor)
-            for ip, name in enumerate(TORSION_PARAMS[:5]):
-                p[f"{name}_{tor}"] = float(cols[4 + ip])
-        row += 1
+    torp: list = []
+    for key, row in ff.rows("reaxff_torsion_parameters").items():
+        t1, t2, t3, t4 = (_frc_wild(x) for x in key)
+        tor = f"{t1}-{t2}-{t3}-{t4}"
+        if tor in torp or f"{t4}-{t3}-{t2}-{t1}" in torp:
+            continue
+        torp.append(tor)
+        for col, val in row.values.items():
+            name = TORSION_FROM_FRC.get(col)
+            if name and name != "n.u.":
+                p[f"{name}_{tor}"] = float(val)
 
-    n_hb = int(lines[row].split()[0])
-    row += 1
-    hbs = []
-    for _ in range(n_hb):
-        cols = lines[row].split()
-        hb = "-".join(spec[int(c) - 1] for c in cols[:3])
+    hbs: list = []
+    for key, row in ff.rows("reaxff_hydrogen-bond_parameters").items():
+        hb = "-".join(key)
         hbs.append(hb)
-        for ip, name in enumerate(HBOND_PARAMS):
-            p[f"{name}_{hb}"] = float(cols[3 + ip])
-        row += 1
+        for col, val in row.values.items():
+            name = HBOND_FROM_FRC.get(col)
+            if name:
+                p[f"{name}_{hb}"] = float(val)
 
-    p["acut"] = 1.0e-4
-    p["hbtol"] = 1.0e-4
-    return FFieldLibrary(p=p, m=None, spec=spec, bonds=bonds, offd=offd,
-                         angs=angs, torp=torp, hbs=hbs, messages=0)
+    # the classical layout's slots 35/36 ("not_used_4/5" to SEAMM) are where
+    # xnns keeps the valence / hydrogen-bond bond-order thresholds; published
+    # fields have zeros there and get the customary 1e-4, while a library
+    # written by ``to_forcefield`` (a seed library, say) keeps its own values
+    for name, default in (("acut", _ACUT_DEFAULT), ("hbtol", _HBTOL_DEFAULT)):
+        if not (p.get(name, 0.0) > 0.0):
+            p[name] = default
+    return FFieldLibrary(
+        p=p, m=None, spec=spec, bonds=bonds, offd=offd, angs=angs, torp=torp,
+        hbs=hbs, messages=0, heat_increment=heat, name=ff.name,
+        references=[r.text for r in ff.references_used()])
 
 
-def read_ffield(path) -> FFieldLibrary:
-    """Read a ReaxFF parameter library from disk.
+def to_forcefield(lib: FFieldLibrary, name: Optional[str] = None,
+                  version: str = "1.0", reference_text: str = ""):
+    """Write a classical :class:`FFieldLibrary` as an in-memory ``.frc`` file.
 
-    Files ending in ``.json`` are parsed as ReaxFF-nn JSON libraries (which
-    may carry network weights); anything else is parsed as a standard
-    ``ffield`` text library.
+    The inverse of :func:`from_forcefield`: the standard blocks become the
+    ``#reaxff_*`` sections (value columns in SEAMM's alphabetical order, as
+    SEAMM itself writes them), plus a ``#define`` and ``#metadata``.
+
+    Parameters
+    ----------
+    lib : FFieldLibrary
+        The library; must be classical (``not lib.is_nn``).
+    name : str, optional
+        The ``#define`` name; default ``"reaxff/<lib.name>"``.
+    version, reference_text : str, optional
+        Version stamp of every row and the ``#reference 1`` text.
+
+    Returns
+    -------
+    xnns.ffnn.common.frc.FrcFile
+        Save it with ``.write(path)``.
+
+    Raises
+    ------
+    ValueError
+        For a ReaxFF-nn library (network weights cannot be expressed in the
+        format; use :meth:`FFieldLibrary.save`).
+    """
+    from ..common.frc import FrcFile, Define, Reference, make_section
+    if lib.is_nn:
+        raise ValueError("a ReaxFF-nn library carries network weights, which "
+                         "the .frc format cannot hold; use FFieldLibrary.save() "
+                         "for the JSON format")
+    base = lib.name or "reaxff"
+    label = base.rsplit("/", 1)[-1]
+    name = name or (base if base.startswith("reaxff/") else f"reaxff/{label}")
+    frc = FrcFile.empty()
+    p = lib.p
+
+    def rows_for(keys, frc_names, xnns_names, sep_key):
+        out = []
+        for key in keys:
+            vals = {}
+            for fn, xn in zip(frc_names, xnns_names):
+                if xn == "n.u.":
+                    vals[fn] = 0.0
+                else:
+                    vals[fn] = float(p.get(f"{xn}_{sep_key(key)}", 0.0))
+            out.append((tuple(key), vals))
+        return out
+
+    sections = []
+    general = [((fn,), {"Value": float(p.get(xn, 0.0)) if xn != "n.u." else 0.0,
+                        "Description": ""})
+               for fn, xn in zip(FRC_GENERAL, GENERAL_PARAMS)]
+    general.sort(key=lambda kv: kv[0][0])
+    sections.append(make_section("reaxff_general_parameters", label,
+                                 ["Parameter"], ["Value", "Description"],
+                                 general, version=version))
+    atomic_names = sorted(FRC_ATOMIC)
+    for g in range(4):
+        cols = atomic_names[8 * g: 8 * g + 8]
+        rows = []
+        for sym in lib.spec:
+            vals = {}
+            for fn in cols:
+                xn = ATOMIC_FROM_FRC[fn]
+                if fn == "Hat":
+                    vals[fn] = float(lib.heat_increment.get(sym, 0.0))
+                elif xn == "n.u.":
+                    vals[fn] = 0.0
+                else:
+                    vals[fn] = float(p.get(f"{xn}_{sym}", 0.0))
+            rows.append(((sym,), vals))
+        sections.append(make_section(f"reaxff_atomic_parameters_{8*g+1}-{8*g+8}",
+                                     label, ["Center"], cols, rows,
+                                     version=version))
+    bond_names = sorted(FRC_BOND)
+    for g in range(2):
+        cols = bond_names[8 * g: 8 * g + 8]
+        rows = []
+        for bd in lib.bonds:
+            i, j = bd.split("-")
+            vals = {fn: (0.0 if BOND_FROM_FRC[fn] == "n.u." else
+                         float(p.get(f"{BOND_FROM_FRC[fn]}_{bd}", 0.0)))
+                    for fn in cols}
+            rows.append(((i, j), vals))
+        sections.append(make_section(f"reaxff_bond_parameters_{8*g+1}-{8*g+8}",
+                                     label, ["I", "J"], cols, rows,
+                                     version=version))
+    cols = sorted(FRC_OFFDIAG)
+    # like pairs may carry explicit off-diagonal values without being listed
+    # in ``offd`` (a seed library switching hydrogen's pi channels off does);
+    # write them too, filling what the library never stored from the atomic
+    # values, which is exactly what ``complete_off_diagonal`` would do
+    offd_pairs = list(lib.offd)
+    for sp in lib.spec:
+        like = f"{sp}-{sp}"
+        if like not in offd_pairs and any(f"{k}_{like}" in p
+                                          for k in OFFDIAG_PARAMS):
+            offd_pairs.append(like)
+    rows = []
+    for bd in offd_pairs:
+        a, b = bd.split("-")
+        vals = {}
+        for fn in cols:
+            xn = OFFDIAG_FROM_FRC[fn]
+            fallback = p.get(f"{xn}_{a}", 0.0) if a == b else 0.0
+            vals[fn] = float(p.get(f"{xn}_{bd}", fallback))
+        rows.append(((a, b), vals))
+    sections.append(make_section("reaxff_off-diagonal_parameters", label,
+                                 ["I", "J"], cols, rows, version=version))
+    cols = sorted(FRC_ANGLE)
+    rows = [(tuple(a.split("-")),
+             {fn: float(p.get(f"{ANGLE_FROM_FRC[fn]}_{a}", 0.0)) for fn in cols})
+            for a in lib.angs]
+    sections.append(make_section("reaxff_angle_parameters", label,
+                                 ["I", "J", "K"], cols, rows, version=version))
+    cols = sorted(FRC_TORSION)
+    rows = []
+    for tor in lib.torp:
+        key = tuple("*" if x == "X" else x for x in tor.split("-"))
+        vals = {fn: (0.0 if TORSION_FROM_FRC[fn] == "n.u." else
+                     float(p.get(f"{TORSION_FROM_FRC[fn]}_{tor}", 0.0)))
+                for fn in cols}
+        rows.append((key, vals))
+    sections.append(make_section("reaxff_torsion_parameters", label,
+                                 ["I", "J", "K", "L"], cols, rows,
+                                 version=version))
+    if lib.hbs:
+        cols = sorted(FRC_HBOND)
+        rows = [(tuple(hb.split("-")),
+                 {fn: float(p.get(f"{HBOND_FROM_FRC[fn]}_{hb}", 0.0)) for fn in cols})
+                for hb in lib.hbs]
+        sections.append(make_section("reaxff_hydrogen-bond_parameters", label,
+                                     ["I", "J", "K"], cols, rows,
+                                     version=version))
+    meta = make_section("metadata", label, ["Parameter"],
+                        ["Value", "Description"],
+                        [(("ff_form",), {"Value": "reaxff",
+                                         "Description": "The functional form of the forcefield"}),
+                         (("charges",), {"Value": "qeq/reaxff",
+                                         "Description": "How charges should be handled"})],
+                        version=version)
+    frc.sections[("metadata", label)] = meta
+    for sec in sections:
+        frc.sections[(sec.kind, sec.label)] = sec
+    define = Define(name=name)
+    define.entries.append((version, "1", "metadata", [label]))
+    for sec in sections:
+        define.entries.append((version, "1", sec.kind, [label]))
+    frc.defines[name] = define
+    text = reference_text or "\n".join(lib.references) or \
+        f"ReaxFF parameters exported from xnns ({lib.name or 'library'})."
+    frc.references[("<memory>", "1")] = Reference(number="1", text=text,
+                                                  author="xnns")
+    return frc
+
+
+def read_ffield(path: Union[str, Path]) -> FFieldLibrary:
+    """Read a ReaxFF parameter library.
 
     Parameters
     ----------
     path : str or Path
-        Path to the parameter file.
+        Either a ``.json`` file (a ReaxFF-nn library, possibly with network
+        weights, or one written by :meth:`FFieldLibrary.save`), or a
+        ``.frc`` force-field spec understood by
+        :func:`~xnns.ffnn.common.frc.find_forcefield`: a field shipped with
+        xnns by name (``"CHO_cho_2008"``, ``"reaxff/CHO_cho_2008"``), a
+        ``.frc`` path, or ``"<path>.frc:<variant>"``.
 
     Returns
     -------
     FFieldLibrary
         The parsed library.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the spec matches nothing.
     """
-    path = Path(path)
-    if path.suffix == ".json":
-        return _read_json(path)
-    return _read_text(path)
+    s = str(path)
+    if s.lower().endswith(".json"):
+        return _read_json(Path(s))
+    from ..common.frc import read_forcefield
+    ff = read_forcefield(s)
+    return from_forcefield(ff)
 
 
 def cutoff_table(table: Optional[dict], kind: str, spec: list) -> dict:

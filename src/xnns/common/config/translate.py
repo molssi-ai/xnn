@@ -112,12 +112,16 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
     # alternative ReaxFF spellings used by ReaxFF-nn training tools
     "reaxff": {
         "libfile": "ffield",
+        "frc": "ffield",
+        "forcefield": "ffield",
         "vdwcut": "cutoff",
         "hbshort": "hb_short",
         "hblong": "hb_long",
     },
     # OPLS spellings used by GROMACS / OpenMM-style inputs
     "opls": {
+        "frc": "library",
+        "forcefield": "library",
         "itp": "library",
         "prm": "library",
         "parameter_file": "library",
