@@ -29,9 +29,9 @@ of xnn are
   HuggingFace-style ``load_dataset()``, ready to train
 
 - the library is accompanied by extensive documentation, tutorials, examples and
-  a complete hands-on course focusing on developing and training MLIPs (see the
-  `Equivariant Graph Neural Networks with e3nn: A Hands-On Course
-  <https://github.com/molssi-ai/e3nn-course>`_ repository)
+  a complete hands-on course focusing on developing and training equivariant
+  graph neural network MLIPs (see the `Equivariant Graph Neural Networks with
+  e3nn <https://github.com/molssi-ai/e3nn-course>`_ repository)
 
 
 .. grid:: 1 1 2 2
@@ -112,6 +112,17 @@ of xnn are
          :expand:
 
          To the API Reference
+
+   .. grid-item-card:: Equivariant GNNs with e3nn
+      :margin: 0 3 0 0
+
+      A hands-on course for developing equivariant GNN interatomic potentials
+
+      .. button-link:: https://github.com/molssi-ai/e3nn-course
+         :color: primary
+         :expand:
+
+         To the Equivariant GNN Course
 
 Models at a glance
 ==================
