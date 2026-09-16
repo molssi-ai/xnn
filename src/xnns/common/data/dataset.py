@@ -17,7 +17,9 @@ from .atomic_data import AtomicGraph
 from .neighborlist import build_neighbor_list
 
 
-def structure_to_graph(s: dict, cutoff: float) -> AtomicGraph:
+def structure_to_graph(
+    s: dict, cutoff: float, device: Optional[torch.device] = None
+) -> AtomicGraph:
     """Build a single-structure :class:`AtomicGraph` from a dict of arrays.
 
     Values may be array-likes or tensors; they are coerced to tensors. The
@@ -33,6 +35,13 @@ def structure_to_graph(s: dict, cutoff: float) -> AtomicGraph:
         ``stress`` ``(3, 3)``.
     cutoff : float
         Neighbor cutoff radius passed to the neighbor list builder.
+    device : torch.device, optional
+        Device to build the graph on. The neighbor list is the expensive part
+        of this function, so building it where the model already is avoids
+        paying for it on the CPU and copying the result across. Defaults to
+        ``None``, which builds on the CPU as before -- the right choice when
+        the graph is being cached by a dataset rather than fed straight to a
+        model.
 
     Returns
     -------
@@ -56,7 +65,8 @@ def structure_to_graph(s: dict, cutoff: float) -> AtomicGraph:
         Tensor
             ``x`` as a tensor.
         """
-        return x if isinstance(x, Tensor) else torch.as_tensor(x, dtype=dtype)
+        out = x if isinstance(x, Tensor) else torch.as_tensor(x, dtype=dtype)
+        return out if device is None else out.to(device)
 
     pos = t(s["pos"])
     z = t(s["atomic_numbers"], dtype=torch.long)
@@ -73,8 +83,8 @@ def structure_to_graph(s: dict, cutoff: float) -> AtomicGraph:
         atomic_numbers=z,
         edge_index=edge_index,
         cell_shifts=cell_shifts,
-        batch=torch.zeros(n, dtype=torch.long),
-        n_atoms=torch.tensor([n], dtype=torch.long),
+        batch=torch.zeros(n, dtype=torch.long, device=device),
+        n_atoms=torch.tensor([n], dtype=torch.long, device=device),
         cell=cell[None] if cell is not None else None,
         pbc=pbc[None] if pbc is not None else None,
         energy=t([s["energy"]]).reshape(1) if s.get("energy") is not None else None,

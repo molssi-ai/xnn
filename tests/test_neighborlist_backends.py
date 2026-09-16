@@ -11,7 +11,7 @@ import torch
 from xnns.common.data import build_neighbor_list
 from xnns.common.data.neighborlist import _vesin_neighbor_list
 
-vesin = pytest.importorskip("vesin.torch")
+pytest.importorskip("vesin_torch", reason="vesin is optional")
 
 
 def edge_set(edge_index, cell_shifts):
@@ -25,12 +25,12 @@ def reference(pos, cutoff, cell, pbc, self_interaction=False):
     """build_neighbor_list with the fast path disabled."""
     import xnns.common.data.neighborlist as nl
 
-    saved = nl._VesinNeighborList
-    nl._VesinNeighborList = None
+    saved = nl._HAS_VESIN
+    nl._HAS_VESIN = False
     try:
         return nl.build_neighbor_list(pos, cutoff, cell, pbc, self_interaction)
     finally:
-        nl._VesinNeighborList = saved
+        nl._HAS_VESIN = saved
 
 
 def water_like(n=60, seed=0):
