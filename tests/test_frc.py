@@ -11,6 +11,7 @@ eye.
 """
 import pytest
 
+from xnn.ffnn.common import frc as frc_mod
 from xnn.ffnn.common import (FrcFile, read_frc, find_forcefield,
                               list_forcefields, convert_units,
                               builtin_data_dir)
@@ -133,6 +134,8 @@ def frc(tmp_path):
 
 def test_file_structure(frc):
     assert frc.header == "!MolSSI forcefield 1"
+    assert frc.header_dialect == "MolSSI"
+    assert frc.format_version == 1 == frc_mod.FRC_FORMAT_VERSION
     assert frc.forcefields == ["base", "patched"]
     assert frc.missing_includes == ["local:__missing__.frc"]
     assert ("quadratic_bond", "patch") in frc.sections
@@ -345,3 +348,33 @@ def test_shipped_oplsaa_values():
         == 1.74
     assert f96.labels["torsion_opls"] == ["oplsaa", "oplsaa-1996"]
     assert len(f96.templates) == 572
+
+
+def test_header_format_version(tmp_path, caplog):
+    """The trailing header number is the format version; only 1 exists."""
+    import logging
+
+    body = BASE.split("\n", 1)[1]
+    legacy = tmp_path / "legacy.frc"
+    legacy.write_text("!BIOSYM forcefield 1\n" + body)
+    with caplog.at_level(logging.WARNING, logger="xnn.ffnn.common.frc"):
+        f = read_frc(legacy)
+    assert (f.header_dialect, f.format_version) == ("BIOSYM", 1)
+    assert not caplog.records
+
+    newer = tmp_path / "newer.frc"
+    newer.write_text("!MolSSI forcefield 2\n" + body)
+    with caplog.at_level(logging.WARNING, logger="xnn.ffnn.common.frc"):
+        f = read_frc(newer)
+    assert f.format_version == 2
+    assert any("format version 2" in r.getMessage() for r in caplog.records)
+
+    assert frc_mod.parse_header("!MolSSI forcefield 1") == ("MolSSI", "forcefield", 1)
+    assert frc_mod.parse_header("no header") == ("", "", None)
+    assert frc_mod.FRC_HEADER == "!MolSSI forcefield 1"
+
+
+def test_shipped_files_are_format_version_1():
+    for path in sorted(frc_mod.builtin_data_dir().rglob("*.frc")):
+        first = path.read_text(encoding="utf-8").splitlines()[0]
+        assert frc_mod.parse_header(first) == ("MolSSI", "forcefield", 1), path
