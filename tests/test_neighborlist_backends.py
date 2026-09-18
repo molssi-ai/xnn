@@ -97,3 +97,22 @@ def test_shifts_are_integers():
     pos, cell = water_like()
     _, cs = build_neighbor_list(pos, 6.0, cell, torch.ones(3, dtype=torch.bool))
     assert cs.dtype == torch.long
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason="needs an Apple mps device"
+)
+@pytest.mark.parametrize("periodic", [False, True])
+def test_mps_positions_use_the_cpu_cell_list(periodic):
+    """vesin insists on float64, which mps lacks: the cell list must be built
+    on the CPU and the edges returned on the mps device, matching the reference."""
+    pos64, cell64 = water_like()
+    pos = pos64.to(torch.float32).to("mps")
+    cell = cell64.to(torch.float32).to("mps") if periodic else None
+    pbc = torch.ones(3, dtype=torch.bool, device="mps") if periodic else None
+    edge_index, shifts = _vesin_neighbor_list(pos, 5.0, cell, pbc, False)
+    assert edge_index.device.type == "mps" and shifts.device.type == "mps"
+    ref = reference(pos64.to(torch.float32), 5.0,
+                    None if cell is None else cell64.to(torch.float32),
+                    None if pbc is None else pbc.cpu())
+    assert edge_set(edge_index.cpu(), shifts.cpu()) == edge_set(*ref)

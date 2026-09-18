@@ -5,6 +5,16 @@ single coherent PyTorch interface.
 
 ## Installation
 
+From PyPI, where the distribution is called `xnns` (the import name and the
+command line are `xnn`):
+
+```
+pip install xnns                 # core (torch, numpy, pyyaml)
+pip install "xnns[gnn,ase]"      # + e3nn for NequIP/MACE/Allegro, + ASE calculator
+```
+
+From a clone, for development:
+
 ```
 pip install -e .             # core (torch, numpy, pyyaml)
 pip install -e ".[ase]"      # + ASE calculator
@@ -13,6 +23,10 @@ pip install -e ".[hydra]"    # + Hydra/OmegaConf config
 pip install -e ".[examples]" # + ASE, e3nn, mace-torch, nequip, jupyter (runs the notebooks)
 pip install -e ".[all]"
 ```
+
+The Allegro reference implementation used by one fidelity notebook is not on
+PyPI; install it separately with
+`pip install "git+https://github.com/mir-group/allegro@v0.3.0"`.
 
 ## Quick start
 
