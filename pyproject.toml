@@ -1,12 +1,40 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77"]   # >=77 for the SPDX license field (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xnn"
-version = "0.1.0"
+# Distribution name on PyPI is "xnns" (the name "xnn" is taken there); the
+# import package and the CLI are "xnn":  pip install xnns  ->  import xnn
+name = "xnns"
+dynamic = ["version"]          # single source: xnn.__version__ (src/xnn/__init__.py)
 description = "Machine-learning interatomic potentials in PyTorch for molecular and periodic systems"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]    # the SEAMM BSD-3 notice ships inside xnn/ffnn/data/
+authors = [
+    { name = "Mohammad Mostafanejad", email = "smostafanejad@molssi.org" },
+]
+maintainers = [
+    { name = "MolSSI AI", email = "smostafanejad@molssi.org" },
+]
+keywords = [
+    "interatomic potentials", "machine learning", "molecular dynamics",
+    "MACE", "NequIP", "Allegro", "SchNet", "PhysNet", "ANI", "ReaxFF", "OPLS",
+    "pytorch", "LAMMPS", "ASE",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
@@ -40,14 +68,16 @@ docs = [
 ]
 # Everything needed to build and run the example notebooks in examples/gnn/,
 # including the reference ACEsuit/mace and mir-group/nequip implementations the
-# notebooks are benchmarked against.
+# notebooks are benchmarked against. The Allegro reference (mir-group/allegro
+# v0.3.0) is not on PyPI, and PyPI refuses metadata with direct URL
+# requirements, so install it separately for the Allegro fidelity notebook:
+#     pip install "git+https://github.com/mir-group/allegro@v0.3.0"
 examples = [
     "ase>=3.22",
     "e3nn>=0.4.4",
     "h5py>=3.0",
     "mace-torch==0.3.16",
     "nequip==0.6.2",
-    "nequip-allegro @ git+https://github.com/mir-group/allegro@v0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
@@ -72,7 +102,6 @@ all = [
     "pytest",
     "mace-torch==0.3.16",
     "nequip==0.6.2",
-    "nequip-allegro @ git+https://github.com/mir-group/allegro@v0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
@@ -80,8 +109,18 @@ all = [
     "nbformat",
 ]
 
+[project.urls]
+Homepage = "https://github.com/molssi-ai/xnn"
+Documentation = "https://molssi-ai.github.io/xnn/"
+Source = "https://github.com/molssi-ai/xnn"
+Issues = "https://github.com/molssi-ai/xnn/issues"
+Changelog = "https://github.com/molssi-ai/xnn/releases"
+
 [project.scripts]
 xnn = "xnn.common.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "xnn.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
