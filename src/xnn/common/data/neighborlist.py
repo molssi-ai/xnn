@@ -111,12 +111,22 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
     if not (molecular or periodic):
         return None
 
+    # vesin computes in float64. Apple's MPS backend has no float64, so on an
+    # mps tensor vesin fails with "Cannot convert a MPS Tensor to float64"; run
+    # the cell list on the CPU there and move the (integer) results back. The
+    # positions are tiny compared with the model's work, so this costs little.
+    device = pos.device
+    if device.type == "mps":
+        pos = pos.detach().cpu()
+        cell = None if cell is None else cell.detach().cpu()
+
     box = (torch.zeros((3, 3), device=pos.device, dtype=pos.dtype)
            if molecular else cell)
     i, j, shifts = VesinNeighborList(cutoff=cutoff, full_list=True).compute(
         points=pos, box=box, periodic=not molecular, quantities="ijS"
     )
-    return torch.stack([i, j], dim=0), shifts.to(torch.long)
+    edge_index = torch.stack([i, j], dim=0).to(device)
+    return edge_index, shifts.to(torch.long).to(device)
 
 
 def build_neighbor_list(
