@@ -9,6 +9,16 @@ Requirements
 xnn requires Python 3.10 or later. The core package depends only on
 ``torch`` (>= 2.0), ``numpy`` and ``pyyaml``; everything else is optional.
 
+Installing from PyPI
+====================
+The distribution on PyPI is called ``xnns``; the import package and the
+command line are ``xnn``:
+
+.. code-block:: bash
+
+   pip install xnns                 # core
+   pip install "xnns[gnn,ase]"      # with e3nn (NequIP / MACE / Allegro) and ASE
+
 Installing from source
 ======================
 Clone the repository and install with ``pip``:
@@ -55,9 +65,11 @@ you need:
      - ``pytest``
      - running ``pytest tests/``
    * - ``examples``
-     - ase, e3nn, ``mace-torch``, ``nequip``, ``allegro``, matplotlib, jupyter
+     - ase, e3nn, ``mace-torch``, ``nequip``, matplotlib, jupyter
      - the validation notebooks in ``examples/gnn/``, which benchmark xnn
-       against the reference implementations
+       against the reference implementations. The Allegro reference
+       (``mir-group/allegro`` v0.3.0) is not on PyPI, so install it
+       separately: ``pip install "git+https://github.com/mir-group/allegro@v0.3.0"``
 
 .. note::
 

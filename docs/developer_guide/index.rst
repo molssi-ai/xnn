@@ -14,3 +14,4 @@ build this documentation.
    extending
    testing
    documentation
+   releasing
