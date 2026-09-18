@@ -1,0 +1,156 @@
+name: Release
+
+# Builds the sdist and wheel of the "xnns" distribution (import name "xnn")
+# and publishes them with PyPI Trusted Publishing (OIDC, no API tokens).
+#
+#   * Publishing a GitHub Release whose tag is vX.Y.Z  ->  build, verify that
+#     the tag matches xnn.__version__, upload to PyPI, attach the files to the
+#     GitHub Release.
+#   * "Run workflow" (workflow_dispatch) with target=testpypi  ->  the same
+#     build, uploaded to TestPyPI as a rehearsal.
+#
+# One-time setup (see docs/developer_guide/releasing.rst):
+#   - PyPI     -> pending trusted publisher for project "xnns", this repo,
+#                 workflow "release.yml", environment "pypi"
+#   - TestPyPI -> the same with environment "testpypi"
+#   - GitHub   -> Settings > Environments: create "pypi" and "testpypi"
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish the build
+        type: choice
+        options: [testpypi, none]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Read the package version
+        id: version
+        run: |
+          VERSION=$(python - <<'EOF'
+          import ast, pathlib
+          tree = ast.parse(pathlib.Path("src/xnn/__init__.py").read_text())
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and any(
+                      getattr(t, "id", None) == "__version__" for t in node.targets):
+                  print(ast.literal_eval(node.value)); break
+          EOF
+          )
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "xnn.__version__ = $VERSION"
+
+      - name: Check that the release tag matches the version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::release tag '$TAG' does not match xnn.__version__ 'v$VERSION'"
+            exit 1
+          fi
+
+      - name: Build
+        run: python -m build
+
+      - name: Check the distributions
+        run: |
+          twine check --strict dist/*
+          ls -l dist
+          # the data files every install needs must be inside the wheel
+          python - <<'EOF'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          need = ["xnn/ffnn/data/oplsaa.frc", "xnn/ffnn/data/reaxff/CHO_cho_2008.frc",
+                  "xnn/ffnn/data/LICENSE-SEAMM"]
+          missing = [n for n in need if n not in names]
+          assert not missing, f"missing from wheel: {missing}"
+          assert any(n.startswith("xnn/dnn/models/") and n.endswith(".npz") for n in names), "D3 tables missing"
+          print(f"{wheel}: {len(names)} files, data files present")
+          EOF
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet --upgrade pip
+          /tmp/smoke/bin/pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python -c "import xnn; print('xnn', xnn.__version__)"
+          /tmp/smoke/bin/python -c "from xnn.ffnn.common import read_forcefield; ff = read_forcefield('oplsaa'); print('oplsaa types:', len(ff.templates))"
+          /tmp/smoke/bin/xnn 2>&1 | head -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/xnns
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          print-hash: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/xnns
+    permissions:
+      id-token: write
+      contents: write        # to attach the files to the GitHub Release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
+      - name: Attach the distributions to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber

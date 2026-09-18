@@ -2269,14 +2269,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nequip-allegro"
-version = "0.3.0"
-source = { git = "https://github.com/mir-group/allegro?rev=v0.3.0#0cb3ec86a5850d105b95f36171460d9cadbdf401" }
-dependencies = [
-    { name = "nequip" },
-]
-
-[[package]]
 name = "nest-asyncio2"
 version = "1.7.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4727,8 +4719,7 @@ wheels = [
 ]
 
 [[package]]
-name = "xnn"
-version = "0.1.0"
+name = "xnns"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4752,7 +4743,6 @@ all = [
     { name = "nbconvert" },
     { name = "nbformat" },
     { name = "nequip" },
-    { name = "nequip-allegro" },
     { name = "omegaconf" },
     { name = "pytest" },
     { name = "vesin-torch" },
@@ -4790,7 +4780,6 @@ examples = [
     { name = "nbconvert" },
     { name = "nbformat" },
     { name = "nequip" },
-    { name = "nequip-allegro" },
     { name = "openmm" },
     { name = "rdkit" },
 ]
@@ -4846,8 +4835,6 @@ requires-dist = [
     { name = "nbformat", marker = "extra == 'examples'" },
     { name = "nequip", marker = "extra == 'all'", specifier = "==0.6.2" },
     { name = "nequip", marker = "extra == 'examples'", specifier = "==0.6.2" },
-    { name = "nequip-allegro", marker = "extra == 'all'", git = "https://github.com/mir-group/allegro?rev=v0.3.0" },
-    { name = "nequip-allegro", marker = "extra == 'examples'", git = "https://github.com/mir-group/allegro?rev=v0.3.0" },
     { name = "numpy" },
     { name = "omegaconf", marker = "extra == 'all'", specifier = ">=2.3" },
     { name = "omegaconf", marker = "extra == 'hydra'", specifier = ">=2.3" },
