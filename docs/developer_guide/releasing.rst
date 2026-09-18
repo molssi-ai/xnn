@@ -13,15 +13,18 @@ anywhere.
 
 What the workflow does
 ======================
-* On every **published GitHub Release** whose tag is ``vX.Y.Z``: build the
-  sdist and wheel with ``python -m build``, run ``twine check --strict``,
-  verify that the tag equals ``v`` + ``xnn.__version__``, verify that the
-  ``.frc`` force-field files and the D3 tables are inside the wheel, install
-  the wheel into a clean virtual environment and import it, then upload to
-  PyPI and attach the files to the GitHub Release.
-* On a manual **Run workflow** with ``target = testpypi``: the same build,
-  uploaded to `TestPyPI <https://test.pypi.org/p/xnns>`_ instead. Use this to
-  rehearse.
+* On every pushed tag ``vX.Y.Z``: build the sdist and wheel with
+  ``python -m build``, run ``twine check --strict``, verify that the tag
+  equals ``v`` + ``xnn.__version__``, verify that the ``.frc`` force-field
+  files and the D3 tables are inside the wheel, install the wheel into a
+  clean virtual environment and import it, upload to PyPI, then create the
+  GitHub Release for the tag (auto-generated notes) with the files attached.
+  Plain ``git`` is all that is needed on your side.
+* On a manual **Run workflow**: ``target = testpypi`` uploads the same build
+  to `TestPyPI <https://test.pypi.org/p/xnns>`_ as a rehearsal, from any
+  branch or tag; ``target = pypi`` publishes a tag that was pushed earlier
+  (select the tag under *Use workflow from*; it must equal ``v`` +
+  ``__version__``); ``target = none`` only builds and checks.
 
 The version is defined once, in ``src/xnn/__init__.py`` (``__version__``);
 ``pyproject.toml`` reads it (``dynamic = ["version"]``).
@@ -52,12 +55,17 @@ Cutting a release
    Check https://test.pypi.org/p/xnns and, in a scratch environment,
    ``pip install --index-url https://test.pypi.org/simple/ --extra-index-url
    https://pypi.org/simple/ xnns``.
-3. Create the release: *Releases > Draft a new release*, new tag ``vX.Y.Z``
-   on ``main`` (the tag must equal ``v`` + ``__version__`` or the workflow
-   fails before uploading), title ``xnn X.Y.Z``, generate release notes,
-   *Publish release*.
+3. Tag and push (the tag must equal ``v`` + ``__version__`` or the workflow
+   fails before uploading):
+
+   .. code-block:: bash
+
+      git tag -a v0.1.0 -m "xnn 0.1.0"
+      git push origin v0.1.0
+
 4. Watch *Actions > Release*. When it is green the package is at
-   https://pypi.org/p/xnns and ``pip install xnns`` works.
+   https://pypi.org/p/xnns, ``pip install xnns`` works, and the GitHub
+   Release for the tag exists with the sdist and wheel attached.
 
 A version can be uploaded to PyPI only once. If a release has to be redone,
 bump the version (for example ``0.1.1``) and publish a new release.

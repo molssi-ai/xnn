@@ -3,11 +3,15 @@ name: Release
 # Builds the sdist and wheel of the "xnns" distribution (import name "xnn")
 # and publishes them with PyPI Trusted Publishing (OIDC, no API tokens).
 #
-#   * Publishing a GitHub Release whose tag is vX.Y.Z  ->  build, verify that
-#     the tag matches xnn.__version__, upload to PyPI, attach the files to the
-#     GitHub Release.
-#   * "Run workflow" (workflow_dispatch) with target=testpypi  ->  the same
-#     build, uploaded to TestPyPI as a rehearsal.
+#   * git push origin vX.Y.Z  ->  build, verify that the tag matches
+#     xnn.__version__, upload to PyPI, then create the GitHub Release for the
+#     tag with the files attached (nothing but git is needed on your side).
+#   * "Run workflow" (workflow_dispatch):
+#       target=testpypi  ->  the same build, uploaded to TestPyPI (rehearsal;
+#                            any branch or tag)
+#       target=pypi      ->  publish an already pushed tag: pick the tag under
+#                            "Use workflow from", it must equal v<version>
+#       target=none      ->  build and check only
 #
 # One-time setup (see docs/developer_guide/releasing.rst):
 #   - PyPI     -> pending trusted publisher for project "xnns", this repo,
@@ -16,14 +20,14 @@ name: Release
 #   - GitHub   -> Settings > Environments: create "pypi" and "testpypi"
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       target:
         description: Where to publish the build
         type: choice
-        options: [testpypi, none]
+        options: [testpypi, pypi, none]
         default: testpypi
 
 permissions:
@@ -62,14 +66,20 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "xnn.__version__ = $VERSION"
 
-      - name: Check that the release tag matches the version
-        if: github.event_name == 'release'
+      - name: Check that the tag matches the version
+        # a PyPI upload must come from a tag vX.Y.Z equal to xnn.__version__
+        if: github.event_name == 'push' || inputs.target == 'pypi'
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::publishing to PyPI needs a tag; run this from a tag ref, not '$TAG'"
+            exit 1
+          fi
           if [ "$TAG" != "v$VERSION" ]; then
-            echo "::error::release tag '$TAG' does not match xnn.__version__ 'v$VERSION'"
+            echo "::error::tag '$TAG' does not match xnn.__version__ 'v$VERSION'"
             exit 1
           fi
 
@@ -132,7 +142,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -140,7 +150,7 @@ jobs:
       url: https://pypi.org/p/xnns
     permissions:
       id-token: write
-      contents: write        # to attach the files to the GitHub Release
+      contents: write        # to create the GitHub Release and attach the files
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -149,8 +159,15 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           print-hash: true
-      - name: Attach the distributions to the GitHub Release
+      - name: Create the GitHub Release for the tag (or attach to an existing one)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "xnn $VERSION" --generate-notes
+          fi
