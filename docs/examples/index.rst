@@ -66,7 +66,14 @@ NequIP, MACE, Allegro, CACE (gnn)
 =================================
 
 The shared Argon train/evaluate/deploy series (one pair of notebooks per
-model), plus a block-by-block walkthrough of the MACE architecture.
+model), plus a block-by-block walkthrough of the MACE architecture, and
+the MACE **foundation models** in action:
+``mace_foundation_molecules.ipynb`` loads MACE-OFF23 with one
+``MACE.from_foundation()`` call and runs the butane torsion profile
+against OPLS-AA, the water dimer against CCSD(T)/CBS, and a
+``Trainer`` fine-tune to a new DFT reference (rMD17 malonaldehyde);
+``mace_foundation_materials.ipynb`` screens equations of state (Si, Al,
+NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0).
 
 .. toctree::
    :maxdepth: 1
@@ -77,6 +84,8 @@ model), plus a block-by-block walkthrough of the MACE architecture.
    nb/gnn/mace/mace_argon_train_test
    nb/gnn/mace/mace_argon_density_md
    nb/gnn/mace/recreate_mace_architecture
+   nb/gnn/mace/mace_foundation_molecules
+   nb/gnn/mace/mace_foundation_materials
    nb/gnn/allegro/allegro_argon_train_test
    nb/gnn/allegro/allegro_argon_density_md
    nb/gnn/cace/cace_argon_train_test
@@ -176,6 +185,7 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/physnet_verification
    nb/fidelity_checks/nequip_verification
    nb/fidelity_checks/mace_verification
+   nb/fidelity_checks/mace_foundation_verification
    nb/fidelity_checks/allegro_verification
    nb/fidelity_checks/cace_verification
    nb/fidelity_checks/les_verification

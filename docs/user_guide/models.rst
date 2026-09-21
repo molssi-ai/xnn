@@ -48,9 +48,29 @@ the order of the symmetric contraction, ``MLP_irreps`` ("16x0e"),
 ``radial_MLP``, ``interaction`` ("RealAgnosticResidualInteractionBlock"),
 ``interaction_first``, ``gate`` ("silu"), ``avg_num_neighbors`` (1.0),
 ``hidden_irreps``, ``num_cutoff_basis`` (5), ``radial_type`` ("bessel"),
-``distance_transform``, ``pair_repulsion`` (False), which adds ZBL core
-repulsion, and ``atomic_energies``, the per-species reference energies
-(E0s).
+``distance_transform`` ("None" | "Agnesi" | "Soft", the chemistry-aware
+warp of the radial coordinate used by the newer foundation models),
+``pair_repulsion`` (False), which adds ZBL core repulsion,
+``atomic_energies``, the per-species reference energies (E0s), and
+``scale`` / ``shift`` (1, 0), the upstream *ScaleShiftMACE* affine on the
+per-atom interaction energy (``E_i = E0_i + scale * E_int,i + shift``).
+The density-normalized interaction generation is available as
+``RealAgnosticDensity(Residual)InteractionBlock``.
+
+**Pretrained foundation models.** ``MACE.from_foundation()`` loads any of
+the published MACE-MP / MACE-OFF checkpoints (MP-0, 0b/0b2/0b3, MPA-0,
+OMAT-0, MATPES, the multi-head MH-0, OFF23; see
+:data:`xnn.gnn.models.mace_foundation.FOUNDATION_MODELS` for the aliases
+and licenses) and converts it weight-for-weight into this implementation,
+verified to float64 round-off against ``mace-torch``
+(:ref:`fidelity`). Multi-head checkpoints are sliced to a chosen ``head``.
+In a config, ``foundation: mace-off23-small`` (with ``cutoff`` set to the
+checkpoint's ``r_max``) builds the pretrained model instead of a fresh
+one, so the standard :class:`~xnn.common.train.Trainer` fine-tunes it
+directly. Loading requires the ``mace-torch`` package to unpickle the
+checkpoint; the converted model does not. The one unsupported checkpoint
+is ``mace-mh-1`` (a next-generation architecture); the converter raises
+``NotImplementedError`` naming the unsupported piece.
 
 NequIP (``gnn``)
 ================
