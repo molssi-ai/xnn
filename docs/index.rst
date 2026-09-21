@@ -164,7 +164,9 @@ Models at a glance
      - gnn
      - spherical-harmonic edges
      - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches `ACEsuit/mace <https://github.com/ACEsuit/mace>`_
+       matches `ACEsuit/mace <https://github.com/ACEsuit/mace>`_, and loads
+       the pretrained MACE-MP / MACE-OFF foundation models
+       (``MACE.from_foundation()``, verified to float64 round-off)
    * - CACE
      - gnn
      - Cartesian monomial edges

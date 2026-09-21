@@ -20,8 +20,8 @@ species: [1, 6, 8]      # atomic_numbers
 # radial / cutoff basis
 radial_type: bessel           # bessel | gaussian (upstream chebyshev is not implemented)
 num_polynomial_cutoff: 5      # num_cutoff_basis
-distance_transform: "None"    # only "None" is supported (the YAML string, not null)
-# interaction blocks
+distance_transform: "None"    # "None" | Agnesi | Soft (chemistry-aware warp of the radial coordinate)
+# interaction blocks: RealAgnostic[Density][Residual]InteractionBlock
 interaction: RealAgnosticResidualInteractionBlock
 interaction_first: RealAgnosticResidualInteractionBlock
 avg_num_neighbors: 1.0
@@ -37,11 +37,21 @@ gate: silu            # silu | tanh | abs | null
 pair_repulsion: false # ZBL two-body repulsion
 atomic_energies: null # E0s: per-element reference energies as a list aligned with
                       # `species` or a {Z: E0} dict; null = trainable from zero
+scale: 1.0            # atomic_inter_scale: E_i = E0_i + scale * E_int,i + shift
+shift: 0.0            # atomic_inter_shift (the upstream ScaleShiftMACE convention)
+# pretrained foundation models: when `foundation` is set, every architecture
+# key above is ignored and the model is loaded with MACE.from_foundation()
+# (see xnn.gnn.models.mace_foundation.FOUNDATION_MODELS for the aliases)
+foundation: null      # e.g. mace-mp-0-medium, mace-off23-small, a URL, or a .model path
+head: null            # head to keep for multi-head checkpoints (e.g. mace-mh-0)
+dtype: null           # cast the loaded foundation model (e.g. float32); null keeps the checkpoint's
 #
 # Remaining upstream MACE flags, for reference:
 #  - training/runtime flags (lr, batch_size, max_num_epochs, energy_weight,
 #    forces_weight, scheduler, valid_fraction, seed, device, ...) belong in
 #    configs/train.yaml under the optim/data/top-level sections, not here.
-#  - scaling / mean / std (ScaleShiftMACE), compute_avg_num_neighbors, heads /
-#    multihead fine-tuning, foundation models, swa/ema, and enable_cueq are not
-#    implemented in xnn; such keys land in `ModelConfig.extra` and are ignored.
+#  - compute_avg_num_neighbors, swa/ema, multihead *training* and enable_cueq
+#    are training-pipeline features of the upstream CLI, not model options;
+#    such keys land in `ModelConfig.extra` and are ignored. (ScaleShiftMACE,
+#    the foundation checkpoints and multi-head checkpoint loading ARE
+#    supported: see scale/shift/foundation/head above.)

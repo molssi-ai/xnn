@@ -51,7 +51,14 @@ the train/test and MD notebooks stay under ``examples/gnn/<model>/``:
 MACE additionally has ``recreate_mace_architecture.ipynb``, a
 step-by-step tutorial that rebuilds the MACE architecture block by block in
 *both* ``mace-torch`` and xnn, with the defining equations and architecture
-figures.
+figures, and two **foundation-model** notebooks built on
+``MACE.from_foundation()``: ``mace_foundation_molecules.ipynb`` (MACE-OFF23
+on the butane torsion vs the built-in OPLS-AA, the water dimer vs the
+CCSD(T)/CBS benchmark, and a ``Trainer`` fine-tune to rMD17 malonaldehyde)
+and ``mace_foundation_materials.ipynb`` (equations of state of Si / Al /
+NaCl across the MACE-MP generations). The conversion of every published
+checkpoint is itself verified in
+``examples/fidelity_checks/mace_foundation_verification.ipynb``.
 
 Every training / MD notebook loads its data through the dataset hub
 (:func:`~xnn.common.data.hub.base.load_dataset`) rather than reading files by
