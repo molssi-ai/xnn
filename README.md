@@ -185,7 +185,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | HDNNP | dnn | radial symmetry functions (G2) | Under development |
 | ANI | dnn | AEV (radial + angular symmetry functions) | Complete: Training, Evaluation, Deployment (ASE only) |
 | NequIP | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
-| MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
+| MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE); loads the pretrained MACE-MP / MACE-OFF foundation models via `MACE.from_foundation()` |
 | CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
 | Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
@@ -266,6 +266,12 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
   + `schnet_rmd17_train.ipynb` and `schnet_ethanol_md.ipynb` for SchNet.
   + `ani_rmd17_train.ipynb` plus the `ani1*_dataset.ipynb` / `ani2x_dataset.ipynb`
     dataset walk-throughs for ANI.
+  + `mace_foundation_molecules.ipynb` and `mace_foundation_materials.ipynb`
+    for the pretrained MACE foundation models (`MACE.from_foundation()`):
+    MACE-OFF23 on torsions / hydrogen bonds / `Trainer` fine-tuning, and
+    equations of state across the MACE-MP generations. Every published
+    checkpoint's conversion is verified in
+    `examples/fidelity_checks/mace_foundation_verification.ipynb`.
   + `les_molecular_dimers.ipynb` for the LES long-range wrapper (charged and
     polar dimers) and `recreate_mace_architecture.ipynb` for a block-by-block
     MACE rebuild.

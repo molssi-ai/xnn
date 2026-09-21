@@ -49,6 +49,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 from .base import EquivariantGNN
+from ..featurizers import DISTANCE_TRANSFORMS
 from .blocks import SCALAR_ACTIVATIONS as GATES
 from .blocks import ScalarActivation as _ScalarActivation
 from .blocks import hidden_irreps as _hidden_irreps
@@ -705,6 +706,147 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
         return self.reshape(pooled), residual
 
 
+class RealAgnosticDensityInteractionBlock(RealAgnosticInteractionBlock):
+    """Non-residual interaction with learned density normalization.
+
+    Identical to :class:`RealAgnosticInteractionBlock` except that the
+    aggregated message is divided by ``1 + rho_i`` -- a learned, per-node
+    neighbor density ``rho_i = sum_j tanh(d(e_ij)^2)`` built from the radial
+    edge features -- instead of the global ``avg_num_neighbors`` constant.
+    This is the interaction of the MACE-MP "density" foundation generation
+    (0b2 / 0b3 / MPA-0 / OMAT-0 / MATPES).
+    """
+
+    def _setup(self):
+        """Add the per-edge density network to the non-residual setup."""
+        super()._setup()
+        self.density_fn = e3nn_nn.FullyConnectedNet(
+            [self.edge_feats_irreps.num_irreps, 1], F.silu)
+
+    def forward(self, node_attrs: Tensor, node_feats: Tensor, edge_attrs: Tensor,
+                edge_feats: Tensor, edge_index: Tensor) -> Tuple[Tensor, Optional[Tensor]]:
+        """Compute one density-normalized update (non-residual variant).
+
+        Parameters
+        ----------
+        node_attrs : torch.Tensor
+            Per-node one-hot element attributes.
+        node_feats : torch.Tensor
+            Incoming node features, shape ``(num_nodes, node_feats_irreps.dim)``.
+        edge_attrs : torch.Tensor
+            Edge spherical-harmonic attributes.
+        edge_feats : torch.Tensor
+            Scalar radial edge features feeding the radial MLP.
+        edge_index : torch.Tensor
+            Edge index of shape ``(2, num_edges)`` (``[senders, receivers]``).
+
+        Returns
+        -------
+        tuple of (torch.Tensor, None)
+            The reshaped message features and ``None`` (no separate
+            self-connection for the non-residual block).
+        """
+        n_atoms = node_feats.shape[0]
+        feats = self.linear_up(node_feats)
+        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
+                              edge_index[1], n_atoms)
+        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
+        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.linear(pooled) / (density + 1.0)
+        # the self-connection acts on the aggregated message here, not the input
+        pooled = self.skip_tp(pooled, node_attrs)
+        return self.reshape(pooled), None
+
+
+class RealAgnosticDensityResidualInteractionBlock(RealAgnosticResidualInteractionBlock):
+    """Residual interaction with learned density normalization.
+
+    Identical to :class:`RealAgnosticResidualInteractionBlock` except for the
+    ``1 + rho_i`` message normalization of
+    :class:`RealAgnosticDensityInteractionBlock`.
+    """
+
+    def _setup(self):
+        """Add the per-edge density network to the residual setup."""
+        super()._setup()
+        self.density_fn = e3nn_nn.FullyConnectedNet(
+            [self.edge_feats_irreps.num_irreps, 1], F.silu)
+
+    def forward(self, node_attrs: Tensor, node_feats: Tensor, edge_attrs: Tensor,
+                edge_feats: Tensor, edge_index: Tensor) -> Tuple[Tensor, Optional[Tensor]]:
+        """Compute one density-normalized update (residual variant).
+
+        Parameters
+        ----------
+        node_attrs : torch.Tensor
+            Per-node one-hot element attributes.
+        node_feats : torch.Tensor
+            Incoming node features, shape ``(num_nodes, node_feats_irreps.dim)``.
+        edge_attrs : torch.Tensor
+            Edge spherical-harmonic attributes.
+        edge_feats : torch.Tensor
+            Scalar radial edge features feeding the radial MLP.
+        edge_index : torch.Tensor
+            Edge index of shape ``(2, num_edges)`` (``[senders, receivers]``).
+
+        Returns
+        -------
+        tuple of (torch.Tensor, torch.Tensor)
+            The reshaped message features and the self-connection ``sc``
+            computed from the input features (to be added as a residual).
+        """
+        n_atoms = node_feats.shape[0]
+        residual = self.skip_tp(node_feats, node_attrs)
+        feats = self.linear_up(node_feats)
+        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
+                              edge_index[1], n_atoms)
+        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
+        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.linear(pooled) / (density + 1.0)
+        return self.reshape(pooled), residual
+
+
+class _ScaleShift(nn.Module):
+    """Affine rescaling of the per-atom interaction energy.
+
+    Implements the upstream ``ScaleShiftMACE`` convention: the *interaction*
+    energy (readouts plus pair repulsion, everything except the per-element
+    reference ``atom_ref``) is mapped through ``scale * x + shift``, where
+    ``scale`` is typically the force RMS of the training set and ``shift``
+    the mean interaction energy per atom. Both are registered buffers (named
+    as upstream, so checkpoint values carry over); the defaults ``(1, 0)``
+    are the identity, which recovers the plain MACE energy expression.
+
+    Parameters
+    ----------
+    scale, shift : float, optional
+        The affine constants, by default 1.0 and 0.0.
+    """
+
+    def __init__(self, scale: float = 1.0, shift: float = 0.0):
+        super().__init__()
+        dtype = torch.get_default_dtype()
+        self.register_buffer("scale", torch.tensor(float(scale), dtype=dtype))
+        self.register_buffer("shift", torch.tensor(float(shift), dtype=dtype))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply ``scale * x + shift`` elementwise.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Per-atom interaction energies.
+
+        Returns
+        -------
+        torch.Tensor
+            The rescaled energies.
+        """
+        return self.scale * x + self.shift
+
+
 class _LinearReadout(nn.Module):
     """Linear equivariant readout mapping node features to a scalar output.
 
@@ -813,6 +955,10 @@ class _ZBLPairRepulsion(nn.Module):
         self.register_buffer(
             "covalent_radii", torch.tensor(ase.data.covalent_radii, dtype=torch.get_default_dtype())
         )
+        # the universal screening-length constants, as buffers (upstream
+        # layout) so trained/quantized checkpoint values carry over
+        self.register_buffer("a_exp", torch.tensor(0.300))
+        self.register_buffer("a_prefactor", torch.tensor(0.4543))
 
     @staticmethod
     def _envelope(x: Tensor, r_max: Tensor, p: Tensor) -> Tensor:
@@ -863,7 +1009,8 @@ class _ZBLPairRepulsion(nn.Module):
         z_src = atomic_numbers[edge_index[0]].to(torch.int64).unsqueeze(-1)
         z_dst = atomic_numbers[edge_index[1]].to(torch.int64).unsqueeze(-1)
         # ZBL universal screening length (angstrom) and screening function
-        screen_len = 0.4543 * 0.529 / (torch.pow(z_src, 0.300) + torch.pow(z_dst, 0.300))
+        screen_len = self.a_prefactor * 0.529 / (
+            torch.pow(z_src, self.a_exp) + torch.pow(z_dst, self.a_exp))
         d = r / screen_len
         screening = (self.c[0] * torch.exp(-3.2 * d) + self.c[1] * torch.exp(-0.9423 * d)
                      + self.c[2] * torch.exp(-0.4028 * d) + self.c[3] * torch.exp(-0.2016 * d))
@@ -877,6 +1024,9 @@ class _ZBLPairRepulsion(nn.Module):
 INTERACTIONS = {
     "RealAgnosticInteractionBlock": RealAgnosticInteractionBlock,
     "RealAgnosticResidualInteractionBlock": RealAgnosticResidualInteractionBlock,
+    "RealAgnosticDensityInteractionBlock": RealAgnosticDensityInteractionBlock,
+    "RealAgnosticDensityResidualInteractionBlock":
+        RealAgnosticDensityResidualInteractionBlock,
 }
 # GATES is the shared SCALAR_ACTIVATIONS registry (imported above): the gate
 # options by their upstream spellings (silu/tanh/abs/ssp/None).
@@ -946,20 +1096,30 @@ class MACE(EquivariantGNN):
         Radial basis type (``"bessel"`` or ``"gaussian"``), by default
         ``"bessel"``.
     distance_transform : str, optional
-        Distance transform; only ``"None"`` is supported.
+        Chemistry-aware warp of the distance fed to the radial basis (the
+        cutoff envelope always sees the raw distance): ``"None"`` (default),
+        ``"Agnesi"`` or ``"Soft"`` (see
+        :mod:`xnn.gnn.featurizers.radial`; ``"Agnesi"`` is what the
+        MACE-MP-0b and later foundation models use).
     pair_repulsion : bool, optional
         If ``True``, add a :class:`_ZBLPairRepulsion` short-range term, by
         default ``False``.
     atomic_energies : torch.Tensor or None, optional
         Per-element reference energies (``E0s``) used to initialise
         ``atom_ref``.
+    scale, shift : float, optional
+        Affine rescaling of the per-atom *interaction* energy (readouts plus
+        pair repulsion), ``E_i = E0_i + scale * E_int,i + shift`` -- the
+        upstream ``ScaleShiftMACE`` convention. The defaults (1, 0) recover
+        the plain MACE energy expression, so one class covers both upstream
+        variants.
 
     Raises
     ------
     ValueError
         If ``num_interactions`` is negative.
     NotImplementedError
-        If ``distance_transform`` is anything other than ``"None"``.
+        If ``distance_transform`` is not one of the supported options.
     """
 
     pair_repulsion: Final[bool]
@@ -986,12 +1146,15 @@ class MACE(EquivariantGNN):
         distance_transform: str = "None",
         pair_repulsion: bool = False,
         atomic_energies: Optional[Tensor] = None,
+        scale: float = 1.0,
+        shift: float = 0.0,
     ):
         if num_interactions < 0:
             raise ValueError("num_interactions (T) must be >= 0")
-        if distance_transform not in ("None", None):
+        if distance_transform not in DISTANCE_TRANSFORMS:
             raise NotImplementedError(
-                f"distance_transform={distance_transform!r} is not supported; use 'None'"
+                f"distance_transform={distance_transform!r} is not supported; "
+                f"options: {[k for k in DISTANCE_TRANSFORMS if k]}"
             )
         # EquivariantGNN gives species/z_to_index/node_attr/atom_ref/edge_feat/
         # irreps_sh; the featurizer uses MACE's cutoff degree + radial type.
@@ -999,6 +1162,8 @@ class MACE(EquivariantGNN):
                          p=num_cutoff_basis, radial_type=radial_type)
         if atomic_energies is not None:  # per-element reference energy (E0s)
             self.set_atomic_energies(atomic_energies)
+        self.distance_transform = DISTANCE_TRANSFORMS[distance_transform]()
+        self.scale_shift = _ScaleShift(scale, shift)
 
         num_elements = len(self.species)
         hid = (o3.Irreps(hidden_irreps) if hidden_irreps is not None
@@ -1065,12 +1230,16 @@ class MACE(EquivariantGNN):
         The single implementation reused by :meth:`node_energy` (the deploy
         entry point) and :meth:`forward`, so it must avoid the
         :class:`~xnn.common.data.AtomicGraph` dataclass and any Python-only
-        constructs. Starts from the per-element reference energy, optionally
-        adds the ZBL pair-repulsion term, then runs ``T`` rounds of
-        interaction + product basis + readout, accumulating each readout into
-        the node energy and collecting the invariant (``l = 0``) channels of
-        every layer's node features (what
-        :class:`~xnn.common.models.les.LatentEwald` consumes).
+        constructs. Accumulates the *interaction* energy -- the optional ZBL
+        pair-repulsion term plus one readout per round of interaction +
+        product basis -- maps it through ``scale_shift`` (identity unless
+        constructed with ``scale``/``shift``, the ``ScaleShiftMACE``
+        convention) and adds the per-element reference energy. The radial
+        basis sees the (optionally ``distance_transform``-warped) distance
+        while the cutoff envelope always sees the raw one. The invariant
+        (``l = 0``) channels of every layer's node features are collected
+        alongside (what :class:`~xnn.common.models.les.LatentEwald`
+        consumes).
 
         Parameters
         ----------
@@ -1090,12 +1259,19 @@ class MACE(EquivariantGNN):
             ``(N, node_feature_dim)`` and the per-atom energy ``(N,)``.
         """
         node_attrs = self.node_attr(atomic_numbers)
-        node_energy = self.atom_ref(atomic_numbers).squeeze(-1)
+        e0 = self.atom_ref(atomic_numbers).squeeze(-1)
         num_nodes = atomic_numbers.shape[0]
-        lengths, edge_sh, edge_radial = self.edge_feat.embed(edge_vec)
+        # the cutoff envelope acts on the raw distance; the radial basis on
+        # the (optionally chemistry-warped) one -- the upstream convention
+        lengths = torch.linalg.norm(edge_vec, dim=-1)
+        edge_sh = self.edge_feat.sph(edge_vec)
+        r_basis = self.distance_transform(lengths, atomic_numbers, edge_index)
+        edge_radial = self.edge_feat.rbf(r_basis) \
+            * self.edge_feat.envelope(lengths)[:, None]
 
+        inter_energy = torch.zeros_like(e0)
         if self.pair_repulsion:
-            node_energy = node_energy + self.pair_repulsion_fn(
+            inter_energy = inter_energy + self.pair_repulsion_fn(
                 lengths[:, None], atomic_numbers, edge_index, num_nodes,
             )
 
@@ -1108,13 +1284,14 @@ class MACE(EquivariantGNN):
                 node_attrs, node_feats, edge_sh, edge_radial, edge_index
             )
             node_feats = product(node_feats, sc, node_attrs)
-            node_energy = node_energy + readout(node_feats).squeeze(-1)
+            inter_energy = inter_energy + readout(node_feats).squeeze(-1)
             # scalar (l=0) channels come first in the e3nn irreps layout
             feats_list.append(node_feats[:, :self._n_scalar_features])
         if len(feats_list) == 0:
             feats_list.append(node_feats)
         features = torch.cat(feats_list, dim=-1)
 
+        node_energy = e0 + self.scale_shift(inter_energy)
         return features, node_energy
 
     @torch.jit.export
@@ -1166,6 +1343,12 @@ class MACE(EquivariantGNN):
         (MACE ``E0s``) a list aligned with ``species``, a ``{Z: E0}`` dict, or
         the string form of either.
 
+        Alternatively, ``extra["foundation"]`` names (or points to) a
+        pretrained MACE foundation checkpoint: the model is then built by
+        :meth:`from_foundation` (optionally with ``extra["head"]`` and
+        ``extra["dtype"]``) and every architecture key is taken from the
+        checkpoint instead of the config.
+
         Parameters
         ----------
         cfg : xnn.common.config.schema.ModelConfig
@@ -1182,6 +1365,18 @@ class MACE(EquivariantGNN):
         from xnn.common.config.coerce import coerce_per_species, coerce_species
 
         extra = dict(cfg.extra or {})
+        foundation = extra.get("foundation")
+        if foundation is not None:
+            model = cls.from_foundation(foundation, head=extra.get("head"),
+                                        dtype=extra.get("dtype"))
+            # the neighbor-list cutoff is wired through cfg.cutoff (the data
+            # pipeline follows it), so it must equal the checkpoint's r_max
+            if abs(float(cfg.cutoff) - float(model.cutoff)) > 1e-9:
+                raise ValueError(
+                    f"model.cutoff={cfg.cutoff} does not match the "
+                    f"foundation checkpoint's r_max={model.cutoff}; set "
+                    f"cutoff: {model.cutoff} in the config")
+            return model
         species = coerce_species(extra.get("species"), default=[1, 6, 8])
         atomic_energies = coerce_per_species(
             extra.get("atomic_energies"), species, "atomic_energies (MACE E0s)")
@@ -1212,4 +1407,43 @@ class MACE(EquivariantGNN):
             distance_transform=extra.get("distance_transform", "None"),
             pair_repulsion=extra.get("pair_repulsion", False),
             atomic_energies=atomic_energies,
+            scale=float(extra.get("scale", 1.0)),
+            shift=float(extra.get("shift", 0.0)),
         )
+
+    @classmethod
+    def from_foundation(cls, source, head=None, dtype=None) -> "MACE":
+        """Load a pretrained MACE foundation model into an xnn :class:`MACE`.
+
+        Downloads (and caches) the requested checkpoint if needed, unpickles
+        it with the ``mace-torch`` package, and converts it weight-for-weight
+        into this implementation -- covering the ``ScaleShiftMACE`` energy
+        expression, the Agnesi distance transform, ZBL pair repulsion, the
+        density-normalized interaction generation, and multi-head
+        checkpoints (sliced to one head). See
+        :mod:`xnn.gnn.models.mace_foundation` for the alias registry and the
+        conversion details.
+
+        Parameters
+        ----------
+        source : str or Path or torch.nn.Module
+            A registered alias (e.g. ``"mace-mp-0-medium"``,
+            ``"mace-off23-small"``; see
+            :data:`~xnn.gnn.models.mace_foundation.FOUNDATION_MODELS`), a
+            checkpoint URL or local path, or an already-loaded ``mace-torch``
+            model instance.
+        head : str, optional
+            Which head of a multi-head checkpoint to keep. Defaults to the
+            checkpoint's only head; required (with the options listed in the
+            error) when there are several.
+        dtype : torch.dtype or str, optional
+            Final dtype of the converted model; ``None`` keeps the
+            checkpoint's (float64 for most foundation models).
+
+        Returns
+        -------
+        MACE
+            The converted model, ready for evaluation or fine-tuning.
+        """
+        from .mace_foundation import foundation_to_xnn
+        return foundation_to_xnn(source, head=head, dtype=dtype)

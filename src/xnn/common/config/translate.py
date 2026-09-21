@@ -42,6 +42,12 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "num_cutoff_basis": "num_polynomial_cutoff",
         "atomic_numbers": "species",
         "E0s": "atomic_energies",
+        "atomic_inter_scale": "scale",
+        "atomic_inter_shift": "shift",
+        "interaction_cls": "interaction",
+        "interaction_cls_first": "interaction_first",
+        "foundation_model": "foundation",
+        "foundation_head": "head",
     },
     # NequIP yaml spellings
     "nequip": {
