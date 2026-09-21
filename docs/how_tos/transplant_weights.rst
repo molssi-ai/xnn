@@ -33,7 +33,13 @@ How much work step 2 is depends on the model:
   keep the same flat weight layout as upstream, so a state dict trained with
   the reference code loads nearly as-is (and vice versa).
 - **MACE**: the implementation reproduces upstream block by block, so whole
-  models transplant through a simple name map.
+  models transplant through a simple name map. For the published pretrained
+  checkpoints no manual transplant is needed at all:
+  ``MACE.from_foundation("mace-mp-0-medium")`` (or an OFF23 alias, a URL, a
+  local ``.model`` path, or an already-loaded ``mace-torch`` module)
+  downloads, unpickles and converts the checkpoint in one call, including
+  the ScaleShift energy expression, distance transforms, ZBL, the density
+  interaction blocks, and multi-head slicing (``head=...``).
 - **CACE**: same, with one gotcha: upstream lazily initializes some layers
   (the ``Bchi`` transform and the readout MLP), so run one forward pass on a
   sample batch before reading the upstream state dict.

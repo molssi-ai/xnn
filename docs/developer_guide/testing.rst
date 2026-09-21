@@ -31,7 +31,12 @@ What is covered
    * - ``test_mace.py``
      - U-matrix shapes, symmetric-contraction equivariance, flexible
        ``num_interactions`` (including T=0), pair repulsion,
-       TorchScript/LAMMPS export, key translation
+       TorchScript/LAMMPS export, key translation; the ScaleShiftMACE
+       energy expression, hand-recomputed Agnesi/Soft distance transforms,
+       density interaction blocks, and **foundation-checkpoint conversion
+       parity with mace-torch** (every architecture flavor plus multi-head
+       slicing, built in-process; a cached-checkpoint test when one is on
+       disk -- tests never download)
    * - ``test_nequip.py``
      - hidden-irreps order, ``_Gate`` vs. e3nn's ``Gate``, equivariance,
        per-species scale/shift, export, key translation, **parity with

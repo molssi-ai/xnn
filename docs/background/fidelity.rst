@@ -38,10 +38,32 @@ implementation reproduces:
   flexible (contrary to the original code, where the ``num_interactions``, T, is
   fixed to 2, our implementation allows for T to be set to 0, ..., N).
 
+- the ``ScaleShiftMACE`` energy expression (``scale`` / ``shift`` on the
+  per-atom interaction energy), the Agnesi and Soft distance transforms,
+  and the density-normalized interaction blocks of the newer foundation
+  generations.
+
 The notebooks in ``examples/fidelity_checks`` verify the xnn's implementation
 and compare it against the upstream version block by block. The notebooks in
 ``examples/gnn/mace/`` offer end to end examples which compare the xnn's MACE
 implementation against ``mace-torch`` on argon molecular dynamics data.
+
+**Foundation models.** ``MACE.from_foundation()`` converts the published
+pretrained checkpoints into xnn:
+``examples/fidelity_checks/mace_foundation_verification.ipynb`` runs the
+complete registry, 16 of the 17 released MACE-MP / MACE-OFF checkpoints
+plus every head of the multi-head ``mace-mh-0``, against the upstream
+engine and finds energy parity at ~1e-15 eV/atom, forces at ~1e-13 eV/A
+and stress at ~1e-15 eV/A^3 (float64). Two conversion details are load
+bearing: the checkpoints' Clebsch-Gordan ``U_matrix`` buffers are
+transplanted rather than regenerated (the higher-``l`` bases differ across
+the e3nn versions the models were trained with; regenerating them leaves
+~1e-4 errors on ``mace-mp-0b2-large``), and float32 checkpoints keep their
+stored, quantized Bessel frequencies and ZBL screening constants.
+``mace-mh-1`` (next-generation nonlinear interaction blocks, un-enveloped
+radial embedding) is rejected with an explicit ``NotImplementedError``.
+``tests/test_mace.py`` covers the same conversion in-process (every
+architecture flavor and multi-head slicing) without downloads.
 
 NequIP
 ======
