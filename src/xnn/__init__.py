@@ -47,6 +47,6 @@ except Exception as _gnn_error:  # noqa: BLE001 - optional family, degrade quiet
     )
     _HAS_GNN = False
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["common", "cnn", "dnn", "ffnn", "hybrid", "transformer",
            "__version__"]
