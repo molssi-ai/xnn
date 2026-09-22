@@ -20,11 +20,13 @@ What ships with xnn
 
    from xnn.ffnn.common import list_forcefields
    sorted(list_forcefields())
-   # ['CL&P', 'lopls', 'oplsaa', 'oplsaa+', 'oplsaa-1996',
-   #  'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
+   # ['CL&P', 'dreiding', 'dreiding/X6', 'lopls', 'oplsaa', 'oplsaa+',
+   #  'oplsaa-1996', 'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
 
 ``oplsaa.frc`` is the OPLS-AA distribution (variants ``oplsaa``, the
-CL&P ionic-liquid extension ``CL&P``, and their union ``oplsaa+``), and a
+CL&P ionic-liquid extension ``CL&P``, and their union ``oplsaa+``),
+``dreiding.frc`` carries the DREIDING generators (variants ``dreiding`` with
+Lennard-Jones nonbonds and ``dreiding/X6`` with exponential-6 ones), and a
 dozen published ReaxFF fields live under ``reaxff/``; all are copied verbatim
 from SEAMM (BSD-3-Clause, see ``src/xnn/ffnn/data/README.md`` for the
 commit and per-file provenance). xnn adds ``lopls`` (Siu *et al.* 2012) and
@@ -40,18 +42,24 @@ Apply a force field to a molecule
 .. code-block:: python
 
    from ase.build import molecule
-   from xnn.ffnn.models import OPLS, ReaxFF
+   from xnn.ffnn.models import OPLS, ReaxFF, Dreiding
 
    ethanol = molecule("CH3CH2OH")
    model = OPLS.from_atoms(ethanol, "oplsaa", cutoff=12.0)   # types + topology
    model.topology.types            # ['opls_80', 'opls_99', 'opls_96', ...]
+
+   dre = Dreiding.from_atoms(ethanol, "dreiding", cutoff=12.0)
+   dre.topology.types              # ['C_3', 'C_3', 'O_3', 'H_', ...]
+   dre.topology.bond_orders        # DREIDING's rules read these too
 
    reax = ReaxFF("CHO_cho_2008")   # ReaxFF needs no typing: species only
 
 ``OPLS.from_atoms`` perceives the bonding with RDKit, assigns the library's
 atom types from its templates (:func:`~xnn.ffnn.common.typing.assign_atom_types`),
 derives the topology, and places impropers at trigonal centers the library
-has a pattern for. RDKit is an optional dependency::
+has a pattern for. ``Dreiding.from_atoms`` does the same and additionally
+keeps the perceived **bond orders**, which its rules need to pick torsion
+barriers and stretch force constants. RDKit is an optional dependency::
 
    pip install "xnn[ffnn]"
 

@@ -75,6 +75,22 @@ What is covered
        periodic stress, batching, size extensivity, trainable-group
        selection and training steps, shared-force-field gradients,
        native-JSON and SEAMM ``.frc`` library readers, key translation
+   * - ``test_dreiding.py``
+     - **hand-recomputed DREIDING equations** (additive bond radii and
+       bond-order scaling, the harmonic-cosine and linear angle forms, the
+       Morse bond, the torsion of eq 13 with its per-bond barrier
+       splitting, spectroscopic inversions, the Lennard-Jones and
+       exponential-6 nonbonds with their combination rules, the Coulomb
+       constant of eq 37 and the 12-10 hydrogen bond of eq 38), **the nine
+       torsion rules of eqs 14-23** (each branch, and symmetry under
+       reversal), the published Tables I/II/III/V, the exact eclipsed-ethane
+       barrier and hydrogen-bond minimum, invariances, forces vs. finite
+       differences, minimum-image bonded terms and periodic stress,
+       batching, size extensivity, SMARTS typing with bond-order perception,
+       Gasteiger charges, trainable-generator selection and training steps,
+       shared-force-field gradients, library JSON round-trips, key
+       translation (self-contained: the LAMMPS cross-check lives in the
+       fidelity notebook)
    * - ``test_hub.py`` / ``test_ase_io.py`` / ``test_benchmark.py`` /
        ``test_trainer_distributed.py``
      - dataset hub builders and caching, ASE file I/O, the benchmark

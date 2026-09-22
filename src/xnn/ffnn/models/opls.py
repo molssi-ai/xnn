@@ -60,6 +60,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import scatter_sum
 
+from .geometry import TINY, geometric_mean, pair_vectors, dihedral_cos
 from .oplslib import (OPLSLibrary, read_opls, resolve_bond_type,
                       resolve_angle_type, resolve_dihedral_type,
                       resolve_improper_type, KCAL_TO_EV)
@@ -69,8 +70,6 @@ from .topology import MolecularTopology, read_topology
 # value 138.935456 kJ/mol nm converted with 96.48533212331 kJ/mol per eV.
 # (ReaxFF uses its own historical constant; see the note in oplslib.py.)
 KE = 14.399645307997487
-# Small numerical guard applied under square roots.
-TINY = 1.0e-12
 DEG = math.pi / 180.0
 
 # Trainable parameter groups of the force field.
@@ -99,23 +98,9 @@ def _as_library(source: Union[OPLSLibrary, str, Path]) -> OPLSLibrary:
     return read_opls(str(source))
 
 
-def _geometric_mean(x: Tensor, y: Tensor) -> Tensor:
-    """Geometric mean with a differentiable zero (for zero-LJ hydrogens).
-
-    Parameters
-    ----------
-    x, y : Tensor
-        Non-negative parameter values, gathered per pair.
-
-    Returns
-    -------
-    Tensor
-        ``sqrt(x * y)``, exactly zero (with zero gradient) where the
-        product vanishes.
-    """
-    prod = x * y
-    safe = torch.sqrt(torch.clamp(prod, min=TINY))
-    return torch.where(prod > 0.0, safe, torch.zeros_like(prod))
+# the shared implementation lives in .geometry; kept under the old name for
+# the module's existing callers
+_geometric_mean = geometric_mean
 
 
 class OPLSForceField(nn.Module):
@@ -645,64 +630,13 @@ class OPLS(InteratomicPotential):
     # ------------------------------------------------------------------
     def _pair_vectors(self, data: AtomicGraph, a: Tensor, b: Tensor
                       ) -> Tensor:
-        """Minimum-image displacement vectors ``pos[b] - pos[a]``.
-
-        For periodic structures the integer image shift is recomputed from
-        the fractional displacement (rounded, detached), so bonded terms are
-        correct for molecules wrapped across the boundary while gradients
-        still flow to positions and cell.
-
-        Parameters
-        ----------
-        data : AtomicGraph
-            The batched graph.
-        a, b : Tensor
-            Atom indices of shape ``(M,)``.
-
-        Returns
-        -------
-        Tensor
-            Displacements of shape ``(M, 3)``.
-        """
-        vec = data.pos[b] - data.pos[a]
-        if data.cell is None or vec.shape[0] == 0:
-            return vec
-        cell = data.cell[data.batch[a]]                       # (M, 3, 3)
-        inv = torch.linalg.inv(data.cell)[data.batch[a]]
-        frac = torch.einsum("mi,mij->mj", vec, inv)
-        shift = -torch.round(frac).detach()
-        if data.pbc is not None:
-            shift = shift * data.pbc[data.batch[a]].to(shift.dtype)
-        return vec + torch.einsum("mi,mij->mj", shift, cell)
+        """Minimum-image displacements (see :func:`.geometry.pair_vectors`)."""
+        return pair_vectors(data, a, b)
 
     def _dihedral_cos(self, data: AtomicGraph, idx: Tensor) -> Tensor:
-        """Cosine of the dihedral angle over each atom quadruple.
-
-        Uses the plane-normal formula with ``phi = 0`` at *cis* (the OPLS
-        convention). Only ``cos phi`` is returned; the Fourier terms are
-        even in ``phi``, so the multiple angles come from Chebyshev
-        identities and no ``arccos``/``atan2`` (whose derivatives are
-        singular at planar geometries) enters the graph.
-
-        Parameters
-        ----------
-        data : AtomicGraph
-            The batched graph.
-        idx : Tensor
-            Atom indices of shape ``(4, M)``.
-
-        Returns
-        -------
-        Tensor
-            ``cos phi`` of shape ``(M,)``.
-        """
-        b1 = self._pair_vectors(data, idx[0], idx[1])
-        b2 = self._pair_vectors(data, idx[1], idx[2])
-        b3 = self._pair_vectors(data, idx[2], idx[3])
-        n1 = torch.cross(b1, b2, dim=1)
-        n2 = torch.cross(b2, b3, dim=1)
-        denom = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)
-        return (n1 * n2).sum(1) / denom
+        """Dihedral cosine, ``phi = 0`` at *cis* (the OPLS convention);
+        see :func:`.geometry.dihedral_cos`."""
+        return dihedral_cos(data, idx)
 
     def _lj_coulomb(self, sig_i, sig_j, eps_i, eps_j, q_i, q_j, r, r2
                     ) -> tuple[Tensor, Tensor]:

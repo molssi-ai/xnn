@@ -442,6 +442,73 @@ scalings; ``trainable`` (none), the parameter groups to refit. OPLS is
 evaluated in eV/Angstrom (libraries store kcal/mol; conversion is
 automatic).
 
+DREIDING / DREIDING-X6 (``ffnn``)
+=================================
+:class:`xnn.ffnn.models.dreiding.Dreiding`: the **rule-generated generic
+force field** of Mayo, Olafson & Goddard III (*J. Phys. Chem.* 94, 8897,
+1990). Where OPLS tabulates a parameter per bond, angle and torsion type,
+DREIDING generates them all from a handful of per-atom generators by
+hybridization rules: bond lengths are sums of atomic radii
+(``R0_IJ = R0_I + R0_J - 0.01``, eq 6) with one universal stretch constant
+scaled by the bond order (eqs 7-9), the equilibrium angle depends only on
+the central atom and every bend shares ``K = 100 kcal/mol/rad^2``
+(eqs 10-12), and each torsion's barrier, periodicity and phase follow from
+the hybridizations of the two central atoms plus the bond order between
+them (eqs 13-23, :func:`~xnn.ffnn.models.dreidinglib.torsion_rule`). That
+is what makes DREIDING *generic*: it has parameters for element
+combinations nobody tabulated.
+
+The energy adds spectroscopic inversions at planar and stereo centers
+(eq 28, all three axis choices averaged), van der Waals interactions in
+either the Lennard-Jones 12-6 form (eq 31', the ``"dreiding"`` variant) or
+the exponential-6 form (eq 32', ``"dreiding/X6"``), optional Coulomb
+interactions with the paper's constant (eq 37; DREIDING prescribes no
+charges of its own, and ``Dreiding.from_atoms(..., charges="gasteiger")``
+supplies the paper's recommended estimate), and the explicit 12-10
+hydrogen-bond term on ``H__HB`` donor triplets (eq 38). Unlike OPLS,
+**1,4 pairs count in full** -- only 1,2 and 1,3 pairs are excluded, as the
+paper specifies. ``forward`` additionally returns ``"charges"`` and the
+per-term decomposition (``"e_bond"``, ``"e_angle"``, ``"e_torsion"``,
+``"e_inversion"``, ``"e_vdw"``, ``"e_coulomb"``, ``"e_hbond"``).
+
+Like OPLS, DREIDING binds to a fixed
+:class:`~xnn.ffnn.models.topology.MolecularTopology`, but the topology also
+carries **bond orders**, since the rules read them.
+``Dreiding.from_atoms(atoms, "dreiding")`` builds everything from a
+structure: RDKit perceives connectivity *and* bond orders, and the SMARTS
+templates in the parameter file assign the DREIDING types. For
+resonance-delocalized bonds the automatic perception is not always what
+DREIDING intends -- an amide C-N is described as ``C_R``-``N_R`` with bond
+order 1.5 (the paper's footnote 8), not as ``C_2``-``N_3`` -- so set the
+types and orders explicitly in those cases.
+
+Because nothing bonded is tabulated, what is trainable are the *generators*
+themselves: ``radius``, ``theta0``, ``bond_k``, ``bond_d``, ``angle_k``,
+``torsion_v`` (one total barrier per rule), ``oop_k``, ``oop_psi0``,
+``vdw_r0``, ``vdw_d0``, ``x6_zeta``, ``hbond_d0``, ``hbond_r0``, plus the
+model's per-atom ``charge``. Several models can share one
+:class:`~xnn.ffnn.models.dreiding.DreidingForceField` to fit transferable
+parameters across molecules jointly, and ``export_library()`` writes the
+trained values back to a JSON library that ``ffield:`` accepts. Parameters
+come from the SEAMM ``dreiding.frc`` shipped with xnn
+(:ref:`howto-forcefield-files`), whose two ``#define`` variants select the
+nonbond form. The implementation is verified term by term against LAMMPS's
+DREIDING styles to ~1e-10 kcal/mol and reproduces Tables XI and XII of the
+1990 paper (see :ref:`fidelity`).
+
+Key options (defaults in parentheses): ``ffield`` (``"dreiding"``), the
+parameter source (``"dreiding"``, ``"dreiding/X6"``, a ``.frc`` path or a
+JSON path); ``topology`` (required), a topology JSON path or inline
+``types`` + ``bonds`` (+ ``bond_orders``); ``cutoff`` (10.0), the
+nonbonded cutoff and neighbor-list radius; ``switch_width`` (0.0), a
+quintic switching window at the cutoff; ``charges`` (none), per-atom
+partial charges; ``bond_style`` (``"harmonic"``, or ``"morse"`` for
+DREIDING/M); ``angle_style`` (``"cosine"``, the harmonic-cosine form of
+eq 10a, or ``"harmonic"`` for eq 11); ``hbond`` (True),
+``hbond_cutoff``/``hbond_angle`` (the nonbonded cutoff / 90 degrees);
+``trainable`` (none), the generator groups to refit. DREIDING is evaluated
+in eV/Angstrom (libraries store kcal/mol; conversion is automatic).
+
 Long-range interactions: Latent Ewald Summation (LES)
 ======================================================
 Short-range models miss electrostatics and dispersion beyond their receptive
