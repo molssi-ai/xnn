@@ -62,7 +62,12 @@ class EwaldSummation(nn.Module):
     dl : float, optional
         Reciprocal grid resolution; the k-space cutoff is ``2*pi/dl``. By
         default 2.0 (``k_c = pi``, the paper's bulk-water setting; its
-        dimer/NaCl runs used ``dl = 3``).
+        dimer/NaCl runs used ``dl = 3``). It applies to **periodic
+        structures only**: a structure without a cell takes the real-space
+        branch, which is exact and reads ``sigma`` but never ``dl``, so on an
+        all-molecular dataset this knob is inert (and is therefore untested
+        by the fit, whatever it is set to). The cutoff is recomputed from
+        ``dl`` on every call, so it can be retuned on a loaded model.
     sigma : float, optional
         Gaussian smearing width in Angstrom, by default 1.0 (paper Methods:
         values between ~0.5 and 2 are reasonable; 1 was best for water).
@@ -94,7 +99,6 @@ class EwaldSummation(nn.Module):
         self.sigma = sigma
         self.exponent = exponent
         self.remove_self_interaction = remove_self_interaction
-        self.k_cut_sq = (2.0 * math.pi / dl) ** 2
 
     def _kfac(self, k2: Tensor) -> Tensor:
         """Interaction kernel in reciprocal space (paper eqs 4 and 5).
@@ -171,13 +175,17 @@ class EwaldSummation(nn.Module):
 
         kpts = half_grid.to(dtype) @ recip
         k2 = kpts.square().sum(dim=1)
+        # k_c is derived from dl on every call rather than cached at
+        # construction, so retuning the cutoff on a loaded model
+        # (``ewald.dl = ...``, as in a convergence study) takes effect
+        k_cut_sq = (2.0 * math.pi / self.dl) ** 2
         # spherical cutoff |k| <= k_c with a relative slack on both bounds;
         # the slack resolves floating-point ties on the boundary shell
         # consistently, keeping the energy exactly rotation-invariant (a
         # documented xnn deviation: upstream compares exactly, so a whole
         # shell can drop out when its |k|^2 lands an ulp above the cutoff)
-        in_shell = ((k2 > self.k_cut_sq * 1e-12)
-                    & (k2 <= self.k_cut_sq * (1.0 + 1e-9)))
+        in_shell = ((k2 > k_cut_sq * 1e-12)
+                    & (k2 <= k_cut_sq * (1.0 + 1e-9)))
         kpts, k2 = kpts[in_shell], k2[in_shell]
 
         # |S(k)|^2 per channel via the real and imaginary parts of the
@@ -292,7 +300,10 @@ class LatentEwald(InteratomicPotential):
         ``True`` (the water script). The charged-dimer script uses ``False``
         (MLP only).
     dl, sigma, exponent, remove_self_interaction
-        Passed to :class:`EwaldSummation`.
+        Passed to :class:`EwaldSummation`. Note that ``dl`` acts on periodic
+        structures only and ``exponent = 6`` is periodic-only as well (the
+        real-space branch that molecular structures take implements the
+        ``1/r`` kernel), so a dataset without cells trains neither.
 
     Attributes
     ----------

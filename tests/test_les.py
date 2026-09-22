@@ -221,6 +221,48 @@ def test_rejects_model_without_features():
         LatentEwald(Bare())
 
 
+def test_k_cutoff_follows_dl_on_a_live_module():
+    """``dl`` can be retuned after construction (a convergence study).
+
+    The k-space cutoff is derived from ``dl`` on every call rather than
+    cached at construction: assigning ``ewald.dl`` on a model that is already
+    built (or loaded from a checkpoint) must change the k-shell, not silently
+    do nothing. Only the shell selection may depend on it -- a module retuned
+    to a given ``dl`` has to agree bit for bit with one constructed with it.
+    """
+    torch.manual_seed(0)
+    pos = torch.rand(40, 3) * 11.0
+    q = torch.randn(40, 4) * 0.1
+    cell = torch.eye(3) * 11.0
+
+    retuned = EwaldSummation(dl=3.0, sigma=1.0)
+    coarse = float(retuned.reciprocal(pos, q, cell))
+    for dl in (2.0, 1.5, 1.0):
+        retuned.dl = dl
+        built = EwaldSummation(dl=dl, sigma=1.0)
+        assert float(retuned.reciprocal(pos, q, cell)) == \
+            float(built.reciprocal(pos, q, cell))
+    # and the cutoff genuinely matters at this smearing: a coarse grid drops
+    # part of the reciprocal sum (sigma = 1 leaves exp(-sigma^2 k_c^2 / 2)
+    # = 0.11 at k_c = 2 pi / 3, against 0.007 at k_c = pi)
+    retuned.dl = 1.0
+    assert abs(float(retuned.reciprocal(pos, q, cell)) - coarse) > 1e-6
+
+
+def test_dispersion_is_periodic_only():
+    """``exponent = 6`` has no real-space branch, upstream or here.
+
+    A structure without a cell takes the real-space sum, which implements the
+    ``1/r`` kernel only, so a dispersion channel needs periodic training data
+    rather than failing silently on molecular frames.
+    """
+    ew = EwaldSummation(dl=2.0, sigma=1.0, exponent=6)
+    pos, q = torch.rand(9, 3) * 3.0, torch.randn(9, 4) * 0.1
+    assert torch.isfinite(ew.reciprocal(pos, q, torch.eye(3) * 12.0))
+    with pytest.raises(ValueError, match="exponent=1 only"):
+        ew.realspace(pos, q)
+
+
 # --------------------------------------------------------------------------
 # fidelity vs the original cace EwaldPotential
 # --------------------------------------------------------------------------

@@ -534,7 +534,11 @@ HDNNP/ANI descriptors. Key options: ``n_channels`` (4), ``hidden``
 ([24, 12] q-MLP), ``sigma`` (1.0 -- Gaussian smearing), ``dl`` (2.0 -- the
 k-space cutoff is ``2*pi/dl``), ``exponent`` (1 for electrostatics, 6 for
 dispersion), ``remove_self_interaction`` (False). Non-periodic structures use
-the equivalent real-space direct sum; forces and stress flow through
+the equivalent real-space direct sum, which is exact and needs no k-space
+cutoff: on a dataset without cells ``dl`` is therefore **inert**, and
+``exponent = 6`` is rejected outright (the real-space branch implements the
+``1/r`` kernel only), so a dispersion channel needs periodic training data.
+Forces and stress flow through
 :class:`~xnn.common.models.outputs.ForceStressOutput` unchanged. The outputs
 gain ``"energy_sr"``, ``"energy_lr"`` and ``"latent_charges"``.
 
