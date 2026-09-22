@@ -137,6 +137,21 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "fudgeLJ": "fudge_lj",
         "fudgeQQ": "fudge_qq",
     },
+    # DREIDING spellings used by LAMMPS / Cerius2-style inputs
+    "dreiding": {
+        "forcefield": "ffield",
+        "library": "ffield",
+        "frc": "ffield",
+        "r_max": "cutoff",
+        "rcut": "cutoff",
+        "pair_cutoff": "cutoff",
+        "rvdw": "cutoff",
+        "bond_form": "bond_style",
+        "angle_form": "angle_style",
+        "hbond_cut": "hbond_cutoff",
+        "hbond_angle_cut": "hbond_angle",
+        "orders": "bond_orders",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

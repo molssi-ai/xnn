@@ -12,7 +12,8 @@ molecular and periodic systems, implemented in PyTorch behind a single coherent
 of state-of-the-art equivariant open-source models such as NequIP, MACE,
 Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, the BAMBOO graph
 equivariant transformer, and the learnable classical force fields ReaxFF /
-ReaxFF-nn (reactive) and OPLS / L-OPLS (fixed topology). The key strengths
+ReaxFF-nn (reactive), OPLS / L-OPLS (fixed topology) and DREIDING
+(rule-generated). The key strengths
 of xnn are
 
 - all models share one data object, module interface, training loop, and
@@ -194,6 +195,12 @@ Models at a glance
      - Complete: training, evaluation, deployment (ASE only); matches
        `OpenMM <https://openmm.org>`_ to ~1e-7 kJ/mol and Table 1 of
        Jorgensen et al. (1996)
+   * - DREIDING / X6
+     - ffnn
+     - rule-generated valence terms
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `LAMMPS <https://lammps.org>`_ DREIDING styles to ~1e-10 kcal/mol
+       and Tables XI-XII of Mayo et al. (1990)
 
 xnn is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository

@@ -398,6 +398,57 @@ angles enter through Chebyshev cosine identities (the OPLS Fourier terms
 are even in the angle, so no ``arccos``/``atan2`` is needed); excluded
 pairs are excluded in every periodic image, the standard MM convention.
 
+DREIDING / DREIDING-X6
+======================
+A clean-room implementation of the **published functional form** (Mayo,
+Olafson & Goddard III, *J. Phys. Chem.* 94, 8897, 1990), with the per-atom
+generators read from the SEAMM ``dreiding.frc`` and the rule constants
+taken from the paper's tables. Because DREIDING *generates* every valence
+term rather than tabulating it, fidelity has to cover the rule engine as
+well as the energy expressions, and is established three ways:
+
+* **The published parameter tables**: Tables I (bond radii, equilibrium
+  angles), II (van der Waals ``R0``, ``D0``, ``zeta``), III (the universal
+  force constants and the inversion constants) and V (the hydrogen-bond
+  parameters) are checked entry by entry in
+  ``examples/fidelity_checks/dreiding_verification.ipynb``.
+* **Parity with LAMMPS**: every term the rule engine generates is written
+  into a LAMMPS data file and evaluated by LAMMPS's own DREIDING styles
+  (``bond_style harmonic``, ``angle_style cosine/squared`` and ``cosine``,
+  ``dihedral_style harmonic``, ``improper_style umbrella``, ``pair_style
+  lj/cut`` / ``buck`` / ``hbond/dreiding/lj``), an entirely independent
+  implementation of the same expressions. Nine molecules covering every
+  rule branch, in both nonbond forms, agree **term by term** to ~1e-10
+  kcal/mol and force by force to ~5e-10 kcal/mol/Angstrom.
+* **The paper's own numbers**: relaxed torsional scans reproduce the
+  DREIDING column of Table XI across fourteen molecules with a mean
+  difference of ~0.01 kcal/mol (max 0.06), and the butane gauche-anti
+  (0.73 vs 0.75) and cyclohexane twist-boat-chair (7.70 vs 7.72) entries of
+  Table XII follow
+  (``examples/ffnn/dreiding/dreiding_conformational_energetics.ipynb``).
+  Two exactly known quantities are hit exactly: the eclipsed-ethane torsion
+  barrier is the published total ``V_JK`` = 2.0 kcal/mol of eq 14, and a
+  linear donor-hydrogen-acceptor bridge at ``R = R_hb`` sits at ``-D_hb``,
+  the analytic minimum of eq 38.
+
+Documented conventions: the inversion term of eq 28 is averaged over all
+three axis choices with weight 1/3, as the paper specifies (LAMMPS applies
+one improper per listed quadruple, so its force constant is ``K/3``); 1,4
+nonbonded pairs count **in full** and only 1,2 and 1,3 pairs are excluded,
+unlike OPLS; the Coulomb constant is the paper's 332.0637 kcal Angstrom/mol
+of eq 37, which differs from LAMMPS ``real`` units' ``qqr2e = 332.06371`` by
+3e-8 relative (the verification notebook absorbs that difference explicitly
+so the comparison isolates the functional forms); the equilibrium angle of
+109.471 degrees in the parameter file is a rounded tetrahedral angle, which
+leaves a residue of ~1e-8 kcal/mol in an otherwise ideal geometry.
+DREIDING prescribes no partial charges, so electrostatics are off unless
+charges are supplied; the paper recommends Gasteiger estimates, available
+through ``Dreiding.from_atoms(..., charges="gasteiger")``. Resonance
+delocalization enters through the *typing*, not the rules: an amide C-N
+must be given as ``C_R``-``N_R`` with bond order 1.5 (the paper's footnote
+8) to get its ~25 kcal/mol barrier, which automatic RDKit perception does
+not do.
+
 Why this matters
 ================
 Fidelity means results published with the reference codes can be reproduced,

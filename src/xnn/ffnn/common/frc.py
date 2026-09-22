@@ -339,10 +339,24 @@ SECTION_SCHEMA: dict[str, dict] = {
                      "form": "rmin-eps",
                      "constants": [("rmin", "Å", float),
                                    ("eps", "kcal/mol", float)]},
-    "buckingham": {"n_atoms": 2, "symmetry": "like_bond", "type": "pair",
-                   "constants": [("A", "kcal/mol", float), ("rho", "Å", float),
-                                 ("C", "kcal/mol*Å^6", float),
-                                 ("cutoff", "Å", float)]},
+    # Buckingham / exponential-6 sections come in two shapes: the classic
+    # pairwise one (key I J, columns A rho C) and the per-atom generator form
+    # of the SEAMM dreiding.frc (key I, columns rho eps S -- the vdW minimum
+    # distance R0, the well depth D0 and the dimensionless scaling parameter
+    # zeta of Mayo et al. 1990, eq 32'). ``n_atoms: None`` means "read the key
+    # width and the value columns from the section's own header line".
+    "buckingham": {"n_atoms": None, "symmetry": "like_bond", "type": "pair",
+                   "constants": None},
+    # DREIDING per-atom generators: the bond radius R0 and the angle Theta0
+    # of the atom as an angle center (Mayo et al. 1990, Table I)
+    "dreiding_atomic_parameters": {
+        "n_atoms": 1, "symmetry": "none", "type": "dreiding atomic",
+        "constants": [("Radius", "Å", float), ("Theta0", "degree", float)]},
+    # DREIDING inversions, keyed by the central atom (second column)
+    "dreiding_out_of_plane": {
+        "n_atoms": 4, "symmetry": "like_oop", "type": "out-of-plane",
+        "constants": [("K2", "kcal/mol/radian^2", float),
+                      ("Psi0", "degree", float)]},
     "quadratic_bond": {"n_atoms": 2, "symmetry": "like_bond", "type": "bond",
                        "constants": [("R0", "Å", float),
                                      ("K2", "kcal/mol/Å^2", float)]},
@@ -429,7 +443,7 @@ _KEY_HEADER_TOKENS = {"I", "J", "K", "L", "M", "N", "Type", "Center",
                       "Parameter", "Atom"}
 
 
-def register_section_schema(kind: str, n_atoms: int, symmetry: str,
+def register_section_schema(kind: str, n_atoms: Optional[int], symmetry: str,
                             constants: Optional[Sequence[tuple]],
                             type: str = "", text: Optional[str] = None,
                             flip: int = 0, **extra) -> None:
@@ -441,6 +455,11 @@ def register_section_schema(kind: str, n_atoms: int, symmetry: str,
         The section kind, the word after ``#`` (e.g. ``"quadratic_bond"``).
     n_atoms : int
         Number of leading atom-type key columns after ``Version`` and ``Ref``.
+    n_atoms : int or None
+        Number of leading atom-type key columns after ``Version`` and ``Ref``;
+        ``None`` reads the key width from the section's own header line (for
+        kinds such as ``buckingham`` that appear in both pairwise and
+        per-atom shapes), in which case ``constants`` should be ``None`` too.
     symmetry : str
         ``"none"``, ``"like_bond"``, ``"like_angle"``, ``"like_torsion"``,
         ``"like_improper"`` (central atom third) or ``"like_oop"`` (central
@@ -903,17 +922,19 @@ class FrcFile:
 
         sch = SECTION_SCHEMA.get(kind)
         header = [t for t in self._header_tokens(sec.comments) if t != "#"]
-        if sch is not None:
+        if sch is not None and sch["n_atoms"] is not None:
             n_atoms = sch["n_atoms"]
             symmetry = sch["symmetry"]
         else:
+            # no schema, or a schema that defers the key width to the file:
+            # the leading I/J/K/L-style header tokens are the key columns
             n_atoms = 0
             for tok in header:
                 if tok in _KEY_HEADER_TOKENS:
                     n_atoms += 1
                 else:
                     break
-            symmetry = "none"
+            symmetry = sch["symmetry"] if sch is not None else "none"
         sec.key_columns = header[:n_atoms] if len(header) >= n_atoms \
             else [f"k{i}" for i in range(n_atoms)]
 

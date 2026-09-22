@@ -1,0 +1,651 @@
+!MolSSI forcefield 1
+
+#define dreiding
+
+!Ver Ref                Function                   Label
+!--------- ---    ------------------------------   ------
+2025.04.06   1    metadata                         dreiding
+2025.02.14   1    atom_types                       dreiding
+2025.02.14   1    templates                        dreiding
+2025.02.14   1    dreiding_atomic_parameters       dreiding
+2025.02.14   1    nonbond(12-6)                    dreiding
+2025.02.14   1    charges                          dreiding
+2025.02.14   1    dreiding_out_of_plane            dreiding
+
+#define dreiding/X6
+
+!Ver Ref                Function                   Label
+!--------- ---    ------------------------------   ------
+2025.04.06   1    metadata                         dreiding
+2025.02.14   1    atom_types                       dreiding
+2025.02.14   1    templates                        dreiding
+2025.02.14   1    dreiding_atomic_parameters       dreiding
+2025.02.14   1    buckingham                       dreiding
+2025.02.14   1    charges                          dreiding
+2025.02.14   1    dreiding_out_of_plane            dreiding
+
+
+#metadata dreiding
+
+!Version      Ref   Parameter       Value  Description
+!---------  -----  ------------  --------  --------------------------------------
+2025.04.06      1   ff_form      dreiding  The functional form of the forcefield
+
+
+#atom_types           dreiding
+
+! Version  Ref    Type       Mass  El  # conns           Comment
+!--------- ---  --------   ------  --  ------- ---------------------------
+2025.02.14   1    H_	    1.008  H	    1  Hydrogen
+2025.02.14   1	  H__HB     1.008  H	    1  Hydrogen bonding H on O or N
+2025.02.14   1	  H__b      1.008  H	    1  Bridging H in diborane
+2025.02.14   1	  B_3      10.81   B	    3  sp3 boron
+2025.02.14   1	  B_2      10.81   B	    2  sp2 boron
+2025.02.14   1	  C_3      12.011  C	    4  sp3 carbon
+2025.02.14   1	  C_R      12.011  C	    3  aromatic carbon
+2025.02.14   1	  C_2      12.011  C	    3  sp2 carbon
+2025.02.14   1	  C_1      12.011  C	    2  sp carbon
+2025.02.14   1	  N_3      14.007  N	    4  sp3 nitrogen
+2025.02.14   1	  N_R      14.007  N	    3  aromatic nitrogen
+2025.02.14   1	  N_2      14.007  N	    2  sp2 nitrogen
+2025.02.14   1	  N_1	   14.007  N	    1  sp nitrogen
+2025.02.14   1	  O_3      15.999  O	    2  sp3 oxygen
+2025.02.14   1	  O_R      15.999  O	    2  aromatic oxygen
+2025.02.14   1	  O_2	   15.999  O	    1  sp2 oxygen
+2025.02.14   1	  O_1	   15.999  O	    1  sp oxygen
+2025.02.14   1	  F_       18.998  F	    1  fluorine
+2025.02.14   1	  Al3     26.982   Al	    3  sp3 aluminum
+2025.02.14   1	  Si3     28.086   Si	    4  sp3 silicon
+2025.02.14   1	  P_3     30.974   P	    3  sp3 phosphorus
+2025.02.14   1	  S_3     32.065   S	    2  sp3 sulfur
+2025.02.14   1	  Cl      35.453   Cl	    1  chlorine
+2025.02.14   1	  Ga3     69.723   Ga	    3  sp3 gallium
+2025.02.14   1	  Ge3     72.63    Ge	    4  sp3 germanium
+2025.02.14   1	  As3     74.922   As	    3  sp3 arsenic
+2025.02.14   1	  Se3     78.971   Se	    2  sp3 arsenic
+2025.02.14   1	  Br      79.904   Br	    1  bromine
+2025.02.14   1	  In3    114.818   In	    3  sp3 indium
+2025.02.14   1	  Sn3    118.71    Sn	    4  sp3 tin
+2025.02.14   1	  Sb3    121.76    Sb	    3  sp3 antimony
+2025.02.14   1	  Te3    127.6     Te	    2  sp3 tellurium
+2025.02.14   1	  I_     126.904   I	    1  iodine
+2025.02.14   1	  Na      22.99    Na	    1  sodium
+2025.02.14   1	  Ca      40.078   Ca	    2  calcium
+2025.02.14   1	  Fe      55.845   Fe	    2  iron
+2025.02.14   1	  Zn      65.38    Zn	    2  zinc
+2025.02.14   1	  C_R1    13.019   C	    2  Aromatic carbon with 1 implicit H
+2025.02.14   1	  C_34    16.043   C	    0  Methane with 4 implicit H's
+2025.02.14   1	  C_33    15.035   C	    1  -CH3 with 3 implicit H's
+2025.02.14   1	  C_32    14.027   C	    2  >CH2 with 2 implicit H's
+2025.02.14   1	  C_31    13.019   C	    3  >CH- with 1 implicit H
+
+
+#dreiding_atomic_parameters	  dreiding
+
+@units Radius Å
+@units Theta0 degree
+
+! Version  Ref    Type      Radius    Theta0 
+!--------- ---  --------   --------  ---------
+2025.02.14   1	H_          0.33      180.0  
+2025.02.14   1	H__HB       0.33      180.0  
+2025.02.14   1	H__b        0.510      90.0  
+2025.02.14   1	B_3         0.880     109.471
+2025.02.14   1	B_2         0.790     120.0  
+2025.02.14   1	C_3         0.770     109.471
+2025.02.14   1	C_R         0.700     120.0  
+2025.02.14   1	C_2         0.670     120.0  
+2025.02.14   1	C_1         0.602     180.0  
+2025.02.14   1	N_3         0.702     106.7  
+2025.02.14   1	N_R         0.650     120.0  
+2025.02.14   1	N_2         0.615     120.0  
+2025.02.14   1	N_1         0.556     180.0  
+2025.02.14   1	O_3         0.660     104.51 
+2025.02.14   1	O_R         0.660     120.0  
+2025.02.14   1	O_2         0.560     120.0  
+2025.02.14   1	O_1         0.528     180.0  
+2025.02.14   1	F_          0.611     180.0  
+2025.02.14   1	Al3         1.047     109.471
+2025.02.14   1	Si3         0.937     109.471
+2025.02.14   1	P_3         0.890      93.3  
+2025.02.14   1	S_3         1.040      92.1  
+2025.02.14   1	Cl          0.997     180.0  
+2025.02.14   1	Ga3         1.210     109.471
+2025.02.14   1	Ge3         1.210     109.471
+2025.02.14   1	As3         1.210      92.1  
+2025.02.14   1	Se3         1.210      90.6  
+2025.02.14   1	Br          1.167     180.0  
+2025.02.14   1	In3         1.390     109.471
+2025.02.14   1	Sn3         1.373     109.471
+2025.02.14   1	Sb3         1.432      91.6  
+2025.02.14   1	Te3         1.280      90.3  
+2025.02.14   1	I_          1.360     180.0  
+2025.02.14   1	Na          1.860      90.0  
+2025.02.14   1	Ca          1.940      90.0  
+2025.02.14   1	Fe          1.285      90.0  
+2025.02.14   1	Zn          1.330     109.471
+2025.02.14   2	Cu          1.302      90.0  
+2025.02.14   2	Ni          1.164      90.0  
+2025.02.14   2	Mg          1.421      90.0  
+2025.02.14   1	C_R1        0.700     120.0  
+2025.02.14   1	C_34        0.770     109.471
+2025.02.14   1	C_33        0.770     109.471
+2025.02.14   1	C_32        0.770     109.471
+2025.02.14   1	C_31        0.770     109.471
+
+#nonbond(12-6)         	  dreiding
+
+> E = eps * [(sigma(ij)*/r(ij))**12 - (sigma(ij)*/r(ij))**6]
+>
+>   = 4 * eps(ij) * [(sigma(ij)*/r(ij))**12 - (sigma(ij)*/r(ij))**6]
+>
+> where        sigma = rmin / 2**1/6
+>
+>          sigma(ij) = sqrt(sigma(i) * sigma(j))
+>
+>            eps(ij) = sqrt(eps(i) * eps(j))
+
+@type rmin-eps
+@combination arithmetic
+@units sigma Å
+@units eps kcal/mol
+
+! Version   Ref       I    rmin(sigma)   eps
+!---------  ----  --------  --------  --------
+2025.02.14     1  H_          3.1950    0.0152
+2025.02.14     1  H__HB       3.1950    0.0001
+2025.02.14     1  H__b        3.1950    0.0152
+2025.02.14     1  B_3         4.0200    0.0950
+2025.02.14     1  B_2         4.0200    0.0950
+2025.02.14     1  C_3         3.8983    0.0951
+2025.02.14     1  C_R         3.8983    0.0951
+2025.02.14     1  C_2         3.8983    0.0951
+2025.02.14     1  C_1         3.8983    0.0951
+2025.02.14     1  N_3         3.6621    0.0774
+2025.02.14     1  N_R         3.6621    0.0774
+2025.02.14     1  N_2         3.6621    0.0744
+2025.02.14     1  N_1         3.6621    0.0744
+2025.02.14     1  O_3         3.4046    0.0957
+2025.02.14     1  O_R         3.4046    0.0957
+2025.02.14     1  O_2         3.4046    0.0957
+2025.02.14     1  O_1         3.4046    0.0957
+2025.02.14     1  F_          3.4720    0.0725
+2025.02.14     1  Al3         4.3900    0.3100
+2025.02.14     1  Si3         4.2700    0.3100
+2025.02.14     1  P_3         4.1500    0.3200
+2025.02.14     1  S_3         4.0300    0.3440
+2025.02.14     1  Cl          3.9503    0.2833
+2025.02.14     1  Ga3         4.3900    0.4000
+2025.02.14     1  Ge3         4.2700    0.4000
+2025.02.14     1  As3         4.1500    0.4100
+2025.02.14     1  Se3         4.0300    0.4300
+2025.02.14     1  Br          3.9500    0.3700
+2025.02.14     1  In3         4.5900    0.5500
+2025.02.14     1  Sn3         4.4700    0.5500
+2025.02.14     1  Sb3         4.3500    0.5500
+2025.02.14     1  Te3         4.2300    0.5700
+2025.02.14     1  I_          4.1500    0.5100
+2025.02.14     1  Na          3.1440    0.5000
+2025.02.14     1  Ca          3.4720    0.0500
+2025.02.14     1  Fe          4.5400    0.0550
+2025.02.14     1  Zn          4.5400    0.0550
+2025.02.14     1  Cu          4.5400    0.0550
+2025.02.14     1  Ni          4.5400    0.0550
+2025.02.14     1  Mg          4.5400    0.0550
+2025.02.14     1  C_R1        4.2300    0.1356
+2025.02.14     1  C_34        4.2370    0.3016
+2025.02.14     1  C_33        4.1524    0.2500
+2025.02.14     1  C_32        4.0677    0.1984
+2025.02.14     1  C_31        3.9830    0.1467
+
+#charges dreiding
+
+
+! Version   Ref   I          Charge
+!---------  ----  --------   ------
+
+#dreiding_out_of_plane 	dreiding
+
+> E = 1/2*K*[1/sin(Psi0)]**2*[cos(Psi) - cos(Psi0)]**2
+> unless Phi0 == 0
+> E = K*[1 - cos(Psi)] for Phi0 = 0
+
+@units K2 kcal/mol/rad**2
+@units Psi0 degrees
+
+! Version   Ref     I          J        K          L        K2        Psi0
+!---------  ----  --------  --------  --------  --------  --------  --------
+2025.02.14     1    *	       B_2 	*	  *        40.0       0.0
+2025.02.14     1    *	       C_2 	*	  *        40.0       0.0
+2025.02.14     1    *	       C_R 	*	  *        40.0       0.0
+2025.02.14     1    *	       N_2 	*	  *        40.0       0.0
+2025.02.14     1    *	       N_R 	*	  *        40.0       0.0
+2025.02.14     1    *	       O_2 	*	  *        40.0       0.0
+2025.02.14     1    *	       O_R 	*	  *        40.0       0.0
+2025.02.14     1    *	       C_31	*	  *        40.0      54.74
+
+
+#buckingham         dreiding
+
+> E = A*exp(-r/rho) - C/r**6
+>
+> where     A = eps*(6./(S - 6.))*np.exp(S)
+>           C = eps*(S/(S - 6.)*rho**6)
+
+@units A kcal/mol
+@units rho Å
+@units C kcal/mol*Å**6
+
+! Version   Ref       I      rho        eps        S
+!---------  ----  --------  --------  --------  --------
+2025.02.14     1  H_          3.1950    0.0152   12.3820
+2025.02.14     1  H__HB       3.1950    0.0001   12.0000
+2025.02.14     1  H__b        3.1950    0.0152   12.3820
+2025.02.14     1  B_3         4.0200    0.0950   14.2300
+2025.02.14     1  B_2         4.0200    0.0950   14.2300
+2025.02.14     1  C_3         3.8983    0.0951   14.0340
+2025.02.14     1  C_R         3.8983    0.0951   14.0340
+2025.02.14     1  C_2         3.8983    0.0951   14.0340
+2025.02.14     1  C_1         3.8983    0.0951   14.0340
+2025.02.14     1  N_3         3.6621    0.0774   13.8430
+2025.02.14     1  N_R         3.6621    0.0774   13.8430
+2025.02.14     1  N_2         3.6621    0.0744   13.8430
+2025.02.14     1  N_1         3.6621    0.0744   13.8430
+2025.02.14     1  O_3         3.4046    0.0957   13.4830
+2025.02.14     1  O_R         3.4046    0.0957   13.4830
+2025.02.14     1  O_2         3.4046    0.0957   13.4830
+2025.02.14     1  O_1         3.4046    0.0957   13.4830
+2025.02.14     1  F_          3.4720    0.0725   14.4440
+2025.02.14     1  Al3         4.3900    0.3100   12.0000
+2025.02.14     1  Si3         4.2700    0.3100   12.0000
+2025.02.14     1  P_3         4.1500    0.3200   12.0000
+2025.02.14     1  S_3         4.0300    0.3440   12.0000
+2025.02.14     1  Cl          3.9503    0.2833   13.8610
+2025.02.14     1  Ga3         4.3900    0.4000   12.0000
+2025.02.14     1  Ge3         4.2700    0.4000   12.0000
+2025.02.14     1  As3         4.1500    0.4100   12.0000
+2025.02.14     1  Se3         4.0300    0.4300   12.0000
+2025.02.14     1  Br          3.9500    0.3700   12.0000
+2025.02.14     1  In3         4.5900    0.5500   12.0000
+2025.02.14     1  Sn3         4.4700    0.5500   12.0000
+2025.02.14     1  Sb3         4.3500    0.5500   12.0000
+2025.02.14     1  Te3         4.2300    0.5700   12.0000
+2025.02.14     1  I_          4.1500    0.5100   12.0000
+2025.02.14     1  Na          3.1440    0.5000   12.0000
+2025.02.14     1  Ca          3.4720    0.0500   12.0000
+2025.02.14     1  Fe          4.5400    0.0550   12.0000
+2025.02.14     1  Zn          4.5400    0.0550   12.0000
+2025.02.14     1  Cu          4.5400    0.0550   12.0000
+2025.02.14     1  Ni          4.5400    0.0550   12.0000
+2025.02.14     1  Mg          4.5400    0.0550   12.0000
+2025.02.14     1  C_R1        4.2300    0.1356   14.0340
+2025.02.14     1  C_34        4.2370    0.3016   12.0000
+2025.02.14     1  C_33        4.1524    0.2500   12.0000
+2025.02.14     1  C_32        4.0677    0.1984   12.0000
+2025.02.14     1  C_31        3.9830    0.1467   12.0000
+
+#templates dreiding
+{
+    "H_": {
+        "2025.02.16": {
+            "smarts": [
+                "[H:1]"
+            ],
+            "description": "Hydrogen",
+            "overrides": []
+        }
+    },
+    "H__HB": {
+        "2025.02.16": {
+            "smarts": [
+                "[N,O,F][H:1]"
+            ],
+            "description": "Hydrogen bonding donor hydrogen",
+            "overrides": []
+        }
+    },
+    "H__b": {
+        "2025.02.16": {
+            "smarts": [
+                "[B][H:1][B]"
+            ],
+            "description": "Bridging hydrogen in diborane",
+            "overrides": []
+        }
+    },
+    "B_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[BD3:1]"
+            ],
+            "description": "SP3 boron",
+            "overrides": []
+        }
+    },
+    "B_2": {
+        "2025.02.16": {
+            "smarts": [
+                "[*]=[BD2:1]"
+            ],
+            "description": "SP2 boron",
+            "overrides": []
+        }
+    },
+    "C_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[CD4:1]"
+            ],
+            "description": "SP3 carbon",
+            "overrides": []
+        }
+    },
+    "C_2": {
+        "2025.02.16": {
+            "smarts": [
+	        "[CD3:1]=[CD3:2]",
+                "[*]=[CD3:1]"
+            ],
+            "description": "SP2 carbon",
+            "overrides": []
+        }
+    },
+    "C_1": {
+        "2025.02.16": {
+            "smarts": [
+	        "[CD2:1]#[CD2:2]",
+                "[*]#[CD2:1]"
+            ],
+            "description": "SP carbon",
+            "overrides": []
+        }
+    },
+    "C_R": {
+        "2025.02.16": {
+            "smarts": [
+                "[c:1]"
+            ],
+            "description": "aromatic carbon",
+            "overrides": []
+        }
+    },
+    "N_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[ND3:1]"
+            ],
+            "description": "SP3 nitrogen",
+            "overrides": []
+        }
+    },
+    "N_2": {
+        "2025.02.16": {
+            "smarts": [
+                "[*]=[ND2:1]"
+            ],
+            "description": "SP2 nitrogen",
+            "overrides": []
+        }
+    },
+    "N_1": {
+        "2025.02.16": {
+            "smarts": [
+                "[*]#[ND1:1]"
+            ],
+            "description": "SP nitrogen",
+            "overrides": []
+        }
+    },
+    "N_R": {
+        "2025.02.16": {
+            "smarts": [
+                "[n:1]"
+            ],
+            "description": "aromatic nitrogen",
+            "overrides": []
+        }
+    },
+    "O_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[OD2:1]"
+            ],
+            "description": "SP3 oxygen",
+            "overrides": []
+        }
+    },
+    "O_2": {
+        "2025.02.16": {
+            "smarts": [
+                "[*]=[OD1:1]"
+            ],
+            "description": "SP2 oxygen",
+            "overrides": []
+        }
+    },
+    "O_1": {
+        "2025.02.16": {
+            "smarts": [
+                "[*]#[OD1:1]"
+            ],
+            "description": "SP oxygen",
+            "overrides": []
+        }
+    },
+    "O_R": {
+        "2025.02.16": {
+            "smarts": [
+                "[o:1]"
+            ],
+            "description": "aromatic oxygen",
+            "overrides": []
+        }
+    },
+    "F_": {
+        "2025.02.16": {
+            "smarts": [
+                "[FD1:1]"
+            ],
+            "description": "fluoride",
+            "overrides": []
+        }
+    },
+    "Al3": {
+        "2025.02.16": {
+            "smarts": [
+                "[AlD3:1]"
+            ],
+            "description": "trivalent aluminum",
+            "overrides": []
+        }
+    },
+    "Si3": {
+        "2025.02.16": {
+            "smarts": [
+                "[SiD3:1]"
+            ],
+            "description": "SP3 silicon",
+            "overrides": []
+        }
+    },
+    "P_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[PD3:1]"
+            ],
+            "description": "SP3 phosphorus",
+            "overrides": []
+        }
+    },
+    "S_3": {
+        "2025.02.16": {
+            "smarts": [
+                "[SD2:1]"
+            ],
+            "description": "SP3 sulfur",
+            "overrides": []
+        }
+    },
+    "Cl": {
+        "2025.02.16": {
+            "smarts": [
+                "[ClD1:1]"
+            ],
+            "description": "chloride",
+            "overrides": []
+        }
+    },
+    "Ga3": {
+        "2025.02.16": {
+            "smarts": [
+                "[GaD3:1]"
+            ],
+            "description": "trivalent gallium",
+            "overrides": []
+        }
+    },
+    "Ge3": {
+        "2025.02.16": {
+            "smarts": [
+                "[GeD4:1]"
+            ],
+            "description": "SP3 germanium",
+            "overrides": []
+        }
+    },
+    "As3": {
+        "2025.02.16": {
+            "smarts": [
+                "[AsD3:1]"
+            ],
+            "description": "trivalent arsenic",
+            "overrides": []
+        }
+    },
+    "Se3": {
+        "2025.02.16": {
+            "smarts": [
+                "[SeD2:1]"
+            ],
+            "description": "divalent selenium",
+            "overrides": []
+        }
+    },
+    "Br": {
+        "2025.02.16": {
+            "smarts": [
+                "[BrD1:1]"
+            ],
+            "description": "bromide",
+            "overrides": []
+        }
+    },
+    "In3": {
+        "2025.02.16": {
+            "smarts": [
+                "[InD3:1]"
+            ],
+            "description": "trivalent indium",
+            "overrides": []
+        }
+    },
+    "Sn3": {
+        "2025.02.16": {
+            "smarts": [
+                "[SnD4:1]"
+            ],
+            "description": "tetravalent tin",
+            "overrides": []
+        }
+    },
+    "Sb3": {
+        "2025.02.16": {
+            "smarts": [
+                "[SbD3:1]"
+            ],
+            "description": "trivalent antimony",
+            "overrides": []
+        }
+    },
+    "Te3": {
+        "2025.02.16": {
+            "smarts": [
+                "[TeD2:1]"
+            ],
+            "description": "divalent tellurium",
+            "overrides": []
+        }
+    },
+    "I_": {
+        "2025.02.16": {
+            "smarts": [
+                "[ID1:1]"
+            ],
+            "description": "iodide",
+            "overrides": []
+        }
+    },
+    "Na": {
+        "2025.02.16": {
+            "smarts": [
+                "[Na:1]"
+            ],
+            "description": "sodium",
+            "overrides": []
+        }
+    },
+    "Ca": {
+        "2025.02.16": {
+            "smarts": [
+                "[Ca:1]"
+            ],
+            "description": "calcium",
+            "overrides": []
+        }
+    },
+    "Fe": {
+        "2025.02.16": {
+            "smarts": [
+                "[Fe:1]"
+            ],
+            "description": "iron",
+            "overrides": []
+        }
+    },
+    "Zn": {
+        "2025.02.16": {
+            "smarts": [
+                "[Zn:1]"
+            ],
+            "description": "zinc",
+            "overrides": []
+        }
+    }
+}
+
+#reference 1
+@Author Paul Saxe
+@Date 2025-02-14
+Dreiding forcefield
+
+@bibtex @article{mayo:1990:8897,
+  author       = {Mayo, S L and Olafson, B D and Goddard, III, W A},
+  title        = {DREIDING: A generic force field for molecular simulations},
+  annote       = {The authors report the parameters for a new generic force field, DREIDING, that they find useful for predicting structures and dynamics of organic, biological, and main-group inorganic molecules. The philosophy in DREIDING is to use general force constants and geometry parameters based on simple hybridization considerations rather than individual force constants and geometric parameters that depend on the particular combination of atoms involved in the bond, angle, or torsion terms. Thus all bond distances are derived from atomic radii, and there is only one force constant each for bonds, angles, and inversions and only six different values for torsional barriers. Parameters are defined for all possible combinations of atoms and new atoms can be added to the force field rather simply. This paper reports the parameters for the nonmetallic main-group elements (B, C, N, O, F columns for the C, Si, Ge, and Sn rows) plus H and a few metals (Na, Ca, Zn, Fe). The accuracy of the DREIDING force field is tested by comparing with (i) 76 accurately determined crystal structures of organic compounds involving H, C, N, O, F, P, S, Cl, and Br, (ii) rotational barriers of a number of molecules, and (iii) relative conformational energies and barriers of a number of molecules. The authors find excellent results for these systems.},
+  doi          = {10.1021/j100389a010},
+  url          = {https://www.osti.gov/biblio/5941560},
+  journal      = {Journal of Physical Chemistry; (USA)},
+  issn         = {ISSN 0022-3654},
+  volume       = {94:26},
+  pages        = {8897--8909},
+  place        = {United States},
+  year         = {1990},
+  month        = {12}
+}
+#end
+
+#reference 2
+
+R1 taken from UFF, the rest are just a copy of DREIDING Zn
+
+#end

@@ -1,0 +1,19 @@
+name: dreiding
+cutoff: 10.0              # nonbonded (van der Waals / Coulomb) cutoff in A
+ffield: dreiding          # parameter library: dreiding (Lennard-Jones nonbonds), dreiding/X6 (exponential-6), a .frc path (file.frc:variant), or a native JSON path
+topology: null            # topology JSON written by MolecularTopology.save (or give types + bonds inline)
+types: null               # per-atom DREIDING type names, e.g. [C_3, H_, H_, ...]; or build the topology with Dreiding.from_atoms (SMARTS typing)
+bonds: null               # bond index pairs, e.g. [[0, 1], [0, 2]]
+bond_orders: null         # bond order per bond (1, 1.5, 2, 3); omitted = all single bonds. Drives the stretch force constants (eq 9) and the torsion rules (eqs 14-23)
+charges: null             # per-atom partial charges in e; DREIDING prescribes none (the paper uses Gasteiger charges where electrostatics matter)
+switch_width: 0.0         # width (A) of the quintic switching function at the cutoff; 0 = plain truncation
+bond_style: harmonic      # harmonic (eq 4a) or morse (eq 5a, the DREIDING/M variant)
+angle_style: cosine       # cosine (the harmonic-cosine form of eq 10a) or harmonic (the theta form of eq 11); linear centers always use eq 10'
+hbond: true               # include the explicit 12-10 hydrogen-bond term (eq 38) on H__HB donor triplets
+hbond_cutoff: null        # donor-acceptor cutoff of the hydrogen-bond term (default: the nonbonded cutoff)
+hbond_angle: 90.0         # donor-hydrogen-acceptor angle cutoff in degrees (the paper's restriction)
+trainable: []             # generator groups to refit, e.g. [radius, vdw_d0, torsion_v, charge]; "all" for every group
+# DREIDING generates every valence term from per-atom generators by hybridization rules
+# (Mayo, Olafson & Goddard, J. Phys. Chem. 94, 8897, 1990), so what is trainable are the
+# generators themselves: radius, theta0, bond_k, bond_d, angle_k, torsion_v, oop_k,
+# oop_psi0, vdw_r0, vdw_d0, x6_zeta, hbond_d0, hbond_r0, plus this model's charge.
