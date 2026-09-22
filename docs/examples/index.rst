@@ -149,6 +149,27 @@ and checking NVE energy conservation.
    nb/ffnn/opls/opls_conformational_energetics
    nb/ffnn/opls/opls_lopls_torsion_refit
 
+DREIDING (ffnn)
+===============
+
+The rule-generated generic force field, tested against the paper that
+defined it: ``dreiding_conformational_energetics.ipynb`` reproduces the
+single-bond rotational barriers of Table XI (fourteen molecules, mean
+difference from the paper's own calculated column ~0.01 kcal/mol) and the
+butane and cyclohexane entries of Table XII, all from relaxed scans, and
+shows where DREIDING's deliberate simplifications part company with
+experiment. ``dreiding_refit_aromatics.ipynb`` then treats the generators
+as trainable parameters: refit them on benzene alone against rMD17 PBE
+forces and ask what that does to naphthalene and toluene, neither of which
+was trained on — a direct test of the transferability DREIDING claims.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: DREIDING (ffnn)
+
+   nb/ffnn/dreiding/dreiding_conformational_energetics
+   nb/ffnn/dreiding/dreiding_refit_aromatics
+
 Deployment: MDI (common)
 ========================
 
@@ -191,3 +212,4 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/les_verification
    nb/fidelity_checks/bamboo_verification
    nb/fidelity_checks/opls_verification
+   nb/fidelity_checks/dreiding_verification

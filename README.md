@@ -191,6 +191,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
 | ReaxFF / ReaxFF-nn | ffnn | bond orders + EEM charges (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 | OPLS / OPLS-AA / L-OPLS | ffnn | fixed valence topology (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
+| DREIDING / DREIDING-X6 | ffnn | rule-generated valence terms (the force field is the model) | Complete: Training, Evaluation, Deployment (ASE only) |
 
 
 <details> <!-- Start Package layout -->
@@ -240,7 +241,7 @@ src/xnn/
 │   │                             typing (SMARTS atom typing), elements
 │   ├── data/                   - shipped parameter files: oplsaa.frc, lopls.frc, oplsaa_1996.frc, reaxff/*.frc
 │   └── models/                 - reaxff, ffield, opls, oplslib, topology
-│       └── …                     + ReaxFF / ReaxFF-nn reactive force field, OPLS / L-OPLS fixed-topology
+│       └── …                     + ReaxFF / ReaxFF-nn reactive force field, OPLS / L-OPLS and DREIDING fixed-topology
 │                                   force field, the .frc <-> model parameter bridges
 ├── transformer/                shared graph-transformer building blocks
 │   ├── attention.py            - EdgeMultiheadAttention (multi-head QKV attention on edges)
@@ -290,6 +291,13 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
     torsion refit of Siu et al. (2012) by gradient descent
     (`trainable=("dihedral_v",)`) and writes the trained field back out as a
     `.frc` file.
+  + `dreiding/dreiding_conformational_energetics.ipynb` reproduces the
+    rotational barriers of Table XI and the conformational energies of Table XII
+    of the 1990 DREIDING paper (14 molecules, mean difference ~0.01 kcal/mol
+    from the paper's own calculated values) from relaxed scans.
+  + `dreiding/dreiding_refit_aromatics.ipynb` refits DREIDING's *generators*
+    on benzene against rMD17 PBE forces and tests whether they transfer to
+    naphthalene and toluene, neither of which is trained on.
 - **Data and deployment:**
   + `data/load_dataset_tutorial.ipynb` covers the one-line dataset hub used by
     every training notebook (`load_dataset("argon_md")`, `load_dataset("rmd17",
@@ -303,6 +311,10 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
     NequIP, Allegro, CACE, SchNet, PhysNet, ANI, BAMBOO and LES.
   + OPLS is verified against OpenMM (an independent MD engine, optional
     dependency) in `opls_verification.ipynb` and `tests/test_opls.py`.
+  + DREIDING is verified term by term against LAMMPS's DREIDING styles
+    (an independent MD engine, optional dependency) in
+    `dreiding_verification.ipynb`, and against the paper's own tables in
+    `tests/test_dreiding.py`.
   + **ReaxFF is the exception:** the authors' reference implementation of
     ReaxFF-nn is AGPL-licensed, so no verification notebook or test depending
     on it (and no code derived from it) is distributed with this MIT-licensed

@@ -133,6 +133,29 @@ def perceive_bonds(mol) -> list[tuple[int, int]]:
                   for b in mol.GetBonds())
 
 
+def perceive_bond_orders(mol) -> list[float]:
+    """Bond orders of an RDKit molecule, aligned with :func:`perceive_bonds`.
+
+    Aromatic bonds come back as 1.5 (RDKit's ``GetBondTypeAsDouble``), the
+    resonance bond order of rule-generated force fields such as DREIDING.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        The molecule.
+
+    Returns
+    -------
+    list of float
+        One order per bond, in the sorted ``(i, j)`` order of
+        :func:`perceive_bonds`.
+    """
+    pairs = sorted(((min(b.GetBeginAtomIdx(), b.GetEndAtomIdx()),
+                     max(b.GetBeginAtomIdx(), b.GetEndAtomIdx())),
+                    float(b.GetBondTypeAsDouble())) for b in mol.GetBonds())
+    return [order for _, order in pairs]
+
+
 def _map_list(pattern) -> list[int]:
     """Pattern atom indices carrying atom maps, in map-number order."""
     ind = {}

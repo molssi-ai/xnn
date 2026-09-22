@@ -121,6 +121,10 @@ class MolecularTopology:
         Per-atom type names (e.g. ``"opls_135"``), length ``n_atoms``.
     bonds : list[tuple[int, int]]
         Bonds as ``(i, j)`` with ``i < j``.
+    bond_orders : list[float]
+        Bond order per entry of ``bonds`` (1, 1.5, 2, 3); empty means all
+        single bonds. Only rule-generated force fields (DREIDING) consume
+        these; OPLS ignores them.
     angles : list[tuple[int, int, int]]
         Angles ``(i, j, k)`` with center ``j`` and ``i < k``.
     dihedrals : list[tuple[int, int, int, int]]
@@ -140,6 +144,7 @@ class MolecularTopology:
 
     types: list[str]
     bonds: list[tuple[int, int]]
+    bond_orders: list[float] = field(default_factory=list)
     angles: list[tuple[int, int, int]] = field(default_factory=list)
     dihedrals: list[tuple[int, int, int, int]] = field(default_factory=list)
     impropers: list[tuple[int, int, int, int]] = field(default_factory=list)
@@ -159,7 +164,9 @@ class MolecularTopology:
     def from_bonds(cls, types: Sequence[str],
                    bonds: Sequence[Sequence[int]],
                    impropers: Sequence[Sequence[int]] = (),
-                   improper_keys: Sequence[str] = ()) -> "MolecularTopology":
+                   improper_keys: Sequence[str] = (),
+                   bond_orders: Optional[Sequence[float]] = None
+                   ) -> "MolecularTopology":
         """Build a topology from atom types and a bond list.
 
         Angles are every unordered pair of bonded neighbors of a common
@@ -180,6 +187,9 @@ class MolecularTopology:
             Exact improper type key per improper (same length as
             ``impropers``). Leave empty to let the force field resolve each
             improper from the classes of its atoms (center third).
+        bond_orders : sequence of float, optional
+            Bond order per entry of ``bonds`` (1, 1.5, 2, 3), in the *input*
+            bond order; omitted means all single bonds.
 
         Returns
         -------
@@ -190,13 +200,17 @@ class MolecularTopology:
         ------
         ValueError
             If a bond index is out of range, a bond is duplicated or joins an
-            atom to itself, or ``impropers`` and ``improper_keys`` disagree in
-            length.
+            atom to itself, ``impropers`` and ``improper_keys`` disagree in
+            length, or ``bond_orders`` does not match ``bonds``.
         """
         n = len(types)
+        if bond_orders is not None and len(bond_orders) != len(bonds):
+            raise ValueError(f"got {len(bond_orders)} bond orders for "
+                             f"{len(bonds)} bonds")
         norm_bonds: list[tuple[int, int]] = []
+        order_of: dict[tuple[int, int], float] = {}
         seen = set()
-        for pair in bonds:
+        for m, pair in enumerate(bonds):
             i, j = int(pair[0]), int(pair[1])
             if not (0 <= i < n and 0 <= j < n):
                 raise ValueError(f"bond ({i}, {j}) is out of range for "
@@ -208,7 +222,11 @@ class MolecularTopology:
                 raise ValueError(f"duplicate bond {key}")
             seen.add(key)
             norm_bonds.append(key)
+            if bond_orders is not None:
+                order_of[key] = float(bond_orders[m])
         norm_bonds.sort()
+        norm_orders = [order_of[b] for b in norm_bonds] if bond_orders \
+            is not None else []
 
         if improper_keys and len(impropers) != len(improper_keys):
             raise ValueError("impropers and improper_keys must have the same "
@@ -255,7 +273,8 @@ class MolecularTopology:
             if pair not in excl:
                 pairs14.add(pair)
 
-        return cls(types=list(types), bonds=norm_bonds, angles=angles,
+        return cls(types=list(types), bonds=norm_bonds,
+                   bond_orders=norm_orders, angles=angles,
                    dihedrals=dihedrals,
                    impropers=[tuple(int(x) for x in im) for im in impropers],
                    improper_keys=list(improper_keys),
@@ -267,7 +286,9 @@ class MolecularTopology:
                  scale: float = 1.2,
                  impropers: Sequence[Sequence[int]] = (),
                  improper_keys: Sequence[str] = (), *,
-                 forcefield=None, charge: int = 0) -> "MolecularTopology":
+                 forcefield=None, charge: int = 0,
+                 bond_orders: Optional[Sequence[float]] = None
+                 ) -> "MolecularTopology":
         """Build a topology for an ASE ``Atoms`` object.
 
         Parameters
@@ -308,11 +329,14 @@ class MolecularTopology:
             if forcefield is None:
                 raise ValueError("give per-atom types, or a forcefield whose "
                                  "templates assign them")
-            from ..common.typing import assign_atom_types, perceive_bonds
+            from ..common.typing import (assign_atom_types, perceive_bonds,
+                                         perceive_bond_orders)
             types, mol = assign_atom_types(atoms, forcefield, charge=charge,
                                            bonds=bonds, return_mol=True)
             if bonds is None:
                 bonds = perceive_bonds(mol)
+                if bond_orders is None:
+                    bond_orders = perceive_bond_orders(mol)
         if len(types) != len(atoms):
             raise ValueError(f"got {len(types)} types for {len(atoms)} atoms")
         if bonds is None:
@@ -321,7 +345,8 @@ class MolecularTopology:
                                 atoms.get_atomic_numbers(), cell=cell,
                                 scale=scale)
         return cls.from_bonds(types, bonds, impropers=impropers,
-                              improper_keys=improper_keys)
+                              improper_keys=improper_keys,
+                              bond_orders=bond_orders)
 
     def replicate(self, n_copies: int) -> "MolecularTopology":
         """Tile this topology into ``n_copies`` consecutive molecules.
@@ -347,12 +372,13 @@ class MolecularTopology:
             return [tuple(x + off for x in item) for item in items]
 
         out = MolecularTopology(types=list(self.types) * n_copies,
-                                bonds=[], angles=[], dihedrals=[],
-                                impropers=[], improper_keys=[],
+                                bonds=[], bond_orders=[], angles=[],
+                                dihedrals=[], impropers=[], improper_keys=[],
                                 exclusions=[], pairs14=[])
         for c in range(n_copies):
             off = c * n
             out.bonds += shift(self.bonds, off)
+            out.bond_orders += list(self.bond_orders)
             out.angles += shift(self.angles, off)
             out.dihedrals += shift(self.dihedrals, off)
             out.impropers += shift(self.impropers, off)
@@ -378,6 +404,8 @@ class MolecularTopology:
             "impropers": [list(im) for im in self.impropers],
             "improper_keys": self.improper_keys,
         }
+        if self.bond_orders:
+            data["bond_orders"] = list(self.bond_orders)
         Path(path).write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -400,4 +428,5 @@ def read_topology(path: Union[str, Path]) -> MolecularTopology:
     data = json.loads(Path(path).read_text())
     return MolecularTopology.from_bonds(
         data["types"], data["bonds"], impropers=data.get("impropers", ()),
-        improper_keys=data.get("improper_keys", ()))
+        improper_keys=data.get("improper_keys", ()),
+        bond_orders=data.get("bond_orders"))

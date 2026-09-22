@@ -17,13 +17,14 @@ from .frc import (ForceField, FrcFile, Section, Row, read_frc, write_frc,
                   read_forcefield, find_forcefield, list_forcefields,
                   builtin_data_dir, register_section_schema, convert_units)
 from .typing import (assign_atom_types, to_rdkit, perceive_bonds,
-                     AtomTypingError)
+                     perceive_bond_orders, AtomTypingError)
 from .elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z, atomic_number
 
 __all__ = [
     "ForceField", "FrcFile", "Section", "Row", "read_frc", "write_frc",
     "read_forcefield", "find_forcefield", "list_forcefields", "builtin_data_dir",
     "register_section_schema", "convert_units",
-    "assign_atom_types", "to_rdkit", "perceive_bonds", "AtomTypingError",
+    "assign_atom_types", "to_rdkit", "perceive_bonds",
+    "perceive_bond_orders", "AtomTypingError",
     "CHEMICAL_SYMBOLS", "SYMBOL_TO_Z", "atomic_number",
 ]
