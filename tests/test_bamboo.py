@@ -307,3 +307,17 @@ def test_parity_vs_original_bamboo():
     full = up_out["forces"] + up_out["qeq_force"]
     assert (xout["forces"].detach() - full).abs().max() < 1e-11
     assert (xout["dipole"][0] - up_out["dipole"][0]).abs().max() < 1e-11
+
+
+def test_d3_reference_set_switch():
+    """BAMBOO's D3(CSO) keeps Grimme's 2010 tables by default; 2024 is opt-in."""
+    torch.manual_seed(0)
+    default = _build(n_interactions=2, use_dispersion=True)
+    assert default.dispersion._c6ab.shape == (95, 95, 5, 5, 3)
+    torch.manual_seed(0)
+    newer = _build(n_interactions=2, use_dispersion=True, d3_references="2024")
+    assert newer.dispersion._c6ab.shape == (95, 95, 7, 7, 3)
+    assert torch.equal(newer.dispersion._c6ab[:87, :87, :5, :5],
+                       default.dispersion._c6ab[:87, :87])
+    g = _graph()
+    assert torch.allclose(default(g)["energy"], newer(g)["energy"])   # no actinides

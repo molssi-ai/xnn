@@ -109,6 +109,12 @@ archive, so a consumer can introspect the artifact without xnn::
    :class:`~xnn.common.deploy.mdi_engine.MDIEngine`. The
    ``long_range`` metadata key records whether this applies.
 
+   The MDI engine (``xnn mdi``) also understands ``>TOTCHARGE`` and the
+   ``--total-charge`` option for the system's net charge, adds D3 / D4 on top
+   of a plain checkpoint with ``--dispersion`` (refused if the checkpoint
+   already includes it), builds graphs at the served model's own cutoff, and
+   serves in the checkpoint's dtype unless ``--dtype`` is given.
+
 .. note::
 
    The built-in neighbor list is the brute-force ``O(S N^2)`` reference

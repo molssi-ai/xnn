@@ -88,6 +88,13 @@ examples = [
 ]
 # The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
 ani = ["torchani==2.2.4", "h5py>=3.0"]
+# The DFT-D4 fidelity notebook and parity tests compare against the reference
+# dftd4 Python package (used only as an external oracle). tomli is what
+# its parameter loader wants on Python >= 3.11.
+d4 = ["dftd4>=3.7", "tomli"]
+# The DFT-D3 fidelity notebook and parity tests compare against simple-dftd3's
+# Python package (used only as an external oracle).
+d3 = ["dftd3>=1.0"]
 # The OPLS fidelity notebook and parity test compare against OpenMM.
 # classical force fields: RDKit assigns atom types from the SMARTS templates
 # in .frc force-field files
@@ -126,7 +133,9 @@ version = { attr = "xnn.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-"xnn.dnn.models" = ["*.npz"]   # Grimme D3 reference tables (PhysNet)
+# Grimme D3 / D4 reference data (numerical tables extracted from the dftd4 and
+# simple-dftd3 sources by tools/build_d*_reference.py) and the PhysNet-era D3 tables
+"xnn.common.models" = ["*.npz"]
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
 "xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 

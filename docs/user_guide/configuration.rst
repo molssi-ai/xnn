@@ -71,6 +71,10 @@ All configuration funnels into a single dataclass tree
      - ``energy_weight`` / ``force_weight`` / ``stress_weight``
      - ``1.0`` / ``10.0`` / ``0.0``: loss weights; nonzero enables the head
    * -
+     - ``huber_delta`` (+ ``huber_delta_energy`` / ``_forces`` / ``_stress``)
+     - ``0.0``: squared error. ``> 0`` clips the loss tails past ``delta``
+       (see :ref:`training`); the per-term values override the global one
+   * -
      - ``scheduler``
      - ``"plateau"``: ``cosine | plateau |`` none
 

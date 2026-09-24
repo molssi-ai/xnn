@@ -31,8 +31,11 @@ def structure_to_graph(
     s : dict
         Structure data. Required keys: ``pos`` ``(N, 3)`` and
         ``atomic_numbers`` ``(N,)``. Optional keys: ``cell`` ``(3, 3)``,
-        ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)`` and
-        ``stress`` ``(3, 3)``.
+        ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)``,
+        ``stress`` ``(3, 3)``, ``total_charge`` (scalar net charge; the
+        key ``charge`` is accepted as a synonym) and ``weight`` (scalar
+        per-structure loss weight; see
+        :func:`~xnn.common.train.losses.weighted_loss`).
     cutoff : float
         Neighbor cutoff radius passed to the neighbor list builder.
     device : torch.device, optional
@@ -78,6 +81,7 @@ def structure_to_graph(
     edge_index, cell_shifts = build_neighbor_list(pos, cutoff, cell, pbc)
 
     n = pos.shape[0]
+    charge = s.get("total_charge", s.get("charge"))
     return AtomicGraph(
         pos=pos,
         atomic_numbers=z,
@@ -90,6 +94,8 @@ def structure_to_graph(
         energy=t([s["energy"]]).reshape(1) if s.get("energy") is not None else None,
         forces=t(s["forces"]) if s.get("forces") is not None else None,
         stress=t(s["stress"]).reshape(1, 3, 3) if s.get("stress") is not None else None,
+        total_charge=(t([charge]).reshape(1) if charge is not None else None),
+        weight=(t([s["weight"]]).reshape(1) if s.get("weight") is not None else None),
     )
 
 
@@ -216,8 +222,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     Nodes and edges are concatenated along their respective axes, ``edge_index``
     entries are offset by the running node count, and a ``batch`` vector mapping
     each node to its structure index is built. Optional fields (``cell``/``pbc``,
-    ``energy``, ``forces``, ``stress``) are only included when present in every
-    input graph. Using ``batch_size=1`` effectively disables batching.
+    ``energy``, ``forces``, ``stress``, ``total_charge``, ``weight``) are only
+    included when present in every input graph. Using ``batch_size=1`` effectively disables batching.
 
     Parameters
     ----------
@@ -232,13 +238,15 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     pos, z, batch, n_atoms = [], [], [], []
     edge_index, cell_shifts = [], []
     cells, pbcs = [], []
-    energies, forces, stresses = [], [], []
+    energies, forces, stresses, charges, weights = [], [], [], [], []
 
     node_offset = 0
     has_cell = all(g.cell is not None for g in graphs)
     has_e = all(g.energy is not None for g in graphs)
     has_f = all(g.forces is not None for g in graphs)
     has_s = all(g.stress is not None for g in graphs)
+    has_q = all(g.total_charge is not None for g in graphs)
+    has_w = all(g.weight is not None for g in graphs)
 
     for b, g in enumerate(graphs):
         pos.append(g.pos)
@@ -257,6 +265,10 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
             forces.append(g.forces)
         if has_s:
             stresses.append(g.stress)
+        if has_q:
+            charges.append(g.total_charge)
+        if has_w:
+            weights.append(g.weight)
 
     return AtomicGraph(
         pos=torch.cat(pos, 0),
@@ -270,4 +282,6 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         energy=torch.cat(energies, 0) if has_e else None,
         forces=torch.cat(forces, 0) if has_f else None,
         stress=torch.cat(stresses, 0) if has_s else None,
+        total_charge=torch.cat(charges, 0) if has_q else None,
+        weight=torch.cat(weights, 0) if has_w else None,
     )

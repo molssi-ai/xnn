@@ -303,7 +303,9 @@ neighbor-list radius when set), ``n_features`` (128), ``n_rbf`` (64),
 ``num_blocks`` = ``n_interactions`` (5), ``num_residual_atomic`` (2),
 ``num_residual_interaction`` (3), ``num_residual_output`` (1),
 ``use_electrostatics`` (True), ``use_dispersion`` (True),
-``s6/s8/a1/a2`` (None = learnable), and ``species`` +
+``s6/s8/a1/a2`` (None = learnable), ``d3_references`` ("2010", Grimme's
+original D3 tables as in upstream PhysNet; "2024" selects the current
+``simple-dftd3`` references, which differ only for Fr-Pu), and ``species`` +
 ``atomic_energies``/``atomic_scales``, loaded into the per-element
 ``Eshift``/``Escale`` tables.
 
@@ -337,7 +339,8 @@ the partial charge, ``charge_mlp_layers`` / ``energy_mlp_layers`` (2),
 ``n_elements`` (87), ``act_fn`` ("silu") / ``attn_act_fn`` ("gelu"),
 ``use_electrostatics`` (True), ``coul_damping_beta`` (18.7) /
 ``coul_damping_r0`` (2.2), ``use_dispersion`` (False) for the optional
-D3(CSO), and ``disp_cutoff`` (10.0).
+D3(CSO), ``disp_cutoff`` (10.0) and ``d3_references`` ("2010", upstream's
+tables; "2024" for the current ``simple-dftd3`` references).
 
 .. note::
 
@@ -541,6 +544,74 @@ cutoff: on a dataset without cells ``dl`` is therefore **inert**, and
 Forces and stress flow through
 :class:`~xnn.common.models.outputs.ForceStressOutput` unchanged. The outputs
 gain ``"energy_sr"``, ``"energy_lr"`` and ``"latent_charges"``.
+
+London dispersion: DFT-D3 and DFT-D4
+====================================
+:class:`~xnn.common.models.d4.D4Dispersion` adds the DFT-D4 dispersion
+energy of Caldeweyher *et al.* (*J. Chem. Phys.* **150**, 154122, 2019) to
+**any** registered model, or stands alone as the model ``"d4"``. It is an
+independent PyTorch implementation of the default D4 model (EEQ partial
+charges, BJ-damped two-body term, approximate ATM three-body term) that
+reproduces the reference ``dftd4`` code to floating-point precision --
+energies, forces, virials, coordination numbers, charges, polarizabilities
+and C6 coefficients, molecular and periodic (Ewald-summed EEQ). Enable it
+from a config --
+
+.. code-block:: yaml
+
+   model:
+     name: mace            # or nequip | allegro | cace | schnet | physnet | hdnnp | ani | reaxff | ...
+     extra:
+       dispersion: {s6: 1.0, s8: 1.20065498, a1: 0.40085597, a2: 5.02928789, s9: 1.0}
+
+-- ``dispersion: true`` selects those PBE0-D4 defaults -- or wrap directly
+with ``D4Dispersion(model, **options)``. The wrapper's ``cutoff`` becomes the
+larger of the model's and the D4 cutoffs (the :class:`Trainer` and ``xnn
+export`` build neighbor lists with it), and the wrapped model only ever sees
+the edges within its own radius. Options (:class:`~xnn.common.models.d4.DFTD4`):
+the damping parameters ``s6, s8, a1, a2, s9, alp`` (PBE0-D4 values by default;
+``s9: 0`` disables the three-body term; ``trainable: true`` makes them
+learnable), the model constants ``ga, gc, wf`` (3, 2, 6), the real-space
+cutoffs ``cutoff_pair, cutoff_triple, cutoff_cn, cutoff_eeq_cn`` in Angstrom
+(upstream's 60 / 40 / 30 / 25 bohr by default, which reproduce ``dftd4``
+exactly but are far longer than an MLIP needs -- for condensed-phase training
+use 10-15 Angstrom for the pair term and less for the triples), and the
+quintic switching windows ``switch_width_pair, switch_width_triple`` (0 by
+default; a few Angstrom keeps energy and forces continuous under a finite
+cutoff in MD). The total charge of each structure is read from the graph's
+``total_charge`` (``atoms.info["charge"]`` in ASE files; neutral when
+absent). The outputs gain ``"energy_sr"``, ``"energy_disp"``,
+``"energy_2body"``, ``"energy_3body"``, ``"eeq_charges"``,
+``"coordination_numbers"``, ``"polarizabilities"`` and
+``"dynamic_polarizabilities"`` (pairwise C6 via
+:func:`~xnn.common.models.d4.c6_matrix`). D4 and LES combine freely (LES
+sees the D4-corrected model's features), and every deploy channel carries
+the term: :class:`~xnn.common.models.outputs.ForceStressOutput`, the ASE
+calculator, the TorchScript export (both ABIs) and the LAMMPS wrapper.
+
+The geometry-only predecessor **DFT-D3** (Grimme *et al.*, *J. Chem. Phys.*
+**132**, 154104, 2010; BJ damping from Grimme, Ehrlich & Goerigk, *J. Comput.
+Chem.* **32**, 1456, 2011) is available the same way as
+:class:`~xnn.common.models.d3.D3Dispersion` / the model ``"d3"``, verified
+against the reference ``simple-dftd3`` to floating-point precision for every
+damping function. Select it with ``dispersion: {name: d3, ...}``; the options
+(:class:`~xnn.common.models.d3.DFTD3`) are ``damping`` (``bj`` -- the 2011
+default -- ``zero``, ``mzero`` or ``op``), the damping parameters ``s6, s8,
+s9, a1, a2, rs6, rs8, alp, bet`` (PBE0 values of the papers by default:
+``s8 = 1.2177, a1 = 0.4145, a2 = 4.8593`` for BJ, ``s8 = 0.928, rs6 = 1.287``
+for zero damping; ``s9 = 0`` as recommended in the 2010 paper -- set ``s9: 1``
+for D3-ATM), the cutoffs ``cutoff_pair, cutoff_triple, cutoff_cn`` (upstream's
+60 / 40 / 40 bohr) and the switching widths, ``trainable``, and
+``references``: ``"2024"`` (default) follows the current reference code,
+which re-parametrized the actinides Fr-Pu in ``simple-dftd3`` 1.1.0 and
+added Am-Lr; ``"2010"`` selects Grimme's original reference systems (Z <= 94),
+the tables of the original D3 codes. The two sets are identical for Z <= 86.
+D3 needs no charges, so the outputs carry ``"coordination_numbers"`` and the
+dense ``"c6_matrix"`` instead of the EEQ quantities. Both dispersion models
+share their machinery (:mod:`~xnn.common.models.dispersion`) and one data
+file; the legacy functional D3 API used inside PhysNet and BAMBOO reads the
+2010 set from it by default, so those models stay bit-identical to their
+upstream codes.
 
 Forces and stress
 =================

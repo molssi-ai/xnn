@@ -147,8 +147,10 @@ def main(argv=None):
         meta = {"model": cfg.model.name,
                 "species": (cfg.model.extra or {}).get("species"),
                 "source_checkpoint": args.ckpt}
-        print("wrote", export_torchscript_potential(
-            base, cfg.model.cutoff, args.out, meta))
+        # the model's own cutoff (a dispersion wrapper widens it beyond the
+        # config's core-model radius)
+        cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
+        print("wrote", export_torchscript_potential(base, cutoff, args.out, meta))
 
     elif cmd == "mdi":
         from ..deploy.mdi_engine import main as mdi_main

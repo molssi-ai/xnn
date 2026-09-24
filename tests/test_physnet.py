@@ -18,7 +18,7 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.dnn.models import d3
+from xnn.common.models import d3
 from xnn.dnn.models.physnet import KEHALF, shifted_softplus
 
 
@@ -239,3 +239,18 @@ def test_parity_vs_original_physnet():
     assert res.returncode == 0, res.stdout + res.stderr
     worst = float(res.stdout.strip().splitlines()[-1])
     assert worst < 1e-12
+
+
+def test_d3_reference_set_switch():
+    """PhysNet keeps Grimme's 2010 tables by default; the 2024 set is opt-in."""
+    torch.manual_seed(0)
+    default = _build(num_blocks=1)
+    assert default._d3_c6ab.shape == (95, 95, 5, 5, 3)
+    assert torch.equal(default._d3_c6ab, d3.d3_c6ab.to(default._d3_c6ab.dtype))
+    torch.manual_seed(0)
+    newer = _build(num_blocks=1, d3_references=2024)
+    assert newer._d3_c6ab.shape == (95, 95, 7, 7, 3)
+    assert torch.equal(newer._d3_c6ab[:87, :87, :5, :5], default._d3_c6ab[:87, :87])
+    assert float(newer._d3_c6ab[92, 8, 0, 0, 0]) != float(default._d3_c6ab[92, 8, 0, 0, 0])
+    g = _graph()
+    assert torch.allclose(default(g)["energy"], newer(g)["energy"])   # no actinides

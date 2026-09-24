@@ -86,7 +86,12 @@ Four ideas hold `xnn` together:
    invariant `"node_features"`, so long-range electrostatics/dispersion can be
    added to *any* short-range model with `extra: {long_range: {...}}` — a
    faithful port of the CACE-LR reference implementation (see
-   `tests/test_les.py` and `examples/gnn/les/`).
+   `tests/test_les.py` and `examples/gnn/les/`). `D4Dispersion` and
+   `D3Dispersion` do the same for London dispersion: the charge-dependent
+   DFT-D4 model (Caldeweyher 2019) and the DFT-D3 model (Grimme 2010/2011,
+   all four damping functions), `extra: {dispersion: {name: d4 | d3, ...}}`,
+   each reproducing its reference code (`dftd4`, `simple-dftd3`) to machine
+   precision (`tests/test_d4.py`, `tests/test_d3.py`, `examples/common/`).
 4. **Extensibility via registry + one config, three frontends.**
    `@register_model("name")` + a `from_config` classmethod makes a model usable
    from any of YAML / argparse / Hydra, which all funnel into one
@@ -215,7 +220,7 @@ src/xnn/
 │   ├── config/                 - one dataclass schema; loaders for yaml / argparse / hydra
 │   │   └── …                     + schema, loaders, translate, coerce
 │   ├── models/                 - InteratomicPotential interface, registry, ForceStressOutput, ops (scatter_sum, shifted_softplus)
-│   │   └── …                     + base, registry, outputs, les, ops
+│   │   └── …                     + base, registry, outputs, ops, les (Latent Ewald), dispersion (shared D3/D4 machinery), d4 (DFT-D4), d3 (DFT-D3)
 │   ├── train/                  - Trainer (batch + device aware), weighted energy/force/stress loss
 │   │   └── …                     + trainer, losses
 │   ├── benchmark/              - score pre-trained models on a dataset (metrics, atomization energy, report writers)
@@ -234,7 +239,7 @@ src/xnn/
 ├── dnn/                        descriptor + per-element networks, and PhysNet
 │   ├── featurizers/            - DNN featurizers
 │   │   └── …                     + symmetry functions, AEV
-│   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet and ported Grimme's D3
+│   └── models/                 base (DescriptorPotential), hdnnp, ani, physnet
 │       └── …
 ├── ffnn/                       learnable classical force fields
 │   ├── common/                 - frc (SEAMM .frc force-field files: reader, resolver, writer, registry),
@@ -278,6 +283,10 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
     MACE rebuild.
   + `bamboo_dimer_electrostatics.ipynb` and `bamboo_charge_analysis.ipynb` for
     the hybrid BAMBOO model.
+  + `common/d4/d4_paper_examples.ipynb` and `common/d4/d4_benchmark.ipynb`
+    for the DFT-D4 dispersion add-on (paper reproductions, benchmark against
+    `dftd4`, deployment of a D4-corrected MLIP); `common/d3/` likewise for
+    DFT-D3 (against `simple-dftd3`).
 - **Force fields** (`examples/ffnn/`):
   + `reaxff/reaxff_rmd17_train_test.ipynb` trains the ReaxFF-nn reactive force
     field on rMD17 and `reaxff/reaxff_md_bond_orders.ipynb` analyses its bond
@@ -308,7 +317,7 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
   + `examples/quickstart.py` is a minimal train/predict script on toy data.
 - **Fidelity checks** (`examples/fidelity_checks/<model>_verification.ipynb`):
   + Block-by-block numerical comparisons against the upstream codes for MACE,
-    NequIP, Allegro, CACE, SchNet, PhysNet, ANI, BAMBOO and LES.
+    NequIP, Allegro, CACE, SchNet, PhysNet, ANI, BAMBOO, LES, DFT-D4 and DFT-D3.
   + OPLS is verified against OpenMM (an independent MD engine, optional
     dependency) in `opls_verification.ipynb` and `tests/test_opls.py`.
   + DREIDING is verified term by term against LAMMPS's DREIDING styles

@@ -150,6 +150,21 @@ class OptimConfig:
     scheduler : str
         Learning-rate scheduler (``none`` / ``cosine`` / ``plateau``). MACE uses
         ``ReduceLROnPlateau``. Defaults to ``"plateau"``.
+    huber_delta : float
+        Crossover from quadratic to linear in the loss, which caps the pull of
+        a few large residuals. ``0.0`` (the default) is plain squared error.
+        Note xnn scales the Huber function to agree with the squared error
+        below ``delta``, so the loss weights keep their meaning when it is
+        switched on; MACE uses the textbook half-square form.
+    huber_delta_energy : float, optional
+        Per-term override of ``huber_delta`` for the energy term. ``None``
+        (default) falls back to it. Energies (eV per atom) and forces (eV/A)
+        differ in scale by an order of magnitude, so one delta rarely suits
+        both.
+    huber_delta_forces : float, optional
+        Per-term override of ``huber_delta`` for the force term.
+    huber_delta_stress : float, optional
+        Per-term override of ``huber_delta`` for the stress term.
     """
 
     lr: float = 1e-3
@@ -159,6 +174,10 @@ class OptimConfig:
     force_weight: float = 10.0
     stress_weight: float = 0.0         # > 0 enables stress training (periodic)
     scheduler: str = "plateau"         # none / cosine / plateau (MACE: ReduceLROnPlateau)
+    huber_delta: float = 0.0           # > 0 clips the loss tails; 0 = squared error
+    huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta
+    huber_delta_forces: Optional[float] = None
+    huber_delta_stress: Optional[float] = None
 
 
 @dataclass

@@ -155,6 +155,21 @@ qualitatively -- a CC/CP/PP subset of the BioFragment dimer set, loaded with
 (Neutral homogeneous systems like the Argon set carry no long-range tail, so
 they are deliberately *not* used here.)
 
+The DFT-D4 dispersion add-on (``examples/common/d4/``) is validated against
+the reference ``dftd4`` Python package in
+``examples/fidelity_checks/d4_verification.ipynb`` (install it with the
+``d4`` extra, ``pip install -e ".[d4]"``; the notebook imports ``dftd4``
+*before* ``torch``, because the wheel's bundled OpenMP runtime returns wrong
+EEQ charges once torch's thread pool is active). ``d4_paper_examples.ipynb``
+reproduces figures and numbers of the D4 paper (needs ``rdkit`` for the
+hexenyne geometry and ``ase`` for the g2 and S22 sets) and
+``d4_benchmark.ipynb`` compares accuracy and timing with ``dftd4`` and runs
+a D4-corrected MLIP through the ASE, TorchScript and LAMMPS-ABI channels.
+The DFT-D3 counterpart (``examples/common/d3/``, fidelity notebook
+``examples/fidelity_checks/d3_verification.ipynb``) compares against the
+reference ``simple-dftd3`` Python package (``pip install -e ".[d3]"``; no
+import-order caveat for this one).
+
 Deployment over MDI (``examples/deploy/mdi_argon_md.ipynb``) trains a small
 MACE on the bundled Argon set, serves the checkpoint with the ``xnn mdi``
 command as a `MolSSI Driver Interface
@@ -162,6 +177,15 @@ command as a `MolSSI Driver Interface
 dynamics from a minimal Python driver over TCP. It needs the ``mdi`` extra
 (``pip install -e ".[mdi]"``, i.e. ``pymdi``); because the MDI library can
 only be initialized once per process, restart the kernel before re-running it.
+``xnn mdi`` serves in the checkpoint's own dtype unless ``--dtype`` says
+otherwise (the model is built in float64 and cast once, so a float64 run sees
+the exact D3 / D4 / LES tables), takes the neighbor-list radius from the built
+model (a dispersion wrapper widens it beyond the config's cutoff), and can add
+a D3 / D4 correction to a checkpoint trained without one (``--dispersion d4``
+or a YAML mapping as in ``extra.dispersion``; refused when the checkpoint
+already carries dispersion). The system's net charge, which D4's EEQ charges
+and charge-aware models use, is set with ``--total-charge`` and can be changed
+by the driver at run time through ``>TOTCHARGE``.
 The engine is model agnostic: the same command serves any family's
 ``best.pt``. Its companion ``mdi_argon_lammps.ipynb`` drives the identical
 engine from **LAMMPS** (``fix mdi/qm``) instead: NVE plus a LAMMPS-side radial

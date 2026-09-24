@@ -137,6 +137,17 @@ class Trainer:
         torch.manual_seed(cfg.seed)
 
         base = build_model(cfg.model)
+        # A wrapper such as the D4 dispersion correction can need a larger
+        # neighbor list than the core model's cutoff that the config carries;
+        # graphs are built lazily, so widening the datasets' radius here (before
+        # any graph exists) keeps data and model consistent.
+        for ds in (train_set, val_set, test_set):
+            model_cutoff = getattr(base, "cutoff", None)
+            if (ds is not None and model_cutoff is not None
+                    and hasattr(ds, "cutoff") and model_cutoff > ds.cutoff):
+                ds.cutoff = float(model_cutoff)
+                if hasattr(ds, "_cache"):
+                    ds._cache.clear()
         self.model = ForceStressOutput(
             base,
             compute_forces=cfg.optim.force_weight > 0,
@@ -280,7 +291,11 @@ class Trainer:
         model = self.model if train else self.module
         pred = model(data)
         loss, logs = weighted_loss(
-            pred, data, o.energy_weight, o.force_weight, o.stress_weight)
+            pred, data, o.energy_weight, o.force_weight, o.stress_weight,
+            huber_delta=o.huber_delta,
+            huber_delta_energy=o.huber_delta_energy,
+            huber_delta_forces=o.huber_delta_forces,
+            huber_delta_stress=o.huber_delta_stress)
         if train:
             self.opt.zero_grad()
             loss.backward()

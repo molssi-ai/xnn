@@ -85,10 +85,18 @@ def build_model(cfg):
     -------
     InteratomicPotential
         The model instance built by the selected class's ``from_config``.
-        When the config's ``extra`` carries a ``"long_range"`` entry (a dict
-        of :class:`~xnn.common.models.les.LatentEwald` options, or ``True``
-        for the defaults), the model is wrapped with the Latent Ewald
-        Summation long-range term.
+        When the config's ``extra`` carries a ``"dispersion"`` entry (a dict
+        with ``name: d4`` (default) or ``name: d3`` plus the options of
+        :class:`~xnn.common.models.d4.DFTD4` / :class:`~xnn.common.models.d3.DFTD3`,
+        or ``True`` for the PBE0-D4 defaults), the model is wrapped with the
+        dispersion correction (:class:`~xnn.common.models.d4.D4Dispersion` or
+        :class:`~xnn.common.models.d3.D3Dispersion`); when it
+        carries a ``"long_range"`` entry (a dict of
+        :class:`~xnn.common.models.les.LatentEwald` options, or ``True`` for
+        the defaults), the model is wrapped with the Latent Ewald Summation
+        long-range term. Both may be combined; dispersion is applied first,
+        so LES sees the D4-corrected model's features (they are passed
+        through unchanged).
 
     Raises
     ------
@@ -101,6 +109,9 @@ def build_model(cfg):
             f"unknown model '{cfg.name}'. registered: {sorted(_MODELS)}"
         )
     model = _MODELS[key].from_config(cfg)
+    dispersion = (cfg.extra or {}).get("dispersion")
+    if dispersion:
+        model = add_dispersion(model, dispersion)
     long_range = (cfg.extra or {}).get("long_range")
     if long_range:
         from .les import LatentEwald
@@ -118,3 +129,44 @@ def available_models() -> list[str]:
         The registered model names, sorted alphabetically.
     """
     return sorted(_MODELS)
+
+
+def add_dispersion(model, spec):
+    """Wrap ``model`` in a D3 or D4 dispersion correction.
+
+    The same hook :func:`build_model` applies for ``extra["dispersion"]``,
+    exposed so deployment code can add dispersion to a trained model after
+    its weights are loaded.
+
+    Parameters
+    ----------
+    model : InteratomicPotential or None
+        The short-range model to correct (``None`` for pure dispersion).
+    spec : dict, str or True
+        ``{"name": "d4" | "d3", **options}`` with the options of
+        :class:`~xnn.common.models.d4.DFTD4` /
+        :class:`~xnn.common.models.d3.DFTD3`; a bare name string; or ``True``
+        for the PBE0-D4 defaults.
+
+    Returns
+    -------
+    DispersionCorrection
+        :class:`~xnn.common.models.d4.D4Dispersion` or
+        :class:`~xnn.common.models.d3.D3Dispersion` around ``model``.
+
+    Raises
+    ------
+    KeyError
+        For a dispersion name other than ``"d3"`` or ``"d4"``.
+    """
+    from .d3 import D3Dispersion, d3_options_from_extra
+    from .d4 import D4Dispersion, d4_options_from_extra
+    if isinstance(spec, str):
+        spec = {"name": spec}
+    opts = dict(spec) if isinstance(spec, dict) else {}
+    name = str(opts.pop("name", "d4")).lower()
+    if name == "d4":
+        return D4Dispersion(model, **d4_options_from_extra(opts))
+    if name == "d3":
+        return D3Dispersion(model, **d3_options_from_extra(opts))
+    raise KeyError(f"unknown dispersion model '{name}' (use 'd3' or 'd4')")

@@ -100,6 +100,50 @@ Long-range: Latent Ewald Summation (gnn)
 
    nb/gnn/les/les_molecular_dimers
 
+Dispersion: DFT-D4 (common)
+===========================
+
+The charge-dependent DFT-D4 dispersion correction as a model-agnostic add-on.
+``d4_paper_examples.ipynb`` reproduces examples of the D4 paper (Caldeweyher
+*et al.* 2019): the charge-scaling function of fig 2, the charge- and
+CN-dependence of the carbon and hydrogen polarizabilities of fig 5, the
+atom-in-molecule polarizabilities and the molecular C6 coefficient of
+(3Z)-hexen-1-yne (fig 3b), the molecular C6 coefficients of the DOSD
+benchmark against the experimental dipole-oscillator-strength values (table
+III), and the D4 vs D3(BJ) dispersion contributions to the S22 interaction
+energies. ``d4_benchmark.ipynb`` benchmarks the xnn implementation against
+the reference ``dftd4`` code (accuracy on S22 and crystals; timing on CPU and
+GPU versus system size, with the upstream and MD-friendly cutoffs) and shows
+D4 correcting a short-range MLIP through every deploy channel.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Dispersion: DFT-D4 (common)
+
+   nb/common/d4/d4_paper_examples
+   nb/common/d4/d4_benchmark
+
+Dispersion: DFT-D3 (common)
+===========================
+
+The geometry-dependent DFT-D3 correction (Grimme *et al.* 2010; BJ damping
+Grimme, Ehrlich & Goerigk 2011) as the same model-agnostic add-on.
+``d3_paper_examples.ipynb`` reproduces examples of the two papers: the
+rare-gas and carbon C6 coefficients of table II and the rare-gas C9 of table
+III (2010), the CN-dependent C6 curves of fig 5, the two-carbon dispersion
+energy of fig 1, the zero- vs BJ-damped argon dimer of fig 1 of the 2011
+paper, the three-body share of the graphene bilayer binding (table VII), and
+the DOSD molecular C6 comparison of fig 6. ``d3_benchmark.ipynb`` benchmarks
+xnn against the reference ``s-dftd3`` (S22, crystals, all damping functions;
+timing on CPU and GPU) and deploys a D3-corrected MLIP through every channel.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Dispersion: DFT-D3 (common)
+
+   nb/common/d3/d3_paper_examples
+   nb/common/d3/d3_benchmark
+
 BAMBOO (hybrid)
 ===============
 
@@ -210,6 +254,8 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/allegro_verification
    nb/fidelity_checks/cace_verification
    nb/fidelity_checks/les_verification
+   nb/fidelity_checks/d4_verification
+   nb/fidelity_checks/d3_verification
    nb/fidelity_checks/bamboo_verification
    nb/fidelity_checks/opls_verification
    nb/fidelity_checks/dreiding_verification
