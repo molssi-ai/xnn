@@ -69,7 +69,8 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
     dict
         Structure dict with keys ``"pos"``, ``"atomic_numbers"``, ``"cell"``
         (``None`` for non-periodic frames), ``"pbc"``, and optionally
-        ``"energy"``, ``"forces"`` and ``"stress"``.
+        ``"energy"``, ``"forces"``, ``"stress"`` and ``"total_charge"`` (from
+        ``atoms.info["total_charge"]`` or ``atoms.info["charge"]``).
     """
     d: dict[str, Any] = {
         "pos": atoms.get_positions(),
@@ -96,6 +97,10 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         d["stress"] = atoms.info[stress_key]
     if "stress" in d:
         d["stress"] = _full_stress(d["stress"])
+    for key in ("total_charge", "charge"):
+        if key in atoms.info:
+            d["total_charge"] = float(atoms.info[key])
+            break
     return d
 
 

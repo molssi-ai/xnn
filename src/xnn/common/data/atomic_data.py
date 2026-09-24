@@ -71,6 +71,14 @@ class AtomicGraph:
         Target forces, of shape ``(N, 3)``. Present during training.
     stress : Tensor, optional
         Target stress, of shape ``(B, 3, 3)``. Present during training.
+    total_charge : Tensor, optional
+        Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
+        Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF).
+    weight : Tensor, optional
+        Per-structure loss weight, of shape ``(B,)``. ``None`` means every
+        structure counts equally, which is the default and reproduces the
+        unweighted loss exactly. Read only by
+        :func:`~xnn.common.train.losses.weighted_loss`; no model sees it.
 
     Attributes
     ----------
@@ -96,6 +104,10 @@ class AtomicGraph:
         Target forces ``(N, 3)``.
     stress : Tensor or None
         Target stress ``(B, 3, 3)``.
+    total_charge : Tensor or None
+        Net charge per structure ``(B,)``.
+    weight : Tensor or None
+        Per-structure loss weight ``(B,)``.
     """
 
     # --- structure ---
@@ -112,6 +124,9 @@ class AtomicGraph:
     energy: Optional[Tensor] = None   # (B,)
     forces: Optional[Tensor] = None   # (N, 3)
     stress: Optional[Tensor] = None   # (B, 3, 3)
+    # --- optional per-structure metadata ---
+    total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
+    weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
 
     @property
     def num_graphs(self) -> int:

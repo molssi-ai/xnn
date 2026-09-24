@@ -14,7 +14,7 @@ interpolated exactly as in ordinary D3.
 
 Implementation note: this reuses the standard Grimme-D3 reference tables and
 the ``C6``/coordination-number machinery already shipped with xnn
-(:mod:`xnn.dnn.models.d3`) rather than the upstream ``dftd3.pt`` blob, so the
+(:mod:`xnn.common.models.d3`) rather than the upstream ``dftd3.pt`` blob, so the
 dispersion here is *not* on the machine-precision fidelity path (the paper
 excludes dispersion from the DFT training set entirely and only adds it during
 MD, so it never enters the trained BAMBOO weights). It is provided for
@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from xnn.dnn.models import d3
+from xnn.common.models import d3
 
 #: hartree -> kcal/mol (bytedance/bamboo ``utils/constant.py``).
 HARTREE_KCAL_MOL = 627.5094740631
@@ -46,6 +46,11 @@ class D3CSODispersion(nn.Module):
     disp_cutoff : float or None, optional
         Real-space cutoff in Angstrom for the coordination-number damping;
         ``None`` disables it. Default 10.0.
+    references : str, optional
+        D3 reference systems, ``"2010"`` (default; Grimme's original tables,
+        as in upstream BAMBOO) or ``"2024"`` (current ``simple-dftd3``
+        references, Fr-Pu re-parametrized); see
+        :func:`xnn.common.models.d3.legacy_c6_table`.
 
     Attributes
     ----------
@@ -54,7 +59,7 @@ class D3CSODispersion(nn.Module):
     """
 
     def __init__(self, s6: float = 1.0, a1: float = 0.86, rc_bohr: float = 7.75,
-                 disp_cutoff: float | None = 10.0):
+                 disp_cutoff: float | None = 10.0, references: str = "2010"):
         super().__init__()
         self.s6 = s6
         self.a1 = a1
@@ -62,7 +67,8 @@ class D3CSODispersion(nn.Module):
         self.disp_cutoff = disp_cutoff
         dt = torch.get_default_dtype()
         # device-resident copies of the standard D3 reference tables
-        self.register_buffer("_c6ab", d3.d3_c6ab.to(dt), persistent=False)
+        self.register_buffer("_c6ab", d3.legacy_c6_table(str(references)).to(dt),
+                             persistent=False)
         self.register_buffer("_rcov", d3.d3_rcov.to(dt), persistent=False)
         self.register_buffer("_r2r4", d3.d3_r2r4.to(dt), persistent=False)
 

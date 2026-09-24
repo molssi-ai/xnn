@@ -304,6 +304,10 @@ class BAMBOO(InteratomicPotential):
     disp_cutoff : float, optional
         Dispersion cutoff in Angstrom (used only when ``use_dispersion``), by
         default 10.0.
+    d3_references : str, optional
+        D3 reference systems of the D3(CSO) term, ``"2010"`` (default,
+        upstream's tables) or ``"2024"`` (current ``simple-dftd3``
+        references); see :class:`~xnn.hybrid.models.dispersion.D3CSODispersion`.
     species : list of int, optional
         Supported atomic numbers, recorded for bookkeeping/config round-trips
         (the embedding is indexed by ``Z`` regardless). Default ``None``.
@@ -352,6 +356,7 @@ class BAMBOO(InteratomicPotential):
         use_electrostatics: bool = True,
         use_dispersion: bool = False,
         disp_cutoff: float = 10.0,
+        d3_references: str = "2010",
         species: Optional[list[int]] = None,
     ):
         super().__init__()
@@ -397,7 +402,8 @@ class BAMBOO(InteratomicPotential):
 
         self.coul_softplus = nn.Softplus(beta=coul_damping_beta)
         self.dispersion = (
-            D3CSODispersion(disp_cutoff=disp_cutoff) if use_dispersion else None)
+            D3CSODispersion(disp_cutoff=disp_cutoff, references=str(d3_references))
+            if use_dispersion else None)
 
     # -- charge-equilibrium electrostatics ---------------------------------
     def coulomb_energy(self, charges: Tensor, edge_vec: Tensor,
@@ -593,5 +599,6 @@ class BAMBOO(InteratomicPotential):
             use_electrostatics=extra.get("use_electrostatics", True),
             use_dispersion=extra.get("use_dispersion", False),
             disp_cutoff=extra.get("disp_cutoff", 10.0),
+            d3_references=str(extra.get("d3_references", "2010")),
             species=species,
         )

@@ -29,7 +29,7 @@ Architecture (paper eqs 3-15, J. Chem. Theory Comput. 15, 3678, 2019):
   a damped/switched Coulomb term (eqs 12-13 -- the code form: shielded
   ``1/sqrt(r^2+1)`` below ``sr_cut/2``, smoothstep-switched to ``1/r``, and
   force-shifted at ``lr_cutoff`` when one is set);
-* Grimme D3(BJ) dispersion (:mod:`~xnn.dnn.models.d3`, an independent
+* Grimme D3(BJ) dispersion (:mod:`~xnn.common.models.d3`, an independent
   implementation verified against the upstream TF module, tables included)
   with optionally learnable ``s6/s8/a1/a2`` completes the total energy
   (eq 12).
@@ -63,7 +63,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import scatter_sum, shifted_softplus
 from xnn.common.models.registry import register_model
-from . import d3
+from ...common.models import d3
 
 MAX_Z = 95  # element-indexed tables cover Z = 0..94 (through Pu)
 KEHALF = 7.199822675975274  # ke/2 in eV*A/e^2; halved since edges come in pairs
@@ -288,6 +288,11 @@ class PhysNet(InteratomicPotential):
         D3(BJ) parameters. ``None`` (default) makes them learnable
         (softplus-reparametrized, initialized to the HF values), a number
         fixes them.
+    d3_references : str, optional
+        D3 reference systems: ``"2010"`` (default; Grimme's original tables,
+        as in upstream PhysNet) or ``"2024"`` (the current ``simple-dftd3``
+        references, which re-parametrize Fr-Pu). Identical for Z <= 86; see
+        :func:`xnn.common.models.d3.legacy_c6_table`.
     energy_shift, energy_scale : float, optional
         Initial value of the per-element energy shift/scale tables
         (upstream ``Eshift``/``Escale``), by default 0 and 1.
@@ -328,6 +333,7 @@ class PhysNet(InteratomicPotential):
         s8: float | None = None,
         a1: float | None = None,
         a2: float | None = None,
+        d3_references: str = "2010",
         energy_shift: float = 0.0,
         energy_scale: float = 1.0,
         charge_shift: float = 0.0,
@@ -378,7 +384,8 @@ class PhysNet(InteratomicPotential):
             setattr(self, f"_{name}_learnable", value is None)
         if use_dispersion:
             dt = torch.get_default_dtype()
-            self.register_buffer("_d3_c6ab", d3.d3_c6ab.to(dt), persistent=False)
+            self.register_buffer("_d3_c6ab", d3.legacy_c6_table(str(d3_references)).to(dt),
+                                 persistent=False)
             self.register_buffer("_d3_rcov", d3.d3_rcov.to(dt), persistent=False)
             self.register_buffer("_d3_r2r4", d3.d3_r2r4.to(dt), persistent=False)
 
@@ -603,6 +610,7 @@ class PhysNet(InteratomicPotential):
             use_dispersion=bool(extra.get("use_dispersion", True)),
             s6=opt_float("s6"), s8=opt_float("s8"),
             a1=opt_float("a1"), a2=opt_float("a2"),
+            d3_references=str(extra.get("d3_references", "2010")),
             energy_shift=float(extra.get("energy_shift", 0.0)),
             energy_scale=float(extra.get("energy_scale", 1.0)),
             charge_shift=float(extra.get("charge_shift", 0.0)),
