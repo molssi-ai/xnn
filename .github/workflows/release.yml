@@ -96,10 +96,10 @@ jobs:
           wheel = glob.glob("dist/*.whl")[0]
           names = zipfile.ZipFile(wheel).namelist()
           need = ["xnn/ffnn/data/oplsaa.frc", "xnn/ffnn/data/reaxff/CHO_cho_2008.frc",
-                  "xnn/ffnn/data/LICENSE-SEAMM"]
+                  "xnn/ffnn/data/LICENSE-SEAMM",
+                  "xnn/common/models/d3_reference.npz", "xnn/common/models/d4_reference.npz"]
           missing = [n for n in need if n not in names]
           assert not missing, f"missing from wheel: {missing}"
-          assert any(n.startswith("xnn/dnn/models/") and n.endswith(".npz") for n in names), "D3 tables missing"
           print(f"{wheel}: {len(names)} files, data files present")
           EOF
 
