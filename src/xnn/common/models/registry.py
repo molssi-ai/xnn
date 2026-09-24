@@ -111,16 +111,7 @@ def build_model(cfg):
     model = _MODELS[key].from_config(cfg)
     dispersion = (cfg.extra or {}).get("dispersion")
     if dispersion:
-        from .d3 import D3Dispersion, d3_options_from_extra
-        from .d4 import D4Dispersion, d4_options_from_extra
-        opts = dict(dispersion) if isinstance(dispersion, dict) else {}
-        name = str(opts.pop("name", "d4")).lower()
-        if name == "d4":
-            model = D4Dispersion(model, **d4_options_from_extra(opts))
-        elif name == "d3":
-            model = D3Dispersion(model, **d3_options_from_extra(opts))
-        else:
-            raise KeyError(f"unknown dispersion model '{name}' (use 'd3' or 'd4')")
+        model = add_dispersion(model, dispersion)
     long_range = (cfg.extra or {}).get("long_range")
     if long_range:
         from .les import LatentEwald
@@ -138,3 +129,44 @@ def available_models() -> list[str]:
         The registered model names, sorted alphabetically.
     """
     return sorted(_MODELS)
+
+
+def add_dispersion(model, spec):
+    """Wrap ``model`` in a D3 or D4 dispersion correction.
+
+    The same hook :func:`build_model` applies for ``extra["dispersion"]``,
+    exposed so deployment code can add dispersion to a trained model after
+    its weights are loaded.
+
+    Parameters
+    ----------
+    model : InteratomicPotential or None
+        The short-range model to correct (``None`` for pure dispersion).
+    spec : dict, str or True
+        ``{"name": "d4" | "d3", **options}`` with the options of
+        :class:`~xnn.common.models.d4.DFTD4` /
+        :class:`~xnn.common.models.d3.DFTD3`; a bare name string; or ``True``
+        for the PBE0-D4 defaults.
+
+    Returns
+    -------
+    DispersionCorrection
+        :class:`~xnn.common.models.d4.D4Dispersion` or
+        :class:`~xnn.common.models.d3.D3Dispersion` around ``model``.
+
+    Raises
+    ------
+    KeyError
+        For a dispersion name other than ``"d3"`` or ``"d4"``.
+    """
+    from .d3 import D3Dispersion, d3_options_from_extra
+    from .d4 import D4Dispersion, d4_options_from_extra
+    if isinstance(spec, str):
+        spec = {"name": spec}
+    opts = dict(spec) if isinstance(spec, dict) else {}
+    name = str(opts.pop("name", "d4")).lower()
+    if name == "d4":
+        return D4Dispersion(model, **d4_options_from_extra(opts))
+    if name == "d3":
+        return D3Dispersion(model, **d3_options_from_extra(opts))
+    raise KeyError(f"unknown dispersion model '{name}' (use 'd3' or 'd4')")

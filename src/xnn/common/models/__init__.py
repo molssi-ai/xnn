@@ -1,5 +1,5 @@
 from .base import InteratomicPotential
-from .registry import register_model, build_model, available_models
+from .registry import register_model, build_model, available_models, add_dispersion
 from .outputs import ForceStressOutput
 from .ops import scatter_sum, build_triplets
 from .les import EwaldSummation, LatentEwald
@@ -11,6 +11,7 @@ __all__ = [
     "InteratomicPotential",
     "register_model",
     "build_model",
+    "add_dispersion",
     "available_models",
     "ForceStressOutput",
     "scatter_sum",

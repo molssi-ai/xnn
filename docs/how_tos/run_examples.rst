@@ -177,6 +177,15 @@ command as a `MolSSI Driver Interface
 dynamics from a minimal Python driver over TCP. It needs the ``mdi`` extra
 (``pip install -e ".[mdi]"``, i.e. ``pymdi``); because the MDI library can
 only be initialized once per process, restart the kernel before re-running it.
+``xnn mdi`` serves in the checkpoint's own dtype unless ``--dtype`` says
+otherwise (the model is built in float64 and cast once, so a float64 run sees
+the exact D3 / D4 / LES tables), takes the neighbor-list radius from the built
+model (a dispersion wrapper widens it beyond the config's cutoff), and can add
+a D3 / D4 correction to a checkpoint trained without one (``--dispersion d4``
+or a YAML mapping as in ``extra.dispersion``; refused when the checkpoint
+already carries dispersion). The system's net charge, which D4's EEQ charges
+and charge-aware models use, is set with ``--total-charge`` and can be changed
+by the driver at run time through ``>TOTCHARGE``.
 The engine is model agnostic: the same command serves any family's
 ``best.pt``. Its companion ``mdi_argon_lammps.ipynb`` drives the identical
 engine from **LAMMPS** (``fix mdi/qm``) instead: NVE plus a LAMMPS-side radial

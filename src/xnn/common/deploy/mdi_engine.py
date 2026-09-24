@@ -4,9 +4,9 @@ The `MolSSI Driver Interface <https://github.com/MolSSI-MDI/MDI_Library>`_
 (MDI) lets simulation codes (LAMMPS, QCEngine, SEAMM, ...) drive an external
 "engine" through a small command protocol. :class:`MDIEngine` implements the
 engine side for xnn: the driver sends the system (``>NATOMS``, ``>ELEMENTS``,
-``>CELL``, ``>COORDS``) and requests results (``<ENERGY``, ``<FORCES``,
-``<STRESS``), and the engine evaluates the wrapped model each time the
-geometry changes.
+``>CELL``, ``>COORDS``, optionally ``>TOTCHARGE``) and requests results
+(``<ENERGY``, ``<FORCES``, ``<STRESS``), and the engine evaluates the wrapped
+model each time the geometry changes.
 
 The engine is model agnostic: it speaks to the model exclusively through the
 :class:`~xnn.common.data.AtomicGraph` contract shared by every model in the
@@ -26,6 +26,12 @@ or from the command line (see :func:`main`)::
 
     xnn mdi --ckpt runs/exp/best.pt -mdi "-role ENGINE -name xnn -method TCP ..."
 
+A checkpoint trained without dispersion can be served with a D3 / D4
+correction added on top (``--dispersion d4`` or a YAML mapping such as
+``"{name: d4, cutoff_pair: 12.0, switch_width_pair: 2.0}"``), and the
+system's net charge (used by D4's EEQ charges and by charge-aware models)
+is set with ``--total-charge`` or by the driver through ``>TOTCHARGE``.
+
 Requires the ``pymdi`` package (``pip install pymdi``); MPI communication
 additionally requires ``mpi4py``.
 
@@ -37,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 import numpy as np
 import torch
@@ -60,10 +67,33 @@ HARTREE_TO_EV = 27.211386245988
 
 # MDI commands the engine understands, registered on the @DEFAULT node.
 _COMMANDS = (
-    ">NATOMS", ">COORDS", ">CELL", ">ELEMENTS",
+    ">NATOMS", ">COORDS", ">CELL", ">ELEMENTS", ">TOTCHARGE",
     "<ENERGY", "<FORCES", "<STRESS",
     "SCF", "EXIT",
 )
+
+
+def _float_dtype(source) -> torch.dtype:
+    """Floating-point dtype of a module's parameters or of a state dict."""
+    tensors = (source.values() if isinstance(source, dict)
+               else source.parameters())
+    for t in tensors:
+        if torch.is_tensor(t) and t.is_floating_point():
+            return t.dtype
+    return torch.get_default_dtype()
+
+
+def _has_dispersion(model: torch.nn.Module) -> bool:
+    """Whether a model already includes a D3 / D4 wrapper (at any nesting)."""
+    from ..models.dispersion import DispersionCorrection
+    from ..models.les import LatentEwald
+    while True:
+        if isinstance(model, DispersionCorrection):
+            return True
+        if isinstance(model, LatentEwald):
+            model = model.model
+        else:
+            return False
 
 
 class MDIEngine:
@@ -90,8 +120,15 @@ class MDIEngine:
         :meth:`from_checkpoint` does).
     cutoff : float
         Neighbor-list cutoff radius in angstrom used when building the graph.
+        Use the model's own ``cutoff`` (a dispersion wrapper widens it beyond
+        the core model's radius), as :meth:`from_checkpoint` does.
     device : str, optional
         Torch device the model runs on. Defaults to ``"cpu"``.
+    total_charge : float, optional
+        Net charge of the system in units of e, passed to the model as
+        :attr:`~xnn.common.data.AtomicGraph.total_charge` (D4's EEQ charges
+        and charge-aware models such as PhysNet use it). Defaults to 0; a
+        driver can change it at run time with ``>TOTCHARGE``.
 
     Attributes
     ----------
@@ -101,6 +138,8 @@ class MDIEngine:
         The neighbor-list cutoff radius in angstrom.
     device : torch.device
         The torch device.
+    total_charge : float
+        The current net charge (e).
     dtype : torch.dtype
         Floating-point dtype of the model parameters; graph tensors are built
         in this dtype.
@@ -111,13 +150,14 @@ class MDIEngine:
     """
 
     def __init__(self, model: torch.nn.Module, cutoff: float,
-                 device: str = "cpu"):
+                 device: str = "cpu", total_charge: float = 0.0):
         self.device = torch.device(device)
         self.model = model.to(self.device).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.cutoff = float(cutoff)
-        self.dtype = next(model.parameters()).dtype
+        self.total_charge = float(total_charge)
+        self.dtype = _float_dtype(model)
 
         # ---- system state, set by driver commands (MDI atomic units) ----
         self.natoms: int | None = None
@@ -141,7 +181,9 @@ class MDIEngine:
 
     @classmethod
     def from_checkpoint(cls, path: str, device: str = "cpu",
-                        dtype: torch.dtype | None = None) -> "MDIEngine":
+                        dtype: torch.dtype | None = None,
+                        dispersion: Any = None,
+                        total_charge: float = 0.0) -> "MDIEngine":
         """Build an engine from a trainer checkpoint (``best.pt``).
 
         The checkpoint is the dictionary written by
@@ -152,6 +194,13 @@ class MDIEngine:
         stress head enabled, matching the state-dict layout the trainer
         saves), and the weights are loaded.
 
+        The model is built in float64, so the constant tables of the
+        physics terms (D3 / D4 reference data, LES kernels) hold their exact
+        values, and cast once afterwards, to ``dtype`` or to the
+        checkpoint's own floating-point dtype. Building in float32 and
+        upcasting would keep float32-rounded tables, which costs about
+        5e-8 hartree in a D4 energy even when serving in float64.
+
         Parameters
         ----------
         path : str
@@ -159,25 +208,62 @@ class MDIEngine:
         device : str, optional
             Torch device the model runs on. Defaults to ``"cpu"``.
         dtype : torch.dtype, optional
-            When given, convert the model to this floating-point dtype
-            (e.g. ``torch.float32`` to speed up a float64-trained model).
+            Floating-point dtype to serve in (``torch.float64`` for NVE energy
+            conservation with a float32-trained model, ``torch.float32`` for
+            speed). Defaults to the dtype of the checkpoint's weights.
+        dispersion : dict, str or None, optional
+            Add a D3 / D4 dispersion correction to a checkpoint that was
+            trained without one: ``"d4"`` / ``"d3"`` for the defaults or a
+            mapping as in the config's ``extra["dispersion"]`` (see
+            :func:`~xnn.common.models.add_dispersion`). Refused when the
+            checkpoint already carries dispersion, which would count it
+            twice. Defaults to ``None`` (serve the checkpoint as is).
+        total_charge : float, optional
+            Net charge of the system in units of e, by default 0. A driver can
+            change it at run time with ``>TOTCHARGE``.
 
         Returns
         -------
         MDIEngine
             An engine wrapping the restored model, with the neighbor-list
-            cutoff taken from the checkpoint's model config.
+            cutoff taken from the built model (a dispersion wrapper widens it
+            beyond the config's core-model radius).
+
+        Raises
+        ------
+        ValueError
+            If ``dispersion`` is given for a checkpoint whose model already
+            includes a dispersion correction.
         """
-        from ..models import build_model, ForceStressOutput
+        from ..models import add_dispersion, build_model, ForceStressOutput
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         cfg = ckpt["cfg"]
-        model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
-        model.load_state_dict(ckpt["model"])
-        if dtype is not None:
-            model = model.to(dtype)
-        logger.info("Loaded %s checkpoint %s (cutoff=%.3f A)",
-                    cfg.model.name, path, cfg.model.cutoff)
-        return cls(model, cutoff=cfg.model.cutoff, device=device)
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float64)
+        try:
+            base = build_model(cfg.model)
+            # ForceStressOutput has no parameters of its own; loading through
+            # it matches the trainer's state-dict layout
+            ForceStressOutput(base).load_state_dict(ckpt["model"])
+            if dispersion is not None:
+                if _has_dispersion(base):
+                    raise ValueError(
+                        f"{path} already includes a dispersion correction "
+                        f"({cfg.model.name} with extra['dispersion']); adding "
+                        f"another one would count dispersion twice")
+                base = add_dispersion(base, dispersion)
+                logger.info("added %s dispersion on top of the checkpoint",
+                            type(base).__name__)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        if dtype is None:
+            dtype = _float_dtype(ckpt["model"])
+        model = ForceStressOutput(base, compute_stress=True).to(dtype)
+        cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
+        logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
+                    cfg.model.name, path, cutoff, str(dtype).replace("torch.", ""),
+                    total_charge)
+        return cls(model, cutoff=cutoff, device=device, total_charge=total_charge)
 
     # ------------------------------------------------------------------ #
     # evaluation
@@ -188,9 +274,10 @@ class MDIEngine:
 
         Converts positions and cell from Bohr to angstrom, builds the graph
         with :func:`~xnn.common.data.structure_to_graph` (tensors are created
-        in the model's dtype so float32 and float64 models both work), runs
-        the model and stores ``energy`` (Hartree), ``forces`` (Hartree/Bohr)
-        and, for periodic systems, ``stress`` (Hartree/Bohr^3).
+        in the model's dtype so float32 and float64 models both work; the
+        current ``total_charge`` rides along), runs the model and stores
+        ``energy`` (Hartree), ``forces`` (Hartree/Bohr) and, for periodic
+        systems, ``stress`` (Hartree/Bohr^3).
 
         Raises
         ------
@@ -218,6 +305,7 @@ class MDIEngine:
                      if self.cell_bohr is not None else None),
             "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
                     if self.cell_bohr is not None else None),
+            "total_charge": self.total_charge,
         }
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
         self._sync()
@@ -291,7 +379,7 @@ class MDIEngine:
         Initializes the MDI library, registers the supported commands on the
         ``@DEFAULT`` node, accepts the driver connection and then services
         commands: system updates (``>NATOMS``, ``>ELEMENTS``, ``>CELL``,
-        ``>COORDS``) mark the results stale, result requests (``<ENERGY``,
+        ``>COORDS``, ``>TOTCHARGE``) mark the results stale, result requests (``<ENERGY``,
         ``<FORCES``, ``<STRESS``) trigger a model evaluation when needed and
         send the values in MDI atomic units. ``<STRESS`` sends zeros for
         non-periodic systems. ``SCF`` forces an immediate evaluation.
@@ -357,6 +445,11 @@ class MDIEngine:
                     self.natoms, 3)
                 self._needs_calculation = True
 
+            elif command == ">TOTCHARGE":
+                self.total_charge = float(mdi.MDI_Recv(1, mdi.MDI_DOUBLE, comm))
+                self._needs_calculation = True
+                logger.info("total charge set to %g e", self.total_charge)
+
             elif command == "<ENERGY":
                 self._ensure_results()
                 mdi.MDI_Send(self.energy, 1, mdi.MDI_DOUBLE, comm)
@@ -402,6 +495,11 @@ def main(argv=None) -> None:
         xnn mdi --ckpt runs/exp/best.pt \\
             -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
 
+    Serve a plain checkpoint with D4 added and a net charge of -1::
+
+        xnn mdi --ckpt best.pt --dispersion "{name: d4, cutoff_pair: 12.0}" \\
+            --total-charge -1 -mdi "..."
+
     For the MPI communication method, launch under ``mpirun`` alongside the
     driver (``mpi4py`` required)::
 
@@ -426,7 +524,16 @@ def main(argv=None) -> None:
     p.add_argument("--device", default="cpu",
                    help='torch device, e.g. "cpu" or "cuda:0" (default: cpu)')
     p.add_argument("--dtype", choices=["float32", "float64"], default=None,
-                   help="optionally convert the model dtype before serving")
+                   help="dtype to serve in (default: the checkpoint's own)")
+    p.add_argument("--dispersion", default=None,
+                   help="add D3/D4 dispersion to a checkpoint trained without "
+                        "it: 'd4', 'd3', or a YAML mapping as in the config's "
+                        "extra.dispersion, e.g. \"{name: d4, cutoff_pair: 12.0, "
+                        "switch_width_pair: 2.0}\" (refused if the checkpoint "
+                        "already carries dispersion)")
+    p.add_argument("--total-charge", type=float, default=0.0,
+                   help="net charge of the system in e (default 0); the driver "
+                        "can change it with >TOTCHARGE")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -437,8 +544,13 @@ def main(argv=None) -> None:
         mpi_comm = MPI.COMM_WORLD
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
+    dispersion = None
+    if args.dispersion:
+        import yaml
+        dispersion = yaml.safe_load(args.dispersion)
     engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
-                                       dtype=dtype)
+                                       dtype=dtype, dispersion=dispersion,
+                                       total_charge=args.total_charge)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 
