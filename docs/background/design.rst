@@ -21,7 +21,9 @@ imported on its own.
                      (GaussianRBF, CosineCutoff)
        config/       one dataclass schema; loaders for yaml/argparse/hydra
        models/       InteratomicPotential interface + registry +
-                     ForceStressOutput + ops (scatter_sum)
+                     ForceStressOutput + ops (scatter_sum), the add-on
+                     terms LES (les), DFT-D4 (d4) and DFT-D3 (d3) on shared
+                     dispersion machinery (dispersion)
        train/        Trainer (batch + device aware), weighted
                      energy/force/stress loss
        benchmark/    score pre-trained models on a dataset (metrics,
@@ -36,7 +38,7 @@ imported on its own.
        models/       schnet
      dnn/          descriptor + per-element networks
        featurizers/  symmetry functions, AEV
-       models/       base (DescriptorPotential), hdnnp, ani, physnet, d3
+       models/       base (DescriptorPotential), hdnnp, ani, physnet
 
 Four ideas hold the package together.
 

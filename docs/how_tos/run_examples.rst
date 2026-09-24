@@ -155,6 +155,21 @@ qualitatively -- a CC/CP/PP subset of the BioFragment dimer set, loaded with
 (Neutral homogeneous systems like the Argon set carry no long-range tail, so
 they are deliberately *not* used here.)
 
+The DFT-D4 dispersion add-on (``examples/common/d4/``) is validated against
+the reference ``dftd4`` Python package in
+``examples/fidelity_checks/d4_verification.ipynb`` (install it with the
+``d4`` extra, ``pip install -e ".[d4]"``; the notebook imports ``dftd4``
+*before* ``torch``, because the wheel's bundled OpenMP runtime returns wrong
+EEQ charges once torch's thread pool is active). ``d4_paper_examples.ipynb``
+reproduces figures and numbers of the D4 paper (needs ``rdkit`` for the
+hexenyne geometry and ``ase`` for the g2 and S22 sets) and
+``d4_benchmark.ipynb`` compares accuracy and timing with ``dftd4`` and runs
+a D4-corrected MLIP through the ASE, TorchScript and LAMMPS-ABI channels.
+The DFT-D3 counterpart (``examples/common/d3/``, fidelity notebook
+``examples/fidelity_checks/d3_verification.ipynb``) compares against the
+reference ``simple-dftd3`` Python package (``pip install -e ".[d3]"``; no
+import-order caveat for this one).
+
 Deployment over MDI (``examples/deploy/mdi_argon_md.ipynb``) trains a small
 MACE on the bundled Argon set, serves the checkpoint with the ``xnn mdi``
 command as a `MolSSI Driver Interface

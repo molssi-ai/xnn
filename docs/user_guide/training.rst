@@ -75,6 +75,50 @@ the loss only when the dataset provides the target and its weight is
 nonzero. Force training is strongly recommended whenever forces are
 available; it is dramatically more data-efficient than energies alone.
 
+The energy term divides by the atom count and averages over *structures*;
+the force term averages over every *atom* in the batch. The two therefore
+disagree about what one sample is, which quietly allocates the fit when a
+dataset mixes structure sizes, or mixes densely sampled scans with sparse
+ones. Two knobs address that.
+
+Per-structure weights
+---------------------
+Give a structure dict a ``weight`` (see
+:func:`~xnn.common.data.dataset.to_graph`) and every term becomes a weighted
+mean: structure :math:`b` counts in proportion to ``weight[b]``, and the
+force term spreads that weight over its atoms. Uniform weights reproduce the
+unweighted loss exactly, so this changes nothing until a dataset asks for it.
+
+.. code-block:: python
+
+   # equalize two sources that differ 10-fold in frame count
+   for s in scan_frames:    s["weight"] = 1.0
+   for s in cluster_frames: s["weight"] = 10.0
+
+Weights are how you allocate the fit on purpose rather than by accident.
+Diagnose first: measure each subset's share of the loss, not just its share
+of the frames, since a subset with larger typical forces carries a share
+that grows with the *square* of that scale.
+
+Huber tails
+-----------
+``optim.huber_delta`` (with ``huber_delta_energy`` / ``huber_delta_forces`` /
+``huber_delta_stress`` overriding it per term) replaces the squared error by
+a function that is quadratic up to :math:`\delta` and linear beyond, capping
+the pull of a few large residuals:
+
+.. math::
+
+   \ell(d) = \begin{cases} d^2 & |d| \le \delta \\
+                            2\delta|d| - \delta^2 & |d| > \delta \end{cases}
+
+The default ``0.0`` is plain squared error. Note this is scaled to agree with
+:math:`d^2` below :math:`\delta`, twice the textbook Huber, so the loss
+weights and learning rate keep their meaning when it is switched on. MACE
+uses the textbook half-square form; halve ported ``delta`` values
+accordingly. Per-term deltas matter because per-atom energies (eV) and
+forces (eV/A) differ in scale by an order of magnitude.
+
 Devices and batching
 ====================
 ``cfg.device = "auto" | "cpu" | "cuda" | "cuda:0"`` is resolved by

@@ -151,8 +151,9 @@ implementation `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
   (``kehalf`` constant and the force-shifted long-range form included), and
   an independently written D3(BJ) dispersion module that reproduces the
   behavior of upstream's bundled Grimme D3 code exactly, with its reference
-  tables (shipped compressed in ``xnn/dnn/models/d3_tables.npz``) and
-  softplus-learnable coefficients;
+  data (Grimme's original C6 table, built from the ``"2010"`` reference set
+  of ``xnn/common/models/d3_reference.npz``; the two PhysNet radius tables
+  kept verbatim) and softplus-learnable coefficients;
 - the shifted-softplus is evaluated in its exact form
   ``max(x, 0) + log1p(exp(-|x|))`` -- PyTorch's ``F.softplus`` goes linear
   above its threshold and would cost ~1e-9.
@@ -299,6 +300,80 @@ follows the input dtype (upstream hard-casts it to float32 and cannot run in
 float64), exact ties at the ``|k| = k_c`` shell resolve consistently so the
 energy is exactly rotation-invariant, and the self-interaction term is
 subtracted once (upstream subtracts it once per ``q`` channel).
+
+DFT-D4 dispersion
+=================
+The dispersion add-on :class:`~xnn.common.models.d4.D4Dispersion` is an
+independently written implementation of the D4 model (Caldeweyher *et al.*,
+*J. Chem. Phys.* 2019), verified against the reference `dftd4
+<https://github.com/dftd4/dftd4>`_ (4.2.0, through its Python package,
+imported only as an external oracle):
+
+- the electronegativity-weighted error-function coordination number, the
+  EEQ charge model (plain CN softly capped at 8, Gaussian charge widths,
+  Lagrange-constrained total charge) and its Ewald summation for periodic
+  cells (automatic splitting parameter, fixed +-2 real / reciprocal windows,
+  Wigner-Seitz image averaging);
+- the charge-scaled, partitioned reference polarizabilities, the Gaussian
+  CN weighting with its per-reference number of Gaussians and the
+  highest-CN fallback, the 23-point Casimir-Polder C6 integration;
+- BJ-damped two-body and neutral-C6 ATM three-body energies with the
+  upstream real-space cutoffs (60 / 40 / 30 / 25 bohr) and optional quintic
+  switching windows.
+
+Energies agree to ~1e-16 hartree, gradients and virials to ~1e-17, charges,
+coordination numbers, polarizabilities and C6 coefficients to ~1e-15, for
+molecules, ions and crystals (``tests/test_d4.py``,
+``examples/fidelity_checks/d4_verification.ipynb``). The one documented
+difference concerns *isolated* atoms (no neighbor within about two covalent
+radii): upstream's soft cap of the EEQ coordination number leaves a one-ulp
+residual of 1.8e-15 instead of zero, which the ``1e-14`` regularizer of the
+EEQ right-hand side amplifies to ~1e-9 e in the charges (~1e-13 hartree);
+xnn evaluates the cap exactly. The reference data are
+extracted from the upstream sources by ``tools/build_d4_reference.py`` and
+ship as ``xnn/common/models/d4_reference.npz``. One environment caveat: the ``dftd4`` wheel's
+bundled OpenMP runtime returns wrong EEQ charges once torch's thread pool
+is active in the same process -- import ``dftd4`` before ``torch``, or run
+it with ``torch.set_num_threads(1)`` (the tests do the latter and check a
+known water molecule as a guard).
+
+DFT-D3 dispersion
+=================
+The dispersion add-on :class:`~xnn.common.models.d3.D3Dispersion` is an
+independently written implementation of the D3 model (Grimme *et al.*, *J.
+Chem. Phys.* 2010; BJ damping: Grimme, Ehrlich & Goerigk, *J. Comput. Chem.*
+2011), verified against the reference `simple-dftd3
+<https://github.com/dftd3/simple-dftd3>`_ (1.6.0, through its Python
+package, imported only as an external oracle):
+
+- the exponential-count coordination number (``k1 = 16``, 4/3-scaled Pyykko
+  radii, 40 bohr cutoff), the Gaussian CN interpolation of the reference C6
+  (``k3 = 4``) with the highest-CN fallback, ``C8`` from the ``<r^4>/<r^2>``
+  factors;
+- the four damping functions of the reference code -- rational (BJ), zero
+  (Chai & Head-Gordon), modified zero and optimized power -- with their
+  respective critical radii (``a1 sqrt(C8/C6) + a2`` or the tabulated pair
+  cutoff radii);
+- the ATM three-body term with zero damping on the 4/3-scaled pair radii
+  and exponent ``alp + 2``, the upstream real-space cutoffs (60 / 40 bohr)
+  and optional quintic switching windows.
+
+Energies agree to ~1e-17 hartree and gradients / virials to ~1e-17 for
+molecules and crystals, every damping function and the three-body term
+(``tests/test_d3.py``, ``examples/fidelity_checks/d3_verification.ipynb``).
+The reference data are extracted from the upstream sources by
+``tools/build_d3_reference.py`` into ``d3_reference.npz``, which carries two
+sets of reference systems: the current reference code's (``references="2024"``,
+the :class:`~xnn.common.models.d3.DFTD3` default; ``simple-dftd3`` 1.1.0
+re-parametrized Fr-Pu and added Am-Lr) and Grimme's original 2010 systems
+(``references="2010"``, read from a ``simple-dftd3`` 1.0.0 checkout). Both are
+identical for Z <= 86. PhysNet and BAMBOO use the 2010 set by default through
+the legacy functional API, so their tables are bit for bit those of their
+upstream codes for every element; ``d3_references: "2024"`` switches them.
+D3 and D4
+share their switching,
+Gaussian-weight, three-body and wrapper machinery
+(:mod:`~xnn.common.models.dispersion`).
 
 ReaxFF / ReaxFF-nn
 ==================
