@@ -53,7 +53,7 @@ def _small(cutoff_fn=None, **kw):
     return SchNet(cutoff_fn=cutoff_fn, **kw)
 
 
-# --- registry / defaults -------------------------------------------------
+# registry / defaults
 
 def test_registered():
     assert "schnet" in available_models()
@@ -77,7 +77,7 @@ def test_invalid_cutoff_fn():
         SchNet(cutoff_fn="polynomial")
 
 
-# --- manuscript equations ------------------------------------------------
+# manuscript equations
 
 def test_shifted_softplus_is_paper_ssp():
     """ssp(x) = ln(0.5 e^x + 0.5) with ssp(0) = 0 (NIPS paper, sec. 4.2)."""
@@ -164,7 +164,7 @@ def test_zero_init_head_and_standardization():
     assert abs(e - expected) < 1e-5
 
 
-# --- physical properties --------------------------------------------------
+# physical properties
 
 def test_energy_invariance_forces_equivariance():
     torch.manual_seed(1)
@@ -264,7 +264,7 @@ def test_periodic_stress():
     assert out["stress"].shape == (1, 3, 3)
 
 
-# --- deployment ------------------------------------------------------------
+# deployment
 
 @pytest.mark.parametrize("cutoff_fn", [None, "cosine"])
 def test_scriptable_and_lammps_export(tmp_path, cutoff_fn):
@@ -287,7 +287,7 @@ def test_scriptable_and_lammps_export(tmp_path, cutoff_fn):
     assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-5
 
 
-# --- config ---------------------------------------------------------------
+# config
 
 def test_from_config_extras():
     cfg = from_dict({"model": {

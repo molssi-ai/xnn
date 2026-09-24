@@ -401,7 +401,7 @@ class PhysNet(InteratomicPotential):
                     sc = torch.as_tensor(atomic_scales, dtype=self.Escale.dtype)
                     self.Escale[torch.tensor(list(species))] = sc
 
-    # -- D3 parameters (softplus-positive when learnable, as upstream) ------
+    # D3 parameters (softplus-positive when learnable, as upstream)
     def _d3_param(self, name: str) -> Tensor:
         raw = getattr(self, f"_{name}")
         return F.softplus(raw) if getattr(self, f"_{name}_learnable") else raw

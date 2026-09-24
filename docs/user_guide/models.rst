@@ -589,6 +589,30 @@ sees the D4-corrected model's features), and every deploy channel carries
 the term: :class:`~xnn.common.models.outputs.ForceStressOutput`, the ASE
 calculator, the TorchScript export (both ABIs) and the LAMMPS wrapper.
 
+**Scale regimes.** The EEQ charges are a charge-constrained linear system of
+size ``N``. ``regime: dense`` (bit-exact ``dftd4`` parity) builds its
+``(N, N)`` matrix with every intermediate retained for the backward pass,
+which exhausts 80 GB near 1500 periodic or 25000 molecular atoms;
+``regime: large`` applies the same system as a matrix-free Ewald operator
+(neighbor-list real space, structure-factor reciprocal space), solves it by
+LU or conjugate gradients (``eeq_solver: auto | lu | cg``) and
+differentiates it implicitly, so memory is linear in the neighbor list and
+reciprocal set and gradients cost one operator application. ``regime: auto``
+(default) switches above 1500 / 6000 atoms. The two regimes agree to the
+reference code's own Ewald tolerance (about 1e-8 in the charges); forces,
+stress and force training are exact in both. ``cutoff_eeq`` sets the
+real-space range of the split (default: the other cutoffs, so the graph is
+not widened; at least 20 bohr for crystals). The three-body term runs in
+recompute blocks of centers by default (``checkpoint_triplets: true``):
+memory bounded by one block at every derivative order (force training
+included), no ``(N, N)`` C6 matrix, one re-evaluation of the block per
+order of differentiation. On an A100 a 5000-atom water cell with 12 / 8 A
+cutoffs takes 5 s for energy, forces and stress and 13 s for a force-loss
+training step in 21 GB, where the dense regime runs out of 80 GB at 1500
+atoms. Both are eager-only; TorchScript exports pin the dense paths.
+Derivations and complexity analyses: ``notes/eeq_large_systems`` and
+``notes/atm_chunking``.
+
 The geometry-only predecessor **DFT-D3** (Grimme *et al.*, *J. Chem. Phys.*
 **132**, 154104, 2010; BJ damping from Grimme, Ehrlich & Goerigk, *J. Comput.
 Chem.* **32**, 1456, 2011) is available the same way as

@@ -56,9 +56,7 @@ from .blocks import hidden_irreps as _hidden_irreps
 from .blocks import tp_out_irreps_with_instructions
 
 
-# ===========================================================================
 # Clebsch-Gordan symmetric coupling basis (the ``U`` tensors)
-# ===========================================================================
 def _wigner_nj(irrepss, normalization: str = "component", filter_ir_mid=None, dtype=None):
     """Generalized Clebsch-Gordan coupling of ``len(irrepss)`` irreps factors.
 
@@ -209,9 +207,7 @@ def U_matrix_real(irreps_in, irreps_out, correlation: int, normalization: str = 
     return [text[: len(text) - 2], torch.zeros(shape, dtype=dtype)]
 
 
-# ===========================================================================
 # Symmetric contraction (MACE Eq. 10-11): the learned product basis
-# ===========================================================================
 # free einsum labels for the correlation axes of the U tensors; anything is
 # fine as long as none collides with the reserved labels b (batch), c (channel),
 # e (element), i (coupling dim), k (path) used in the contraction equations
@@ -420,11 +416,9 @@ class SymmetricContraction(nn.Module):
         return torch.cat(outs, dim=-1)
 
 
-# ===========================================================================
 # Irreps helpers + equivariant blocks
 # (the shared uvu path helper `tp_out_irreps_with_instructions` lives in
 #  .blocks; MACE uses its default sorted-instruction convention)
-# ===========================================================================
 class _ReshapeIrreps(nn.Module):
     """Flat ``(N, irreps.dim)`` -> ``(N, mul, sum_ir_dim)`` (uniform mul assumed).
 
@@ -1032,9 +1026,7 @@ INTERACTIONS = {
 # options by their upstream spellings (silu/tanh/abs/ssp/None).
 
 
-# ===========================================================================
 # The MACE model
-# ===========================================================================
 @register_model("mace")
 class MACE(EquivariantGNN):
     """Faithful MACE with a flexible number of interaction layers (T = 0..N).

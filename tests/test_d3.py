@@ -78,10 +78,7 @@ def _energy(model, pos, z, **kw):
     return float(model(_graph(pos, z, model.cutoff, **kw))["energy"])
 
 
-# --------------------------------------------------------------------------
 # DFTD3 core
-# --------------------------------------------------------------------------
-
 def test_defaults_are_pbe0_of_the_papers():
     bj = DFTD3()
     assert bj.damping == "bj"
@@ -359,9 +356,7 @@ def test_reference_sets():
     assert m.term.references == "2010"
 
 
-# --------------------------------------------------------------------------
 # wrapper, config hook, nesting
-# --------------------------------------------------------------------------
 
 MODEL_CONFIGS = {
     "cace": {"extra": {"species": [1, 8], "n_atom_basis": 2, "max_l": 2, "max_nu": 2}},
@@ -437,10 +432,7 @@ def test_nests_with_les_and_standalone_features():
     assert torch.isfinite(les_d3(_graph(pos, z, 9.0))["energy"]).all()
 
 
-# --------------------------------------------------------------------------
 # deploy channels
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("periodic", [False, True])
 @pytest.mark.parametrize("kind", ["standalone", "schnet"])
 def test_torchscript_export_matches_eager(kind, periodic):
@@ -484,10 +476,7 @@ def test_ase_calculator_matches_eager():
     assert np.abs(atoms.get_forces() - ref["forces"].detach().numpy()).max() < 1e-10
 
 
-# --------------------------------------------------------------------------
 # parity with the upstream simple-dftd3 package
-# --------------------------------------------------------------------------
-
 def _upstream_param(damping, **kw):
     from dftd3 import interface as di
     cls = {"bj": di.RationalDampingParam, "zero": di.ZeroDampingParam,

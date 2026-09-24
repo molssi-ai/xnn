@@ -216,9 +216,7 @@ class OPLSForceField(nn.Module):
         make("improper_v2", [float(lib.improper_types[k]["v2"]) * KCAL_TO_EV
                              for k in self.improper_keys])
 
-    # ------------------------------------------------------------------
     # resolution (topology binding)
-    # ------------------------------------------------------------------
     def type_index(self, name: str) -> int:
         """Row index of atom type ``name``.
 
@@ -352,9 +350,7 @@ class OPLSForceField(nn.Module):
         """Whether an improper pattern exists for the class quadruple."""
         return resolve_improper_type(self._improper_types, i, j, k, l) is not None
 
-    # ------------------------------------------------------------------
     # export
-    # ------------------------------------------------------------------
     def export_library(self) -> OPLSLibrary:
         """Write the current (possibly trained) parameters back to a library.
 
@@ -522,9 +518,7 @@ class OPLS(InteratomicPotential):
         top = MolecularTopology.from_bonds(types, perceive_bonds(mol))
         return cls(lib, top, **kwargs)
 
-    # ------------------------------------------------------------------
     # topology binding
-    # ------------------------------------------------------------------
     def _bind_topology(self, top: MolecularTopology) -> None:
         """Resolve the topology against the force field into index buffers.
 
@@ -625,9 +619,7 @@ class OPLS(InteratomicPotential):
         buf("excl_index", [list(p) for p in excl], (-1, 2))
         self.excl_index = self.excl_index.t().contiguous()
 
-    # ------------------------------------------------------------------
     # geometry helpers
-    # ------------------------------------------------------------------
     def _pair_vectors(self, data: AtomicGraph, a: Tensor, b: Tensor
                       ) -> Tensor:
         """Minimum-image displacements (see :func:`.geometry.pair_vectors`)."""
@@ -659,9 +651,7 @@ class OPLS(InteratomicPotential):
         s6 = (sig * sig / (r2 + TINY)) ** 3
         return 4.0 * eps * (s6 * s6 - s6), KE * q_i * q_j / r
 
-    # ------------------------------------------------------------------
     # forward
-    # ------------------------------------------------------------------
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Evaluate the OPLS energy on a (batched) atomic graph.
 
@@ -713,7 +703,7 @@ class OPLS(InteratomicPotential):
             """Tile per-interaction type rows ``(m,)`` to ``(B*m,)``."""
             return v.repeat(B)
 
-        # --- bonds -----------------------------------------------------
+        # bonds
         bi = expand(self.bond_index)
         bt = tile(self.bond_type)
         bvec = self._pair_vectors(data, bi[0], bi[1])
@@ -722,7 +712,7 @@ class OPLS(InteratomicPotential):
         e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
             + scatter_sum(0.5 * e_bond, bi[1], N)
 
-        # --- angles ----------------------------------------------------
+        # angles
         ai = expand(self.angle_index)
         at = tile(self.angle_type)
         u = self._pair_vectors(data, ai[1], ai[0])
@@ -735,7 +725,7 @@ class OPLS(InteratomicPotential):
         e_angle = P["angle_k"][at] * (theta - P["angle_theta0"][at]) ** 2
         e_angle_node = scatter_sum(e_angle, ai[1], N)
 
-        # --- proper dihedrals (Fourier series, eq 4) --------------------
+        # proper dihedrals (Fourier series, eq 4)
         di = expand(self.dihedral_index)
         dt = tile(self.dihedral_type)
         c1 = self._dihedral_cos(data, di)
@@ -749,14 +739,14 @@ class OPLS(InteratomicPotential):
                                     + vd[:, 4] * (1.0 - c4)))
         e_tors_node = scatter_sum(e_tors, di[1], N)
 
-        # --- improper dihedrals -----------------------------------------
+        # improper dihedrals
         ii = expand(self.improper_index)
         it = tile(self.improper_type)
         ci = self._dihedral_cos(data, ii)
         e_impr = 0.5 * P["improper_v2"][it] * (1.0 - (2.0 * ci * ci - 1.0))
         e_impr_node = scatter_sum(e_impr, ii[2], N)
 
-        # --- nonbonded: neighbor list minus exclusions -------------------
+        # nonbonded: neighbor list minus exclusions
         src, dst = data.edge_index[0], data.edge_index[1]
         vec = data.edge_vectors()
         r2 = (vec * vec).sum(1)
@@ -783,7 +773,7 @@ class OPLS(InteratomicPotential):
         e_lj_node = scatter_sum(0.5 * w * lj_e, dst, N)
         e_coul_node = scatter_sum(0.5 * w * coul_e, dst, N)
 
-        # --- scaled 1,4 pairs (exact, cutoff-independent) -----------------
+        # scaled 1,4 pairs (exact, cutoff-independent)
         pi = expand(self.pair14_index)
         p_t0, p_t1 = t[pi[0]], t[pi[1]]
         pvec = self._pair_vectors(data, pi[0], pi[1])
@@ -829,9 +819,7 @@ class OPLS(InteratomicPotential):
             "e_coulomb14": self.aggregate_energy(e_coul14_node, data),
         }
 
-    # ------------------------------------------------------------------
     # conveniences
-    # ------------------------------------------------------------------
     def export_library(self) -> OPLSLibrary:
         """Export the current parameters as an :class:`OPLSLibrary`.
 

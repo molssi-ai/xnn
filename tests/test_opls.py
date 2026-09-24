@@ -44,9 +44,7 @@ def _f64():
     torch.set_default_dtype(prev)
 
 
-# ----------------------------------------------------------------------
 # small builders
-# ----------------------------------------------------------------------
 def _graph(pos, z, cutoff, cell=None):
     """Build a single-structure graph from raw arrays."""
     s = {"pos": torch.as_tensor(pos, dtype=torch.get_default_dtype()),
@@ -116,9 +114,7 @@ def _ethylene(pyramid_deg=0.0, explicit_impropers=True):
     return pos, [6, 6, 1, 1, 1, 1], top
 
 
-# ----------------------------------------------------------------------
 # registration, topology derivation, libraries
-# ----------------------------------------------------------------------
 def test_registration():
     assert "opls" in available_models()
 
@@ -262,9 +258,7 @@ def test_strict_refuses_unimplemented_forms():
     assert plus.fragments
 
 
-# ----------------------------------------------------------------------
 # equation-level references
-# ----------------------------------------------------------------------
 def test_bond_energy_equation():
     lib = builtin_library("oplsaa")
     top = MolecularTopology.from_bonds(["opls_80", "opls_80"], [(0, 1)])
@@ -420,9 +414,7 @@ def test_missing_parameters_are_reported_together():
     assert "nope" in str(err.value)
 
 
-# ----------------------------------------------------------------------
 # invariances, forces, batching, periodicity
-# ----------------------------------------------------------------------
 def test_rotation_translation_invariance_and_force_equivariance():
     model, pos, z = _butane_model()
     fmodel = ForceStressOutput(model)
@@ -534,9 +526,7 @@ def test_switching_function():
         OPLS(lib, top, cutoff=10.0, switch_width=10.0)
 
 
-# ----------------------------------------------------------------------
 # fidelity anchor: the 1996 paper's ethane barrier
-# ----------------------------------------------------------------------
 def test_relaxed_ethane_barrier_matches_paper():
     ase = pytest.importorskip("ase")
     from ase.constraints import FixInternals
@@ -659,9 +649,7 @@ def test_openmm_parity():
         assert np.abs(f_x - f_omm).max() < 1e-5
 
 
-# ----------------------------------------------------------------------
 # SMARTS typing entry points (RDKit)
-# ----------------------------------------------------------------------
 def test_from_atoms_reproduces_hand_typed_model():
     pytest.importorskip("rdkit")
     pos, z, types, bonds = _butane()
@@ -685,9 +673,7 @@ def test_from_atoms_reproduces_hand_typed_model():
     assert abs(float(lo(gt)["e_bond"]) - float(hand(gt)["e_bond"])) < 1e-12
 
 
-# ----------------------------------------------------------------------
 # training, shared parameters, config
-# ----------------------------------------------------------------------
 def test_trainable_selection_and_gradients():
     model, pos, z = _butane_model(trainable=("dihedral_v", "charge"))
     out = model(_graph(pos, z, 20.0))

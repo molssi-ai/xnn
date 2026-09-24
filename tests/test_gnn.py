@@ -33,7 +33,7 @@ def _proper_rotation(seed=1):
     return R
 
 
-# --- featurizers (independently usable) ---
+# featurizers (independently usable)
 
 def test_radial_sf_shape():
     sf = RadialSymmetryFunctions(SPECIES, cutoff=5.0)
@@ -66,7 +66,7 @@ def test_radial_sf_rotation_invariant():
     assert torch.allclose(d0, d1, atol=1e-4)
 
 
-# --- equivariant GNNs ---
+# equivariant GNNs
 
 @pytest.mark.parametrize("name", ["nequip", "mace", "allegro", "cace"])
 def test_gnn_equivariance(name):

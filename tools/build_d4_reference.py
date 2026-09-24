@@ -44,10 +44,7 @@ MAX_SEC = 17
 MAX_CN_BIN = 19
 
 
-# ---------------------------------------------------------------------------
 # Fortran parsing helpers
-# ---------------------------------------------------------------------------
-
 def _read_joined(path: Path) -> str:
     """File contents with comments dropped and ``&`` continuations joined."""
     out = []
@@ -102,10 +99,7 @@ def _nint(x: float) -> int:
     return int(math.floor(abs(x) + 0.5)) * (1 if x >= 0 else -1)
 
 
-# ---------------------------------------------------------------------------
 # build
-# ---------------------------------------------------------------------------
-
 def build(dftd4: Path, multicharge: Path, mctc: Path) -> dict[str, np.ndarray]:
     src = dftd4 / "src" / "dftd4"
     ref = parse_data_statements(_read_joined(src / "reference.inc"))

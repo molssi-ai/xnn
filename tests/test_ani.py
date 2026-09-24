@@ -51,10 +51,7 @@ def _graph(n=8, cutoff=5.2, R=None, shift=0.0, seed=1, perm=None):
     return structure_to_graph({"pos": pos, "atomic_numbers": z}, cutoff)
 
 
-# --------------------------------------------------------------------------- #
 # building blocks                                                             #
-# --------------------------------------------------------------------------- #
-
 def test_build_triplets_matches_bruteforce():
     """The vectorised triplet builder matches a per-atom brute force."""
     rng = torch.Generator().manual_seed(0)
@@ -107,10 +104,7 @@ def test_shift_recipe_matches_torchani_grid():
     assert math.isclose(shfz[0], math.pi / 16)
 
 
-# --------------------------------------------------------------------------- #
 # model behaviour                                                             #
-# --------------------------------------------------------------------------- #
-
 def test_forward_and_forces():
     """ANI produces per-structure energy and conservative forces."""
     model = ForceStressOutput(ANI.ani1x(SPECIES))
@@ -215,10 +209,7 @@ def test_ani2x_energy_forces_on_halogens():
     assert torch.isfinite(out["forces"]).all()
 
 
-# --------------------------------------------------------------------------- #
 # config                                                                      #
-# --------------------------------------------------------------------------- #
-
 def test_registered():
     """ANI is discoverable through the model registry."""
     assert "ani" in available_models()
@@ -270,10 +261,7 @@ def test_behler_parrinello_conventions():
     assert math.isclose(bp.angular.cos_factor, 1.0)
 
 
-# --------------------------------------------------------------------------- #
 # torchani parity (only where torchani is installed)                          #
-# --------------------------------------------------------------------------- #
-
 def _xnn_graph(Z, pos, cutoff):
     Z = torch.as_tensor(Z, dtype=torch.long)
     pos = torch.as_tensor(pos, dtype=torch.float64)

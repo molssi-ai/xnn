@@ -195,9 +195,7 @@ def test_upstream_mace_key_translation():
         build_model(from_dict({"model": {"name": "mace", "E0s": "average"}}).model)
 
 
-# ---------------------------------------------------------------------------
 # ScaleShiftMACE energy expression, distance transforms, density blocks
-# ---------------------------------------------------------------------------
 def test_scale_shift_energy_expression():
     """E_i = E0_i + scale * E_int,i + shift, with ZBL inside the scale."""
     pytest.importorskip("ase")
@@ -302,9 +300,7 @@ def test_from_config_scale_shift_transform_keys():
     assert m.pair_repulsion
 
 
-# ---------------------------------------------------------------------------
 # foundation-model conversion: parity with upstream mace-torch
-# ---------------------------------------------------------------------------
 def _upstream_scale_shift_mace(flavor, heads=None):
     """Build a small upstream ScaleShiftMACE of the requested flavor."""
     import mace.modules as mm

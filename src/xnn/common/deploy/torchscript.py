@@ -52,6 +52,7 @@ time (``total_charge``, default neutral), since neither tensor ABI carries it.
 # NOTE: deliberately no ``from __future__ import annotations`` -- it turns the
 # class-level attribute annotations below into strings, which TorchScript's
 # annotation resolver rejects ("Unknown type annotation: 'bool'").
+import copy
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -300,10 +301,11 @@ class _NoDispersion(nn.Module):
 class _DispersionHead(nn.Module):
     """Scriptable single-structure view of a :class:`DispersionCorrection` wrapper.
 
-    Holds the wrapper's evaluator (:class:`~xnn.common.models.d4.DFTD4` or
-    :class:`~xnn.common.models.d3.DFTD3`; the same module, so a trained
-    damping parameter deploys as trained) and calls its batched core for one
-    structure.
+    Holds a copy of the wrapper's evaluator (:class:`~xnn.common.models.d4.DFTD4`
+    or :class:`~xnn.common.models.d3.DFTD3`; same parameters, so a trained
+    damping parameter deploys as trained) pinned to its scriptable paths --
+    the dense EEQ regime and the plain three-body loop -- and calls its
+    batched core for one structure.
 
     Parameters
     ----------
@@ -325,6 +327,13 @@ class _DispersionHead(nn.Module):
 
     def __init__(self, term, total_charge: float = 0.0):
         super().__init__()
+        # a copy: the export pins the scriptable paths (dense EEQ, plain
+        # triplet loop) without touching the eager model's settings
+        term = copy.deepcopy(term)
+        if hasattr(term, "regime"):
+            term.regime = "dense"
+        if hasattr(term, "checkpoint_triplets"):
+            term.checkpoint_triplets = False
         self.term = term
         self.total_charge = float(total_charge)
 

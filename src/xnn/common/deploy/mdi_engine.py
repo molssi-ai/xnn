@@ -159,19 +159,19 @@ class MDIEngine:
         self.total_charge = float(total_charge)
         self.dtype = _float_dtype(model)
 
-        # ---- system state, set by driver commands (MDI atomic units) ----
+        # system state, set by driver commands (MDI atomic units)
         self.natoms: int | None = None
         self.atomic_numbers: np.ndarray | None = None
         self.coords_bohr: np.ndarray | None = None   # (N, 3)
         self.cell_bohr: np.ndarray | None = None     # (3, 3); None => molecular
 
-        # ---- results of the latest evaluation (MDI atomic units) ----
+        # results of the latest evaluation (MDI atomic units)
         self.energy: float | None = None
         self.forces: np.ndarray | None = None
         self.stress: np.ndarray | None = None
         self._needs_calculation = True
 
-        # ---- timing ----
+        # timing
         self._n_calc = 0
         self._t_total = 0.0
         self._t_graph = 0.0     # neighbour list + tensor assembly
@@ -265,9 +265,7 @@ class MDIEngine:
                     total_charge)
         return cls(model, cutoff=cutoff, device=device, total_charge=total_charge)
 
-    # ------------------------------------------------------------------ #
     # evaluation
-    # ------------------------------------------------------------------ #
 
     def calculate(self) -> None:
         """Evaluate the model on the current system state.
@@ -369,9 +367,7 @@ class MDIEngine:
             self.calculate()
             self._needs_calculation = False
 
-    # ------------------------------------------------------------------ #
     # MDI communication loop
-    # ------------------------------------------------------------------ #
 
     def run(self, mdi_options: str, mpi_comm=None) -> None:
         """Run the MDI engine loop until the driver sends ``EXIT``.

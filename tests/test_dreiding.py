@@ -49,9 +49,7 @@ def _f64():
     torch.set_default_dtype(prev)
 
 
-# ----------------------------------------------------------------------
 # small builders
-# ----------------------------------------------------------------------
 def _graph(pos, z, cutoff, cell=None):
     """Build a single-structure graph from raw arrays."""
     s = {"pos": torch.as_tensor(pos, dtype=torch.get_default_dtype()),
@@ -112,9 +110,7 @@ def _water_dimer(r_oo=2.75):
     return pos, [8, 1, 1, 8, 1, 1], top
 
 
-# ----------------------------------------------------------------------
 # registration and the parameter library
-# ----------------------------------------------------------------------
 def test_registration():
     assert "dreiding" in available_models()
 
@@ -188,9 +184,7 @@ def test_library_json_roundtrip(tmp_path):
     assert json.loads(path.read_text())["format"] == "xnn-dreiding-1"
 
 
-# ----------------------------------------------------------------------
 # the torsion rule engine (eqs 14-23)
-# ----------------------------------------------------------------------
 def test_torsion_rules_against_the_paper():
     lib = read_dreiding("dreiding")
 
@@ -255,9 +249,7 @@ def test_torsion_barrier_is_split_over_the_central_bond():
     assert v == pytest.approx(2.0, abs=1e-12)
 
 
-# ----------------------------------------------------------------------
 # energy expressions, recomputed by hand
-# ----------------------------------------------------------------------
 def test_bond_energy_and_radius_additivity():
     model, z = _ethane_model(keep_intermediates=True)
     pos = _ethane_pos()
@@ -512,9 +504,7 @@ def test_fourteen_pairs_are_included_in_full():
     assert int((w > 0).sum()) == 2 * len(top.pairs14)
 
 
-# ----------------------------------------------------------------------
 # invariances, batching, periodicity
-# ----------------------------------------------------------------------
 def test_rotation_translation_invariance_and_force_equivariance():
     model, z = _ethane_model()
     pos = torch.tensor(_ethane_pos(37.0))
@@ -628,9 +618,7 @@ def test_missing_parameters_are_reported_together():
     assert "Xx_" in msg and "Yy_" in msg
 
 
-# ----------------------------------------------------------------------
 # typing, config, training
-# ----------------------------------------------------------------------
 @pytest.mark.parametrize("smiles,expect", [
     ("CC", ["C_3", "C_3"] + ["H_"] * 6),
     ("C=C", ["C_2", "C_2"] + ["H_"] * 4),

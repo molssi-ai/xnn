@@ -59,9 +59,7 @@ def _model(nn, **kwargs):
     return ReaxFF(template_library(["C", "H", "O"], nn=nn), nn=nn, **kwargs)
 
 
-# ---------------------------------------------------------------------------
 # equation-level references
-# ---------------------------------------------------------------------------
 def test_uncorrected_bond_order_equation():
     """A C2 dimer reproduces eq 2 of van Duin 2001 (scalar recomputation)."""
     lib = template_library(["C"], nn=False)
@@ -297,9 +295,7 @@ def test_hydrogen_bond_term():
     assert abs(float(it["ehb"][idx]) - ehb) < 1e-8
 
 
-# ---------------------------------------------------------------------------
 # invariances, forces, batching
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("nn", [False, True])
 def test_rotation_translation_invariance(nn):
     """Energy is invariant and forces are equivariant under rigid motions."""
@@ -401,9 +397,7 @@ def test_periodic_stress_and_bond_orders():
     assert torch.allclose(it["bo0"], it["bo0"][rev], atol=1e-12)
 
 
-# ---------------------------------------------------------------------------
 # training, libraries, config
-# ---------------------------------------------------------------------------
 def test_trainable_selection_and_step():
     """Only requested classical groups (plus nn weights) receive gradients."""
     model = _model(nn=True, trainable=("Desi", "ang_val1"))

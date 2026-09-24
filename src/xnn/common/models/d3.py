@@ -98,16 +98,14 @@ from .dispersion import (
     options_from_extra,
     switching_function,
     three_body_energy,
+    three_body_energy_chunked,
 )
 from .ops import scatter_sum
 from .registry import register_model
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-# ---------------------------------------------------------------------------
-# legacy functional API (PhysNet / BAMBOO): Grimme's D3(BJ) in the form of the
-# PhysNet TensorFlow code, on the reference-code data
-# ---------------------------------------------------------------------------
+# legacy functional API (PhysNet / BAMBOO): D3(BJ) as in the PhysNet TF code
 
 # unit conversions, with the exact values used in Grimme's reference code
 d3_autoang = 0.52917726  # multiply to go from bohr to angstrom
@@ -425,9 +423,7 @@ def edisp(Z: Tensor, r: Tensor, idx_i: Tensor, idx_j: Tensor,
     return _scatter_add(e6 + e8, idx_i, n_atoms)
 
 
-# ---------------------------------------------------------------------------
 # the general D3 model (reference-code semantics)
-# ---------------------------------------------------------------------------
 
 # model constants
 _KCN = 16.0                    # steepness k1 of the counting function (eq 15)
@@ -488,6 +484,12 @@ class DFTD3(nn.Module):
     trainable : bool, optional
         Make ``s6, s8, s9, a1, a2, rs6, rs8, bet`` learnable parameters, by
         default ``False``.
+    checkpoint_triplets : bool, optional
+        Evaluate the three-body term in recompute blocks of centers
+        (:func:`~xnn.common.models.dispersion.three_body_energy_chunked`),
+        by default ``True``; bounds the memory by one block at every
+        derivative order at the cost of re-evaluating it in the backward
+        passes. Eager only.
     references : str, optional
         Set of reference systems: ``"2024"`` (default, the current reference
         code: Fr-Pu re-parametrized with up to seven references, Am-Lr added)
@@ -521,6 +523,7 @@ class DFTD3(nn.Module):
     switch_width_triple: float
     n_features: int
     references: str
+    checkpoint_triplets: bool
 
     def __init__(self, damping: str = "bj", s6: float = 1.0, s8: Optional[float] = None,
                  s9: float = 0.0, a1: float = 0.4145, a2: float = 4.8593,
@@ -530,8 +533,10 @@ class DFTD3(nn.Module):
                  cutoff_triple: float = _CUTOFF_TRIPLE_AU * BOHR,
                  cutoff_cn: float = _CUTOFF_CN_AU * BOHR,
                  switch_width_pair: float = 0.0, switch_width_triple: float = 0.0,
-                 trainable: bool = False, references: str = "2024"):
+                 trainable: bool = False, references: str = "2024",
+                 checkpoint_triplets: bool = True):
         super().__init__()
+        self.checkpoint_triplets = bool(checkpoint_triplets)
         damping = damping.lower()
         if damping in ("rational", "d3bj"):
             damping = "bj"
@@ -579,9 +584,7 @@ class DFTD3(nn.Module):
                              persistent=False)
         self.register_buffer("c6ref", torch.tensor(tab["c6"], dtype=dt), persistent=False)
 
-    # ------------------------------------------------------------------
     # building blocks (atomic units; TorchScript-compatible)
-    # ------------------------------------------------------------------
     def coordination_numbers(self, z: Tensor, edge_index: Tensor, r: Tensor,
                              n_atoms: int) -> Tensor:
         """Exponential-count coordination numbers (2010 paper eq 15), ``(N,)``.
@@ -674,9 +677,17 @@ class DFTD3(nn.Module):
         e_pair = -0.5 * c6 * sw * (self.s6 * t6 + self.s8 * rr * t8)
         return scatter_sum(e_pair, dst, n_atoms)
 
-    # ------------------------------------------------------------------
     # evaluation
-    # ------------------------------------------------------------------
+    @torch.jit.unused
+    def _three_body_chunked(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor,
+                            c6_mat: Tensor, n_atoms: int) -> Tensor:
+        """Checkpointed ATM term (eager only), memory bounded by one block of centers."""
+        return three_body_energy_chunked(z, edge_index, edge_vec, r, self.rs9 * self.rvdw,
+                                         self.s9, (self.alp + 2.0) / 3.0,
+                                         self.cutoff_triple / self.bohr,
+                                         self.switch_width_triple / self.bohr, n_atoms,
+                                         c6_mat=c6_mat)
+
     @torch.jit.export
     def evaluate(self, atomic_numbers: Tensor, pos: Tensor, edge_index: Tensor,
                  edge_vec: Tensor, batch: Tensor, num_graphs: int,
@@ -729,10 +740,14 @@ class DFTD3(nn.Module):
                 raise ValueError("the D3 three-body term needs the dense C6 matrix "
                                  "(more than 20000 atoms); set s9 = 0")
             in_triple = r <= self.cutoff_triple / self.bohr
-            e3 = three_body_energy(z, edge_index[:, in_triple], vec_au[in_triple],
-                                   r[in_triple], c6_mat, self.rs9 * self.rvdw, self.s9,
-                                   (self.alp + 2.0) / 3.0, self.cutoff_triple / self.bohr,
-                                   self.switch_width_triple / self.bohr, n_atoms)
+            if self.checkpoint_triplets and not torch.jit.is_scripting():
+                e3 = self._three_body_chunked(z, edge_index[:, in_triple], vec_au[in_triple],
+                                              r[in_triple], c6_mat, n_atoms)
+            else:
+                e3 = three_body_energy(z, edge_index[:, in_triple], vec_au[in_triple],
+                                       r[in_triple], c6_mat, self.rs9 * self.rvdw, self.s9,
+                                       (self.alp + 2.0) / 3.0, self.cutoff_triple / self.bohr,
+                                       self.switch_width_triple / self.bohr, n_atoms)
             node_energy = node_energy + e3
         if dense:
             c6_self = c6_mat.diagonal()
@@ -759,7 +774,7 @@ class DFTD3(nn.Module):
 
 _D3_KEYS = ("damping", "s6", "s8", "s9", "a1", "a2", "rs6", "rs8", "alp", "bet", "references",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "switch_width_pair",
-            "switch_width_triple", "trainable")
+            "switch_width_triple", "trainable", "checkpoint_triplets")
 
 
 @register_model("d3")

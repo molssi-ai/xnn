@@ -219,9 +219,7 @@ class OPLSLibrary:
         return to_forcefield(self, name=name, version=version).write(path)
 
 
-# ----------------------------------------------------------------------
 # bonded-type resolution
-# ----------------------------------------------------------------------
 def resolve_bond_type(bond_types: dict, a: str, b: str) -> Optional[str]:
     """Find the bond-type key for the class pair ``(a, b)``.
 
@@ -337,9 +335,7 @@ def resolve_improper_type(improper_types: dict, i: str, j: str, k: str,
     return None
 
 
-# ----------------------------------------------------------------------
 # readers
-# ----------------------------------------------------------------------
 def _read_json(path: Path) -> OPLSLibrary:
     """Read the native JSON library format."""
     data = json.loads(path.read_text())

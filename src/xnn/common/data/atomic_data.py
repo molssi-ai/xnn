@@ -110,7 +110,7 @@ class AtomicGraph:
         Per-structure loss weight ``(B,)``.
     """
 
-    # --- structure ---
+    # structure
     pos: Tensor              # (N, 3) cartesian positions
     atomic_numbers: Tensor   # (N,)   integer Z per atom
     edge_index: Tensor       # (2, E) [src, dst]; energy of dst depends on src
@@ -120,11 +120,11 @@ class AtomicGraph:
     cell: Optional[Tensor] = None     # (B, 3, 3) lattice vectors as rows
     pbc: Optional[Tensor] = None      # (B, 3) bool periodicity flags
 
-    # --- targets / labels (optional; present during training) ---
+    # targets / labels (optional; present during training)
     energy: Optional[Tensor] = None   # (B,)
     forces: Optional[Tensor] = None   # (N, 3)
     stress: Optional[Tensor] = None   # (B, 3, 3)
-    # --- optional per-structure metadata ---
+    # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
 

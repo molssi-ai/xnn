@@ -60,7 +60,7 @@ class Benchmark:
         for cm in cfg.custom_metrics:
             _metrics.load_custom_metric(cm["name"], cm["path"])
 
-    # -- data -------------------------------------------------------------
+    # data
     def _dataset(self, cutoff: float) -> AtomicDataset:
         """Return the benchmark dataset for a given cutoff (cached per cutoff).
 
@@ -114,7 +114,7 @@ class Benchmark:
                           shuffle=False, collate_fn=collate,
                           num_workers=self.cfg.data.num_workers)
 
-    # -- per-model model handling ----------------------------------------
+    # per-model model handling
     def _load_model(self, entry: ModelEntry):
         """Build the model and load the entry's checkpoint weights.
 
@@ -172,7 +172,7 @@ class Benchmark:
         model.load_state_dict(sd)
         return model, cfg
 
-    # -- scoring ----------------------------------------------------------
+    # scoring
     def _atomic_energies(self, dataset):
         """Build (once) the ``Z``-indexed E0 lookup for atomization scoring.
 
@@ -225,7 +225,7 @@ class Benchmark:
         n_params = sum(p.numel() for p in model.parameters())
         return {"model": entry.label, "n_params": n_params, **scores}
 
-    # -- driver -----------------------------------------------------------
+    # driver
     def run(self) -> list[dict]:
         """Score every model on the benchmark dataset and write the results.
 

@@ -37,9 +37,7 @@ def _f64():
     torch.set_default_dtype(old)
 
 
-# --------------------------------------------------------------------------
 # geometries (Angstrom)
-# --------------------------------------------------------------------------
 
 # ASE g2 geometries (the reference values below were generated on these)
 WATER = (np.array([[0.0, 0.0, 0.119262], [0.0, 0.763239, -0.477047],
@@ -84,10 +82,7 @@ def _energy(model, pos, z, **kw):
     return float(model(_graph(pos, z, model.cutoff, **kw))["energy"])
 
 
-# --------------------------------------------------------------------------
 # DFTD4 physics
-# --------------------------------------------------------------------------
-
 def test_defaults_are_pbe0_d4():
     d4 = DFTD4()
     for k, v in PBE0_D4.items():
@@ -270,9 +265,7 @@ def test_rejects_unsupported_elements():
         D4Dispersion()(_graph(np.array([[0.0, 0, 0], [2.0, 0, 0]]), [104, 1], 5.0))
 
 
-# --------------------------------------------------------------------------
 # wrapper around every model, config hook, LES nesting
-# --------------------------------------------------------------------------
 
 MODEL_CONFIGS = {
     "cace": {"extra": {"species": [1, 8], "n_atom_basis": 2, "max_l": 2, "max_nu": 2}},
@@ -384,10 +377,7 @@ def test_total_charge_flows_through_the_data_layer():
                    ).total_charge is None
 
 
-# --------------------------------------------------------------------------
 # deploy channels
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("periodic", [False, True])
 @pytest.mark.parametrize("kind", ["standalone", "schnet"])
 def test_torchscript_export_matches_eager(kind, periodic):
@@ -479,10 +469,7 @@ def test_trainer_widens_dataset_cutoff_to_the_wrapper(tmp_path):
     assert trainer.model.model.cutoff == 9.0
 
 
-# --------------------------------------------------------------------------
 # parity with the upstream dftd4 package
-# --------------------------------------------------------------------------
-
 def _upstream(pos, z, charge=0.0, cell=None, params=None):
     """Reference D4 results from the ``dftd4`` Python package, in atomic units.
 
