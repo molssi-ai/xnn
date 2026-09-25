@@ -141,3 +141,28 @@ def test_cli_parses_dispersion_and_charge(tmp_path, monkeypatch):
           "--total-charge", "-1", "--dtype", "float64"])
     assert seen == {"cutoff": pytest.approx(12.0), "charge": -1.0,
                     "dtype": torch.float64, "disp": True}
+
+
+@pytest.mark.parametrize("extra", [{"long_range": True},
+                                   {"dispersion": {**FAST_D4, "regime": "large", "cutoff_pair": 11.0}},
+                                   {"dispersion": {**FAST_D4, "regime": "dense"}}])
+def test_float32_model_under_float64_default(tmp_path, extra):
+    """A float32 checkpoint served in a process whose default dtype is float64
+    must still give forces and stress on a periodic cell (torch.det's backward
+    would otherwise mix in the default dtype; cell volumes use cell_volume)."""
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        path = _checkpoint(tmp_path, {**BASE, "extra": extra})
+        torch.set_default_dtype(torch.float64)
+        engine = MDIEngine.from_checkpoint(path, dtype=torch.float32)
+        rng = np.random.default_rng(0)
+        engine.natoms = 30
+        engine.atomic_numbers = np.array([8, 1, 1] * 10)
+        engine.coords_bohr = rng.uniform(0, 8.0, (30, 3)) / BOHR_TO_ANGSTROM
+        engine.cell_bohr = np.eye(3) * 8.0 / BOHR_TO_ANGSTROM
+        engine.calculate()
+        assert engine.dtype == torch.float32
+        assert np.isfinite(engine.energy) and engine.forces.shape == (30, 3) and engine.stress.shape == (3, 3)
+    finally:
+        torch.set_default_dtype(prev)

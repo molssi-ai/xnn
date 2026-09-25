@@ -276,7 +276,10 @@ def test_scripted_core_matches_eager():
     g = _graph(*_cluster(10), 9.0, cell=np.eye(3) * 6.0)
     args = (g.atomic_numbers, g.pos, g.edge_index, g.edge_vectors(), g.batch, 1,
             g.cell, g.pbc, torch.zeros(1))
-    assert torch.equal(d3.evaluate(*args)["node_energy"], scripted.evaluate(*args)["node_energy"])
+    # the eager three-body term visits each triangle once and sums its thirds
+    # into the three corners, the scripted loop once per corner: rounding only
+    assert torch.allclose(d3.evaluate(*args)["node_energy"], scripted.evaluate(*args)["node_energy"],
+                          atol=1e-13, rtol=0)
 
 
 def test_trainable_parameters_and_gradients():

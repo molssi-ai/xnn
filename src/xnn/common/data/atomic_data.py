@@ -180,9 +180,17 @@ class AtomicGraph:
         src, dst = self.edge_index[0], self.edge_index[1]
         vec = self.pos[dst] - self.pos[src]
         if self.cell is not None:
-            # cell of the structure each edge belongs to (via its src node)
-            cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
-            shift = torch.einsum("ei,eij->ej",
-                                 self.cell_shifts.to(vec.dtype), cell_per_edge)
+            if self.cell.shape[0] == 1:
+                # one structure: a plain matmul. Gathering the cell onto every
+                # edge makes the backward pass (the stress) accumulate 9 E
+                # values into the same nine entries through the sort-based
+                # index backward, which cost 1.5 s of a D4 step and half of a
+                # MACE step on 5000 periodic atoms (notes/atm_chunking).
+                shift = self.cell_shifts.to(vec.dtype) @ self.cell[0]
+            else:
+                # cell of the structure each edge belongs to (via its src node)
+                cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
+                shift = torch.einsum("ei,eij->ej",
+                                     self.cell_shifts.to(vec.dtype), cell_per_edge)
             vec = vec + shift
         return vec

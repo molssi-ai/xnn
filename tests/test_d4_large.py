@@ -385,3 +385,87 @@ def test_training_mode_retains_only_inputs():
     assert kept[False] > 10 * n_triplets
     assert kept[True] < 200 * n_edges + 300 * len(z) ** 2
     assert kept[True] < kept[False] / 10
+
+
+def test_recompute_pairs_match_plain_two_body_in_training_mode():
+    """Edge blocks of the two-body term equal the plain evaluation, including
+    the force-loss gradients of the damping parameters."""
+    pos, z = _molecule(90, seed=7, box=8.0)
+    res = {}
+    for chunked in (False, True):
+        m = D4Dispersion(recompute_pairs=chunked, trainable=True, s9=0.0, **MOL)
+        if chunked:                                   # small blocks on this instance only
+            import functools
+            m.term._two_body_chunked = functools.partial(m.term._two_body_chunked, chunk=257)
+        fs = ForceStressOutput(m)
+        fs.train()
+        out = fs(_graph(pos, z, m.cutoff))
+        (out["forces"] ** 2).sum().backward()
+        res[chunked] = (out["energy"].detach(), out["forces"].detach(),
+                        torch.stack([m.term.s6.grad, m.term.s8.grad, m.term.a1.grad, m.term.a2.grad]))
+    assert torch.allclose(res[False][0], res[True][0], atol=1e-12, rtol=0)
+    assert torch.allclose(res[False][1], res[True][1], atol=1e-12, rtol=0)
+    assert torch.allclose(res[False][2], res[True][2], rtol=1e-10, atol=1e-12)
+    # the exported head pins the plain path
+    from xnn.common.deploy.torchscript import _DispersionHead
+    assert _DispersionHead(D4Dispersion(**MOL).term).term.recompute_pairs is False
+
+
+@pytest.mark.parametrize("L", [7.0, 11.0])
+def test_per_edge_c6_third_side_lookup_on_periodic_cells(L):
+    """The per-edge C6 path finds the third side of every kept triplet through
+    the packed (dst, src, shift) keys, including cells shorter than twice the
+    cutoff where a pair has several images; energies, forces and stress equal
+    the plain loop to rounding."""
+    from xnn.common.models.dispersion import edge_cell_shifts, pair_edge_keys
+    pos, z, cell = _crystal(n=40, L=L)
+    plain = _run(D4Dispersion(regime="dense", checkpoint_triplets=False, **PER), pos, z, cell, stress=True)
+    new = _run(D4Dispersion(regime="dense", **PER), pos, z, cell, stress=True)
+    assert abs(float(new["energy_3body"] - plain["energy_3body"])) < 1e-13
+    assert torch.allclose(new["forces"], plain["forces"], atol=1e-13, rtol=0)
+    assert torch.allclose(new["stress"], plain["stress"], atol=1e-15, rtol=0)
+    # recovered shifts reproduce the graph's edge vectors and give unique keys
+    g = _graph(pos, z, 11.0, cell)
+    shifts = edge_cell_shifts(g.pos, g.edge_index, g.edge_vectors(), g.cell, g.batch)
+    rebuilt = g.pos[g.edge_index[1]] - g.pos[g.edge_index[0]] + shifts.to(g.pos.dtype) @ g.cell[0]
+    assert torch.allclose(rebuilt, g.edge_vectors(), atol=1e-12, rtol=0)
+    keys = pair_edge_keys(g.edge_index, shifts, len(z))
+    assert torch.unique(keys).numel() == keys.numel()
+
+
+def test_analytic_block_gradient_matches_autograd():
+    """The closed-form gradient of the per-edge block (forces, C6, radii, a1,
+    a2, s9) equals autograd through the block, in eval mode and through the
+    force-training double backward."""
+    import functools
+    from xnn.common.models import dispersion as disp
+    rng = np.random.default_rng(11)
+    pos, z, cell = rng.uniform(0, 9.0, (60, 3)), ([8, 1, 1, 6] * 15), np.eye(3) * 9.0
+    res = {}
+    for analytic in (True, False):
+        m = D4Dispersion(regime="dense", trainable=True, switch_width_pair=2.0, switch_width_triple=1.5, **PER)
+        chunked = functools.partial(disp.three_body_energy_chunked, analytic=analytic, chunk=4096)
+        m.term._three_body_chunked = functools.partial(_three_body_with, m.term, chunked)
+        fs = ForceStressOutput(m, compute_stress=True)
+        fs.train()
+        out = fs(_graph(pos, z, m.cutoff, cell))
+        (out["forces"] ** 2).sum().backward()
+        res[analytic] = (out["energy_3body"].detach(), out["forces"].detach(), out["stress"].detach(),
+                         torch.stack([m.term.s9.grad, m.term.a1.grad, m.term.a2.grad, m.term.s8.grad]))
+    assert torch.allclose(res[True][0], res[False][0], atol=1e-13, rtol=0)
+    assert torch.allclose(res[True][1], res[False][1], atol=1e-11, rtol=0)
+    assert torch.allclose(res[True][2], res[False][2], atol=1e-13, rtol=0)
+    assert torch.allclose(res[True][3], res[False][3], rtol=1e-9, atol=1e-12)
+
+
+def _three_body_with(term, chunked, z, pos, edge_index, edge_vec, r, alpha_neutral, cell, batch, n_atoms):
+    """DFTD4._three_body_chunked with a chosen chunked driver (test helper)."""
+    import math
+    from xnn.common.models.dispersion import edge_cell_shifts
+    alpha_a = (3.0 / math.pi) * alpha_neutral * term.cp_weights
+    c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
+    shifts = edge_cell_shifts(pos, edge_index, edge_vec, cell, batch)
+    r0_atom = (3.0 ** 0.25) * torch.sqrt(term.r4r2[z])
+    return chunked(z, edge_index, edge_vec, r, None, term.s9, term.alp / 3.0, term.cutoff_triple / term.bohr,
+                   term.switch_width_triple / term.bohr, n_atoms, r0_atom=r0_atom, a1=term.a1, a2=term.a2,
+                   c6_edge=c6_edge, edge_shift=shifts)

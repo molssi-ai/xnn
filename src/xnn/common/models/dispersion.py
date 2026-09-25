@@ -28,7 +28,7 @@ from torch import Tensor, nn
 
 from ..data import AtomicGraph
 from .base import InteratomicPotential
-from .ops import build_triplets, scatter_sum
+from .ops import build_triplets, scatter_sum, segment_sum
 
 # CODATA 2018, derived from h, m_e, c, alpha and e exactly as the reference
 # codes (mctc-lib) do: a_0 = hbar / (m_e c alpha), E_h = m_e c^2 alpha^2. The
@@ -190,8 +190,12 @@ def triplet_energy(a: Tensor, b: Tensor, c: Tensor, j: Tensor, k: Tensor, edge_v
     by the scripted loop (:func:`three_body_energy`) and the recomputed one
     (:func:`three_body_energy_chunked`), so the formula lives once.
     """
-    v_ij, v_ik = edge_vec[a], edge_vec[b]
-    r2_ij, r2_ik = r[a] ** 2, r[b] ** 2
+    # index_select rather than x[idx]: its backward is an atomic index_add,
+    # where the sort-based backward of advanced indexing serializes the many
+    # repeats of every edge over the triplets (notes/atm_chunking)
+    v_ij, v_ik = edge_vec.index_select(0, a), edge_vec.index_select(0, b)
+    r_a, r_b = r.index_select(0, a), r.index_select(0, b)
+    r2_ij, r2_ik = r_a * r_a, r_b * r_b
     v_jk = v_ij - v_ik
     r2_jk = (v_jk * v_jk).sum(-1)
     keep = (r2_jk <= cutoff * cutoff) & (r2_jk > 2.220446049250313e-16)
@@ -199,7 +203,7 @@ def triplet_energy(a: Tensor, b: Tensor, c: Tensor, j: Tensor, k: Tensor, edge_v
     r_jk = torch.sqrt(r2_jk)
     c9 = s9 * torch.sqrt((c6_cj * c6_ck * c6_jk).abs())
     if r0_prod is None:
-        zc, zj, zk = z[c], z[j], z[k]
+        zc, zj, zk = z.index_select(0, c), z.index_select(0, j), z.index_select(0, k)
         r0 = r0_table[zc, zj] * r0_table[zc, zk] * r0_table[zj, zk]
     else:
         r0 = r0_prod
@@ -210,38 +214,115 @@ def triplet_energy(a: Tensor, b: Tensor, c: Tensor, j: Tensor, k: Tensor, edge_v
     damp = 1.0 / (1.0 + 6.0 * (r0 / prod1) ** alp3)
     angular = (0.375 * (r2_ij + r2_jk - r2_ik) * (r2_ij - r2_jk + r2_ik)
                * (-r2_ij + r2_jk + r2_ik) / prod5 + 1.0 / prod3)
-    sw = (switching_function(r[a], cutoff, width) * switching_function(r[b], cutoff, width)
+    sw = (switching_function(r_a, cutoff, width) * switching_function(r_b, cutoff, width)
           * switching_function(r_jk, cutoff, width))
     return torch.where(keep, c9 * angular * damp * sw / 3.0, torch.zeros_like(prod1))
 
 
-def _triplet_block(c0: int, c1: int, z: Tensor, edge_index: Tensor, edge_vec: Tensor,
+def edge_cell_shifts(pos: Tensor, edge_index: Tensor, edge_vec: Tensor, cell: Tensor,
+                     batch: Tensor) -> Tensor:
+    """Integer lattice shifts ``S`` of directed edges, ``(E, 3)`` int64.
+
+    Recovered from ``edge_vec = pos[dst] - pos[src] + S @ cell`` (the
+    :meth:`~xnn.common.data.AtomicGraph.edge_vectors` convention) with the cell
+    of each edge's structure (``cell (B, 3, 3)``, an all-zero cell marks a
+    molecule and gives zero shifts), so no neighbor-list metadata is needed.
+    """
+    src, dst = edge_index[0], edge_index[1]
+    b = batch[dst]
+    periodic = cell.abs().sum(dim=(1, 2)) > 0
+    inv = torch.where(periodic[:, None, None], torch.linalg.inv(torch.where(
+        periodic[:, None, None], cell, torch.eye(3, dtype=cell.dtype, device=cell.device))),
+        torch.zeros_like(cell))
+    frac = torch.einsum("ei,eij->ej", edge_vec - (pos[dst] - pos[src]), inv[b])
+    return torch.round(frac).to(torch.long)
+
+
+def pair_edge_keys(edge_index: Tensor, shifts: Tensor, n_atoms: int) -> Tensor:
+    """One int64 key per directed edge from ``(dst, src, shift)``, unique per image."""
+    if n_atoms > (1 << 22) or int(shifts.abs().max()) > 31 if shifts.numel() else False:
+        raise ValueError("pair keys support up to 4M atoms and |cell shift| <= 31")
+    sh = (shifts + 32).to(torch.long)
+    code = (sh[:, 0] << 12) | (sh[:, 1] << 6) | sh[:, 2]
+    return ((edge_index[1] * n_atoms + edge_index[0]) << 18) | code
+
+
+def _block_triplets(e0: int, e1: int, edge_index: Tensor, n_atoms: int, once: bool):
+    """Triplets of the centers whose (center-sorted) edges are ``e0 <= e < e1``.
+
+    Returns the edge ids ``a, b`` (``j -> c``, ``k -> c``), the atoms
+    ``c, j, k`` and the ``distinct`` mask. With ``once`` a triangle of three
+    distinct atoms is kept only from its smallest-index corner.
+    """
+    eids = torch.arange(e0, e1, device=edge_index.device)
+    e1_, e2_, c = build_triplets(edge_index[:, e0:e1], n_atoms)
+    a, b = eids.index_select(0, e1_), eids.index_select(0, e2_)
+    src = edge_index[0]
+    j, k = src.index_select(0, a), src.index_select(0, b)
+    distinct = (j != c) & (k != c) & (j != k)
+    if once and a.numel() > 0:
+        canonical = torch.nonzero(~distinct | ((c < j) & (c < k))).squeeze(1)
+        a, b, c = a.index_select(0, canonical), b.index_select(0, canonical), c.index_select(0, canonical)
+        j, k, distinct = j.index_select(0, canonical), k.index_select(0, canonical), distinct.index_select(0, canonical)
+    return a, b, c, j, k, distinct
+
+
+def _third_side(a: Tensor, b: Tensor, j: Tensor, k: Tensor, n_atoms: int, edge_shift: Tensor,
+                sorted_keys: Tensor, key_perm: Tensor):
+    """Edge id of the third side ``(j, k)`` of every triplet and whether it exists.
+
+    The third side is the edge ``k -> j`` with shift ``S_b - S_a``, found by its
+    packed key; a triplet whose third side lies beyond the cutoff has no edge
+    (it is masked by ``keep`` in :func:`triplet_energy` anyway).
+    """
+    shift = edge_shift.index_select(0, b) - edge_shift.index_select(0, a) + 32
+    code = (shift[:, 0] << 12) | (shift[:, 1] << 6) | shift[:, 2]
+    key = ((j * n_atoms + k) << 18) | code
+    idx = torch.searchsorted(sorted_keys, key).clamp_(max=sorted_keys.shape[0] - 1)
+    found = sorted_keys.index_select(0, idx) == key
+    return key_perm.index_select(0, idx), found
+
+
+def _triplet_block(e0: int, e1: int, z: Tensor, edge_index: Tensor, edge_vec: Tensor,
                    r: Tensor, r0_table: Optional[Tensor], s9: Tensor, alp3: float, cutoff: float,
                    width: float, n_atoms: int, c6_mat: Optional[Tensor],
                    alpha_a: Optional[Tensor], alpha_b: Optional[Tensor],
-                   r0_atom: Optional[Tensor], a1: Optional[Tensor], a2: Optional[Tensor]) -> Tensor:
-    """Per-atom ATM energy of the centers ``c0 <= c < c1`` (enumerated here, so a
-    recompute block retains nothing of the triplets)."""
-    dst = edge_index[1]
-    eids = torch.nonzero((dst >= c0) & (dst < c1)).squeeze(1)
-    e1, e2, c = build_triplets(edge_index[:, eids], n_atoms)
-    if e1.numel() == 0:
+                   r0_atom: Optional[Tensor], a1: Optional[Tensor], a2: Optional[Tensor],
+                   c6_edge: Optional[Tensor] = None, edge_shift: Optional[Tensor] = None,
+                   sorted_keys: Optional[Tensor] = None, key_perm: Optional[Tensor] = None,
+                   once: bool = True) -> Tensor:
+    """Per-atom ATM energy of the centers whose edges are ``e0 <= e < e1`` in the
+    center-sorted edge list (enumerated here, so a recompute block retains
+    nothing of the triplets).
+
+    With ``once`` every triangle of three distinct atoms is evaluated from one
+    corner only, the one with the smallest index, and a third of its energy is
+    assigned to each corner; triangles with a repeated atom (periodic
+    self-images) keep the reference bookkeeping of one third per center
+    visit. Per-atom energies are identical either way; the work drops by
+    three.
+    """
+    a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
+    if a.numel() == 0:
         return torch.zeros(n_atoms, dtype=r.dtype, device=r.device)
-    a, b = eids[e1], eids[e2]
-    j, k = edge_index[0][a], edge_index[0][b]
-    if c6_mat is not None:
+    if c6_edge is not None:
+        c6_cj, c6_ck = c6_edge.index_select(0, a), c6_edge.index_select(0, b)
+        e_jk, found = _third_side(a, b, j, k, n_atoms, edge_shift, sorted_keys, key_perm)
+        # a positive placeholder keeps sqrt's backward finite on masked triplets
+        c6_jk = torch.where(found, c6_edge.index_select(0, e_jk), torch.ones_like(c6_cj))
+    elif c6_mat is not None:
         c6_cj, c6_ck, c6_jk = c6_mat[c, j], c6_mat[c, k], c6_mat[j, k]
     else:
         # C6 from the dynamic polarizabilities: (alpha_a[i] * alpha_b[j]).sum()
-        ac, aj, ak = alpha_a[c], alpha_a[j], alpha_a[k]
-        bc, bj, bk = alpha_b[c], alpha_b[j], alpha_b[k]
+        ac, aj = alpha_a.index_select(0, c), alpha_a.index_select(0, j)
+        bj, bk = alpha_b.index_select(0, j), alpha_b.index_select(0, k)
         c6_cj, c6_ck, c6_jk = (ac * bj).sum(-1), (ac * bk).sum(-1), (aj * bk).sum(-1)
     if r0_atom is not None:
         # BJ radii ``a1 sqrt(3 Q_A Q_B) + a2`` from per-atom factors
         # ``rho_A = 3^(1/4) sqrt(Q_A)``: the trainable scalars enter through
         # broadcasts (cheap reductions in the backward pass) instead of a
         # gathered pair table whose gradient is a contended index-accumulate
-        rc, rj, rk = r0_atom[c], r0_atom[j], r0_atom[k]
+        rc, rj, rk = r0_atom.index_select(0, c), r0_atom.index_select(0, j), r0_atom.index_select(0, k)
         table = torch.zeros((1, 1), dtype=r.dtype, device=r.device)
         r0_prod = (a1 * rc * rj + a2) * (a1 * rc * rk + a2) * (a1 * rj * rk + a2)
     else:
@@ -249,19 +330,151 @@ def _triplet_block(c0: int, c1: int, z: Tensor, edge_index: Tensor, edge_vec: Te
         r0_prod = None
     e_tri = triplet_energy(a, b, c, j, k, edge_vec, r, z, c6_cj, c6_ck, c6_jk,
                            table, s9, alp3, cutoff, width, r0_prod)
-    return scatter_sum(e_tri, c, n_atoms)
+    energy = _center_sum(e_tri, c, n_atoms)
+    if once:
+        # the other two corners of a triangle visited once get their thirds
+        e_out = torch.where(distinct, e_tri, torch.zeros_like(e_tri))
+        energy = energy + scatter_sum(e_out, j, n_atoms) + scatter_sum(e_out, k, n_atoms)
+    return energy
+
+
+def _switch_and_slope(r: Tensor, cutoff: float, width: float):
+    """The quintic switch and its derivative with respect to ``r``."""
+    if width <= 0.0:
+        return torch.ones_like(r), torch.zeros_like(r)
+    w = min(width, cutoff)
+    u = torch.clamp((cutoff - r) / w, 0.0, 1.0)
+    sw = u ** 3 * (10.0 + u * (6.0 * u - 15.0))
+    inside = (u > 0.0) & (u < 1.0)
+    slope = torch.where(inside, -30.0 * u * u * (1.0 - u) ** 2 / w, torch.zeros_like(u))
+    return sw, slope
+
+
+def _triplet_block_grad(e0: int, e1: int, grad_out: Tensor, z: Tensor, edge_index: Tensor,
+                        edge_vec: Tensor, r: Tensor, table: Tensor, s9: Tensor, c6_edge: Tensor,
+                        r0_atom: Tensor, a1: Tensor, a2: Tensor, alp3: float, cutoff: float,
+                        width: float, n_atoms: int, edge_shift: Tensor, sorted_keys: Tensor,
+                        key_perm: Tensor, once: bool):
+    """Closed-form gradient of :func:`_triplet_block` (per-edge C6, per-atom radii).
+
+    Given the cotangent ``grad_out`` ``(N,)`` of the per-atom energies, returns
+    the gradients with respect to every block input in order (``None`` for
+    the integer ones): the two edge vectors of each triplet through the three
+    squared distances, the three pair ``C6`` through ``C9``, the radius
+    factors and ``a1, a2`` through the damping, and ``s9``. One pass, no
+    autograd graph; written in differentiable ops so that autograd over it
+    provides the second derivative for force training.
+    """
+    a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
+    zeros_like = lambda t: torch.zeros_like(t)
+    if a.numel() == 0:
+        return (None, None, zeros_like(edge_vec), zeros_like(r), None, zeros_like(s9),
+                zeros_like(c6_edge), zeros_like(r0_atom), zeros_like(a1), zeros_like(a2))
+    # weight of each triplet: the cotangent of the corners that receive its thirds
+    weight = grad_out.index_select(0, c)
+    if once:
+        weight = weight + torch.where(distinct, grad_out.index_select(0, j) + grad_out.index_select(0, k),
+                                      torch.zeros_like(weight))
+    # geometry
+    v_ij, v_ik = edge_vec.index_select(0, a), edge_vec.index_select(0, b)
+    x, y = (v_ij * v_ij).sum(-1), (v_ik * v_ik).sum(-1)
+    v_jk = v_ij - v_ik
+    w_ = (v_jk * v_jk).sum(-1)
+    keep = (w_ <= cutoff * cutoff) & (w_ > 2.220446049250313e-16)
+    w_ = torch.where(keep, w_, torch.ones_like(w_))
+    ra, rb, rjk = torch.sqrt(x), torch.sqrt(y), torch.sqrt(w_)
+    # C6 and C9
+    c6_cj, c6_ck = c6_edge.index_select(0, a), c6_edge.index_select(0, b)
+    e_jk, found = _third_side(a, b, j, k, n_atoms, edge_shift, sorted_keys, key_perm)
+    c6_jk = torch.where(found, c6_edge.index_select(0, e_jk), torch.ones_like(c6_cj))
+    c9 = torch.sqrt((c6_cj * c6_ck * c6_jk).abs())
+    # radii
+    rc, rj, rk = r0_atom.index_select(0, c), r0_atom.index_select(0, j), r0_atom.index_select(0, k)
+    p_cj, p_ck, p_jk = a1 * rc * rj + a2, a1 * rc * rk + a2, a1 * rj * rk + a2
+    r0 = p_cj * p_ck * p_jk
+    # the summand and its pieces
+    prod2 = x * y * w_
+    prod1 = torch.sqrt(prod2)
+    prod3 = prod2 * prod1
+    prod5 = prod3 * prod2
+    t = (r0 / prod1) ** alp3
+    damp = 1.0 / (1.0 + 6.0 * t)
+    f1, f2, f3 = x + w_ - y, x - w_ + y, -x + w_ + y
+    nn = f1 * f2 * f3
+    angular = 0.375 * nn / prod5 + 1.0 / prod3
+    sa, sa_r = _switch_and_slope(ra, cutoff, width)
+    sb, sb_r = _switch_and_slope(rb, cutoff, width)
+    sjk, sjk_r = _switch_and_slope(rjk, cutoff, width)
+    sw = sa * sb * sjk
+    base = torch.where(keep, weight * s9 * c9 / 3.0, torch.zeros_like(weight))   # E = base * A D S
+    e_tri = base * angular * damp * sw
+    # d/dx, d/dy, d/dw of A, D, S (x, y, w the squared distances)
+    n_x = f2 * f3 + f1 * f3 - f1 * f2
+    n_y = -f2 * f3 + f1 * f3 + f1 * f2
+    n_w = f2 * f3 - f1 * f3 + f1 * f2
+    ang_x = 0.375 * (n_x / prod5 - 2.5 * nn / (prod5 * x)) - 1.5 / (prod3 * x)
+    ang_y = 0.375 * (n_y / prod5 - 2.5 * nn / (prod5 * y)) - 1.5 / (prod3 * y)
+    ang_w = 0.375 * (n_w / prod5 - 2.5 * nn / (prod5 * w_)) - 1.5 / (prod3 * w_)
+    d_common = 3.0 * alp3 * t * damp * damp
+    damp_x, damp_y, damp_w = d_common / x, d_common / y, d_common / w_
+    sw_x = sa_r / (2.0 * ra) * sb * sjk
+    sw_y = sb_r / (2.0 * rb) * sa * sjk
+    sw_w = sjk_r / (2.0 * rjk) * sa * sb
+    g_x = base * (ang_x * damp * sw + angular * damp_x * sw + angular * damp * sw_x)
+    g_y = base * (ang_y * damp * sw + angular * damp_y * sw + angular * damp * sw_y)
+    g_w = base * (ang_w * damp * sw + angular * damp_w * sw + angular * damp * sw_w)
+    g_vij = 2.0 * (g_x[:, None] * v_ij + g_w[:, None] * v_jk)
+    g_vik = 2.0 * (g_y[:, None] * v_ik - g_w[:, None] * v_jk)
+    grad_edge_vec = torch.zeros_like(edge_vec).index_add(0, a, g_vij).index_add(0, b, g_vik)
+    # C6 (through C9 = sqrt(c6 c6 c6)): dE/dc6 = E / (2 c6); the placeholder rows carry E = 0
+    grad_c6 = torch.zeros_like(c6_edge).index_add(0, a, 0.5 * e_tri / c6_cj)
+    grad_c6 = grad_c6.index_add(0, b, 0.5 * e_tri / c6_ck)
+    grad_c6 = grad_c6.index_add(0, e_jk, torch.where(found, 0.5 * e_tri / c6_jk, torch.zeros_like(e_tri)))
+    # radii (through the damping): dE/dr0 = -alp3 E 6 t D / r0, then the three pair factors
+    g_r0 = -alp3 * e_tri * 6.0 * t * damp / r0
+    g_pcj, g_pck, g_pjk = g_r0 * p_ck * p_jk, g_r0 * p_cj * p_jk, g_r0 * p_cj * p_ck
+    grad_rho = torch.zeros_like(r0_atom).index_add(0, c, a1 * (g_pcj * rj + g_pck * rk))
+    grad_rho = grad_rho.index_add(0, j, a1 * (g_pcj * rc + g_pjk * rk))
+    grad_rho = grad_rho.index_add(0, k, a1 * (g_pck * rc + g_pjk * rj))
+    grad_a1 = (g_pcj * rc * rj + g_pck * rc * rk + g_pjk * rj * rk).sum().reshape(a1.shape)
+    grad_a2 = (g_pcj + g_pck + g_pjk).sum().reshape(a2.shape)
+    grad_s9 = (torch.where(keep, weight * c9 / 3.0, torch.zeros_like(weight))
+               * angular * damp * sw).sum().reshape(s9.shape)
+    return (None, None, grad_edge_vec, torch.zeros_like(r), None, grad_s9, grad_c6, grad_rho,
+            grad_a1, grad_a2)
+
+
+def _center_sum(e_tri: Tensor, c: Tensor, n_atoms: int) -> Tensor:
+    """Per-atom sums of triplet energies whose centers ``c`` arrive sorted.
+
+    A segmented reduction (:func:`~xnn.common.models.ops.segment_sum`) instead
+    of the atomic scatter: the triplets of a center are consecutive, so the
+    reduction needs no atomics; the result is placed into the ``(N,)`` vector.
+    """
+    if c.numel() == 0:
+        return e_tri.new_zeros(n_atoms)
+    c0, c1 = int(c[0]), int(c[-1]) + 1
+    lengths = torch.bincount(c - c0, minlength=c1 - c0)
+    sums = segment_sum(e_tri, lengths)
+    zeros = e_tri.new_zeros
+    return torch.cat([zeros(c0), sums, zeros(n_atoms - c1)])
 
 
 def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor,
                               r0_table: Optional[Tensor], s9: Tensor, alp3: float, cutoff: float,
                               width: float, n_atoms: int, c6_mat: Optional[Tensor] = None,
                               alpha_a: Optional[Tensor] = None, alpha_b: Optional[Tensor] = None,
-                              chunk: int = 1 << 20, r0_atom: Optional[Tensor] = None,
-                              a1: Optional[Tensor] = None, a2: Optional[Tensor] = None) -> Tensor:
+                              chunk: Optional[int] = None, r0_atom: Optional[Tensor] = None,
+                              a1: Optional[Tensor] = None, a2: Optional[Tensor] = None,
+                              c6_edge: Optional[Tensor] = None,
+                              edge_shift: Optional[Tensor] = None,
+                              once: bool = True, analytic: bool = True) -> Tensor:
     """:func:`three_body_energy` with memory bounded by one block (eager only).
 
-    The centers are cut into blocks holding about ``chunk`` triplets each
-    (read off the cumulative pair counts of the neighbor list), and every
+    The edges are sorted by center once, the centers are cut into blocks
+    holding about ``chunk`` triplets each (read off the cumulative pair counts;
+    ``None`` sizes the block from the free device memory, between 2^20 and
+    2^24, since every block pays a fixed set-up in both passes), and every
     block -- triplet enumeration included -- runs as a
     :func:`~xnn.common.models.recompute.recompute` block, so the retained
     state is the neighbor list and the per-atom sums at every derivative
@@ -270,29 +483,52 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
     ``(N, N)`` or, without one, from the polarizability factors ``alpha_a``,
     ``alpha_b`` ``(N, K)`` as ``sum_k alpha_a[i, k] alpha_b[j, k]`` (D4: the
     Casimir-Polder weights folded into ``alpha_a``), which removes the
-    ``(N, N)`` table altogether. The pair critical radii come from the element
+    ``(N, N)`` table altogether. Faster still, ``c6_edge`` ``(E,)`` gives the
+    pair C6 per directed edge (computed once, differentiable in whatever it
+    depends on) together with the edges' integer cell shifts ``edge_shift``
+    ``(E, 3)``: the two sides through the center are then scalar gathers and
+    the third side is found by a binary search over packed pair keys, which
+    removes the ``(T, 23)`` gathers and, above all, their contended
+    index-accumulate backward (energy + forces 53 -> 15 ns per triplet on an
+    A100). The pair critical radii come from the element
     table ``r0_table`` or, for BJ radii ``a1 sqrt(3 Q_A Q_B) + a2``, from the
     per-atom factors ``r0_atom = 3^(1/4) sqrt(Q)`` with the scalars ``a1, a2``
-    (cheap gradients when those are trainable). Results equal the scripted loop
-    to rounding; see ``notes/atm_chunking``.
+    (cheap gradients when those are trainable). With ``once`` (default) each
+    triangle of distinct atoms is evaluated from its smallest-index corner
+    only. With ``analytic`` (default) and the per-edge C6 / per-atom radius
+    inputs, the block's first derivative is evaluated in closed form
+    (:func:`_triplet_block_grad`) in one pass instead of re-running the block
+    under autograd. Results equal the scripted loop to rounding; see
+    ``notes/atm_chunking``.
     """
     from .recompute import recompute
     energy = torch.zeros(n_atoms, dtype=r.dtype, device=r.device)
     if edge_index.shape[1] == 0:
         return energy
+    # edges sorted by center once: a block is then an edge range, not a scan
+    order = torch.argsort(edge_index[1], stable=True)
+    edge_index = edge_index.index_select(1, order)
+    edge_vec, r = edge_vec.index_select(0, order), r.index_select(0, order)
+    if c6_edge is not None:
+        c6_edge, edge_shift = c6_edge.index_select(0, order), edge_shift.index_select(0, order)
     counts = torch.bincount(edge_index[1], minlength=n_atoms)
+    offsets = torch.cumsum(counts, 0)
     cum = torch.cumsum(counts * (counts - 1) // 2, 0)
     total = int(cum[-1])
     if total == 0:
         return energy
+    if chunk is None:
+        chunk = auto_triplet_chunk(r)
     bounds = [0, n_atoms]
     if total > chunk:
         marks = torch.arange(chunk, total, chunk, device=cum.device)
         cuts = torch.unique(torch.searchsorted(cum, marks, right=False) + 1).tolist()
         bounds = [0] + [c for c in cuts if 0 < c < n_atoms] + [n_atoms]
+    edge_bounds = [0] + offsets.index_select(0, torch.tensor(bounds[1:], device=offsets.device) - 1).tolist()
     # the block sees tensors only; the C6 source (dense matrix or the two
     # polarizability factors) is passed through so its gradients flow
-    use_alpha = c6_mat is None
+    use_edge = c6_edge is not None
+    use_alpha = c6_mat is None and not use_edge
     use_atom = r0_atom is not None
     if use_atom:
         r0_args = (r0_atom, a1, a2)
@@ -300,21 +536,54 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
     else:
         r0_args = ()
         table = r0_table
-    c6_args = (alpha_a, alpha_b) if use_alpha else (c6_mat,)
+    if use_edge:
+        keys = pair_edge_keys(edge_index, edge_shift, n_atoms)
+        sorted_keys, key_perm = torch.sort(keys)
+        c6_args = (c6_edge,)
+        lookup = (edge_shift, sorted_keys, key_perm)     # constants of the block
+    else:
+        c6_args = (alpha_a, alpha_b) if use_alpha else (c6_mat,)
+        lookup = (None, None, None)
 
-    def block(c0: int, c1: int, z_, ei, ev, r_, r0, s9_, *rest):
+    def block(e0: int, e1: int, z_, ei, ev, r_, r0, s9_, *rest):
         c6 = rest[:len(c6_args)]
         r0a = rest[len(c6_args):]
-        return _triplet_block(c0, c1, z_, ei, ev, r_, r0, s9_, alp3, cutoff, width, n_atoms,
-                              None if use_alpha else c6[0],
+        return _triplet_block(e0, e1, z_, ei, ev, r_, r0, s9_, alp3, cutoff, width, n_atoms,
+                              c6[0] if (c6_mat is not None and not use_edge) else None,
                               c6[0] if use_alpha else None, c6[1] if use_alpha else None,
                               r0a[0] if use_atom else None, r0a[1] if use_atom else None,
-                              r0a[2] if use_atom else None)
+                              r0a[2] if use_atom else None,
+                              c6[0] if use_edge else None, *lookup, once)
 
-    for c0, c1 in zip(bounds[:-1], bounds[1:]):
-        energy = energy + recompute(lambda *t, c0=c0, c1=c1: block(c0, c1, *t),
-                                    z, edge_index, edge_vec, r, table, s9, *c6_args, *r0_args)
+    use_analytic = analytic and use_edge and use_atom
+
+    def grad_block(e0: int, e1: int, grad_out, z_, ei, ev, r_, tab, s9_, c6e, rho, a1_, a2_):
+        return _triplet_block_grad(e0, e1, grad_out, z_, ei, ev, r_, tab, s9_, c6e, rho, a1_, a2_,
+                                   alp3, cutoff, width, n_atoms, *lookup, once)
+
+    for e0, e1 in zip(edge_bounds[:-1], edge_bounds[1:]):
+        if e1 > e0:
+            energy = energy + recompute(
+                lambda *t, e0=e0, e1=e1: block(e0, e1, *t),
+                z, edge_index, edge_vec, r, table, s9, *c6_args, *r0_args,
+                grad_fn=(lambda g, *t, e0=e0, e1=e1: grad_block(e0, e1, g, *t)) if use_analytic else None)
     return energy
+
+
+def auto_triplet_chunk(like: Tensor) -> int:
+    """Triplets per recompute block from the free device memory.
+
+    A block's transient state is about 100 values of ``like.dtype`` plus 40
+    bytes of indices per triplet, twice over in the backward pass; the block
+    takes a quarter of the free memory within ``[2^20, 2^24]`` (CPU: ``2^22``).
+    Fewer, larger blocks amortize the per-block set-up, which is paid in both
+    passes.
+    """
+    if like.device.type != "cuda":
+        return 1 << 22
+    free, _ = torch.cuda.mem_get_info(like.device)
+    per_triplet = 2 * (100 * like.element_size() + 40)
+    return int(min(1 << 24, max(1 << 20, free // (4 * per_triplet))))
 
 
 

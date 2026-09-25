@@ -45,31 +45,48 @@ def _expand(grads: Sequence, needs: Sequence[bool]):
     return out
 
 
+def _block_grads(fn, grad_fn, needs, g, live, create_graph):
+    """Gradients of ``fn(*live)`` contracted with ``g`` for the inputs that need them."""
+    wrt = [t for t, need in zip(live, needs) if need]
+    if grad_fn is not None:
+        # analytic: grad_fn returns one entry per input (None where not needed)
+        full = grad_fn(g, *live)
+        return [full[i] for i, need in enumerate(needs) if need], wrt
+    y = fn(*live)
+    grads = torch.autograd.grad(y, wrt, g, create_graph=create_graph, allow_unused=True)
+    return list(grads), wrt
+
+
 class _RecomputeGrad(torch.autograd.Function):
-    """``d fn(*tensors) / d tensors`` contracted with ``grad_out``, recomputed on demand."""
+    """``d fn(*tensors) / d tensors`` contracted with ``grad_out``, recomputed on demand.
+
+    With an analytic ``grad_fn`` the gradient is evaluated in closed form
+    (one pass, no autograd graph of the block); its own derivative, for the
+    second backward, comes from autograd over the analytic expressions.
+    """
 
     @staticmethod
-    def forward(ctx, fn: Callable[..., Tensor], needs: Sequence[bool], grad_out: Tensor,
+    def forward(ctx, fn: Callable[..., Tensor], grad_fn, needs: Sequence[bool], grad_out: Tensor,
                 *tensors: Tensor):
-        ctx.fn, ctx.needs = fn, needs
+        ctx.fn, ctx.grad_fn, ctx.needs = fn, grad_fn, needs
         ctx.save_for_backward(grad_out, *tensors)
-        with torch.enable_grad():
-            live = [t.detach().requires_grad_(need) for t, need in zip(tensors, needs)]
-            y = fn(*live)
-            wrt = [t for t, need in zip(live, needs) if need]
-            grads = torch.autograd.grad(y, wrt, grad_out.detach(), allow_unused=True)
+        if grad_fn is not None:
+            with torch.no_grad():
+                grads, wrt = _block_grads(fn, grad_fn, needs, grad_out, list(tensors), False)
+        else:
+            with torch.enable_grad():
+                live = [t.detach().requires_grad_(need) for t, need in zip(tensors, needs)]
+                grads, wrt = _block_grads(fn, None, needs, grad_out.detach(), live, False)
         return tuple(torch.zeros_like(t) if g is None else g.detach() for g, t in zip(grads, wrt))
 
     @staticmethod
     def backward(ctx, *cotangents: Tensor):
         grad_out, *tensors = ctx.saved_tensors
-        fn, needs = ctx.fn, ctx.needs
+        fn, grad_fn, needs = ctx.fn, ctx.grad_fn, ctx.needs
         with torch.enable_grad():
             live = [t.detach().requires_grad_(need) for t, need in zip(tensors, needs)]
             g_live = grad_out.detach().requires_grad_(True)
-            y = fn(*live)
-            wrt = [t for t, need in zip(live, needs) if need]
-            grads = torch.autograd.grad(y, wrt, g_live, create_graph=True, allow_unused=True)
+            grads, wrt = _block_grads(fn, grad_fn, needs, g_live, live, True)
             total = sum((g * c).sum() for g, c in zip(grads, cotangents) if g is not None)
             if not torch.is_tensor(total) or not total.requires_grad:
                 second = [None] * (1 + len(wrt))
@@ -77,15 +94,15 @@ class _RecomputeGrad(torch.autograd.Function):
                 second = torch.autograd.grad(total, [g_live] + wrt, allow_unused=True)
         g_grad_out = second[0] if second[0] is not None else torch.zeros_like(grad_out)
         g_inputs = [torch.zeros_like(t) if g is None else g for g, t in zip(second[1:], wrt)]
-        return (None, None, g_grad_out, *_expand(g_inputs, needs))
+        return (None, None, None, g_grad_out, *_expand(g_inputs, needs))
 
 
 class _RecomputeBlock(torch.autograd.Function):
     """``fn(*tensors)`` evaluated without recording; gradients via :class:`_RecomputeGrad`."""
 
     @staticmethod
-    def forward(ctx, fn: Callable[..., Tensor], *tensors: Tensor) -> Tensor:
-        ctx.fn = fn
+    def forward(ctx, fn: Callable[..., Tensor], grad_fn, *tensors: Tensor) -> Tensor:
+        ctx.fn, ctx.grad_fn = fn, grad_fn
         ctx.needs = [bool(t.requires_grad) for t in tensors]
         ctx.save_for_backward(*tensors)
         with torch.no_grad():
@@ -93,11 +110,11 @@ class _RecomputeBlock(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out: Tensor):
-        grads = _RecomputeGrad.apply(ctx.fn, ctx.needs, grad_out, *ctx.saved_tensors)
-        return (None, *_expand(grads, ctx.needs))
+        grads = _RecomputeGrad.apply(ctx.fn, ctx.grad_fn, ctx.needs, grad_out, *ctx.saved_tensors)
+        return (None, None, *_expand(grads, ctx.needs))
 
 
-def recompute(fn: Callable[..., Tensor], *tensors: Tensor) -> Tensor:
+def recompute(fn: Callable[..., Tensor], *tensors: Tensor, grad_fn=None) -> Tensor:
     """Evaluate ``fn(*tensors)`` as a block that is recomputed rather than stored.
 
     Parameters
@@ -107,6 +124,11 @@ def recompute(fn: Callable[..., Tensor], *tensors: Tensor) -> Tensor:
         :func:`functools.partial`) returning one tensor.
     *tensors : Tensor
         Its inputs; gradients flow to those with ``requires_grad``.
+    grad_fn : callable, optional
+        Analytic gradient ``grad_fn(grad_out, *tensors) -> tuple`` with one
+        entry per input (``None`` for inputs without gradient), written in
+        differentiable torch ops. Used in place of autograd through ``fn``
+        for the first derivative; the second derivative is autograd over it.
 
     Returns
     -------
@@ -117,4 +139,4 @@ def recompute(fn: Callable[..., Tensor], *tensors: Tensor) -> Tensor:
     if not torch.is_grad_enabled() or not any(t.requires_grad for t in tensors):
         with torch.no_grad():
             return fn(*tensors)
-    return _RecomputeBlock.apply(fn, *tensors)
+    return _RecomputeBlock.apply(fn, grad_fn, *tensors)

@@ -16,6 +16,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from .ops import cell_volume
+
 from ..data import AtomicGraph
 
 
@@ -141,7 +143,7 @@ class ForceStressOutput(nn.Module):
             out["forces"] = -g["pos"] if g.get("pos") is not None else torch.zeros_like(data.pos)
         if strain is not None:
             if g.get("strain") is not None:
-                volume = torch.det(data.cell).abs().clamp(min=1e-8)  # (B,)
+                volume = cell_volume(data.cell).clamp(min=1e-8)  # (B,)
                 out["stress"] = g["strain"] / volume[:, None, None]
             else:
                 out["stress"] = torch.zeros_like(strain)

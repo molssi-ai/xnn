@@ -247,7 +247,9 @@ def test_scripted_core_matches_eager():
     args = (g.atomic_numbers, g.pos, g.edge_index, g.edge_vectors(), g.batch, 1,
             g.cell, g.pbc, torch.zeros(1))
     a, b = d4.evaluate(*args), scripted.evaluate(*args)
-    assert torch.equal(a["node_energy"], b["node_energy"])
+    # the eager three-body term visits each triangle once and sums its thirds
+    # into the three corners, the scripted loop once per corner: rounding only
+    assert torch.allclose(a["node_energy"], b["node_energy"], atol=1e-13, rtol=0)
     assert torch.equal(a["charges"], b["charges"])
 
 

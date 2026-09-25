@@ -25,12 +25,45 @@ from torch import Tensor
 try:  # keep import-safe without vesin
     from vesin_torch import NeighborList as VesinNeighborList
     _HAS_VESIN = True
-except ModuleNotFoundError:
-    try:  # vesin < 0.4 shipped it here, and warns from this path
+except ImportError:
+    try:  # vesin < 0.4 shipped it here, and warns from this path; a bare
+        # ``vesin`` without ``vesin-torch`` raises ImportError from it
         from vesin.torch import NeighborList as VesinNeighborList
         _HAS_VESIN = True
-    except ModuleNotFoundError:
+    except ImportError:
         VesinNeighborList, _HAS_VESIN = None, False
+
+_NVRTC_LOADED = False
+
+
+def _preload_nvrtc() -> None:
+    """Make ``libnvrtc`` findable for vesin's CUDA kernels.
+
+    vesin compiles its GPU kernels at first use and looks for ``libnvrtc.so``
+    on the loader path. A pip-installed torch carries that library inside the
+    ``nvidia-cuda-nvrtc`` wheel, which is not on ``LD_LIBRARY_PATH``; loading
+    it once with ``RTLD_GLOBAL`` from there is enough. No-op when the wheel
+    is absent (a system CUDA toolkit is then expected on the path).
+    """
+    global _NVRTC_LOADED
+    if _NVRTC_LOADED:
+        return
+    _NVRTC_LOADED = True
+    try:
+        import ctypes
+        import glob
+        import importlib.util
+        import os
+
+        spec = importlib.util.find_spec("nvidia.cuda_nvrtc")
+        if spec is None or not spec.submodule_search_locations:
+            return
+        for path in spec.submodule_search_locations:
+            for lib in sorted(glob.glob(os.path.join(path, "lib", "libnvrtc.so*"))):
+                if "builtins" not in os.path.basename(lib):
+                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+    except OSError:
+        pass
 
 
 def _n_repeats(cell: Tensor, cutoff: float, pbc: Tensor) -> list[int]:
@@ -122,6 +155,8 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
 
     box = (torch.zeros((3, 3), device=pos.device, dtype=pos.dtype)
            if molecular else cell)
+    if pos.is_cuda:
+        _preload_nvrtc()
     i, j, shifts = VesinNeighborList(cutoff=cutoff, full_list=True).compute(
         points=pos, box=box, periodic=not molecular, quantities="ijS"
     )

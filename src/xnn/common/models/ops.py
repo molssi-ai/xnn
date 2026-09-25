@@ -133,3 +133,61 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
     first = order[base + a_local]
     second = order[base + b_local]
     return first, second, center
+
+
+def cell_volume(cell: Tensor) -> Tensor:
+    """Volume of row-vector cells ``(..., 3, 3)`` as the scalar triple product.
+
+    Used instead of ``torch.det`` for cell volumes: the backward of ``det``
+    builds an LU solve in the *process default* dtype, so a float32 model
+    served in a process whose default is float64 fails in the force pass
+    (torch 2.5). The triple product differentiates in the cell's own dtype
+    and is scriptable.
+    """
+    cross = torch.linalg.cross(cell[..., 1, :], cell[..., 2, :])
+    return (cell[..., 0, :] * cross).sum(-1).abs()
+
+
+class _SegmentSum(torch.autograd.Function):
+    """Sum of consecutive segments of ``x`` (lengths given), differentiable to any order.
+
+    ``torch.segment_reduce`` is a segmented reduction without atomics, but its
+    built-in backward has no derivative of its own, which the recompute
+    blocks need in training mode. Here the backward is the expansion
+    (:class:`_SegmentExpand`) and that function's backward is this sum again,
+    so the pair differentiates to any order.
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor, lengths: Tensor) -> Tensor:
+        ctx.save_for_backward(lengths)
+        return torch.segment_reduce(x, "sum", lengths=lengths, unsafe=True)
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        (lengths,) = ctx.saved_tensors
+        return _SegmentExpand.apply(g, lengths), None
+
+
+class _SegmentExpand(torch.autograd.Function):
+    """Broadcast one value per segment to its elements (the adjoint of the segment sum)."""
+
+    @staticmethod
+    def forward(ctx, g: Tensor, lengths: Tensor) -> Tensor:
+        ctx.save_for_backward(lengths)
+        return torch.repeat_interleave(g, lengths, dim=0)
+
+    @staticmethod
+    def backward(ctx, h: Tensor):
+        (lengths,) = ctx.saved_tensors
+        return _SegmentSum.apply(h, lengths), None
+
+
+def segment_sum(x: Tensor, lengths: Tensor) -> Tensor:
+    """Sum of consecutive segments of ``x`` along dim 0; ``lengths`` (int64) sum to ``len(x)``.
+
+    A segmented reduction (no atomics) for values that arrive grouped, such as
+    the triplets of a center; differentiable to any order (see
+    :class:`_SegmentSum`).
+    """
+    return _SegmentSum.apply(x, lengths)

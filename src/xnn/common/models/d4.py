@@ -101,11 +101,12 @@ from .dispersion import (
     gaussian_reference_weights,
     options_from_extra,
     switching_function,
+    edge_cell_shifts,
     three_body_energy,
     three_body_energy_chunked,
 )
 from .eeq import EEQSystem, eeq_charges_large, ewald_alpha, reciprocal_vectors
-from .ops import scatter_sum
+from .ops import cell_volume, scatter_sum
 from .registry import register_model
 
 # D4 model constants
@@ -304,6 +305,16 @@ class DFTD4(nn.Module):
         included) and no ``(N, N)`` C6 matrix is needed, at the cost of
         re-evaluating each block once per order of differentiation. Eager
         only; TorchScript uses the plain chunk loop.
+    recompute_pairs : bool, optional
+        Evaluate the two-body term in recompute blocks of edges, by default
+        ``True``: the per-edge ``(E, 23)`` polarizability products of the
+        Casimir-Polder C6 (about 1.5 kB per edge when retained for the
+        backward pass, 14 million edges at 20 000 atoms with a 12 A cutoff)
+        are then transient. Eager only.
+    triplet_chunk : int or None, optional
+        Triplets per three-body recompute block; ``None`` (default) sizes it
+        from the free device memory (2^20 to 2^24). Larger blocks amortize
+        the per-block set-up, which is paid in both passes.
 
     Attributes
     ----------
@@ -342,6 +353,8 @@ class DFTD4(nn.Module):
     cutoff_eeq: float
     eeq_solver: str
     checkpoint_triplets: bool
+    recompute_pairs: bool
+    triplet_chunk: Optional[int]
     auto_large_periodic: int
     auto_large_molecular: int
 
@@ -357,7 +370,8 @@ class DFTD4(nn.Module):
                  switch_width_triple: float = 0.0,
                  trainable: bool = False, regime: str = "auto",
                  cutoff_eeq: Optional[float] = None, eeq_solver: str = "auto",
-                 checkpoint_triplets: bool = True):
+                 checkpoint_triplets: bool = True, recompute_pairs: bool = True,
+                 triplet_chunk: Optional[int] = None):
         super().__init__()
         regime = str(regime).lower()
         if regime not in REGIMES:
@@ -368,6 +382,8 @@ class DFTD4(nn.Module):
         self.auto_large_periodic, self.auto_large_molecular = AUTO_LARGE_PERIODIC, AUTO_LARGE_MOLECULAR
         self.eeq_solver = str(eeq_solver)
         self.checkpoint_triplets = bool(checkpoint_triplets)
+        self.recompute_pairs = bool(recompute_pairs)
+        self.triplet_chunk = triplet_chunk
         # model constants, held on the instance so the exported methods can
         # read them under TorchScript
         self.bohr, self.hartree = BOHR, HARTREE
@@ -526,7 +542,7 @@ class DFTD4(nn.Module):
         """
         n = pos.shape[0]
         device, dtype = pos.device, pos.dtype
-        vol = torch.det(cell).abs()
+        vol = cell_volume(cell)
         recip = 2.0 * math.pi * torch.linalg.inv(cell).t()
         alpha = _ewald_alpha(float(torch.linalg.norm(recip, dim=1).min()),
                              float(torch.linalg.norm(cell, dim=1).min()), float(vol))
@@ -651,16 +667,52 @@ class DFTD4(nn.Module):
         return eeq_charges_large(system, pos, None, rad, diag, x, total_charge)
 
     @torch.jit.unused
-    def _three_body_chunked(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor,
-                            alpha_neutral: Tensor, n_atoms: int) -> Tensor:
-        """Checkpointed ATM term with per-block C6 from the polarizabilities (eager only)."""
+    def _two_body_chunked(self, z: Tensor, edge_index: Tensor, r: Tensor, alpha_iw: Tensor,
+                          n_atoms: int, chunk: int = 1 << 20) -> Tensor:
+        """:meth:`two_body_energy` in recompute blocks of ``chunk`` edges (eager only)."""
+        from .recompute import recompute
+        energy = torch.zeros(n_atoms, dtype=r.dtype, device=r.device)
+        n_edges = int(edge_index.shape[1])
+
+        def block(ei, r_, alpha, s6, s8, a1, a2):
+            src, dst = ei[0], ei[1]
+            zi, zj = z[dst], z[src]
+            c6 = (3.0 / math.pi) * (alpha[dst] * alpha[src] * self.cp_weights).sum(-1)
+            rr = 3.0 * self.r4r2[zi] * self.r4r2[zj]
+            r0 = a1 * torch.sqrt(rr) + a2
+            r2 = r_ * r_
+            t6 = 1.0 / (r2 ** 3 + r0 ** 6)
+            t8 = 1.0 / (r2 ** 4 + r0 ** 8)
+            sw = switching_function(r_, self.cutoff_pair / self.bohr, self.switch_width_pair / self.bohr)
+            return scatter_sum(-0.5 * c6 * sw * (s6 * t6 + s8 * rr * t8), dst, n_atoms)
+
+        for e0 in range(0, n_edges, chunk):
+            e1 = min(e0 + chunk, n_edges)
+            energy = energy + recompute(block, edge_index[:, e0:e1], r[e0:e1], alpha_iw,
+                                        self.s6, self.s8, self.a1, self.a2)
+        return energy
+
+    @torch.jit.unused
+    def _three_body_chunked(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                            r: Tensor, alpha_neutral: Tensor, cell: Tensor, batch: Tensor,
+                            n_atoms: int) -> Tensor:
+        """Recompute-block ATM term with per-edge C6 (eager only).
+
+        The pair C6 of every directed edge within the three-body cutoff is
+        formed once from the neutral-atom polarizabilities (differentiable, so
+        the coordination-number dependence reaches the forces), and the blocks
+        gather scalars; see :func:`~xnn.common.models.dispersion.three_body_energy_chunked`.
+        """
         alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
+        c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
+        shifts = edge_cell_shifts(pos, edge_index, edge_vec, cell, batch)
         r0_atom = (3.0 ** 0.25) * torch.sqrt(self.r4r2[z])      # rho_A: R0_AB = a1 rho_A rho_B + a2
         return three_body_energy_chunked(z, edge_index, edge_vec, r, None,
                                          self.s9, self.alp / 3.0, self.cutoff_triple / self.bohr,
                                          self.switch_width_triple / self.bohr, n_atoms,
-                                         alpha_a=alpha_a, alpha_b=alpha_neutral,
-                                         r0_atom=r0_atom, a1=self.a1, a2=self.a2)
+                                         r0_atom=r0_atom, a1=self.a1, a2=self.a2,
+                                         c6_edge=c6_edge, edge_shift=shifts,
+                                         chunk=self.triplet_chunk)
 
     def reference_weights(self, z: Tensor, cn: Tensor, q: Tensor) -> Tensor:
         """Charge-scaled Gaussian weights of the reference systems (eqs 2-4, 8).
@@ -817,8 +869,11 @@ class DFTD4(nn.Module):
         alpha_iw = self.dynamic_polarizabilities(z, weights)
 
         in_pair = r <= self.cutoff_pair / self.bohr
-        e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
-                                  alpha_iw, n_atoms)
+        if self.recompute_pairs and not torch.jit.is_scripting():
+            e2 = self._two_body_chunked(z, edge_index[:, in_pair], r[in_pair], alpha_iw, n_atoms)
+        else:
+            e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
+                                      alpha_iw, n_atoms)
         node_energy = e2
         e3 = torch.zeros_like(e2)
         if bool(self.s9 != 0.0):
@@ -827,8 +882,9 @@ class DFTD4(nn.Module):
             alpha_neutral = self.dynamic_polarizabilities(z, weights_neutral)
             in_triple = r <= self.cutoff_triple / self.bohr
             if self.checkpoint_triplets and not torch.jit.is_scripting():
-                e3 = self._three_body_chunked(z, edge_index[:, in_triple], vec_au[in_triple],
-                                              r[in_triple], alpha_neutral, n_atoms)
+                e3 = self._three_body_chunked(z, pos_au, edge_index[:, in_triple], vec_au[in_triple],
+                                              r[in_triple], alpha_neutral, cell / self.bohr, batch,
+                                              n_atoms)
             else:
                 if n_atoms > 20000:
                     raise ValueError("the scripted D4 three-body term needs the dense C6 "
@@ -920,7 +976,8 @@ class D4Dispersion(DispersionCorrection):
 _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "cutoff_eeq_cn",
             "switch_width_pair", "switch_width_triple", "trainable",
-            "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets")
+            "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets", "recompute_pairs",
+            "triplet_chunk")
 
 
 def d4_options_from_extra(extra: dict) -> dict:

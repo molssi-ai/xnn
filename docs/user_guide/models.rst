@@ -603,10 +603,16 @@ reference code's own Ewald tolerance (about 1e-8 in the charges); forces,
 stress and force training are exact in both. ``cutoff_eeq`` sets the
 real-space range of the split (default: the other cutoffs, so the graph is
 not widened; at least 20 bohr for crystals). The three-body term runs in
-recompute blocks of centers by default (``checkpoint_triplets: true``):
-memory bounded by one block at every derivative order (force training
-included), no ``(N, N)`` C6 matrix, one re-evaluation of the block per
-order of differentiation. On an A100 a 5000-atom water cell with 12 / 8 A
+recompute blocks of centers by default (``checkpoint_triplets: true``;
+``triplet_chunk`` sets the block size, by default from the free device
+memory) and the two-body term in recompute blocks of edges
+(``recompute_pairs: true``): memory bounded by one block at every derivative
+order (force training included), no ``(N, N)`` C6 matrix and no retained
+``(E, 23)`` polarizability products. The three-body blocks form the pair C6
+once per edge, visit each triangle of distinct atoms once, and take their
+first derivative in closed form; on 5184 water atoms (float32, A100) the
+full D4 step with forces and stress went from 3.7 s to 0.7 s at an 8 Å
+triple cutoff and from 7.6 s to 1.8 s at 10 Å (``notes/atm_chunking``). On an A100 a 5000-atom water cell with 12 / 8 A
 cutoffs takes 5 s for energy, forces and stress and 13 s for a force-loss
 training step in 21 GB, where the dense regime runs out of 80 GB at 1500
 atoms. Both are eager-only; TorchScript exports pin the dense paths.

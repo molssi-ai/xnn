@@ -490,6 +490,9 @@ class DFTD3(nn.Module):
         by default ``True``; bounds the memory by one block at every
         derivative order at the cost of re-evaluating it in the backward
         passes. Eager only.
+    triplet_chunk : int or None, optional
+        Triplets per recompute block; ``None`` (default) sizes it from the
+        free device memory.
     references : str, optional
         Set of reference systems: ``"2024"`` (default, the current reference
         code: Fr-Pu re-parametrized with up to seven references, Am-Lr added)
@@ -524,6 +527,7 @@ class DFTD3(nn.Module):
     n_features: int
     references: str
     checkpoint_triplets: bool
+    triplet_chunk: Optional[int]
 
     def __init__(self, damping: str = "bj", s6: float = 1.0, s8: Optional[float] = None,
                  s9: float = 0.0, a1: float = 0.4145, a2: float = 4.8593,
@@ -534,9 +538,10 @@ class DFTD3(nn.Module):
                  cutoff_cn: float = _CUTOFF_CN_AU * BOHR,
                  switch_width_pair: float = 0.0, switch_width_triple: float = 0.0,
                  trainable: bool = False, references: str = "2024",
-                 checkpoint_triplets: bool = True):
+                 checkpoint_triplets: bool = True, triplet_chunk: Optional[int] = None):
         super().__init__()
         self.checkpoint_triplets = bool(checkpoint_triplets)
+        self.triplet_chunk = triplet_chunk
         damping = damping.lower()
         if damping in ("rational", "d3bj"):
             damping = "bj"
@@ -686,7 +691,7 @@ class DFTD3(nn.Module):
                                          self.s9, (self.alp + 2.0) / 3.0,
                                          self.cutoff_triple / self.bohr,
                                          self.switch_width_triple / self.bohr, n_atoms,
-                                         c6_mat=c6_mat)
+                                         c6_mat=c6_mat, chunk=self.triplet_chunk)
 
     @torch.jit.export
     def evaluate(self, atomic_numbers: Tensor, pos: Tensor, edge_index: Tensor,
@@ -774,7 +779,7 @@ class DFTD3(nn.Module):
 
 _D3_KEYS = ("damping", "s6", "s8", "s9", "a1", "a2", "rs6", "rs8", "alp", "bet", "references",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "switch_width_pair",
-            "switch_width_triple", "trainable", "checkpoint_triplets")
+            "switch_width_triple", "trainable", "checkpoint_triplets", "triplet_chunk")
 
 
 @register_model("d3")

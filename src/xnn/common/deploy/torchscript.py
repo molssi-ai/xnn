@@ -59,6 +59,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
+from ..models.ops import cell_volume
+
 
 def _image_shifts(cell: Tensor, cutoff: float, pbc: Tensor) -> Tensor:
     """Integer lattice-image offsets covering ``cutoff`` along periodic axes.
@@ -334,6 +336,8 @@ class _DispersionHead(nn.Module):
             term.regime = "dense"
         if hasattr(term, "checkpoint_triplets"):
             term.checkpoint_triplets = False
+        if hasattr(term, "recompute_pairs"):
+            term.recompute_pairs = False
         self.term = term
         self.total_charge = float(total_charge)
 
@@ -603,7 +607,7 @@ class TorchScriptPotential(nn.Module):
         if g_pos is not None:
             forces = -g_pos
 
-        volume = torch.det(cell).abs()
+        volume = cell_volume(cell)
         stress = torch.zeros((3, 3), dtype=dtype, device=device)
         if g_strain is not None and bool(volume > 1e-8):
             stress = g_strain / volume

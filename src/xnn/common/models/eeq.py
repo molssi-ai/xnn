@@ -47,7 +47,7 @@ from typing import Optional
 
 import torch
 from torch import Tensor
-from .ops import scatter_sum
+from .ops import cell_volume, scatter_sum
 from .recompute import recompute
 
 #: relative truncation of the real- and reciprocal-space Ewald tails
@@ -90,7 +90,7 @@ def reciprocal_vectors(cell: Tensor, alpha: float, eps: float = EWALD_EPS) -> tu
     ``g (N_G,) = 4 pi / V exp(-G^2 / 4 alpha^2) / G^2`` (bohr units; ``cell``
     rows are lattice vectors in bohr).
     """
-    vol = torch.det(cell).abs()
+    vol = cell_volume(cell)
     recip = 2.0 * math.pi * torch.linalg.inv(cell).t()                  # rows: b_i
     g_max = 2.0 * alpha * math.sqrt(-math.log(eps))
     # |m_i| = |G . a_i| / 2 pi <= G_max |a_i| / 2 pi
@@ -106,7 +106,7 @@ def reciprocal_vectors(cell: Tensor, alpha: float, eps: float = EWALD_EPS) -> tu
 
 def reciprocal_weights(grid: Tensor, cell: Tensor, alpha: float) -> tuple[Tensor, Tensor]:
     """``G = m B`` and ``g(G)`` for integer triples ``grid`` and a (live) ``cell``."""
-    vol = torch.det(cell).abs()
+    vol = cell_volume(cell)
     recip = 2.0 * math.pi * torch.linalg.inv(cell).t()
     gvec = grid @ recip
     g2 = (gvec * gvec).sum(-1)
