@@ -60,6 +60,11 @@ class XNNCalculator(Calculator):
         The neighbor-list cutoff radius.
     device : str
         The torch device string.
+    eeq_reuse : bool, optional
+        Carry the large-regime EEQ solve of a D4 term from one step to the
+        next (:meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse`), for
+        molecular dynamics and geometry optimization; results agree with the
+        fresh solve to the solver tolerance. Default ``False``.
 
     Raises
     ------
@@ -69,13 +74,19 @@ class XNNCalculator(Calculator):
 
     implemented_properties = ["energy", "forces", "stress"]
 
-    def __init__(self, model, cutoff: float, device: str = "cpu", **kwargs):
+    def __init__(self, model, cutoff: float, device: str = "cpu", eeq_reuse: bool = False,
+                 **kwargs):
         if not _HAS_ASE:
             raise ImportError("ASE is required: pip install \"xnn[ase]\"")
         super().__init__(**kwargs)
         self.model = model.to(device).eval()
         self.cutoff = cutoff
         self.device = device
+        if eeq_reuse:
+            # molecular dynamics / optimization: carry the D4 EEQ solve from one
+            # step to the next (no effect on a model without a D4 term)
+            from ..models.d4 import enable_eeq_reuse
+            enable_eeq_reuse(self.model)
 
     def calculate(self, atoms=None, properties=("energy",),
                   system_changes=all_changes):

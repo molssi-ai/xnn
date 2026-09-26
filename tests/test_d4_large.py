@@ -1,7 +1,6 @@
 """D4 scale regimes: the large-system EEQ operator (matrix-free, LU / CG,
 implicit differentiation) against the dense reference path, and the
-checkpointed three-body chunks against the plain loop. See
-``notes/eeq_large_systems`` and ``notes/atm_chunking``."""
+checkpointed three-body chunks against the plain loop."""
 import numpy as np
 import pytest
 import torch
@@ -67,9 +66,18 @@ def test_regime_options_and_auto_selection():
         DFTD4(regime="fast")
     with pytest.raises(ValueError, match="eeq_solver"):
         DFTD4(eeq_solver="gmres")
-    # cutoff_eeq defaults to the other cutoffs and never widens the graph by itself
-    assert DFTD4(**MOL).cutoff == 9.0 and DFTD4(**MOL).cutoff_eeq == 9.0
+    # cutoff_eeq defaults to 16 A (or the other cutoffs, if larger) unless the
+    # regime is dense, which has no Ewald split; an explicit value always wins
+    from xnn.common.models.d4 import DEFAULT_CUTOFF_EEQ
+    assert DEFAULT_CUTOFF_EEQ == 16.0
+    assert DFTD4(**MOL).cutoff == 16.0 and DFTD4(**MOL).cutoff_eeq == 16.0
+    assert DFTD4(regime="large", **MOL).cutoff == 16.0
+    assert DFTD4(regime="dense", **MOL).cutoff == 9.0 and DFTD4(regime="dense", **MOL).cutoff_eeq == 9.0
     assert DFTD4(cutoff_eeq=14.0, **MOL).cutoff == 14.0
+    assert DFTD4(cutoff_eeq=9.0, **MOL).cutoff == 9.0
+    wide = dict(MOL, cutoff_pair=18.0)
+    assert DFTD4(**wide).cutoff_eeq == 18.0                       # never below the other cutoffs
+    assert DFTD4().cutoff_eeq == DFTD4().cutoff                    # upstream 60 bohr pair cutoff
     # config hook
     cfg = from_dict({"model": {"name": "d4", "extra": {"regime": "large", "eeq_solver": "cg",
                                                         "checkpoint_triplets": False, "cutoff_eeq": 12.0}}})
@@ -79,10 +87,10 @@ def test_regime_options_and_auto_selection():
 
 def test_large_regime_needs_twenty_bohr_of_neighbor_list_for_crystals():
     pos, z, cell = _crystal(n=20)
-    m = D4Dispersion(regime="large", **MOL)          # 9 A = 17 bohr
+    m = D4Dispersion(regime="large", cutoff_eeq=9.0, **MOL)          # 9 A = 17 bohr
     with pytest.raises(ValueError, match="20 bohr"):
         _run(m, pos, z, cell)
-    _run(D4Dispersion(regime="large", **MOL), *_molecule(20))   # molecules have no such limit
+    _run(D4Dispersion(regime="large", cutoff_eeq=9.0, **MOL), *_molecule(20))   # molecules: no such limit
 
 
 # EEQ: large vs dense

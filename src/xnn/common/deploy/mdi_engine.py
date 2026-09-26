@@ -41,6 +41,7 @@ training data). The engine converts at the boundary in both directions.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from typing import Any
@@ -75,8 +76,10 @@ _COMMANDS = (
 
 def _float_dtype(source) -> torch.dtype:
     """Floating-point dtype of a module's parameters or of a state dict."""
+    # a module's parameters first, then its buffers: a standalone dispersion
+    # model (``name: d4``) has buffers only
     tensors = (source.values() if isinstance(source, dict)
-               else source.parameters())
+               else itertools.chain(source.parameters(), source.buffers()))
     for t in tensors:
         if torch.is_tensor(t) and t.is_floating_point():
             return t.dtype
@@ -183,7 +186,8 @@ class MDIEngine:
     def from_checkpoint(cls, path: str, device: str = "cpu",
                         dtype: torch.dtype | None = None,
                         dispersion: Any = None,
-                        total_charge: float = 0.0) -> "MDIEngine":
+                        total_charge: float = 0.0,
+                        eeq_reuse: bool = False) -> "MDIEngine":
         """Build an engine from a trainer checkpoint (``best.pt``).
 
         The checkpoint is the dictionary written by
@@ -221,6 +225,13 @@ class MDIEngine:
         total_charge : float, optional
             Net charge of the system in units of e, by default 0. A driver can
             change it at run time with ``>TOTCHARGE``.
+        eeq_reuse : bool, optional
+            Carry the large-regime D4 EEQ solve over from one step to the next
+            (:meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse`), for
+            molecular dynamics and optimizations where each structure follows
+            the previous one closely. Results agree with the fresh solve to
+            the solver tolerance (1e-9 relative residual in float64). By
+            default ``False``.
 
         Returns
         -------
@@ -259,6 +270,13 @@ class MDIEngine:
         if dtype is None:
             dtype = _float_dtype(ckpt["model"])
         model = ForceStressOutput(base, compute_stress=True).to(dtype)
+        if eeq_reuse:
+            from ..models.d4 import enable_eeq_reuse
+            n_terms = enable_eeq_reuse(model)
+            if n_terms:
+                logger.info("EEQ reuse between steps enabled for %d D4 term(s)", n_terms)
+            else:
+                logger.info("--eeq-reuse has no effect: the model has no D4 term")
         cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff, str(dtype).replace("torch.", ""),
@@ -530,6 +548,10 @@ def main(argv=None) -> None:
     p.add_argument("--total-charge", type=float, default=0.0,
                    help="net charge of the system in e (default 0); the driver "
                         "can change it with >TOTCHARGE")
+    p.add_argument("--eeq-reuse", action="store_true",
+                   help="carry the large-regime D4 EEQ solve over between steps "
+                        "(MD, optimization); results agree with the fresh solve "
+                        "to the solver tolerance")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -546,7 +568,8 @@ def main(argv=None) -> None:
         dispersion = yaml.safe_load(args.dispersion)
     engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
                                        dtype=dtype, dispersion=dispersion,
-                                       total_charge=args.total_charge)
+                                       total_charge=args.total_charge,
+                                       eeq_reuse=args.eeq_reuse)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

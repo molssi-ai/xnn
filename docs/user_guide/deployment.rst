@@ -113,7 +113,11 @@ archive, so a consumer can introspect the artifact without xnn::
    ``--total-charge`` option for the system's net charge, adds D3 / D4 on top
    of a plain checkpoint with ``--dispersion`` (refused if the checkpoint
    already includes it), builds graphs at the served model's own cutoff, and
-   serves in the checkpoint's dtype unless ``--dtype`` is given.
+   serves in the checkpoint's dtype unless ``--dtype`` is given. For molecular
+   dynamics and optimizations, ``--eeq-reuse`` carries the large-regime D4 EEQ
+   solve over from one step to the next
+   (:class:`~xnn.common.models.eeq.EEQReuse`); the ASE calculator offers the
+   same as ``XNNCalculator(model, cutoff, eeq_reuse=True)``.
 
 .. note::
 
