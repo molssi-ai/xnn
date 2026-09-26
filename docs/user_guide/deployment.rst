@@ -116,7 +116,8 @@ archive, so a consumer can introspect the artifact without xnn::
    serves in the checkpoint's dtype unless ``--dtype`` is given. For molecular
    dynamics and optimizations, ``--eeq-reuse`` carries the large-regime D4 EEQ
    solve over from one step to the next
-   (:class:`~xnn.common.models.eeq.EEQReuse`).
+   (:class:`~xnn.common.models.eeq.EEQReuse`); the ASE calculator offers the
+   same as ``XNNCalculator(model, cutoff, eeq_reuse=True)``.
 
 .. note::
 

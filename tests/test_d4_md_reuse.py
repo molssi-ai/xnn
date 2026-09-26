@@ -261,3 +261,71 @@ def test_cli_eeq_reuse_flag(tmp_path, monkeypatch):
     assert seen["reuse"] == [True]
     main(args)
     assert seen["reuse"] == [False]
+
+
+# ----------------------------------------------------------------------------
+# float32 LU accuracy, the ASE opt-in, and batches
+# ----------------------------------------------------------------------------
+
+def test_float32_lu_forces_are_refined():
+    """The float32 factor alone leaves ~1e-3 eV/A in the forces (the adjoint
+    through the factor); with the iterative refinement the LU path is as
+    accurate as the float32 iterative one."""
+    pos, z, cell = _water_box()
+    ref = _run(D4Dispersion(regime="large", eeq_solver="lu", **PER), pos, z, cell)
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        s = {"pos": torch.tensor(pos, dtype=torch.float32), "atomic_numbers": torch.tensor(z),
+             "cell": torch.tensor(cell, dtype=torch.float32), "pbc": torch.tensor([True] * 3)}
+        out = {}
+        for solver in ("lu", "cg"):
+            m = D4Dispersion(regime="large", eeq_solver=solver, **PER)
+            out[solver] = ForceStressOutput(m, compute_stress=True)(structure_to_graph(s, m.cutoff))
+    finally:
+        torch.set_default_dtype(prev)
+    for solver in ("lu", "cg"):
+        assert torch.allclose(out[solver]["eeq_charges"].double(), ref["eeq_charges"], atol=2e-5, rtol=0)
+        assert torch.allclose(out[solver]["forces"].double(), ref["forces"], atol=2e-5, rtol=0)
+
+
+def test_ase_calculator_eeq_reuse_opt_in():
+    ase = pytest.importorskip("ase")
+    from xnn.common.deploy import XNNCalculator
+    pos, z, cell = _water_box()
+    model = ForceStressOutput(D4Dispersion(regime="large", **PER), compute_stress=True)
+    calc = XNNCalculator(model, cutoff=model.cutoff, eeq_reuse=True)
+    term = model.model.term
+    assert isinstance(term.__dict__["_eeq_reuse"], EEQReuse)
+    atoms = ase.Atoms(numbers=z, positions=pos, cell=cell, pbc=True)
+    atoms.calc = calc
+    f_reuse = atoms.get_forces()
+    fresh = _run(D4Dispersion(regime="large", **PER), pos, z, cell)
+    assert np.abs(f_reuse - fresh["forces"].detach().numpy()).max() < 1e-7
+    assert term.__dict__["_eeq_reuse"].stats["solves"] == 3
+    plain = XNNCalculator(ForceStressOutput(D4Dispersion(regime="large", **PER)), cutoff=model.cutoff)
+    assert plain.model.model.term.__dict__.get("_eeq_reuse") is None
+
+
+def test_eeq_reuse_is_skipped_inside_a_batch():
+    """Only a structure evaluated on its own reuses the previous solve; a batch
+    of several structures takes the fresh path (results identical to it)."""
+    from xnn.common.data import collate
+    pos, z, cell = _water_box()
+    other, zo, co = _water_box(seed=1)
+    fresh = D4Dispersion(regime="large", **PER)
+    reused = D4Dispersion(regime="large", **PER)
+    reused.d4.enable_eeq_reuse()
+
+    def graph(p, zz, c):
+        return structure_to_graph({"pos": torch.tensor(p), "atomic_numbers": torch.tensor(zz),
+                                   "cell": torch.tensor(c), "pbc": torch.tensor([True] * 3)}, fresh.cutoff)
+
+    batch = collate([graph(pos, z, cell), graph(other, zo, co)])
+    a, b = fresh(batch), reused(batch)
+    assert torch.allclose(a["energy"], b["energy"], atol=1e-12, rtol=0)
+    assert torch.allclose(a["eeq_charges"], b["eeq_charges"], atol=1e-12, rtol=0)
+    assert reused.d4.__dict__["_eeq_reuse"].stats["solves"] == 0
+    # the same structure alone: now the reuse engages
+    reused(graph(pos, z, cell))
+    assert reused.d4.__dict__["_eeq_reuse"].stats["solves"] > 0

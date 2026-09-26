@@ -17,7 +17,7 @@ from xnn.common.models.dispersion import DispersionCorrection
 
 BASE = {"name": "schnet", "cutoff": 4.0, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
 FAST_D4 = {"name": "d4", "cutoff_pair": 9.0, "cutoff_triple": 6.0,
-           "cutoff_cn": 7.0, "cutoff_eeq_cn": 7.0}
+           "cutoff_cn": 7.0, "cutoff_eeq_cn": 7.0, "cutoff_eeq": 9.0}
 
 
 def _checkpoint(tmp_path, model_cfg, dtype=torch.float32, name="best.pt"):
@@ -137,14 +137,15 @@ def test_cli_parses_dispersion_and_charge(tmp_path, monkeypatch):
     monkeypatch.setattr(MDIEngine, "run", fake_run)
     main(["--ckpt", path, "-mdi", "-role ENGINE -name xnn -method TCP -port 1 -hostname h",
           "--dispersion", "{name: d4, cutoff_pair: 12.0, switch_width_pair: 2.0, "
-          "cutoff_triple: 6.0, cutoff_cn: 7.0, cutoff_eeq_cn: 7.0}",
+          "cutoff_triple: 6.0, cutoff_cn: 7.0, cutoff_eeq_cn: 7.0, cutoff_eeq: 12.0}",
           "--total-charge", "-1", "--dtype", "float64"])
     assert seen == {"cutoff": pytest.approx(12.0), "charge": -1.0,
                     "dtype": torch.float64, "disp": True}
 
 
 @pytest.mark.parametrize("extra", [{"long_range": True},
-                                   {"dispersion": {**FAST_D4, "regime": "large", "cutoff_pair": 11.0}},
+                                   {"dispersion": {**FAST_D4, "regime": "large", "cutoff_pair": 11.0,
+                                                   "cutoff_eeq": 11.0}},
                                    {"dispersion": {**FAST_D4, "regime": "dense"}}])
 def test_float32_model_under_float64_default(tmp_path, extra):
     """A float32 checkpoint served in a process whose default dtype is float64

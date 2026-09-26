@@ -326,10 +326,10 @@ coordination numbers, polarizabilities and C6 coefficients to ~1e-15, for
 molecules, ions and crystals (``tests/test_d4.py``,
 ``examples/fidelity_checks/d4_verification.ipynb``).
 The ``large`` EEQ regime (matrix-free Ewald operator, implicit
-differentiation; ``notes/eeq_large_systems``) is not bit-exact: it is
+differentiation) is not bit-exact: it is
 converged to 1e-10 and differs from ``dftd4`` by that code's own Ewald
 tolerance, about 1e-8 in the charges. The recompute three-body blocks
-(``notes/atm_chunking``) reproduce the reference loop to rounding, in
+reproduce the reference loop to rounding, in
 training mode as well. The one documented
 difference concerns *isolated* atoms (no neighbor within about two covalent
 radii): upstream's soft cap of the EEQ coordination number leaves a one-ulp

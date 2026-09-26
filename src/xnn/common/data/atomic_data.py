@@ -185,7 +185,7 @@ class AtomicGraph:
                 # edge makes the backward pass (the stress) accumulate 9 E
                 # values into the same nine entries through the sort-based
                 # index backward, which cost 1.5 s of a D4 step and half of a
-                # MACE step on 5000 periodic atoms (notes/atm_chunking).
+                # MACE step on 5000 periodic atoms.
                 shift = self.cell_shifts.to(vec.dtype) @ self.cell[0]
             else:
                 # cell of the structure each edge belongs to (via its src node)

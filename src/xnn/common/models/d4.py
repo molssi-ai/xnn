@@ -126,6 +126,10 @@ _CUTOFF_TRIPLE_AU = 40.0
 _CUTOFF_CN_AU = 30.0
 _CUTOFF_EEQ_CN_AU = 25.0
 _MIN_CUTOFF_EEQ_AU = 20.0      # shortest real-space range of the large-regime EEQ split
+#: default real-space range of the large-regime Ewald split (Angstrom): the
+#: reciprocal set shrinks as r^-3 and the operator is about four times cheaper
+#: than at 12 A, while the charges agree to 2e-10 e
+DEFAULT_CUTOFF_EEQ = 16.0
 #: ``regime="auto"`` switches from the dense (bit-exact) EEQ path to the
 #: large-system operator above these atom counts (dense memory: about 7 kB
 #: per pair for a periodic cell, 64 B per pair for a molecule)
@@ -289,8 +293,12 @@ class DFTD4(nn.Module):
     cutoff_eeq : float or None, optional
         Real-space range (Angstrom) of the large-regime Ewald split, which
         sets the splitting parameter (a longer range means fewer reciprocal
-        vectors). By default the largest of the other cutoffs, so the
-        neighbor list is not widened; the large regime needs at least 20 bohr
+        vectors). ``None`` (default) takes :data:`DEFAULT_CUTOFF_EEQ` (16 A)
+        or the largest of the other cutoffs, whichever is larger, unless
+        ``regime="dense"`` (which has no Ewald split and keeps the other
+        cutoffs' radius); the neighbor list is then at most 16 A, which costs
+        about 2.4 times the edges of a 12 A list and buys a four times
+        cheaper EEQ operator. The large regime needs at least 20 bohr
         (10.6 A), below which the ``erf(gamma r)`` part of the kernel is not
         screened, and raises otherwise.
     eeq_solver : str, optional
@@ -412,11 +420,18 @@ class DFTD4(nn.Module):
         self.cutoff_triple = float(cutoff_triple)
         self.cutoff_cn = float(cutoff_cn)
         self.cutoff_eeq_cn = float(cutoff_eeq_cn)
-        # the large-regime real-space range defaults to the neighbor-list
-        # radius the other terms need, so it never widens the graph on its own
+        # the large-regime real-space range: 16 A by default (a longer range
+        # shrinks the reciprocal set, see DEFAULT_CUTOFF_EEQ), never below the
+        # radius the other terms need, and not widened at all in the dense
+        # regime, which has no Ewald split
         base_cutoff = max(self.cutoff_pair, self.cutoff_triple,
                           self.cutoff_cn, self.cutoff_eeq_cn)
-        self.cutoff_eeq = float(cutoff_eeq) if cutoff_eeq is not None else base_cutoff
+        if cutoff_eeq is not None:
+            self.cutoff_eeq = float(cutoff_eeq)
+        elif regime == "dense":
+            self.cutoff_eeq = base_cutoff
+        else:
+            self.cutoff_eeq = max(base_cutoff, DEFAULT_CUTOFF_EEQ)
         self.cutoff = max(base_cutoff, self.cutoff_eeq)
         self.switch_width_pair = float(switch_width_pair)
         self.switch_width_triple = float(switch_width_triple)
@@ -670,12 +685,13 @@ class DFTD4(nn.Module):
     @torch.jit.unused
     def _eeq_charges_large(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
                            cn_eeq: Tensor, total_charge: Tensor, cell: Tensor,
-                           periodic: bool) -> Tensor:
+                           periodic: bool, alone: bool = True) -> Tensor:
         """Large-regime EEQ charges of one structure (eager only).
 
         ``edge_index`` / ``edge_vec`` are the structure's edges within
-        ``cutoff_eeq`` in local numbering and bohr. See
-        :mod:`~xnn.common.models.eeq`.
+        ``cutoff_eeq`` in local numbering and bohr; ``alone`` says the
+        structure is the only one of its batch, the condition for the EEQ
+        reuse between steps. See :mod:`~xnn.common.models.eeq`.
         """
         if periodic and self.cutoff_eeq < _MIN_CUTOFF_EEQ_AU * self.bohr:
             raise ValueError(
@@ -685,15 +701,19 @@ class DFTD4(nn.Module):
         rad = self.eeq_rad[z]
         diag = self.eeq_eta[z] + math.sqrt(2.0 / math.pi) / rad
         x = -self.eeq_chi[z] + self.eeq_kcnchi[z] * cn_eeq / torch.sqrt(cn_eeq + self.eeq_cn_reg)
+        reuse = self.__dict__.get("_eeq_reuse") if alone else None
+        # the system's identity for the reuse: atom count and element sequence
+        signature = (int(z.shape[0]), int(z.sum()),
+                     int((z * torch.arange(1, z.shape[0] + 1, device=z.device)).sum()))
         if periodic:
             alpha = ewald_alpha(self.cutoff_eeq / self.bohr)
             grid, gvec, gfac = reciprocal_vectors(cell.detach(), alpha)
             diag = diag - 2.0 * alpha / math.sqrt(math.pi)
             system = EEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac, grid,
-                               solver=self.eeq_solver, reuse=self.__dict__.get("_eeq_reuse"))
+                               solver=self.eeq_solver, reuse=reuse, signature=signature)
             return eeq_charges_large(system, pos, edge_vec, rad, diag, x, total_charge, cell)
-        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver,
-                           reuse=self.__dict__.get("_eeq_reuse"))
+        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver, reuse=reuse,
+                           signature=signature)
         return eeq_charges_large(system, pos, None, rad, diag, x, total_charge)
 
     @torch.jit.unused
@@ -889,7 +909,7 @@ class DFTD4(nn.Module):
                 sel = in_eeq & (batch[edge_index[1]] == b)
                 charges.append(self._eeq_charges_large(
                     z[members], pos_au[members], local[edge_index[:, sel]], vec_au[sel],
-                    cn_eeq[members], total_charge[b], cell_b, periodic))
+                    cn_eeq[members], total_charge[b], cell_b, periodic, num_graphs == 1))
             else:
                 charges.append(self.eeq_charges(z[members], pos_au[members],
                                                 cn_eeq[members], total_charge[b],
@@ -1009,6 +1029,20 @@ _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",
             "switch_width_pair", "switch_width_triple", "trainable",
             "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets", "recompute_pairs",
             "triplet_chunk", "triplet_cache")
+
+
+def enable_eeq_reuse(model, enabled: bool = True, **options) -> int:
+    """Switch the EEQ reuse between steps on (or off) for every D4 term of a model.
+
+    The hook of the molecular-dynamics channels (ASE calculator, MDI engine):
+    walks ``model`` for :class:`DFTD4` modules and calls their
+    :meth:`~DFTD4.enable_eeq_reuse`. Returns the number of terms found (0 when
+    the model has no D4 term, in which case the option has no effect).
+    """
+    terms = [m for m in model.modules() if isinstance(m, DFTD4)]
+    for term in terms:
+        term.enable_eeq_reuse(enabled, **options)
+    return len(terms)
 
 
 def d4_options_from_extra(extra: dict) -> dict:

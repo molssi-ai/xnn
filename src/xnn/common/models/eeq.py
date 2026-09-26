@@ -10,7 +10,7 @@ system, evaluated so that memory stays ``O(E + N N_G + N c)`` (edges,
 structure factors, one row block) and gradients cost one matrix-vector
 product per backward.
 
-Algorithm (details and derivations in ``notes/eeq_large_systems``):
+Algorithm:
 
 * **Operator.** Molecules: ``A_ij = erf(gamma_ij r_ij) / r_ij`` applied in
   row blocks that are never stored. Periodic cells: an Ewald split at a
@@ -142,13 +142,17 @@ class EEQSystem:
     reuse : EEQReuse or None
         Carry the solve over from the previous structure of an MD run or
         optimization (:class:`EEQReuse`); ``solver`` is then only the fallback.
+    signature : tuple or None
+        Hashable identity of the system (atom count and elements) that
+        :class:`EEQReuse` compares before reusing its state.
     """
 
     def __init__(self, diag: Tensor, rad: Tensor, pos: Tensor,
                  edge_index: Optional[Tensor] = None, edge_vec: Optional[Tensor] = None,
                  alpha: float = 0.0, gvec: Optional[Tensor] = None,
                  gfac: Optional[Tensor] = None, grid: Optional[Tensor] = None,
-                 solver: str = "auto", reuse: Optional["EEQReuse"] = None):
+                 solver: str = "auto", reuse: Optional["EEQReuse"] = None,
+                 signature: Optional[tuple] = None):
         self.n = pos.shape[0]
         self.diag = diag.detach()
         self.rad = rad.detach()
@@ -164,7 +168,7 @@ class EEQSystem:
             raise ValueError(f"eeq_solver must be 'auto', 'lu' or 'cg', got {solver!r}")
         self.solver = ("lu" if self.n <= LU_MAX_ATOMS else "cg") if solver == "auto" else solver
         self.reuse = reuse
-        self._reuse_calls = 0      # which of the step's solves this is (EEQReuse)
+        self.signature = signature   # identifies the system for EEQReuse (atom count, elements)
         self._lu = None            # (LU, pivots) of the augmented matrix
         self._y_ones = None        # A^-1 1 (CG path)
         self._sf = None            # (C, S) structure factors when they fit
@@ -233,11 +237,17 @@ class EEQSystem:
         return amat + torch.diag(self.diag)
 
     # solves (no autograd)
-    def solve_augmented(self, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:
-        """Solve ``[[A, 1], [1^T, 0]] [y; mu] = [b_top; b_bot]``; returns ``(y, mu)``."""
+    def solve_augmented(self, b_top: Tensor, b_bot: Tensor,
+                        role: str = "charges") -> tuple[Tensor, Tensor]:
+        """Solve ``[[A, 1], [1^T, 0]] [y; mu] = [b_top; b_bot]``; returns ``(y, mu)``.
+
+        ``role`` names the solve of the step: ``"charges"``, ``"residual"``
+        (the correction of :func:`eeq_charges_large`) or ``"adjoint"`` (the
+        backward pass); :class:`EEQReuse` keeps a separate history per role.
+        """
         with torch.no_grad():
             if self.reuse is not None:
-                return self.reuse.solve(self, b_top, b_bot)
+                return self.reuse.solve(self, b_top, b_bot, role)
             if self.solver == "lu":
                 return self._solve_lu(b_top, b_bot)
             return self._solve_cg(b_top, b_bot)
@@ -248,11 +258,21 @@ class EEQSystem:
             amat = self.assemble()
             ones = torch.ones((n, 1), dtype=amat.dtype, device=amat.device)
             zero = torch.zeros((1, 1), dtype=amat.dtype, device=amat.device)
-            full = torch.cat([torch.cat([amat, ones], dim=1),
-                              torch.cat([ones.t(), zero], dim=1)], dim=0)
-            self._lu = torch.linalg.lu_factor(full)
+            self._full = torch.cat([torch.cat([amat, ones], dim=1),
+                                    torch.cat([ones.t(), zero], dim=1)], dim=0)
+            self._lu = torch.linalg.lu_factor(self._full)
         rhs = torch.cat([b_top, b_bot.reshape(1)]).unsqueeze(1)
-        sol = torch.linalg.lu_solve(*self._lu, rhs).squeeze(1)
+        sol = torch.linalg.lu_solve(*self._lu, rhs)
+        # iterative refinement: a float32 factor leaves ~1e-2 e in the raw
+        # solution and, through the adjoint, ~1e-3 eV/A in the forces; each
+        # round with the residual in float64 recovers about four digits
+        rounds = 2 if sol.dtype == torch.float32 else 1
+        full64 = self._full.double() if rounds == 2 else self._full
+        for _ in range(rounds):
+            resid = (rhs.double() - full64 @ sol.double()).to(sol.dtype) if rounds == 2 \
+                else rhs - full64 @ sol
+            sol = sol + torch.linalg.lu_solve(*self._lu, resid)
+        sol = sol.squeeze(1)
         return sol[:n], sol[n]
 
     def _solve_cg(self, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:
@@ -340,8 +360,8 @@ class EEQReuse:
       solve was already converged.
 
     The results do not depend on the reuse beyond the tolerance ``tol``
-    (relative residual; by default 1e-9 in float64 and 100 machine epsilons in
-    float32): a poor preconditioner or guess only costs iterations. If a solve
+    (relative residual; by default 1e-9 in float64 and 1e-6 in float32): a
+    poor preconditioner or guess only costs iterations. If a solve
     does not converge within ``maxiter`` the preconditioner is re-formed from
     the current matrix and the solve retried once, and failing that the step
     falls back to the LU path.
@@ -349,10 +369,12 @@ class EEQReuse:
     Measured on 5001 water atoms at 0.997 g/cm^3 (A100, cutoff_eeq 16 A, a
     real 0.5 fs trajectory): the three solves of a step take 20 ms in float32
     and 59 ms in float64, against 0.13-0.31 s for assembly + LU, with one
-    inverse formed for the whole run (``notes/eeq_large_systems/psaxe_bench``).
+    inverse formed for the whole run.
 
-    One instance serves one sequence of structures with the same number of
-    atoms; it resets itself when the size, dtype or device change. It holds an
+    One instance serves one sequence of structures of the same system (atom
+    count, elements, dtype, device); it resets itself when any of these
+    change, and :class:`~xnn.common.models.d4.DFTD4` uses it only for a
+    structure evaluated on its own, never inside a batch. It holds an
     ``(N, N)`` matrix (0.1 GB at 5000 atoms in float32).
 
     Parameters
@@ -386,7 +408,10 @@ class EEQReuse:
     def _tolerance(self, dtype: torch.dtype) -> float:
         if self.tol is not None:
             return float(self.tol)
-        return 1e-9 if dtype == torch.float64 else 100.0 * torch.finfo(dtype).eps
+        # float32: 1e-6, not 100 machine epsilons (1.2e-5), which left 2-5e-4 e
+        # in the charges over a trajectory where the refined LU keeps 3e-6 e;
+        # the tighter tolerance costs one or two iterations per solve
+        return 1e-9 if dtype == torch.float64 else 1e-6
 
     def _precondition(self, system: EEQSystem) -> None:
         amat = system.assemble()
@@ -419,17 +444,19 @@ class EEQReuse:
             rz = rz_new
         return x, -1
 
-    def solve(self, system: EEQSystem, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:
-        """The constrained solve of ``system`` (see :meth:`EEQSystem.solve_augmented`)."""
+    def solve(self, system: EEQSystem, b_top: Tensor, b_bot: Tensor,
+              role: str = "charges") -> tuple[Tensor, Tensor]:
+        """The constrained solve of ``system`` for one ``role`` of the step
+        (``"charges"``, ``"residual"``, ``"adjoint"``; see
+        :meth:`EEQSystem.solve_augmented`)."""
         with torch.no_grad():
-            key = (system.n, b_top.dtype, b_top.device)
+            key = (system.n, b_top.dtype, b_top.device, system.signature)
             if key != self._key:
                 self.reset()
                 self._key = key
             if self._inv is None or self._stale:
                 self._precondition(system)
-            call = system._reuse_calls
-            system._reuse_calls += 1
+            call = {"charges": 0, "residual": 1}.get(role, 2)
             out = self._attempt(system, b_top, b_bot, call)
             if out is None:                # re-form from this matrix and retry once
                 self._precondition(system)
@@ -527,17 +554,17 @@ class _AugmentedSolve(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, system: EEQSystem, b_top: Tensor, b_bot: Tensor):
+    def forward(ctx, system: EEQSystem, b_top: Tensor, b_bot: Tensor, role: str = "residual"):
         ctx.system = system
-        y, mu = system.solve_augmented(b_top.detach(), b_bot.detach())
+        y, mu = system.solve_augmented(b_top.detach(), b_bot.detach(), role)
         return y, mu.reshape(())
 
     @staticmethod
     def backward(ctx, g_y: Tensor, g_mu: Optional[Tensor]):
         if g_mu is None:
             g_mu = torch.zeros((), dtype=g_y.dtype, device=g_y.device)
-        lam, kappa = _AugmentedSolve.apply(ctx.system, g_y, g_mu)
-        return None, lam, kappa
+        lam, kappa = _AugmentedSolve.apply(ctx.system, g_y, g_mu, "adjoint")
+        return None, lam, kappa, None
 
 
 def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor],
@@ -562,8 +589,8 @@ def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor]
         Live lattice vectors ``(3, 3)`` in bohr (periodic case).
     """
     total = total_charge.to(x.dtype).reshape(())
-    q0, mu0 = system.solve_augmented(x.detach(), total.detach())
+    q0, mu0 = system.solve_augmented(x.detach(), total.detach(), "charges")
     res_top = x - system.apply_differentiable(pos, edge_vec, rad, diag, q0, cell) - mu0
     res_bot = total - q0.sum()
-    dq, _ = _AugmentedSolve.apply(system, res_top, res_bot)
+    dq, _ = _AugmentedSolve.apply(system, res_top, res_bot, "residual")
     return q0 + dq

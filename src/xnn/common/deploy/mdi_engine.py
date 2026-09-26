@@ -271,12 +271,10 @@ class MDIEngine:
             dtype = _float_dtype(ckpt["model"])
         model = ForceStressOutput(base, compute_stress=True).to(dtype)
         if eeq_reuse:
-            from ..models.d4 import DFTD4
-            terms = [m for m in model.modules() if isinstance(m, DFTD4)]
-            for term in terms:
-                term.enable_eeq_reuse()
-            if terms:
-                logger.info("EEQ reuse between steps enabled for %d D4 term(s)", len(terms))
+            from ..models.d4 import enable_eeq_reuse
+            n_terms = enable_eeq_reuse(model)
+            if n_terms:
+                logger.info("EEQ reuse between steps enabled for %d D4 term(s)", n_terms)
             else:
                 logger.info("--eeq-reuse has no effect: the model has no D4 term")
         cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))

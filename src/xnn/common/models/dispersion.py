@@ -192,7 +192,7 @@ def triplet_energy(a: Tensor, b: Tensor, c: Tensor, j: Tensor, k: Tensor, edge_v
     """
     # index_select rather than x[idx]: its backward is an atomic index_add,
     # where the sort-based backward of advanced indexing serializes the many
-    # repeats of every edge over the triplets (notes/atm_chunking)
+    # repeats of every edge over the triplets
     v_ij, v_ik = edge_vec.index_select(0, a), edge_vec.index_select(0, b)
     r_a, r_b = r.index_select(0, a), r.index_select(0, b)
     r2_ij, r2_ik = r_a * r_a, r_b * r_b
@@ -565,8 +565,7 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
     under autograd. On that path ``triplet_cache`` keeps each block's triples
     from the forward to the backward pass (:class:`_TripletCache`; GB, ``None``
     for a quarter of the free device memory, 0 to disable), so they are
-    enumerated once per step. Results equal the scripted loop to rounding; see
-    ``notes/atm_chunking``.
+    enumerated once per step. Results equal the scripted loop to rounding.
     """
     from .recompute import recompute
     energy = torch.zeros(n_atoms, dtype=r.dtype, device=r.device)

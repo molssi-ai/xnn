@@ -50,7 +50,9 @@ AMMONIUM = (np.array([[0.0, 0.0, 0.0], [0.59, 0.59, 0.59], [-0.59, -0.59, 0.59],
                       [-0.59, 0.59, -0.59], [0.59, -0.59, -0.59]]), [7, 1, 1, 1, 1])
 # small cutoffs keep the tests fast; the defaults are exercised in the
 # upstream-parity tests
-FAST = dict(cutoff_pair=9.0, cutoff_triple=7.0, cutoff_cn=8.0, cutoff_eeq_cn=8.0)
+# cutoff_eeq pinned to the pair cutoff: the large regime's default (16 A) would
+# otherwise widen the wrapper's neighbor list beyond these test cutoffs
+FAST = dict(cutoff_pair=9.0, cutoff_triple=7.0, cutoff_cn=8.0, cutoff_eeq_cn=8.0, cutoff_eeq=9.0)
 
 
 def _graph(pos, z, cutoff, cell=None, charge=None, R=None, shift=0.0):
