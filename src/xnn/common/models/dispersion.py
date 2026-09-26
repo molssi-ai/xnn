@@ -283,6 +283,60 @@ def _third_side(a: Tensor, b: Tensor, j: Tensor, k: Tensor, n_atoms: int, edge_s
     return key_perm.index_select(0, idx), found
 
 
+class _TripletCache:
+    """A step's ATM block triples, kept from the forward to the backward pass.
+
+    The forward block enumerates its triples anyway; storing them saves the
+    backward pass (the closed-form block gradient) from enumerating them a
+    second time, which is 25-35% of the three-body time. Per triple the cache
+    holds the two edges ``a, b`` and the third side ``e_jk`` as int32 plus the
+    ``distinct`` / ``found`` flags, 14 bytes; the centers and outer atoms are
+    recovered from the edges (``c = dst[a]``, ``j = src[a]``, ``k = src[b]``).
+    Blocks that do not fit in ``budget`` bytes are re-enumerated as before, and
+    an entry is freed as soon as the backward pass has taken it. The cache
+    lives in the closures of one :func:`three_body_energy_chunked` call, so
+    nothing outlives the autograd graph of a step.
+    """
+
+    BYTES_PER_TRIPLE = 14
+
+    def __init__(self, budget: int):
+        self.budget = int(budget)
+        self.used = 0
+        self.store: Dict[tuple, tuple] = {}
+
+    def put(self, key: tuple, a: Tensor, b: Tensor, distinct: Tensor, e_jk: Tensor,
+            found: Tensor) -> None:
+        nbytes = int(a.numel()) * self.BYTES_PER_TRIPLE
+        if self.used + nbytes > self.budget:
+            return
+        self.store[key] = (a.to(torch.int32), b.to(torch.int32), distinct,
+                           e_jk.to(torch.int32), found, nbytes)
+        self.used += nbytes
+
+    def take(self, key: tuple, edge_index: Tensor):
+        entry = self.store.pop(key, None)
+        if entry is None:
+            return None
+        a32, b32, distinct, e32, found, nbytes = entry
+        self.used -= nbytes
+        a, b = a32.long(), b32.long()
+        src, dst = edge_index[0], edge_index[1]
+        return (a, b, dst.index_select(0, a), src.index_select(0, a), src.index_select(0, b),
+                distinct, e32.long(), found)
+
+
+def triplet_cache_budget(like: Tensor, budget: Optional[float]) -> int:
+    """Bytes the triple cache may hold: ``budget`` in GB, or ``None`` for a
+    quarter of the free device memory (CPU: 1 GB); 0 disables the cache."""
+    if budget is not None:
+        return int(float(budget) * 2 ** 30)
+    if like.device.type != "cuda":
+        return 1 << 30
+    free, _ = torch.cuda.mem_get_info(like.device)
+    return int(0.25 * free)
+
+
 def _triplet_block(e0: int, e1: int, z: Tensor, edge_index: Tensor, edge_vec: Tensor,
                    r: Tensor, r0_table: Optional[Tensor], s9: Tensor, alp3: float, cutoff: float,
                    width: float, n_atoms: int, c6_mat: Optional[Tensor],
@@ -290,7 +344,7 @@ def _triplet_block(e0: int, e1: int, z: Tensor, edge_index: Tensor, edge_vec: Te
                    r0_atom: Optional[Tensor], a1: Optional[Tensor], a2: Optional[Tensor],
                    c6_edge: Optional[Tensor] = None, edge_shift: Optional[Tensor] = None,
                    sorted_keys: Optional[Tensor] = None, key_perm: Optional[Tensor] = None,
-                   once: bool = True) -> Tensor:
+                   once: bool = True, cache: Optional[_TripletCache] = None) -> Tensor:
     """Per-atom ATM energy of the centers whose edges are ``e0 <= e < e1`` in the
     center-sorted edge list (enumerated here, so a recompute block retains
     nothing of the triplets).
@@ -300,7 +354,8 @@ def _triplet_block(e0: int, e1: int, z: Tensor, edge_index: Tensor, edge_vec: Te
     assigned to each corner; triangles with a repeated atom (periodic
     self-images) keep the reference bookkeeping of one third per center
     visit. Per-atom energies are identical either way; the work drops by
-    three.
+    three. With a ``cache`` the block's triples are kept for the backward pass
+    (:class:`_TripletCache`).
     """
     a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
     if a.numel() == 0:
@@ -308,6 +363,8 @@ def _triplet_block(e0: int, e1: int, z: Tensor, edge_index: Tensor, edge_vec: Te
     if c6_edge is not None:
         c6_cj, c6_ck = c6_edge.index_select(0, a), c6_edge.index_select(0, b)
         e_jk, found = _third_side(a, b, j, k, n_atoms, edge_shift, sorted_keys, key_perm)
+        if cache is not None:
+            cache.put((e0, e1), a, b, distinct, e_jk, found)
         # a positive placeholder keeps sqrt's backward finite on masked triplets
         c6_jk = torch.where(found, c6_edge.index_select(0, e_jk), torch.ones_like(c6_cj))
     elif c6_mat is not None:
@@ -354,7 +411,7 @@ def _triplet_block_grad(e0: int, e1: int, grad_out: Tensor, z: Tensor, edge_inde
                         edge_vec: Tensor, r: Tensor, table: Tensor, s9: Tensor, c6_edge: Tensor,
                         r0_atom: Tensor, a1: Tensor, a2: Tensor, alp3: float, cutoff: float,
                         width: float, n_atoms: int, edge_shift: Tensor, sorted_keys: Tensor,
-                        key_perm: Tensor, once: bool):
+                        key_perm: Tensor, once: bool, cache: Optional[_TripletCache] = None):
     """Closed-form gradient of :func:`_triplet_block` (per-edge C6, per-atom radii).
 
     Given the cotangent ``grad_out`` ``(N,)`` of the per-atom energies, returns
@@ -363,9 +420,14 @@ def _triplet_block_grad(e0: int, e1: int, grad_out: Tensor, z: Tensor, edge_inde
     squared distances, the three pair ``C6`` through ``C9``, the radius
     factors and ``a1, a2`` through the damping, and ``s9``. One pass, no
     autograd graph; written in differentiable ops so that autograd over it
-    provides the second derivative for force training.
+    provides the second derivative for force training. The triples come from
+    ``cache`` when the forward block stored them, else they are enumerated.
     """
-    a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
+    cached = cache.take((e0, e1), edge_index) if cache is not None else None
+    if cached is not None:
+        a, b, c, j, k, distinct, e_jk, found = cached
+    else:
+        a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
     zeros_like = lambda t: torch.zeros_like(t)
     if a.numel() == 0:
         return (None, None, zeros_like(edge_vec), zeros_like(r), None, zeros_like(s9),
@@ -385,7 +447,8 @@ def _triplet_block_grad(e0: int, e1: int, grad_out: Tensor, z: Tensor, edge_inde
     ra, rb, rjk = torch.sqrt(x), torch.sqrt(y), torch.sqrt(w_)
     # C6 and C9
     c6_cj, c6_ck = c6_edge.index_select(0, a), c6_edge.index_select(0, b)
-    e_jk, found = _third_side(a, b, j, k, n_atoms, edge_shift, sorted_keys, key_perm)
+    if cached is None:
+        e_jk, found = _third_side(a, b, j, k, n_atoms, edge_shift, sorted_keys, key_perm)
     c6_jk = torch.where(found, c6_edge.index_select(0, e_jk), torch.ones_like(c6_cj))
     c9 = torch.sqrt((c6_cj * c6_ck * c6_jk).abs())
     # radii
@@ -468,7 +531,8 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
                               a1: Optional[Tensor] = None, a2: Optional[Tensor] = None,
                               c6_edge: Optional[Tensor] = None,
                               edge_shift: Optional[Tensor] = None,
-                              once: bool = True, analytic: bool = True) -> Tensor:
+                              once: bool = True, analytic: bool = True,
+                              triplet_cache: Optional[float] = None) -> Tensor:
     """:func:`three_body_energy` with memory bounded by one block (eager only).
 
     The edges are sorted by center once, the centers are cut into blocks
@@ -498,7 +562,10 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
     only. With ``analytic`` (default) and the per-edge C6 / per-atom radius
     inputs, the block's first derivative is evaluated in closed form
     (:func:`_triplet_block_grad`) in one pass instead of re-running the block
-    under autograd. Results equal the scripted loop to rounding; see
+    under autograd. On that path ``triplet_cache`` keeps each block's triples
+    from the forward to the backward pass (:class:`_TripletCache`; GB, ``None``
+    for a quarter of the free device memory, 0 to disable), so they are
+    enumerated once per step. Results equal the scripted loop to rounding; see
     ``notes/atm_chunking``.
     """
     from .recompute import recompute
@@ -553,13 +620,21 @@ def three_body_energy_chunked(z: Tensor, edge_index: Tensor, edge_vec: Tensor, r
                               c6[0] if use_alpha else None, c6[1] if use_alpha else None,
                               r0a[0] if use_atom else None, r0a[1] if use_atom else None,
                               r0a[2] if use_atom else None,
-                              c6[0] if use_edge else None, *lookup, once)
+                              c6[0] if use_edge else None, *lookup, once,
+                              cache if use_analytic else None)
 
     use_analytic = analytic and use_edge and use_atom
+    # the triple cache only pays when a backward pass will take the triples
+    cache = None
+    if use_analytic and torch.is_grad_enabled() and (edge_vec.requires_grad
+                                                     or c6_edge.requires_grad):
+        budget = triplet_cache_budget(r, triplet_cache)
+        if budget > 0:
+            cache = _TripletCache(budget)
 
     def grad_block(e0: int, e1: int, grad_out, z_, ei, ev, r_, tab, s9_, c6e, rho, a1_, a2_):
         return _triplet_block_grad(e0, e1, grad_out, z_, ei, ev, r_, tab, s9_, c6e, rho, a1_, a2_,
-                                   alp3, cutoff, width, n_atoms, *lookup, once)
+                                   alp3, cutoff, width, n_atoms, *lookup, once, cache)
 
     for e0, e1 in zip(edge_bounds[:-1], edge_bounds[1:]):
         if e1 > e0:

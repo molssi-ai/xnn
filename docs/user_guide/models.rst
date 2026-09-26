@@ -616,6 +616,22 @@ triple cutoff and from 7.6 s to 1.8 s at 10 Å (``notes/atm_chunking``). On an A
 cutoffs takes 5 s for energy, forces and stress and 13 s for a force-loss
 training step in 21 GB, where the dense regime runs out of 80 GB at 1500
 atoms. Both are eager-only; TorchScript exports pin the dense paths.
+
+For molecular dynamics two more options pay. ``triplet_cache`` (on by
+default: a quarter of the free device memory; a number in GB, or 0 to switch
+it off) keeps each three-body block's triples from the forward to the
+backward pass, so they are enumerated once per step instead of twice; it is
+exact and costs 14 bytes per triple (0.5 GB for 5000 water atoms at an 8 Å
+triple cutoff). :meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse` (``xnn
+mdi --eeq-reuse``) carries the large-regime EEQ solve from one step to the
+next (:class:`~xnn.common.models.eeq.EEQReuse`): a preconditioner formed once
+from an earlier step's matrix and warm-started conjugate gradients replace
+the assembly and factorization of every step, with results equal to the
+fresh solve to its tolerance (1e-9 relative residual in float64). On 5001
+water atoms (A100, float32, real 0.5 fs MD frames) MACE-LES + D4 at an 8 Å
+triple cutoff went from 0.83 s to 0.47 s per step with both and
+``cutoff_eeq: 16``; a longer ``cutoff_eeq`` than the default 12 Å halves the
+reciprocal set and the EEQ cost without changing the charges (2e-10 e).
 Derivations and complexity analyses: ``notes/eeq_large_systems`` and
 ``notes/atm_chunking``.
 

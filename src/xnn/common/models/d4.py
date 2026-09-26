@@ -105,7 +105,7 @@ from .dispersion import (
     three_body_energy,
     three_body_energy_chunked,
 )
-from .eeq import EEQSystem, eeq_charges_large, ewald_alpha, reciprocal_vectors
+from .eeq import EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, reciprocal_vectors
 from .ops import cell_volume, scatter_sum
 from .registry import register_model
 
@@ -315,6 +315,18 @@ class DFTD4(nn.Module):
         Triplets per three-body recompute block; ``None`` (default) sizes it
         from the free device memory (2^20 to 2^24). Larger blocks amortize
         the per-block set-up, which is paid in both passes.
+    triplet_cache : float or None, optional
+        Keep each three-body block's triples from the forward to the backward
+        pass so they are enumerated once per step: a budget in GB, ``None``
+        (default) for a quarter of the free device memory, 0 to disable.
+        Exact (the backward pass uses the same triples); 14 bytes per triple,
+        e.g. 0.5 GB for 5000 water atoms at an 8 A triple cutoff. Eager only.
+
+    Notes
+    -----
+    For molecular dynamics and geometry optimization,
+    :meth:`enable_eeq_reuse` carries the large-regime EEQ solve from one
+    step to the next (see :class:`~xnn.common.models.eeq.EEQReuse`).
 
     Attributes
     ----------
@@ -355,6 +367,7 @@ class DFTD4(nn.Module):
     checkpoint_triplets: bool
     recompute_pairs: bool
     triplet_chunk: Optional[int]
+    triplet_cache: Optional[float]
     auto_large_periodic: int
     auto_large_molecular: int
 
@@ -371,7 +384,8 @@ class DFTD4(nn.Module):
                  trainable: bool = False, regime: str = "auto",
                  cutoff_eeq: Optional[float] = None, eeq_solver: str = "auto",
                  checkpoint_triplets: bool = True, recompute_pairs: bool = True,
-                 triplet_chunk: Optional[int] = None):
+                 triplet_chunk: Optional[int] = None,
+                 triplet_cache: Optional[float] = None):
         super().__init__()
         regime = str(regime).lower()
         if regime not in REGIMES:
@@ -384,6 +398,7 @@ class DFTD4(nn.Module):
         self.checkpoint_triplets = bool(checkpoint_triplets)
         self.recompute_pairs = bool(recompute_pairs)
         self.triplet_chunk = triplet_chunk
+        self.triplet_cache = None if triplet_cache is None else float(triplet_cache)
         # model constants, held on the instance so the exported methods can
         # read them under TorchScript
         self.bohr, self.hartree = BOHR, HARTREE
@@ -639,6 +654,20 @@ class DFTD4(nn.Module):
         return "large" if n_atoms > limit else "dense"
 
     @torch.jit.unused
+    def enable_eeq_reuse(self, enabled: bool = True, **options) -> None:
+        """Carry the large-regime EEQ solve over between consecutive structures.
+
+        For molecular dynamics and geometry optimization, where one structure
+        follows the previous one closely; see
+        :class:`~xnn.common.models.eeq.EEQReuse`, which receives ``options``
+        (``tol``, ``refresh``, ``maxiter``). Results agree with the fresh
+        solve to the solver tolerance; the dense regime is not affected.
+        ``enable_eeq_reuse(False)`` switches it off again. Eager only.
+        """
+        # kept out of the module's attributes that TorchScript would inspect
+        self.__dict__["_eeq_reuse"] = EEQReuse(**options) if enabled else None
+
+    @torch.jit.unused
     def _eeq_charges_large(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
                            cn_eeq: Tensor, total_charge: Tensor, cell: Tensor,
                            periodic: bool) -> Tensor:
@@ -661,9 +690,10 @@ class DFTD4(nn.Module):
             grid, gvec, gfac = reciprocal_vectors(cell.detach(), alpha)
             diag = diag - 2.0 * alpha / math.sqrt(math.pi)
             system = EEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac, grid,
-                               solver=self.eeq_solver)
+                               solver=self.eeq_solver, reuse=self.__dict__.get("_eeq_reuse"))
             return eeq_charges_large(system, pos, edge_vec, rad, diag, x, total_charge, cell)
-        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver)
+        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver,
+                           reuse=self.__dict__.get("_eeq_reuse"))
         return eeq_charges_large(system, pos, None, rad, diag, x, total_charge)
 
     @torch.jit.unused
@@ -712,7 +742,8 @@ class DFTD4(nn.Module):
                                          self.switch_width_triple / self.bohr, n_atoms,
                                          r0_atom=r0_atom, a1=self.a1, a2=self.a2,
                                          c6_edge=c6_edge, edge_shift=shifts,
-                                         chunk=self.triplet_chunk)
+                                         chunk=self.triplet_chunk,
+                                         triplet_cache=self.triplet_cache)
 
     def reference_weights(self, z: Tensor, cn: Tensor, q: Tensor) -> Tensor:
         """Charge-scaled Gaussian weights of the reference systems (eqs 2-4, 8).
@@ -977,7 +1008,7 @@ _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "cutoff_eeq_cn",
             "switch_width_pair", "switch_width_triple", "trainable",
             "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets", "recompute_pairs",
-            "triplet_chunk")
+            "triplet_chunk", "triplet_cache")
 
 
 def d4_options_from_extra(extra: dict) -> dict:
