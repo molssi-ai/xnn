@@ -114,6 +114,33 @@ def reciprocal_weights(grid: Tensor, cell: Tensor, alpha: float) -> tuple[Tensor
     return gvec, g
 
 
+def lu_solve_refined(lu: Tensor, pivots: Tensor, full: Tensor, rhs: Tensor,
+                     rounds64: int = 1) -> Tensor:
+    """``full^-1 @ rhs`` from the LU factor of ``full``, with iterative refinement.
+
+    A float32 factor alone leaves up to ~1e-2 e in the raw EEQ solution of a
+    few thousand atoms and, through the adjoint, ~1e-3 eV/A in the forces.
+    Each refinement round (residual of the current solution, in float64 when
+    the factor is float32, solved with the same factor and added back)
+    recovers about four digits, so two rounds in float32 bring the solution
+    to the accuracy of the float32 matrix itself. In float64 ``rounds64``
+    rounds are applied (``0`` keeps the plain LAPACK solution bit for bit).
+    Differentiable and scriptable: the gradient flows through the factor,
+    the solves and the residuals, so the adjoint is refined as well.
+    """
+    sol = torch.linalg.lu_solve(lu, pivots, rhs)
+    if sol.dtype == torch.float32:
+        full64 = full.double()
+        rhs64 = rhs.double()
+        for _ in range(2):
+            resid = (rhs64 - full64 @ sol.double()).to(sol.dtype)
+            sol = sol + torch.linalg.lu_solve(lu, pivots, resid)
+    else:
+        for _ in range(rounds64):
+            sol = sol + torch.linalg.lu_solve(lu, pivots, rhs - full @ sol)
+    return sol
+
+
 class EEQSystem:
     """The EEQ linear system of one structure as a constant, matrix-free operator.
 
@@ -262,17 +289,7 @@ class EEQSystem:
                                     torch.cat([ones.t(), zero], dim=1)], dim=0)
             self._lu = torch.linalg.lu_factor(self._full)
         rhs = torch.cat([b_top, b_bot.reshape(1)]).unsqueeze(1)
-        sol = torch.linalg.lu_solve(*self._lu, rhs)
-        # iterative refinement: a float32 factor leaves ~1e-2 e in the raw
-        # solution and, through the adjoint, ~1e-3 eV/A in the forces; each
-        # round with the residual in float64 recovers about four digits
-        rounds = 2 if sol.dtype == torch.float32 else 1
-        full64 = self._full.double() if rounds == 2 else self._full
-        for _ in range(rounds):
-            resid = (rhs.double() - full64 @ sol.double()).to(sol.dtype) if rounds == 2 \
-                else rhs - full64 @ sol
-            sol = sol + torch.linalg.lu_solve(*self._lu, resid)
-        sol = sol.squeeze(1)
+        sol = lu_solve_refined(self._lu[0], self._lu[1], self._full, rhs).squeeze(1)
         return sol[:n], sol[n]
 
     def _solve_cg(self, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:

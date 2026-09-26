@@ -105,7 +105,8 @@ from .dispersion import (
     three_body_energy,
     three_body_energy_chunked,
 )
-from .eeq import EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, reciprocal_vectors
+from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_refined,
+                  reciprocal_vectors)
 from .ops import cell_volume, scatter_sum
 from .registry import register_model
 
@@ -657,8 +658,11 @@ class DFTD4(nn.Module):
         zero = torch.zeros((1, 1), dtype=pos.dtype, device=pos.device)
         full = torch.cat([torch.cat([amat, ones], dim=1),
                           torch.cat([ones.t(), zero], dim=1)], dim=0)
-        rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)])
-        sol = torch.linalg.solve(full, rhs)
+        rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)]).unsqueeze(1)
+        # LU with iterative refinement in float32 (the plain LAPACK solution
+        # in float64, which keeps this path bit-exact against dftd4)
+        lu, pivots = torch.linalg.lu_factor(full)
+        sol = lu_solve_refined(lu, pivots, full, rhs, rounds64=0).squeeze(1)
         return sol[:n]
 
     def select_regime(self, n_atoms: int, periodic: bool) -> str:

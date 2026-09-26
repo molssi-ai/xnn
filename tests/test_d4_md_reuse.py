@@ -289,6 +289,30 @@ def test_float32_lu_forces_are_refined():
         assert torch.allclose(out[solver]["forces"].double(), ref["forces"], atol=2e-5, rtol=0)
 
 
+def test_float32_dense_charges_are_refined():
+    """The dense regime's LU solve is refined the same way: without it the
+    float32 charges of 375 atoms are off by 1-2e-5 e (forces 1-2e-6 eV/A)
+    against float64, with it by ~1e-6 e (forces ~1e-7 eV/A)."""
+    pos, z, cell = _water_box(5)
+
+    def run(dtype, periodic):
+        prev = torch.get_default_dtype()
+        torch.set_default_dtype(dtype)
+        try:
+            s = {"pos": torch.tensor(pos, dtype=dtype), "atomic_numbers": torch.tensor(z)}
+            if periodic:
+                s.update(cell=torch.tensor(cell, dtype=dtype), pbc=torch.tensor([True] * 3))
+            m = D4Dispersion(regime="dense", **PER)
+            return ForceStressOutput(m, compute_stress=periodic)(structure_to_graph(s, m.cutoff))
+        finally:
+            torch.set_default_dtype(prev)
+
+    for periodic in (False, True):
+        ref, out = run(torch.float64, periodic), run(torch.float32, periodic)
+        assert torch.allclose(out["eeq_charges"].double(), ref["eeq_charges"], atol=3e-6, rtol=0)
+        assert torch.allclose(out["forces"].double(), ref["forces"], atol=5e-7, rtol=0)
+
+
 def test_ase_calculator_eeq_reuse_opt_in():
     ase = pytest.importorskip("ase")
     from xnn.common.deploy import XNNCalculator

@@ -607,8 +607,11 @@ cutoffs if that is larger (a longer range shrinks the reciprocal set as
 with charges unchanged to 2e-10 e; the neighbor list is then at most 16 Å,
 about 2.4 times the edges of a 12 Å list). ``regime: dense`` keeps the other
 cutoffs' radius, and an explicit value always wins; crystals need at least
-20 bohr. In float32 the LU solve refines its solution twice with float64
-residuals, so its forces are as accurate as the iterative path's. The three-body term runs in
+20 bohr. In float32 the EEQ solve of both regimes (the dense one and the
+large one's LU) refines its solution twice with float64 residuals, so its
+charges and forces are as accurate as the float32 matrix allows (dense
+regime, 1536 atoms: charges 4e-5 to 2e-6 e, forces 9e-6 to 1.5e-7 eV/Å
+against float64). The three-body term runs in
 recompute blocks of centers by default (``checkpoint_triplets: true``;
 ``triplet_chunk`` sets the block size, by default from the free device
 memory) and the two-body term in recompute blocks of edges
