@@ -41,6 +41,7 @@ training data). The engine converts at the boundary in both directions.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from typing import Any
@@ -75,8 +76,10 @@ _COMMANDS = (
 
 def _float_dtype(source) -> torch.dtype:
     """Floating-point dtype of a module's parameters or of a state dict."""
+    # a module's parameters first, then its buffers: a standalone dispersion
+    # model (``name: d4``) has buffers only
     tensors = (source.values() if isinstance(source, dict)
-               else source.parameters())
+               else itertools.chain(source.parameters(), source.buffers()))
     for t in tensors:
         if torch.is_tensor(t) and t.is_floating_point():
             return t.dtype
