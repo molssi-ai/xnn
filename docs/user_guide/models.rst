@@ -592,6 +592,20 @@ sees the D4-corrected model's features), and every deploy channel carries
 the term: :class:`~xnn.common.models.outputs.ForceStressOutput`, the ASE
 calculator, the TorchScript export (both ABIs) and the LAMMPS wrapper.
 
+**Long-range tail.** ``tail_correction: true`` adds, for periodic structures,
+the two-body dispersion the pair cutoff and its switching window remove,
+assuming a uniform distribution of atoms beyond the window (the analog of
+LAMMPS ``pair_modify tail yes``, which does not reach energies returned
+through ``fix mdi/qm``). It uses the structure's own charge- and CN-dependent
+C6 and the BJ damping, and is differentiable, so its forces and stress are
+consistent with the energy; molecules are unaffected, and it is off by
+default. On 192 periodic water atoms (pair term only, 2 Angstrom switch) a
+12 Angstrom cutoff without it is 0.48 meV/atom and 82 atm short of the
+converged pair term; with it, 12, 20 and 30 Angstrom agree to 0.003 meV/atom
+and 3 atm. The outputs gain ``"energy_tail"``. The three-body term has no
+tail correction: beyond a 10 Angstrom triple cutoff it is worth about 10 atm
+in water, and a uniform-fluid ATM tail is not a reliable estimate.
+
 **Scale regimes.** The EEQ charges are a charge-constrained linear system of
 size ``N``. ``regime: dense`` (bit-exact ``dftd4`` parity) builds its
 ``(N, N)`` matrix with every intermediate retained for the backward pass,
