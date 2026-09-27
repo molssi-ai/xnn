@@ -131,6 +131,52 @@ def available_models() -> list[str]:
     return sorted(_MODELS)
 
 
+def recorded_dispersion(cfg) -> dict | None:
+    """The ``subtracted_dispersion`` record of a (possibly older) ``Config``.
+
+    Checkpoints written before the field existed unpickle without it, so
+    the attribute is read with a default.
+    """
+    return getattr(cfg, "subtracted_dispersion", None)
+
+
+def resolve_dispersion(explicit, recorded):
+    """The dispersion a deployment adds to a checkpoint's model.
+
+    ``recorded`` is the checkpoint's ``subtracted_dispersion`` record (what
+    the labels had removed, with the settings to add it back); ``explicit``
+    is what the caller asked for. The rules: ``explicit=False`` serves the
+    model as is; with no record the explicit request is used; with a record
+    and no request the record is used; with both, the explicit keys override
+    the recorded ones (so ``{"cutoff_triple": 8.0}`` keeps the recorded
+    functional parameters), and a different term name is an error.
+
+    Returns
+    -------
+    dict, str, True or None
+        The spec for :func:`add_dispersion`, or ``None`` to add nothing.
+
+    Raises
+    ------
+    ValueError
+        When the explicit spec names another term than the record.
+    """
+    if explicit is False:
+        return None
+    if recorded is None:
+        return explicit
+    record = {"name": recorded} if isinstance(recorded, str) else dict(recorded)
+    record.setdefault("name", "d4")
+    if explicit is None or explicit is True:
+        return record
+    override = {"name": explicit} if isinstance(explicit, str) else dict(explicit)
+    if str(override.get("name", record["name"])).lower() != str(record["name"]).lower():
+        raise ValueError(
+            f"the checkpoint records {record['name']} as subtracted from its labels; "
+            f"a {override['name']} correction cannot be added instead")
+    return {**record, **override}
+
+
 def add_dispersion(model, spec):
     """Wrap ``model`` in a D3 or D4 dispersion correction.
 

@@ -41,6 +41,7 @@ training data). The engine converts at the boundary in both directions.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from typing import Any
@@ -75,8 +76,10 @@ _COMMANDS = (
 
 def _float_dtype(source) -> torch.dtype:
     """Floating-point dtype of a module's parameters or of a state dict."""
+    # a module's parameters first, then its buffers: a standalone dispersion
+    # model (``name: d4``) has buffers only
     tensors = (source.values() if isinstance(source, dict)
-               else source.parameters())
+               else itertools.chain(source.parameters(), source.buffers()))
     for t in tensors:
         if torch.is_tensor(t) and t.is_floating_point():
             return t.dtype
@@ -183,7 +186,8 @@ class MDIEngine:
     def from_checkpoint(cls, path: str, device: str = "cpu",
                         dtype: torch.dtype | None = None,
                         dispersion: Any = None,
-                        total_charge: float = 0.0) -> "MDIEngine":
+                        total_charge: float = 0.0,
+                        eeq_reuse: bool = False) -> "MDIEngine":
         """Build an engine from a trainer checkpoint (``best.pt``).
 
         The checkpoint is the dictionary written by
@@ -211,16 +215,27 @@ class MDIEngine:
             Floating-point dtype to serve in (``torch.float64`` for NVE energy
             conservation with a float32-trained model, ``torch.float32`` for
             speed). Defaults to the dtype of the checkpoint's weights.
-        dispersion : dict, str or None, optional
+        dispersion : dict, str, bool or None, optional
             Add a D3 / D4 dispersion correction to a checkpoint that was
             trained without one: ``"d4"`` / ``"d3"`` for the defaults or a
             mapping as in the config's ``extra["dispersion"]`` (see
-            :func:`~xnn.common.models.add_dispersion`). Refused when the
+            :func:`~xnn.common.models.add_dispersion`). A checkpoint whose
+            config records ``subtracted_dispersion`` (what the labels had
+            removed) gets that term added by default, ``None``; an explicit
+            mapping then overrides the recorded keys it names, and
+            ``False`` serves the checkpoint as is. Refused when the
             checkpoint already carries dispersion, which would count it
-            twice. Defaults to ``None`` (serve the checkpoint as is).
+            twice.
         total_charge : float, optional
             Net charge of the system in units of e, by default 0. A driver can
             change it at run time with ``>TOTCHARGE``.
+        eeq_reuse : bool, optional
+            Carry the large-regime D4 EEQ solve over from one step to the next
+            (:meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse`), for
+            molecular dynamics and optimizations where each structure follows
+            the previous one closely. Results agree with the fresh solve to
+            the solver tolerance (1e-9 relative residual in float64). By
+            default ``False``.
 
         Returns
         -------
@@ -236,8 +251,11 @@ class MDIEngine:
             includes a dispersion correction.
         """
         from ..models import add_dispersion, build_model, ForceStressOutput
+        from ..models.registry import recorded_dispersion, resolve_dispersion
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         cfg = ckpt["cfg"]
+        recorded = recorded_dispersion(cfg)
+        spec = resolve_dispersion(dispersion, recorded)
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.float64)
         try:
@@ -245,20 +263,38 @@ class MDIEngine:
             # ForceStressOutput has no parameters of its own; loading through
             # it matches the trainer's state-dict layout
             ForceStressOutput(base).load_state_dict(ckpt["model"])
-            if dispersion is not None:
+            if spec is not None:
                 if _has_dispersion(base):
                     raise ValueError(
                         f"{path} already includes a dispersion correction "
                         f"({cfg.model.name} with extra['dispersion']); adding "
                         f"another one would count dispersion twice")
-                base = add_dispersion(base, dispersion)
-                logger.info("added %s dispersion on top of the checkpoint",
-                            type(base).__name__)
+                base = add_dispersion(base, spec)
+                if recorded is None:
+                    logger.info("added %s dispersion on top of the checkpoint: %s",
+                                type(base).__name__, spec)
+                elif dispersion is None or dispersion is True:
+                    logger.info("adding back the dispersion recorded as subtracted "
+                                "from the training labels: %s", spec)
+                else:
+                    logger.info("adding back the dispersion recorded as subtracted "
+                                "from the training labels, with overrides %s: %s",
+                                dispersion, spec)
+            elif recorded is not None:
+                logger.warning("serving %s WITHOUT the dispersion recorded as subtracted "
+                               "from its training labels (%s)", path, recorded)
         finally:
             torch.set_default_dtype(prev_dtype)
         if dtype is None:
             dtype = _float_dtype(ckpt["model"])
         model = ForceStressOutput(base, compute_stress=True).to(dtype)
+        if eeq_reuse:
+            from ..models.d4 import enable_eeq_reuse
+            n_terms = enable_eeq_reuse(model)
+            if n_terms:
+                logger.info("EEQ reuse between steps enabled for %d D4 term(s)", n_terms)
+            else:
+                logger.info("--eeq-reuse has no effect: the model has no D4 term")
         cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff, str(dtype).replace("torch.", ""),
@@ -496,6 +532,10 @@ def main(argv=None) -> None:
         xnn mdi --ckpt best.pt --dispersion "{name: d4, cutoff_pair: 12.0}" \\
             --total-charge -1 -mdi "..."
 
+    A checkpoint whose config records ``subtracted_dispersion`` gets that
+    term added without any option (``--dispersion`` then overrides the keys
+    it names; ``--no-dispersion`` serves the checkpoint as is).
+
     For the MPI communication method, launch under ``mpirun`` alongside the
     driver (``mpi4py`` required)::
 
@@ -526,10 +566,19 @@ def main(argv=None) -> None:
                         "it: 'd4', 'd3', or a YAML mapping as in the config's "
                         "extra.dispersion, e.g. \"{name: d4, cutoff_pair: 12.0, "
                         "switch_width_pair: 2.0}\" (refused if the checkpoint "
-                        "already carries dispersion)")
+                        "already carries dispersion); a checkpoint that records "
+                        "subtracted_dispersion gets it added by default, and the "
+                        "mapping given here overrides the recorded keys it names")
+    p.add_argument("--no-dispersion", action="store_true",
+                   help="serve the checkpoint as is, ignoring a recorded "
+                        "subtracted_dispersion")
     p.add_argument("--total-charge", type=float, default=0.0,
                    help="net charge of the system in e (default 0); the driver "
                         "can change it with >TOTCHARGE")
+    p.add_argument("--eeq-reuse", action="store_true",
+                   help="carry the large-regime D4 EEQ solve over between steps "
+                        "(MD, optimization); results agree with the fresh solve "
+                        "to the solver tolerance")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -541,12 +590,17 @@ def main(argv=None) -> None:
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
     dispersion = None
+    if args.dispersion and args.no_dispersion:
+        p.error("--dispersion and --no-dispersion exclude each other")
     if args.dispersion:
         import yaml
         dispersion = yaml.safe_load(args.dispersion)
+    elif args.no_dispersion:
+        dispersion = False
     engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
                                        dtype=dtype, dispersion=dispersion,
-                                       total_charge=args.total_charge)
+                                       total_charge=args.total_charge,
+                                       eeq_reuse=args.eeq_reuse)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

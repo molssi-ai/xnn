@@ -57,6 +57,21 @@ def _build(T=2, max_L=1, max_ell=3, correlation=3, n_features=16, **extra):
     return build_model(cfg.model)
 
 
+def test_state_dict_without_scale_shift_loads_strictly():
+    """Checkpoints from before ``scale_shift`` existed load as the identity
+    (the values the module was built with), through a strict load."""
+    torch.manual_seed(0)
+    m = _build(T=1)
+    sd = {k: v for k, v in m.state_dict().items() if "scale_shift" not in k}
+    torch.manual_seed(1)
+    m2 = _build(T=1)
+    m2.load_state_dict(sd)
+    assert float(m2.scale_shift.scale) == 1.0 and float(m2.scale_shift.shift) == 0.0
+    assert all(torch.equal(a, b) for a, b in zip(m.state_dict().values(), m2.state_dict().values()))
+    with pytest.raises(RuntimeError, match="Missing key"):
+        m2.load_state_dict({k: v for k, v in sd.items() if "atom_ref" not in k})
+
+
 def test_registered_single_mace():
     models = available_models()
     assert "mace" in models
