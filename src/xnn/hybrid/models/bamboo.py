@@ -405,7 +405,7 @@ class BAMBOO(InteratomicPotential):
             D3CSODispersion(disp_cutoff=disp_cutoff, references=str(d3_references))
             if use_dispersion else None)
 
-    # -- charge-equilibrium electrostatics ---------------------------------
+    # charge-equilibrium electrostatics
     def coulomb_energy(self, charges: Tensor, edge_vec: Tensor,
                        row: Tensor, col: Tensor) -> Tensor:
         """Per-pair damped Coulomb energy (upstream ``get_coulomb``, no Ewald).

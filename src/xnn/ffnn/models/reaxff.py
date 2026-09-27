@@ -454,9 +454,7 @@ class ReaxFF(InteratomicPotential):
             self._assemble_networks(lib.m or {})
         self.node_feature_dim = 3
 
-    # ------------------------------------------------------------------
     # parameter assembly
-    # ------------------------------------------------------------------
     def _assemble_parameters(self, p: dict, bonds: list, lib: FFieldLibrary,
                              trainable: Union[Sequence[str], str]) -> None:
         """Build the dense parameter tensors from the flat library dict.
@@ -571,7 +569,7 @@ class ReaxFF(InteratomicPotential):
                             ten[i, self._h_index, k] = float(p[key]) * unit(name)
             make_param(f"hb_{name}", ten)
 
-        # --- cutoff tables (fixed buffers) ---
+        # cutoff tables (fixed buffers)
         rcut = cutoff_table(lib.rcut, "rcut", spec)
         rcuta = cutoff_table(lib.rcuta, "rcuta", spec)
         rcut_m = torch.zeros(S, S, dtype=dtype)
@@ -673,9 +671,7 @@ class ReaxFF(InteratomicPotential):
             for prefix in ("fsi", "fpi", "fpp"):
                 stack_pairs(prefix, self.bo_layer[1])
 
-    # ------------------------------------------------------------------
     # parameter access helpers
-    # ------------------------------------------------------------------
     def _pair(self, name: str) -> Tensor:
         """Pair parameter matrix ``(S, S)``, symmetrized to tie gradients."""
         mat = self.params[name]
@@ -737,9 +733,7 @@ class ReaxFF(InteratomicPotential):
             bh = sym(w[prefix + "b"], 1)[:, idx_a, idx_b]
         return _mlp(x, wi, bi, wh, bh, wo, bo)
 
-    # ------------------------------------------------------------------
     # forward
-    # ------------------------------------------------------------------
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Evaluate the ReaxFF energy on a (batched) atomic graph.
 
@@ -771,7 +765,7 @@ class ReaxFF(InteratomicPotential):
         r = torch.sqrt((vec * vec).sum(dim=1) + SAFETY)
         si, sj = s[dst], s[src]
 
-        # --- EEM charges and the shielded Coulomb kernel -------------------
+        # EEM charges and the shielded Coulomb kernel
         gamma_e = self._comb("gamma")[si, sj]
         gm3 = (1.0 / gamma_e) ** 3
         rth = (r ** 3 + gm3) ** (1.0 / 3.0)        # shielded distance kernel
@@ -779,7 +773,7 @@ class ReaxFF(InteratomicPotential):
         q = self._eem_charges(data, s, tap / rth)
         inter["q"] = q
 
-        # --- bonded subset ---------------------------------------------------
+        # bonded subset
         bmask = (r < self.rcbo[si, sj]) & (src != dst)
         b_src, b_dst = src[bmask], dst[bmask]
         b_r = r[bmask]
@@ -791,7 +785,7 @@ class ReaxFF(InteratomicPotential):
             """Gather pair parameter ``name`` per bonded edge."""
             return self._pair(name)[bsi, bsj]
 
-        # --- uncorrected bond orders (sigma / pi / double-pi), eq 2 ----------
+        # uncorrected bond orders (sigma / pi / double-pi), eq 2
         eterm1 = (1.0 + self.botol) * torch.exp(
             pb("bo1") * (b_r / pb("rosi")) ** pb("bo2"))
         eterm2 = torch.exp(pb("bo3") * (b_r / pb("ropi")) ** pb("bo4"))
@@ -812,7 +806,7 @@ class ReaxFF(InteratomicPotential):
                      eterm3=eterm3, bop_si=bop_si, bop_pi=bop_pi,
                      bop_pp=bop_pp, bop=bop, deltap=deltap)
 
-        # --- corrected bond orders -------------------------------------------
+        # corrected bond orders
         if self.nn:
             bo0, bosi, bopi, bopp = self._message_passing(
                 s, b_src, b_dst, b_shift, bop, bop_si, bop_pi, bop_pp, N)
@@ -829,12 +823,12 @@ class ReaxFF(InteratomicPotential):
         inter.update(bo0=bo0, bo=bo, bosi=bosi, bopi=bopi, bopp=bopp,
                      delta=delta, dpi=dpi)
 
-        # --- bond energy -------------------------------------------------------
+        # bond energy
         esi = self._bond_energy(bsi, bsj, bo0, bosi, bopi, bopp, pb)
         e_bond_node = scatter_sum(-0.5 * esi, b_dst, N)
         inter["esi"] = esi
 
-        # --- lone pair / over- / under-coordination ----------------------------
+        # lone pair / over- / under-coordination
         vale, val = P["vale"][s], P["val"][s]
         delta_e = 0.5 * (delta - vale)
         de = torch.relu(-torch.ceil(delta_e))
@@ -860,22 +854,22 @@ class ReaxFF(InteratomicPotential):
         inter.update(nlp=nlp, delta_lp=delta_lp, dpil=dpil,
                      delta_lpcorr=delta_lpcorr)
 
-        # --- valence angles (+ penalty + three-body conjugation) ---------------
+        # valence angles (+ penalty + three-body conjugation)
         amask = b_r < self.rcuta_pair[bsi, bsj]
         e_ang_node, e_pen_node, e_tcon_node = self._angle_terms(
             s, N, b_src, b_dst, b_vec, b_r, amask, bo, fbo, delta, dv, dpi,
             nlp, inter)
 
-        # --- torsions (+ four-body conjugation) ---------------------------------
+        # torsions (+ four-body conjugation)
         e_tor_node, e_fcon_node = self._torsion_terms(
             s, N, b_src, b_dst, b_vec, b_r, b_shift, amask, bo, bopi, fbo,
             delta, inter)
 
-        # --- hydrogen bonds ------------------------------------------------------
+        # hydrogen bonds
         e_hb_node = self._hbond_terms(s, N, src, dst, vec, r, b_src, b_dst,
                                       b_vec, b_r, amask, bo0, fhb, inter)
 
-        # --- van der Waals + Coulomb ----------------------------------------------
+        # van der Waals + Coulomb
         f13 = (r ** P["vdw1"]
                + (1.0 / self._comb("gammaw")[si, sj]) ** P["vdw1"]) \
             ** (1.0 / P["vdw1"])
@@ -887,7 +881,7 @@ class ReaxFF(InteratomicPotential):
         e_coul_node = scatter_sum(0.5 * ecoul_e, dst, N)
         inter.update(f13=f13, evdw=evdw_e, ecoul=ecoul_e)
 
-        # --- charge self energy + atomic reference ----------------------------------
+        # charge self energy + atomic reference
         e_self_node = q * (P["chi"][s] + q * P["mu"][s])
         e_atomic_node = -P["atomic"][s]
 
@@ -921,9 +915,7 @@ class ReaxFF(InteratomicPotential):
             self.intermediates = inter
         return out
 
-    # ------------------------------------------------------------------
     # blocks
-    # ------------------------------------------------------------------
     def _correction_factors(self, s: Tensor, b_src: Tensor, b_dst: Tensor,
                             bop: Tensor, deltap: Tensor
                             ) -> tuple[Tensor, Tensor, Tensor]:
@@ -1655,9 +1647,7 @@ class ReaxFF(InteratomicPotential):
             bo_layer=self.bo_layer, mf_layer=self.mf_layer,
             be_layer=self.be_layer, vdw_layer=None, rcut=rcut, rcuta=rcuta)
 
-    # ------------------------------------------------------------------
     # construction
-    # ------------------------------------------------------------------
     @classmethod
     def from_ffield(cls, path, **kwargs) -> "ReaxFF":
         """Construct a :class:`ReaxFF` from a parameter library on disk.

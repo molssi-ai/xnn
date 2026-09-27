@@ -168,10 +168,7 @@ def test_live_download(tmp_path):
     assert abs(s["energy"]) < 1e5  # eV, converted from kcal/mol
 
 
-# --------------------------------------------------------------------------- #
 # lode_dimers (Materials Cloud extxyz)                                         #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_lode(monkeypatch):
     """Patch the lode_dimers downloader to emit a small synthetic extxyz.
@@ -283,10 +280,7 @@ def test_lode_live_download(tmp_path):
     assert s["forces"].shape[0] == len(s["atomic_numbers"])
 
 
-# --------------------------------------------------------------------------- #
 # ani1 (pyanitools HDF5)                                                       #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_ani1(tmp_path):
     """Write a synthetic pyanitools-shaped archive layout under tmp_path.
@@ -380,10 +374,7 @@ def test_ani1_invalid_args(fake_ani1, kwargs, match):
         load_dataset("ani1", **base)
 
 
-# --------------------------------------------------------------------------- #
 # ani1x (single pyanitools HDF5 with forces + NaN masking)                     #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_ani1x(monkeypatch):
     """Patch the ANI-1x downloader to emit a small synthetic release HDF5.
@@ -490,10 +481,7 @@ def test_ani1x_invalid_args(fake_ani1x, tmp_path, kwargs, match):
         load_dataset("ani1x", **base)
 
 
-# --------------------------------------------------------------------------- #
 # ani1ccx (coupled-cluster subset of the ANI-1x release file)                  #
-# --------------------------------------------------------------------------- #
-
 def test_ani1ccx_registered():
     """ani1ccx is discoverable through the registry."""
     assert "ani1ccx" in list_datasets()
@@ -565,10 +553,7 @@ def test_ani1ccx_rejects_forces_and_level():
         load_dataset("ani1ccx", level="wb97x_dz", quiet=True)
 
 
-# --------------------------------------------------------------------------- #
 # ani2x (Zenodo tarball, atom-count-grouped HDF5 with forces, 7 elements)      #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_ani2x(monkeypatch):
     """Patch the ANI-2x downloader to emit a small synthetic release archive.
@@ -711,10 +696,7 @@ def test_ani2x_cap_samples_across_group(monkeypatch, tmp_path):
     assert 17 in elems                          # the tail-only Cl survived
 
 
-# --------------------------------------------------------------------------- #
 # argon_md (bundled extxyz)                                                    #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_argon(tmp_path):
     """Write a synthetic argon_md-shaped extxyz layout under tmp_path.
@@ -789,10 +771,7 @@ def test_argon_bad_split(fake_argon):
         load_dataset("argon_md", split="valid", cache_dir=fake_argon, quiet=True)
 
 
-# --------------------------------------------------------------------------- #
 # lode_dimers bundled bio_scan subset                                          #
-# --------------------------------------------------------------------------- #
-
 @pytest.fixture
 def fake_bio_scan(tmp_path):
     """Write a synthetic bundled bio_scan file under tmp_path/lode_dimers/."""

@@ -37,9 +37,7 @@ def _f64():
     torch.set_default_dtype(old)
 
 
-# --------------------------------------------------------------------------
 # geometries (Angstrom)
-# --------------------------------------------------------------------------
 
 # ASE g2 geometries (the reference values below were generated on these)
 WATER = (np.array([[0.0, 0.0, 0.119262], [0.0, 0.763239, -0.477047],
@@ -52,7 +50,9 @@ AMMONIUM = (np.array([[0.0, 0.0, 0.0], [0.59, 0.59, 0.59], [-0.59, -0.59, 0.59],
                       [-0.59, 0.59, -0.59], [0.59, -0.59, -0.59]]), [7, 1, 1, 1, 1])
 # small cutoffs keep the tests fast; the defaults are exercised in the
 # upstream-parity tests
-FAST = dict(cutoff_pair=9.0, cutoff_triple=7.0, cutoff_cn=8.0, cutoff_eeq_cn=8.0)
+# cutoff_eeq pinned to the pair cutoff: the large regime's default (16 A) would
+# otherwise widen the wrapper's neighbor list beyond these test cutoffs
+FAST = dict(cutoff_pair=9.0, cutoff_triple=7.0, cutoff_cn=8.0, cutoff_eeq_cn=8.0, cutoff_eeq=9.0)
 
 
 def _graph(pos, z, cutoff, cell=None, charge=None, R=None, shift=0.0):
@@ -84,10 +84,7 @@ def _energy(model, pos, z, **kw):
     return float(model(_graph(pos, z, model.cutoff, **kw))["energy"])
 
 
-# --------------------------------------------------------------------------
 # DFTD4 physics
-# --------------------------------------------------------------------------
-
 def test_defaults_are_pbe0_d4():
     d4 = DFTD4()
     for k, v in PBE0_D4.items():
@@ -252,7 +249,9 @@ def test_scripted_core_matches_eager():
     args = (g.atomic_numbers, g.pos, g.edge_index, g.edge_vectors(), g.batch, 1,
             g.cell, g.pbc, torch.zeros(1))
     a, b = d4.evaluate(*args), scripted.evaluate(*args)
-    assert torch.equal(a["node_energy"], b["node_energy"])
+    # the eager three-body term visits each triangle once and sums its thirds
+    # into the three corners, the scripted loop once per corner: rounding only
+    assert torch.allclose(a["node_energy"], b["node_energy"], atol=1e-13, rtol=0)
     assert torch.equal(a["charges"], b["charges"])
 
 
@@ -270,9 +269,7 @@ def test_rejects_unsupported_elements():
         D4Dispersion()(_graph(np.array([[0.0, 0, 0], [2.0, 0, 0]]), [104, 1], 5.0))
 
 
-# --------------------------------------------------------------------------
 # wrapper around every model, config hook, LES nesting
-# --------------------------------------------------------------------------
 
 MODEL_CONFIGS = {
     "cace": {"extra": {"species": [1, 8], "n_atom_basis": 2, "max_l": 2, "max_nu": 2}},
@@ -384,10 +381,7 @@ def test_total_charge_flows_through_the_data_layer():
                    ).total_charge is None
 
 
-# --------------------------------------------------------------------------
 # deploy channels
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("periodic", [False, True])
 @pytest.mark.parametrize("kind", ["standalone", "schnet"])
 def test_torchscript_export_matches_eager(kind, periodic):
@@ -479,10 +473,7 @@ def test_trainer_widens_dataset_cutoff_to_the_wrapper(tmp_path):
     assert trainer.model.model.cutoff == 9.0
 
 
-# --------------------------------------------------------------------------
 # parity with the upstream dftd4 package
-# --------------------------------------------------------------------------
-
 def _upstream(pos, z, charge=0.0, cell=None, params=None):
     """Reference D4 results from the ``dftd4`` Python package, in atomic units.
 

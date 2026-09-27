@@ -114,7 +114,11 @@ III), and the D4 vs D3(BJ) dispersion contributions to the S22 interaction
 energies. ``d4_benchmark.ipynb`` benchmarks the xnn implementation against
 the reference ``dftd4`` code (accuracy on S22 and crystals; timing on CPU and
 GPU versus system size, with the upstream and MD-friendly cutoffs) and shows
-D4 correcting a short-range MLIP through every deploy channel.
+D4 correcting a short-range MLIP through every deploy channel. ``d4_large_scale_ethanol.ipynb`` pushes the large-system regime to the
+memory limit of one GPU: a MACE trained on rMD17 ethanol, corrected with D4,
+evaluated on liquid-ethanol boxes packed from rMD17 conformers up to about
+20 000 atoms, where the MACE itself fills an 80 GB GPU (time and memory scaling, dense vs. large regime, the cost of
+a training step, the EEQ solvers, and NVE dynamics through the ASE calculator).
 
 .. toctree::
    :maxdepth: 1
@@ -122,6 +126,7 @@ D4 correcting a short-range MLIP through every deploy channel.
 
    nb/common/d4/d4_paper_examples
    nb/common/d4/d4_benchmark
+   nb/common/d4/d4_large_scale_ethanol
 
 Dispersion: DFT-D3 (common)
 ===========================

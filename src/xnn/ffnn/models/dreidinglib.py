@@ -194,9 +194,7 @@ class DreidingLibrary:
     fragments: dict = field(default_factory=dict)
     name: str = "dreiding"
 
-    # ------------------------------------------------------------------
     # rule helpers
-    # ------------------------------------------------------------------
     def hybrid(self, type_name: str) -> str:
         """Hybridization class of a type (see :func:`hybridization`)."""
         return hybridization(type_name)
@@ -305,9 +303,7 @@ def torsion_rule(lib: DreidingLibrary, t_i: str, t_j: str, t_k: str,
     return "j"                                                 # propene-like
 
 
-# ----------------------------------------------------------------------
 # reading
-# ----------------------------------------------------------------------
 def _from_json(path: Path) -> DreidingLibrary:
     """Load a native JSON library written by :meth:`DreidingLibrary.save`."""
     data = json.loads(path.read_text())

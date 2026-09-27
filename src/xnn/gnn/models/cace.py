@@ -67,10 +67,7 @@ from .base import GNNPotential
 MESSAGE_TYPES = ("M", "Ar", "Bchi")
 
 
-# ---------------------------------------------------------------------------
 # symmetrizer combination rules (upstream cace.modules.angular_tools)
-# ---------------------------------------------------------------------------
-
 def _combos_nu2(l_max: int) -> dict:
     """nu=2 invariants ``B2_l = sum C(l) A_l^2`` (paper eq 7): one group per
     total ``l`` in ``1..l_max``, each pairing every angular entry with itself."""

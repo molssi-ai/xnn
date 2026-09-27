@@ -24,9 +24,7 @@ from xnn.common.config import from_dict as cfg_from_dict
 from xnn.common.models import build_model, ForceStressOutput
 
 
-# --------------------------------------------------------------------------- #
 # helpers
-# --------------------------------------------------------------------------- #
 def _write_dataset(path, n=12):
     """Write a tiny extxyz file with per-frame energy and forces."""
     from ase import Atoms
@@ -79,9 +77,7 @@ def _bench_dict(data_path, models, **over):
     return d
 
 
-# --------------------------------------------------------------------------- #
 # config
-# --------------------------------------------------------------------------- #
 def test_models_accept_strings_and_mappings():
     cfg = from_dict({"models": ["schnet", {"name": "mace", "cutoff": 5.0}]})
     assert [m.label for m in cfg.models] == ["schnet", "mace"]
@@ -195,9 +191,7 @@ def test_metrics_reject_unknown_target_and_malformed_entries():
         from_dict({"metrics": [["energy", "mae", "rmse"]]})   # 3-item entry
 
 
-# --------------------------------------------------------------------------- #
 # metrics
-# --------------------------------------------------------------------------- #
 def test_builtin_metrics_values():
     p = torch.tensor([1.0, 2.0, 3.0])
     t = torch.tensor([1.0, 4.0, 3.0])
@@ -236,9 +230,7 @@ def test_custom_metric_registration_via_decorator():
     assert out["forces_halfmae"] == pytest.approx(2.0)
 
 
-# --------------------------------------------------------------------------- #
 # atomization / interaction energy
-# --------------------------------------------------------------------------- #
 def test_e0_lookup_from_dict():
     e0 = build_e0_lookup({1: -13.6, 8: -2042.0})
     assert e0[1] == pytest.approx(-13.6)
@@ -330,9 +322,7 @@ def test_atomization_average_end_to_end(tmp_path):
     assert any("energy_mae" in r for r in rows)
 
 
-# --------------------------------------------------------------------------- #
 # report
-# --------------------------------------------------------------------------- #
 def test_columns_lead_with_model():
     rows = [{"model": "a", "energy_mae": 1.0, "n_params": 5}]
     assert columns(rows)[0] == "model"
@@ -404,9 +394,7 @@ def test_column_units_energy_total_when_not_per_atom():
     assert b._column_units()["energy_mae"] == "eV"
 
 
-# --------------------------------------------------------------------------- #
 # end-to-end scoring driver
-# --------------------------------------------------------------------------- #
 def test_benchmark_scores_pretrained_models(tmp_path):
     data = _write_dataset(tmp_path / "data.extxyz")
     ck1 = _make_checkpoint(tmp_path / "m1.pt")

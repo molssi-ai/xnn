@@ -157,9 +157,7 @@ class MolecularTopology:
         """int : Number of atoms in the topology."""
         return len(self.types)
 
-    # ------------------------------------------------------------------
     # constructors
-    # ------------------------------------------------------------------
     @classmethod
     def from_bonds(cls, types: Sequence[str],
                    bonds: Sequence[Sequence[int]],
@@ -387,9 +385,7 @@ class MolecularTopology:
             out.pairs14 += shift(self.pairs14, off)
         return out
 
-    # ------------------------------------------------------------------
     # persistence
-    # ------------------------------------------------------------------
     def save(self, path: Union[str, Path]) -> None:
         """Write the topology as JSON (round-tripped by :func:`read_topology`).
 

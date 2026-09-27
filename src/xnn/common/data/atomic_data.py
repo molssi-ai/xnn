@@ -110,7 +110,7 @@ class AtomicGraph:
         Per-structure loss weight ``(B,)``.
     """
 
-    # --- structure ---
+    # structure
     pos: Tensor              # (N, 3) cartesian positions
     atomic_numbers: Tensor   # (N,)   integer Z per atom
     edge_index: Tensor       # (2, E) [src, dst]; energy of dst depends on src
@@ -120,11 +120,11 @@ class AtomicGraph:
     cell: Optional[Tensor] = None     # (B, 3, 3) lattice vectors as rows
     pbc: Optional[Tensor] = None      # (B, 3) bool periodicity flags
 
-    # --- targets / labels (optional; present during training) ---
+    # targets / labels (optional; present during training)
     energy: Optional[Tensor] = None   # (B,)
     forces: Optional[Tensor] = None   # (N, 3)
     stress: Optional[Tensor] = None   # (B, 3, 3)
-    # --- optional per-structure metadata ---
+    # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
 
@@ -180,9 +180,17 @@ class AtomicGraph:
         src, dst = self.edge_index[0], self.edge_index[1]
         vec = self.pos[dst] - self.pos[src]
         if self.cell is not None:
-            # cell of the structure each edge belongs to (via its src node)
-            cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
-            shift = torch.einsum("ei,eij->ej",
-                                 self.cell_shifts.to(vec.dtype), cell_per_edge)
+            if self.cell.shape[0] == 1:
+                # one structure: a plain matmul. Gathering the cell onto every
+                # edge makes the backward pass (the stress) accumulate 9 E
+                # values into the same nine entries through the sort-based
+                # index backward, which cost 1.5 s of a D4 step and half of a
+                # MACE step on 5000 periodic atoms.
+                shift = self.cell_shifts.to(vec.dtype) @ self.cell[0]
+            else:
+                # cell of the structure each edge belongs to (via its src node)
+                cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
+                shift = torch.einsum("ei,eij->ej",
+                                     self.cell_shifts.to(vec.dtype), cell_per_edge)
             vec = vec + shift
         return vec

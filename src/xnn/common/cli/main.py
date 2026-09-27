@@ -131,8 +131,12 @@ def main(argv=None):
                             "which exposes the whole-system entry point "
                             "'forward' and the pair-style 'forward_lammps'")
         p.add_argument("--out", default="model_deployed.pt")
+        p.add_argument("--no-dispersion", action="store_true",
+                       help="export the checkpoint as is, ignoring a recorded "
+                            "subtracted_dispersion")
         args, _ = p.parse_known_args(rest)
-        from ..models import build_model, ForceStressOutput
+        from ..models import add_dispersion, build_model, ForceStressOutput
+        from ..models.registry import recorded_dispersion, resolve_dispersion
         from ..deploy import export_torchscript_potential
         state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
         # prefer the architecture embedded in the checkpoint, as `benchmark`
@@ -144,6 +148,16 @@ def main(argv=None):
                 f"architecture it was trained with")
         base = build_model(cfg.model)
         ForceStressOutput(base).load_state_dict(state["model"])
+        # a route-B checkpoint records what its labels had subtracted; the
+        # export adds it back unless told not to
+        recorded = recorded_dispersion(cfg)
+        spec = resolve_dispersion(False if args.no_dispersion else None, recorded)
+        if spec is not None:
+            base = add_dispersion(base, spec)
+            print("adding back the dispersion recorded as subtracted from the "
+                  f"training labels: {spec}")
+        elif recorded is not None:
+            print(f"exporting WITHOUT the recorded subtracted dispersion ({recorded})")
         meta = {"model": cfg.model.name,
                 "species": (cfg.model.extra or {}).get("species"),
                 "source_checkpoint": args.ckpt}

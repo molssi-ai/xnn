@@ -42,6 +42,8 @@ import math
 from typing import List
 
 import torch
+
+from .ops import cell_volume
 from torch import Tensor, nn
 
 from ..data import AtomicGraph
@@ -195,7 +197,7 @@ class EwaldSummation(nn.Module):
         im_sk = torch.sin(angles).T @ q
         sk_sq = re_sk.square() + im_sk.square()
         energy = (2.0 * (self._kfac(k2).unsqueeze(1) * sk_sq).sum()
-                  / torch.det(cell))
+                  / cell_volume(cell))
         if self.remove_self_interaction and self.exponent == 1:
             energy = energy - self._self_energy(q)
         return energy

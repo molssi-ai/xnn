@@ -139,13 +139,11 @@ where = ["src"]
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
 "xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 
-# ---------------------------------------------------------------------------
 # uv configuration -- reproduces the .venv the notebooks were created with.
 #
 # The host has 2x A100 with CUDA driver 12.2, so torch must use the cu121 GPU
 # wheels (the default wheels are cu13x and fail on this driver). torch is pulled
 # from the PyTorch cu121 index, which resolves torch to 2.5.1+cu121.
-# ---------------------------------------------------------------------------
 [tool.uv]
 
 [[tool.uv.index]]

@@ -28,6 +28,11 @@ All configuration funnels into a single dataclass tree
    * -
      - ``output_dir``
      - ``"runs/exp"``: where checkpoints are written
+   * -
+     - ``subtracted_dispersion``
+     - ``None``: what was subtracted from the labels (``{name: d4, s8: ...,
+       cutoff_pair: ...}``), added back by ``xnn mdi`` / ``xnn export``; see
+       :ref:`deployment`
    * - ``ModelConfig``
      - ``name``
      - ``"mace"``: any registered model name

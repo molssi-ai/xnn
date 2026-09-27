@@ -233,9 +233,7 @@ class DreidingForceField(nn.Module):
         self.register_buffer("rule_n", torch.tensor(n_rule, dtype=torch.long))
         self.register_buffer("rule_sign", torch.tensor(s_rule, dtype=dtype))
 
-    # ------------------------------------------------------------------
     # resolution
-    # ------------------------------------------------------------------
     def type_index(self, name: str) -> int:
         """Row index of atom type ``name``.
 
@@ -268,9 +266,7 @@ class DreidingForceField(nn.Module):
             raise KeyError(f"atom type {name!r} has no van der Waals "
                            f"parameters in library {self.name!r}")
 
-    # ------------------------------------------------------------------
     # export
-    # ------------------------------------------------------------------
     def export_library(self) -> DreidingLibrary:
         """Write the current (possibly trained) parameters back to a library.
 
@@ -486,9 +482,7 @@ class Dreiding(InteratomicPotential):
         ff = ffield if isinstance(ffield, DreidingForceField) else source
         return cls(ff, top, charges=charges, **kwargs)
 
-    # ------------------------------------------------------------------
     # topology binding
-    # ------------------------------------------------------------------
     def _bind_topology(self, top: MolecularTopology,
                        charges: Optional[Sequence[float]]) -> None:
         """Generate every valence term from the DREIDING rules.
@@ -533,12 +527,12 @@ class Dreiding(InteratomicPotential):
         buf("top_type", t_idx, (-1,))
         self.register_buffer("top_z", ff.type_z[self.top_type].clone())
 
-        # --- bonds: R0 from radii, K from the bond order ----------------
+        # bonds: R0 from radii, K from the bond order
         buf("bond_index", [list(b) for b in top.bonds], (-1, 2))
         self.bond_index = self.bond_index.t().contiguous()
         buf("bond_order", orders, (-1,), dtype)
 
-        # --- angles: theta0 of the center; linear centers use eq 10' ----
+        # angles: theta0 of the center; linear centers use eq 10'
         buf("angle_index", [list(a) for a in top.angles], (-1, 3))
         self.angle_index = self.angle_index.t().contiguous()
         linear = [abs(lib.theta0.get(top.types[j], 180.0) - 180.0) < 1e-8
@@ -582,11 +576,11 @@ class Dreiding(InteratomicPotential):
         buf("inversion_index", inv, (-1, 4))
         self.inversion_index = self.inversion_index.t().contiguous()
 
-        # --- nonbonded exclusions: 1,2 and 1,3 only (1,4 in full) --------
+        # nonbonded exclusions: 1,2 and 1,3 only (1,4 in full)
         buf("excl_index", [list(p) for p in top.exclusions], (-1, 2))
         self.excl_index = self.excl_index.t().contiguous()
 
-        # --- hydrogen-bond triplets (donor, H, acceptor) -----------------
+        # hydrogen-bond triplets (donor, H, acceptor)
         donors = [i for i, name in enumerate(top.types)
                   if name in ff.donor_types]
         acceptor = [bool(ff.type_acceptor[ti]) for ti in t_idx]
@@ -608,7 +602,7 @@ class Dreiding(InteratomicPotential):
         buf("hbond_index", hb, (-1, 3))
         self.hbond_index = self.hbond_index.t().contiguous()
 
-        # --- charges ------------------------------------------------------
+        # charges
         if charges is None:
             q = torch.zeros(n, dtype=dtype)
         else:
@@ -621,9 +615,7 @@ class Dreiding(InteratomicPotential):
         else:
             self.register_buffer("charge", q)
 
-    # ------------------------------------------------------------------
     # forward
-    # ------------------------------------------------------------------
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Evaluate the DREIDING energy on a (batched) atomic graph.
 
@@ -674,7 +666,7 @@ class Dreiding(InteratomicPotential):
             """Tile per-interaction rows ``(m,)`` to ``(B*m,)``."""
             return v.repeat(B)
 
-        # --- bonds (eqs 4-9) --------------------------------------------
+        # bonds (eqs 4-9)
         bi = expand(self.bond_index)
         bo = tile(self.bond_order)
         bt0, bt1 = t[bi[0]], t[bi[1]]
@@ -691,7 +683,7 @@ class Dreiding(InteratomicPotential):
         e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
             + scatter_sum(0.5 * e_bond, bi[1], N)
 
-        # --- angles (eqs 10-12) ------------------------------------------
+        # angles (eqs 10-12)
         ai = expand(self.angle_index)
         lin = tile(self.angle_linear)
         u = pair_vectors(data, ai[1], ai[0])
@@ -712,7 +704,7 @@ class Dreiding(InteratomicPotential):
         e_angle = torch.where(lin, e_lin, e_nonlin)
         e_angle_node = scatter_sum(e_angle, ai[1], N)
 
-        # --- torsions (eqs 13-23) ----------------------------------------
+        # torsions (eqs 13-23)
         di = expand(self.dihedral_index)
         dr = tile(self.dihedral_rule)
         dw = tile(self.dihedral_weight)
@@ -726,7 +718,7 @@ class Dreiding(InteratomicPotential):
             * (1.0 - self.ff.rule_sign[dr] * tn)
         e_tors_node = scatter_sum(e_tors, di[1], N)
 
-        # --- inversions (eq 28) ------------------------------------------
+        # inversions (eq 28)
         ii = expand(self.inversion_index)
         it = t[ii[0]]
         rij = pair_vectors(data, ii[0], ii[1])
@@ -746,7 +738,7 @@ class Dreiding(InteratomicPotential):
         e_inv = torch.where(planar, e_pl, e_np) / 3.0
         e_inv_node = scatter_sum(e_inv, ii[0], N)
 
-        # --- nonbonded: neighbor list minus 1,2 / 1,3 exclusions ---------
+        # nonbonded: neighbor list minus 1,2 / 1,3 exclusions
         src, dst = data.edge_index[0], data.edge_index[1]
         vec = data.edge_vectors()
         r2 = (vec * vec).sum(1)
@@ -791,7 +783,7 @@ class Dreiding(InteratomicPotential):
         e_vdw_node = scatter_sum(0.5 * w * vdw_e, dst, N)
         e_coul_node = scatter_sum(0.5 * w * coul_e, dst, N)
 
-        # --- hydrogen bonds (eq 38) ---------------------------------------
+        # hydrogen bonds (eq 38)
         if self.use_hbond and self.hbond_index.shape[1] > 0:
             hb = expand(self.hbond_index)
             vec_da = pair_vectors(data, hb[0], hb[2])
@@ -840,9 +832,7 @@ class Dreiding(InteratomicPotential):
             "e_hbond": self.aggregate_energy(e_hb_node, data),
         }
 
-    # ------------------------------------------------------------------
     # conveniences
-    # ------------------------------------------------------------------
     def export_library(self) -> DreidingLibrary:
         """Export the current parameters as a :class:`DreidingLibrary`.
 

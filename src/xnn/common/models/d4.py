@@ -101,9 +101,13 @@ from .dispersion import (
     gaussian_reference_weights,
     options_from_extra,
     switching_function,
+    edge_cell_shifts,
     three_body_energy,
+    three_body_energy_chunked,
 )
-from .ops import scatter_sum
+from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit,
+                  reciprocal_vectors)
+from .ops import cell_volume, scatter_sum
 from .registry import register_model
 
 # D4 model constants
@@ -122,6 +126,17 @@ _CUTOFF_PAIR_AU = 60.0
 _CUTOFF_TRIPLE_AU = 40.0
 _CUTOFF_CN_AU = 30.0
 _CUTOFF_EEQ_CN_AU = 25.0
+_MIN_CUTOFF_EEQ_AU = 20.0      # shortest real-space range of the large-regime EEQ split
+#: default real-space range of the large-regime Ewald split (Angstrom): the
+#: reciprocal set shrinks as r^-3 and the operator is about four times cheaper
+#: than at 12 A, while the charges agree to 2e-10 e
+DEFAULT_CUTOFF_EEQ = 16.0
+#: ``regime="auto"`` switches from the dense (bit-exact) EEQ path to the
+#: large-system operator above these atom counts (dense memory: about 7 kB
+#: per pair for a periodic cell, 64 B per pair for a molecule)
+AUTO_LARGE_PERIODIC = 1500
+AUTO_LARGE_MOLECULAR = 6000
+REGIMES = ("auto", "dense", "large")
 
 # PBE0-D4 (bj-eeq-atm) damping parameters, paper / dftd4 parameter set
 PBE0_D4 = {"s6": 1.0, "s8": 1.20065498, "a1": 0.40085597, "a2": 5.02928789,
@@ -266,12 +281,80 @@ class DFTD4(nn.Module):
     trainable : bool, optional
         Make ``s6, s8, a1, a2, s9`` learnable ``nn.Parameter``s, by default
         ``False`` (fixed buffers).
+    regime : str, optional
+        How the EEQ charges are computed: ``"dense"`` builds the ``(N, N)``
+        interaction matrix as the reference code does (bit-exact
+        ``dftd4`` parity; memory grows as ``N^2``), ``"large"`` uses the
+        matrix-free operator, iterative / factorized solve and implicit
+        differentiation of :mod:`~xnn.common.models.eeq` (memory ``O(E + N
+        N_G)``, agreement with ``dense`` to about 1e-10 hartree, eager
+        only), and ``"auto"`` (default) picks ``large`` above
+        :data:`AUTO_LARGE_PERIODIC` / :data:`AUTO_LARGE_MOLECULAR` atoms.
+        TorchScript always runs ``dense``.
+    cutoff_eeq : float or None, optional
+        Real-space range (Angstrom) of the large-regime Ewald split, which
+        sets the splitting parameter (a longer range means fewer reciprocal
+        vectors). ``None`` (default) takes :data:`DEFAULT_CUTOFF_EEQ` (16 A)
+        or the largest of the other cutoffs, whichever is larger, unless
+        ``regime="dense"`` (which has no Ewald split and keeps the other
+        cutoffs' radius); the neighbor list is then at most 16 A, which costs
+        about 2.4 times the edges of a 12 A list and buys a four times
+        cheaper EEQ operator. The large regime needs at least 20 bohr
+        (10.6 A), below which the ``erf(gamma r)`` part of the kernel is not
+        screened, and raises otherwise.
+    eeq_solver : str, optional
+        Large-regime solver: ``"auto"`` (LU of the assembled matrix up to
+        :data:`~xnn.common.models.eeq.LU_MAX_ATOMS` atoms, conjugate
+        gradients above), ``"lu"`` or ``"cg"``.
+    checkpoint_triplets : bool, optional
+        Evaluate the three-body term in recompute blocks of centers
+        (:func:`~xnn.common.models.dispersion.three_body_energy_chunked`,
+        :mod:`~xnn.common.models.recompute`), by default ``True``: memory is
+        bounded by one block at every derivative order (force training
+        included) and no ``(N, N)`` C6 matrix is needed, at the cost of
+        re-evaluating each block once per order of differentiation. Eager
+        only; TorchScript uses the plain chunk loop.
+    recompute_pairs : bool, optional
+        Evaluate the two-body term in recompute blocks of edges, by default
+        ``True``: the per-edge ``(E, 23)`` polarizability products of the
+        Casimir-Polder C6 (about 1.5 kB per edge when retained for the
+        backward pass, 14 million edges at 20 000 atoms with a 12 A cutoff)
+        are then transient. Eager only.
+    triplet_chunk : int or None, optional
+        Triplets per three-body recompute block; ``None`` (default) sizes it
+        from the free device memory (2^20 to 2^24). Larger blocks amortize
+        the per-block set-up, which is paid in both passes.
+    triplet_cache : float or None, optional
+        Keep each three-body block's triples from the forward to the backward
+        pass so they are enumerated once per step: a budget in GB, ``None``
+        (default) for a quarter of the free device memory, 0 to disable.
+        Exact (the backward pass uses the same triples); 14 bytes per triple,
+        e.g. 0.5 GB for 5000 water atoms at an 8 A triple cutoff. Eager only.
+
+    tail_correction : bool, optional
+        Add, for periodic structures, the homogeneous long-range correction of
+        the two-body term: the energy the pair cutoff and its switching window
+        remove, ``E_tail = (2 pi / V) sum_ij int (1 - sw(r)) u_ij(r) r^2 dr``
+        over all ordered atom pairs with a uniform distribution beyond the
+        window (the analog of LAMMPS ``pair_modify tail yes``). It uses the
+        structure's own (charge- and CN-dependent) ``C6`` and the BJ damping,
+        and is differentiable, so its forces (from the ``C6``) and its stress
+        (``-E_tail / V`` on the diagonal) are consistent with the energy. By
+        default ``False``. Molecular structures are unaffected.
+
+    Notes
+    -----
+    For molecular dynamics and geometry optimization,
+    :meth:`enable_eeq_reuse` carries the large-regime EEQ solve from one
+    step to the next (see :class:`~xnn.common.models.eeq.EEQReuse`).
 
     Attributes
     ----------
     cutoff : float
-        The largest of the four cutoffs (Angstrom) -- the neighbor-list radius
+        The largest of the cutoffs (Angstrom) -- the neighbor-list radius
         this module needs.
+    regime : str
+        The requested regime (``"auto"``, ``"dense"`` or ``"large"``).
     """
 
     bohr: float
@@ -298,6 +381,16 @@ class DFTD4(nn.Module):
     alp: float
     max_ngw: int
     n_features: int
+    regime: str
+    cutoff_eeq: float
+    eeq_solver: str
+    checkpoint_triplets: bool
+    recompute_pairs: bool
+    triplet_chunk: Optional[int]
+    triplet_cache: Optional[float]
+    tail_correction: bool
+    auto_large_periodic: int
+    auto_large_molecular: int
 
     def __init__(self, s6: float = 1.0, s8: float = 1.20065498,
                  a1: float = 0.40085597, a2: float = 5.02928789,
@@ -309,8 +402,25 @@ class DFTD4(nn.Module):
                  cutoff_eeq_cn: float = _CUTOFF_EEQ_CN_AU * BOHR,
                  switch_width_pair: float = 0.0,
                  switch_width_triple: float = 0.0,
-                 trainable: bool = False):
+                 trainable: bool = False, regime: str = "auto",
+                 cutoff_eeq: Optional[float] = None, eeq_solver: str = "auto",
+                 checkpoint_triplets: bool = True, recompute_pairs: bool = True,
+                 triplet_chunk: Optional[int] = None,
+                 triplet_cache: Optional[float] = None,
+                 tail_correction: bool = False):
         super().__init__()
+        regime = str(regime).lower()
+        if regime not in REGIMES:
+            raise ValueError(f"regime must be one of {REGIMES}, got {regime!r}")
+        if eeq_solver not in ("auto", "lu", "cg"):
+            raise ValueError(f"eeq_solver must be 'auto', 'lu' or 'cg', got {eeq_solver!r}")
+        self.regime = regime
+        self.auto_large_periodic, self.auto_large_molecular = AUTO_LARGE_PERIODIC, AUTO_LARGE_MOLECULAR
+        self.eeq_solver = str(eeq_solver)
+        self.checkpoint_triplets = bool(checkpoint_triplets)
+        self.recompute_pairs = bool(recompute_pairs)
+        self.triplet_chunk = triplet_chunk
+        self.triplet_cache = None if triplet_cache is None else float(triplet_cache)
         # model constants, held on the instance so the exported methods can
         # read them under TorchScript
         self.bohr, self.hartree = BOHR, HARTREE
@@ -324,10 +434,28 @@ class DFTD4(nn.Module):
         self.cutoff_triple = float(cutoff_triple)
         self.cutoff_cn = float(cutoff_cn)
         self.cutoff_eeq_cn = float(cutoff_eeq_cn)
-        self.cutoff = max(self.cutoff_pair, self.cutoff_triple,
+        # the large-regime real-space range: 16 A by default (a longer range
+        # shrinks the reciprocal set, see DEFAULT_CUTOFF_EEQ), never below the
+        # radius the other terms need, and not widened at all in the dense
+        # regime, which has no Ewald split
+        base_cutoff = max(self.cutoff_pair, self.cutoff_triple,
                           self.cutoff_cn, self.cutoff_eeq_cn)
+        if cutoff_eeq is not None:
+            self.cutoff_eeq = float(cutoff_eeq)
+        elif regime == "dense":
+            self.cutoff_eeq = base_cutoff
+        else:
+            self.cutoff_eeq = max(base_cutoff, DEFAULT_CUTOFF_EEQ)
+        self.cutoff = max(base_cutoff, self.cutoff_eeq)
         self.switch_width_pair = float(switch_width_pair)
         self.switch_width_triple = float(switch_width_triple)
+        self.tail_correction = bool(tail_correction)
+        # Gauss-Legendre rule on [-1, 1] for the tail integrals
+        gl_x, gl_w = np.polynomial.legendre.leggauss(48)
+        self.register_buffer("gl_x", torch.tensor(gl_x, dtype=torch.get_default_dtype()),
+                             persistent=False)
+        self.register_buffer("gl_w", torch.tensor(gl_w, dtype=torch.get_default_dtype()),
+                             persistent=False)
 
         dt = torch.get_default_dtype()
         for name, value in [("s6", s6), ("s8", s8), ("a1", a1), ("a2", a2),
@@ -371,9 +499,7 @@ class DFTD4(nn.Module):
         self.register_buffer("cp_weights", torch.tensor(_CP_WEIGHTS, dtype=dt),
                              persistent=False)
 
-    # ------------------------------------------------------------------
     # setup
-    # ------------------------------------------------------------------
     def _reference_polarizabilities(self, ref: dict) -> np.ndarray:
         """Atom-in-molecule reference polarizabilities ``alpha_A,ref(i w)``.
 
@@ -393,9 +519,7 @@ class DFTD4(nn.Module):
         alpha = np.where(sys_present, np.maximum(alpha, 0.0), 0.0)
         return alpha
 
-    # ------------------------------------------------------------------
     # building blocks (atomic units; all TorchScript-compatible)
-    # ------------------------------------------------------------------
     def coordination_numbers(self, z: Tensor, edge_index: Tensor, r: Tensor,
                              n_atoms: int) -> Tuple[Tensor, Tensor]:
         """D4 and EEQ coordination numbers of every atom (paper eqs 6, 14).
@@ -469,7 +593,7 @@ class DFTD4(nn.Module):
         """
         n = pos.shape[0]
         device, dtype = pos.device, pos.dtype
-        vol = torch.det(cell).abs()
+        vol = cell_volume(cell)
         recip = 2.0 * math.pi * torch.linalg.inv(cell).t()
         alpha = _ewald_alpha(float(torch.linalg.norm(recip, dim=1).min()),
                              float(torch.linalg.norm(cell, dim=1).min()), float(vol))
@@ -554,9 +678,122 @@ class DFTD4(nn.Module):
         zero = torch.zeros((1, 1), dtype=pos.dtype, device=pos.device)
         full = torch.cat([torch.cat([amat, ones], dim=1),
                           torch.cat([ones.t(), zero], dim=1)], dim=0)
-        rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)])
-        sol = torch.linalg.solve(full, rhs)
-        return sol[:n]
+        rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)]).unsqueeze(1)
+        if pos.dtype == torch.float32:
+            # one LU factor of the detached matrix, one float64-residual
+            # refinement round, and the derivatives through the residual:
+            # O(N^2) backward, charges and forces at the float32 matrix's own
+            # accuracy (~2e-6 e, ~2e-7 eV/A at a few thousand atoms)
+            lu, pivots = torch.linalg.lu_factor(full.detach())
+            sol = lu_solve_implicit(lu, pivots, full, rhs, 1)
+        else:
+            # the plain LAPACK solution, bit-exact against dftd4
+            sol = torch.linalg.solve(full, rhs)
+        return sol[:n, 0]
+
+    def select_regime(self, n_atoms: int, periodic: bool) -> str:
+        """Resolve ``"auto"`` to ``"dense"`` or ``"large"`` for one structure."""
+        if self.regime != "auto":
+            return self.regime
+        limit = self.auto_large_periodic if periodic else self.auto_large_molecular
+        return "large" if n_atoms > limit else "dense"
+
+    @torch.jit.unused
+    def enable_eeq_reuse(self, enabled: bool = True, **options) -> None:
+        """Carry the large-regime EEQ solve over between consecutive structures.
+
+        For molecular dynamics and geometry optimization, where one structure
+        follows the previous one closely; see
+        :class:`~xnn.common.models.eeq.EEQReuse`, which receives ``options``
+        (``tol``, ``refresh``, ``maxiter``). Results agree with the fresh
+        solve to the solver tolerance; the dense regime is not affected.
+        ``enable_eeq_reuse(False)`` switches it off again. Eager only.
+        """
+        # kept out of the module's attributes that TorchScript would inspect
+        self.__dict__["_eeq_reuse"] = EEQReuse(**options) if enabled else None
+
+    @torch.jit.unused
+    def _eeq_charges_large(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                           cn_eeq: Tensor, total_charge: Tensor, cell: Tensor,
+                           periodic: bool, alone: bool = True) -> Tensor:
+        """Large-regime EEQ charges of one structure (eager only).
+
+        ``edge_index`` / ``edge_vec`` are the structure's edges within
+        ``cutoff_eeq`` in local numbering and bohr; ``alone`` says the
+        structure is the only one of its batch, the condition for the EEQ
+        reuse between steps. See :mod:`~xnn.common.models.eeq`.
+        """
+        if periodic and self.cutoff_eeq < _MIN_CUTOFF_EEQ_AU * self.bohr:
+            raise ValueError(
+                f"the large EEQ regime needs cutoff_eeq >= {_MIN_CUTOFF_EEQ_AU:.0f} bohr "
+                f"({_MIN_CUTOFF_EEQ_AU * self.bohr:.1f} A) of neighbor list, got "
+                f"{self.cutoff_eeq:.2f} A; raise cutoff_eeq or use regime='dense'")
+        rad = self.eeq_rad[z]
+        diag = self.eeq_eta[z] + math.sqrt(2.0 / math.pi) / rad
+        x = -self.eeq_chi[z] + self.eeq_kcnchi[z] * cn_eeq / torch.sqrt(cn_eeq + self.eeq_cn_reg)
+        reuse = self.__dict__.get("_eeq_reuse") if alone else None
+        # the system's identity for the reuse: atom count and element sequence
+        signature = (int(z.shape[0]), int(z.sum()),
+                     int((z * torch.arange(1, z.shape[0] + 1, device=z.device)).sum()))
+        if periodic:
+            alpha = ewald_alpha(self.cutoff_eeq / self.bohr)
+            grid, gvec, gfac = reciprocal_vectors(cell.detach(), alpha)
+            diag = diag - 2.0 * alpha / math.sqrt(math.pi)
+            system = EEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac, grid,
+                               solver=self.eeq_solver, reuse=reuse, signature=signature)
+            return eeq_charges_large(system, pos, edge_vec, rad, diag, x, total_charge, cell)
+        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver, reuse=reuse,
+                           signature=signature)
+        return eeq_charges_large(system, pos, None, rad, diag, x, total_charge)
+
+    @torch.jit.unused
+    def _two_body_chunked(self, z: Tensor, edge_index: Tensor, r: Tensor, alpha_iw: Tensor,
+                          n_atoms: int, chunk: int = 1 << 20) -> Tensor:
+        """:meth:`two_body_energy` in recompute blocks of ``chunk`` edges (eager only)."""
+        from .recompute import recompute
+        energy = torch.zeros(n_atoms, dtype=r.dtype, device=r.device)
+        n_edges = int(edge_index.shape[1])
+
+        def block(ei, r_, alpha, s6, s8, a1, a2):
+            src, dst = ei[0], ei[1]
+            zi, zj = z[dst], z[src]
+            c6 = (3.0 / math.pi) * (alpha[dst] * alpha[src] * self.cp_weights).sum(-1)
+            rr = 3.0 * self.r4r2[zi] * self.r4r2[zj]
+            r0 = a1 * torch.sqrt(rr) + a2
+            r2 = r_ * r_
+            t6 = 1.0 / (r2 ** 3 + r0 ** 6)
+            t8 = 1.0 / (r2 ** 4 + r0 ** 8)
+            sw = switching_function(r_, self.cutoff_pair / self.bohr, self.switch_width_pair / self.bohr)
+            return scatter_sum(-0.5 * c6 * sw * (s6 * t6 + s8 * rr * t8), dst, n_atoms)
+
+        for e0 in range(0, n_edges, chunk):
+            e1 = min(e0 + chunk, n_edges)
+            energy = energy + recompute(block, edge_index[:, e0:e1], r[e0:e1], alpha_iw,
+                                        self.s6, self.s8, self.a1, self.a2)
+        return energy
+
+    @torch.jit.unused
+    def _three_body_chunked(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                            r: Tensor, alpha_neutral: Tensor, cell: Tensor, batch: Tensor,
+                            n_atoms: int) -> Tensor:
+        """Recompute-block ATM term with per-edge C6 (eager only).
+
+        The pair C6 of every directed edge within the three-body cutoff is
+        formed once from the neutral-atom polarizabilities (differentiable, so
+        the coordination-number dependence reaches the forces), and the blocks
+        gather scalars; see :func:`~xnn.common.models.dispersion.three_body_energy_chunked`.
+        """
+        alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
+        c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
+        shifts = edge_cell_shifts(pos, edge_index, edge_vec, cell, batch)
+        r0_atom = (3.0 ** 0.25) * torch.sqrt(self.r4r2[z])      # rho_A: R0_AB = a1 rho_A rho_B + a2
+        return three_body_energy_chunked(z, edge_index, edge_vec, r, None,
+                                         self.s9, self.alp / 3.0, self.cutoff_triple / self.bohr,
+                                         self.switch_width_triple / self.bohr, n_atoms,
+                                         r0_atom=r0_atom, a1=self.a1, a2=self.a2,
+                                         c6_edge=c6_edge, edge_shift=shifts,
+                                         chunk=self.triplet_chunk,
+                                         triplet_cache=self.triplet_cache)
 
     def reference_weights(self, z: Tensor, cn: Tensor, q: Tensor) -> Tensor:
         """Charge-scaled Gaussian weights of the reference systems (eqs 2-4, 8).
@@ -628,13 +865,78 @@ class DFTD4(nn.Module):
         e_pair = -0.5 * c6 * sw * (self.s6 * t6 + self.s8 * rr * t8)
         return scatter_sum(e_pair, dst, n_atoms)
 
+    def tail_integrals(self) -> Tensor:
+        """Radial integrals of the two-body term lost to the pair cutoff.
+
+        ``J_AB = -int_{r_s}^inf (1 - sw(r)) [s6 / (r^6 + R0^6) + s8 (C8/C6) /
+        (r^8 + R0^8)] r^2 dr`` per element pair, in bohr^-3 (multiply by a
+        ``C6`` in hartree bohr^6), with ``r_s`` the start of the switching
+        window (the cutoff itself for a sharp one). The window is integrated
+        with Gauss-Legendre in ``r``, the region beyond the cutoff with
+        Gauss-Legendre in ``x = 1 / r``.
+
+        Returns
+        -------
+        Tensor
+            Shape ``(Z_max + 1, Z_max + 1)``.
+        """
+        rc = self.cutoff_pair / self.bohr
+        width = min(self.switch_width_pair, self.cutoff_pair) / self.bohr
+        rr = 3.0 * self.r4r2[:, None] * self.r4r2[None, :]           # C8 / C6
+        r0 = self.a1 * torch.sqrt(rr) + self.a2
+        r06 = (r0 ** 6)[:, :, None]
+        r08 = (r0 ** 8)[:, :, None]
+        # beyond the cutoff, x = 1/r in (0, 1/rc]: r^2 dr / (r^n + R^n) ->
+        # x^(n-4) / (1 + R^n x^n) dx
+        x = (self.gl_x + 1.0) / (2.0 * rc)
+        wx = self.gl_w / (2.0 * rc)
+        outer = (self.s6 * x ** 2 / (1.0 + r06 * x ** 6)
+                 + self.s8 * rr[:, :, None] * x ** 4 / (1.0 + r08 * x ** 8))
+        total = (outer * wx).sum(-1)
+        if width > 0.0:
+            r = rc - width + width * (self.gl_x + 1.0) / 2.0
+            wr = self.gl_w * width / 2.0
+            miss = (1.0 - switching_function(r, rc, width)) * r * r
+            inner = (self.s6 / (r ** 6 + r06) + self.s8 * rr[:, :, None] / (r ** 8 + r08))
+            total = total + (inner * miss * wr).sum(-1)
+        return -total
+
+    def tail_energy(self, z: Tensor, alpha_iw: Tensor, cell: Tensor) -> Tensor:
+        """Per-atom homogeneous tail correction of one periodic structure (hartree).
+
+        ``E_tail = (2 pi / V) sum_AB J_AB S_AB`` with ``S_AB`` the sum of
+        ``C6`` over the ordered pairs of atoms of elements ``A`` and ``B``,
+        which the Casimir-Polder form reduces to per-element sums of the
+        dynamic polarizabilities. Each atom carries its pairs with every
+        other atom.
+
+        Parameters
+        ----------
+        z : Tensor
+            Atomic numbers, shape ``(N,)``.
+        alpha_iw : Tensor
+            Dynamic polarizabilities, shape ``(N, 23)``.
+        cell : Tensor
+            Lattice vectors as rows in bohr, shape ``(3, 3)``.
+
+        Returns
+        -------
+        Tensor
+            Shape ``(N,)``.
+        """
+        vol = torch.det(cell).abs()
+        n_el = self.r4r2.shape[0]
+        per_element = torch.zeros((n_el, alpha_iw.shape[1]), dtype=alpha_iw.dtype,
+                                  device=alpha_iw.device).index_add(0, z, alpha_iw)
+        field = self.tail_integrals() @ per_element                    # (Z, 23)
+        # (2 pi / V) (3 / pi) sum_w alpha_i(w) field(z_i, w)
+        return (6.0 / vol) * (alpha_iw * self.cp_weights * field[z]).sum(-1)
+
     def pair_radius_table(self) -> Tensor:
         """BJ critical radii ``a1 sqrt(3 Q_A Q_B) + a2`` for all element pairs, bohr."""
         return self.a1 * torch.sqrt(3.0 * self.r4r2[:, None] * self.r4r2[None, :]) + self.a2
 
-    # ------------------------------------------------------------------
     # evaluation
-    # ------------------------------------------------------------------
     @torch.jit.export
     def evaluate(self, atomic_numbers: Tensor, pos: Tensor, edge_index: Tensor,
                  edge_vec: Tensor, batch: Tensor, num_graphs: int,
@@ -691,41 +993,70 @@ class DFTD4(nn.Module):
         cn_d4, cn_eeq = self.coordination_numbers(z, edge_index, r, n_atoms)
 
         charges: List[Tensor] = []
+        in_eeq = r <= self.cutoff_eeq / self.bohr
         for b in range(num_graphs):
             members = torch.nonzero(batch == b).squeeze(1)
             cell_b = cell[b] / self.bohr
             periodic = bool(pbc[b].any()) and bool(cell_b.abs().sum() > 1e-8)
-            charges.append(self.eeq_charges(z[members], pos_au[members],
-                                            cn_eeq[members], total_charge[b],
-                                            cell_b, periodic))
+            regime = self.select_regime(int(members.shape[0]), periodic)
+            if regime == "large" and not torch.jit.is_scripting():
+                # the structure's EEQ-range edges in local numbering
+                local = torch.full((n_atoms,), -1, dtype=torch.long, device=z.device)
+                local[members] = torch.arange(members.shape[0], device=z.device)
+                sel = in_eeq & (batch[edge_index[1]] == b)
+                charges.append(self._eeq_charges_large(
+                    z[members], pos_au[members], local[edge_index[:, sel]], vec_au[sel],
+                    cn_eeq[members], total_charge[b], cell_b, periodic, num_graphs == 1))
+            else:
+                charges.append(self.eeq_charges(z[members], pos_au[members],
+                                                cn_eeq[members], total_charge[b],
+                                                cell_b, periodic))
         q = torch.cat(charges)
 
         weights = self.reference_weights(z, cn_d4, q)
         alpha_iw = self.dynamic_polarizabilities(z, weights)
 
         in_pair = r <= self.cutoff_pair / self.bohr
-        e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
-                                  alpha_iw, n_atoms)
+        if self.recompute_pairs and not torch.jit.is_scripting():
+            e2 = self._two_body_chunked(z, edge_index[:, in_pair], r[in_pair], alpha_iw, n_atoms)
+        else:
+            e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
+                                      alpha_iw, n_atoms)
         node_energy = e2
+        e_tail = torch.zeros_like(e2)
+        if self.tail_correction:
+            for b in range(num_graphs):
+                cell_b = cell[b] / self.bohr
+                if bool(pbc[b].any()) and bool(cell_b.abs().sum() > 1e-8):
+                    members = torch.nonzero(batch == b).squeeze(1)
+                    e_tail = e_tail.index_add(
+                        0, members, self.tail_energy(z[members], alpha_iw[members], cell_b))
+            node_energy = node_energy + e_tail
         e3 = torch.zeros_like(e2)
         if bool(self.s9 != 0.0):
-            if n_atoms > 20000:
-                raise ValueError("the D4 three-body term needs the dense C6 matrix "
-                                 "(more than 20000 atoms); set s9 = 0")
             # the ATM term uses C6 coefficients of the *neutral* atoms
             weights_neutral = self.reference_weights(z, cn_d4, torch.zeros_like(q))
             alpha_neutral = self.dynamic_polarizabilities(z, weights_neutral)
-            c6_neutral = (3.0 / math.pi) * (alpha_neutral * self.cp_weights) @ alpha_neutral.t()
             in_triple = r <= self.cutoff_triple / self.bohr
-            e3 = three_body_energy(z, edge_index[:, in_triple], vec_au[in_triple],
-                                   r[in_triple], c6_neutral, self.pair_radius_table(),
-                                   self.s9, self.alp / 3.0, self.cutoff_triple / self.bohr,
-                                   self.switch_width_triple / self.bohr, n_atoms)
+            if self.checkpoint_triplets and not torch.jit.is_scripting():
+                e3 = self._three_body_chunked(z, pos_au, edge_index[:, in_triple], vec_au[in_triple],
+                                              r[in_triple], alpha_neutral, cell / self.bohr, batch,
+                                              n_atoms)
+            else:
+                if n_atoms > 20000:
+                    raise ValueError("the scripted D4 three-body term needs the dense C6 "
+                                     "matrix (more than 20000 atoms); set s9 = 0")
+                c6_neutral = (3.0 / math.pi) * (alpha_neutral * self.cp_weights) @ alpha_neutral.t()
+                e3 = three_body_energy(z, edge_index[:, in_triple], vec_au[in_triple],
+                                       r[in_triple], c6_neutral, self.pair_radius_table(),
+                                       self.s9, self.alp / 3.0, self.cutoff_triple / self.bohr,
+                                       self.switch_width_triple / self.bohr, n_atoms)
             node_energy = node_energy + e3
         return {
             "node_energy": node_energy * self.hartree,
             "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
             "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_tail": scatter_sum(e_tail, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn_d4,
             "charges": q,
             "polarizabilities": alpha_iw[:, 0],
@@ -802,7 +1133,23 @@ class D4Dispersion(DispersionCorrection):
 
 _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "cutoff_eeq_cn",
-            "switch_width_pair", "switch_width_triple", "trainable")
+            "switch_width_pair", "switch_width_triple", "trainable",
+            "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets", "recompute_pairs",
+            "triplet_chunk", "triplet_cache", "tail_correction")
+
+
+def enable_eeq_reuse(model, enabled: bool = True, **options) -> int:
+    """Switch the EEQ reuse between steps on (or off) for every D4 term of a model.
+
+    The hook of the molecular-dynamics channels (ASE calculator, MDI engine):
+    walks ``model`` for :class:`DFTD4` modules and calls their
+    :meth:`~DFTD4.enable_eeq_reuse`. Returns the number of terms found (0 when
+    the model has no D4 term, in which case the option has no effect).
+    """
+    terms = [m for m in model.modules() if isinstance(m, DFTD4)]
+    for term in terms:
+        term.enable_eeq_reuse(enabled, **options)
+    return len(terms)
 
 
 def d4_options_from_extra(extra: dict) -> dict:

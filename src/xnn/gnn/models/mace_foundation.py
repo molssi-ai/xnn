@@ -151,9 +151,7 @@ def load_foundation(source: Union[str, Path]) -> nn.Module:
     return torch.load(path, map_location="cpu", weights_only=False)
 
 
-# ----------------------------------------------------------------------
 # introspection helpers
-# ----------------------------------------------------------------------
 def _resolve_head(upstream: nn.Module, head: Optional[str]) -> tuple[int, int]:
     """Pick the head index of a (possibly multi-head) checkpoint.
 
@@ -235,9 +233,7 @@ def _scalar_weight(linear: o3.Linear, n_out: int) -> torch.Tensor:
     return linear.weight.detach().reshape(-1, n_out)
 
 
-# ----------------------------------------------------------------------
 # conversion
-# ----------------------------------------------------------------------
 def _copy_symmetric_contractions(xnn_sc, up_sc, correlation: int) -> None:
     """Transplant upstream symmetric-contraction weights and CG bases.
 
@@ -316,7 +312,7 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
     head_idx, n_heads = _resolve_head(upstream, head)
     up_dtype = next(upstream.parameters()).dtype
 
-    # --- read the architecture off the checkpoint -----------------------
+    # read the architecture off the checkpoint
     species = [int(z) for z in upstream.atomic_numbers]
     r_max = float(upstream.r_max)
     T = int(upstream.num_interactions)
@@ -388,7 +384,7 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
     e0s = torch.atleast_2d(
         upstream.atomic_energies_fn.atomic_energies.detach().cpu())[head_idx]
 
-    # --- build the xnn twin under the checkpoint's dtype -----------------
+    # build the xnn twin under the checkpoint's dtype
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(up_dtype)
     try:
@@ -406,7 +402,7 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
     finally:
         torch.set_default_dtype(prev_dtype)
 
-    # --- transplant the weights -----------------------------------------
+    # transplant the weights
     with torch.no_grad():
         model.node_embedding.load_state_dict(
             upstream.node_embedding.linear.state_dict())

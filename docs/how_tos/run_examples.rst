@@ -165,6 +165,11 @@ reproduces figures and numbers of the D4 paper (needs ``rdkit`` for the
 hexenyne geometry and ``ase`` for the g2 and S22 sets) and
 ``d4_benchmark.ipynb`` compares accuracy and timing with ``dftd4`` and runs
 a D4-corrected MLIP through the ASE, TorchScript and LAMMPS-ABI channels.
+``d4_large_scale_ethanol.ipynb`` needs a GPU with tens of GB and the
+``vesin`` extra (``pip install -e ".[vesin]"``, the cell-list neighbor list):
+it trains a small MACE on rMD17 ethanol and evaluates the D4-corrected model
+on liquid-ethanol boxes of up to about 20 000 atoms in the large regime,
+about 20 minutes on an 80 GB GPU.
 The DFT-D3 counterpart (``examples/common/d3/``, fidelity notebook
 ``examples/fidelity_checks/d3_verification.ipynb``) compares against the
 reference ``simple-dftd3`` Python package (``pip install -e ".[d3]"``; no

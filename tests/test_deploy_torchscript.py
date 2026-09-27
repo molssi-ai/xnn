@@ -68,10 +68,7 @@ def _model(long_range):
     return model.eval()
 
 
-# --------------------------------------------------------------------------
 # scriptable neighbor list
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("case", ["molecular", "cubic", "triclinic",
                                   "unwrapped", "partial_pbc"])
 def test_neighbor_list_matches_reference(case):
@@ -116,10 +113,7 @@ def test_neighbor_list_is_scriptable():
     assert ei.shape[0] == 2 and cs.shape[1] == 3
 
 
-# --------------------------------------------------------------------------
 # exported potential
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("long_range", [False, True])
 @pytest.mark.parametrize("periodic", [False, True])
 def test_scripted_matches_eager(long_range, periodic):

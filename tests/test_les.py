@@ -53,10 +53,7 @@ def _graph(periodic=True, R=None, shift=0.0, seed=0, n=10):
     return structure_to_graph(s, 4.5)
 
 
-# --------------------------------------------------------------------------
 # EwaldSummation math
-# --------------------------------------------------------------------------
-
 @pytest.mark.parametrize("exponent", [1, 6])
 @pytest.mark.parametrize("triclinic", [False, True])
 def test_ewald_exact_invariances(exponent, triclinic):
@@ -106,9 +103,7 @@ def test_ewald_realspace_matches_large_box_limit():
     assert abs(e_mol - e_box) < 1e-4  # periodic images + k-cutoff residual
 
 
-# --------------------------------------------------------------------------
 # LatentEwald wrapper
-# --------------------------------------------------------------------------
 
 MODEL_CONFIGS = {
     "cace": {"extra": {"species": [1, 8], "n_atom_basis": 2, "max_l": 2,
@@ -263,10 +258,7 @@ def test_dispersion_is_periodic_only():
         ew.realspace(pos, q)
 
 
-# --------------------------------------------------------------------------
 # fidelity vs the original cace EwaldPotential
-# --------------------------------------------------------------------------
-
 def test_parity_vs_original_ewald():
     """The Ewald kernels match upstream cace.modules.EwaldPotential.
 

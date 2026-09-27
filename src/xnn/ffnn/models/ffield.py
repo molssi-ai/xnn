@@ -437,9 +437,7 @@ def _read_json(path: Path) -> FFieldLibrary:
     )
 
 
-# ----------------------------------------------------------------------
 # the SEAMM .frc format
-# ----------------------------------------------------------------------
 # SEAMM parameter names, in the column order of the classical ``ffield``
 # layout, so that ``zip(FRC_*, <positional xnn names>)`` is the name map.
 # Taken from SEAMM's own translation tables (seamm_ff_util.reaxff.metadata).

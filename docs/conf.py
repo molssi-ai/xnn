@@ -14,7 +14,7 @@ import sys
 # Make the package importable without installation (docs/ -> repo root -> src/)
 sys.path.insert(0, os.path.abspath(os.path.join("..", "src")))
 
-# -- General configuration ---------------------------------------------
+# General configuration
 
 extensions = [
     "sphinx.ext.autodoc",
@@ -45,7 +45,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 pygments_style = "default"
 
-# -- Autodoc / autosummary ----------------------------------------------
+# Autodoc / autosummary
 
 autosummary_generate = True
 autodoc_member_order = "bysource"
@@ -63,7 +63,7 @@ intersphinx_mapping = {
     "torch": ("https://pytorch.org/docs/stable/", None),
 }
 
-# -- Example notebooks (myst-nb) ----------------------------------------
+# Example notebooks (myst-nb)
 
 # The example notebooks are committed fully executed, so the docs build only
 # renders them -- it never runs them (no GPU, datasets, or extra venvs needed).
@@ -101,13 +101,13 @@ def _mirror_example_notebooks():
 
 _mirror_example_notebooks()
 
-# -- Copy button --------------------------------------------------------
+# Copy button
 
 # Strip prompts when copying code cells
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
 
-# -- Options for HTML output -------------------------------------------
+# Options for HTML output
 
 html_theme = "pydata_sphinx_theme"
 

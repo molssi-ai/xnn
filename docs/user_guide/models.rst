@@ -53,7 +53,10 @@ warp of the radial coordinate used by the newer foundation models),
 ``pair_repulsion`` (False), which adds ZBL core repulsion,
 ``atomic_energies``, the per-species reference energies (E0s), and
 ``scale`` / ``shift`` (1, 0), the upstream *ScaleShiftMACE* affine on the
-per-atom interaction energy (``E_i = E0_i + scale * E_int,i + shift``).
+per-atom interaction energy (``E_i = E0_i + scale * E_int,i + shift``); a
+checkpoint written before this block existed carries no ``scale_shift``
+entries and loads with the values the model was built with, the identity by
+default.
 The density-normalized interaction generation is available as
 ``RealAgnosticDensity(Residual)InteractionBlock``.
 
@@ -588,6 +591,79 @@ absent). The outputs gain ``"energy_sr"``, ``"energy_disp"``,
 sees the D4-corrected model's features), and every deploy channel carries
 the term: :class:`~xnn.common.models.outputs.ForceStressOutput`, the ASE
 calculator, the TorchScript export (both ABIs) and the LAMMPS wrapper.
+
+**Long-range tail.** ``tail_correction: true`` adds, for periodic structures,
+the two-body dispersion the pair cutoff and its switching window remove,
+assuming a uniform distribution of atoms beyond the window (the analog of
+LAMMPS ``pair_modify tail yes``, which does not reach energies returned
+through ``fix mdi/qm``). It uses the structure's own charge- and CN-dependent
+C6 and the BJ damping, and is differentiable, so its forces and stress are
+consistent with the energy; molecules are unaffected, and it is off by
+default. On 192 periodic water atoms (pair term only, 2 Angstrom switch) a
+12 Angstrom cutoff without it is 0.48 meV/atom and 82 atm short of the
+converged pair term; with it, 12, 20 and 30 Angstrom agree to 0.003 meV/atom
+and 3 atm. The outputs gain ``"energy_tail"``. The three-body term has no
+tail correction: beyond a 10 Angstrom triple cutoff it is worth about 10 atm
+in water, and a uniform-fluid ATM tail is not a reliable estimate.
+
+**Scale regimes.** The EEQ charges are a charge-constrained linear system of
+size ``N``. ``regime: dense`` (bit-exact ``dftd4`` parity) builds its
+``(N, N)`` matrix with every intermediate retained for the backward pass,
+which exhausts 80 GB near 1500 periodic or 25000 molecular atoms;
+``regime: large`` applies the same system as a matrix-free Ewald operator
+(neighbor-list real space, structure-factor reciprocal space), solves it by
+LU or conjugate gradients (``eeq_solver: auto | lu | cg``) and
+differentiates it implicitly, so memory is linear in the neighbor list and
+reciprocal set and gradients cost one operator application. ``regime: auto``
+(default) switches above 1500 / 6000 atoms. The two regimes agree to the
+reference code's own Ewald tolerance (about 1e-8 in the charges); forces,
+stress and force training are exact in both. ``cutoff_eeq`` sets the
+real-space range of the split: by default 16 Å, or the largest of the other
+cutoffs if that is larger (a longer range shrinks the reciprocal set as
+``r^-3`` and makes the EEQ operator about four times cheaper than at 12 Å,
+with charges unchanged to 2e-10 e; the neighbor list is then at most 16 Å,
+about 2.4 times the edges of a 12 Å list). ``regime: dense`` keeps the other
+cutoffs' radius, and an explicit value always wins; crystals need at least
+20 bohr. In float32 the EEQ solve of both regimes refines its solution
+with float64 residuals, so charges and forces are as accurate as the
+float32 matrix allows (dense regime, 1536 atoms: charges 4e-5 to 2e-6 e,
+forces 9e-6 to 1.5e-7 eV/Å against float64). The dense path factors the
+matrix once and differentiates through the residual rather than through
+the factor, so the refined solve is no slower than the plain one, and its
+first and second derivatives (forces, force-training gradients, Hessians)
+carry the same accuracy. The three-body term runs in
+recompute blocks of centers by default (``checkpoint_triplets: true``;
+``triplet_chunk`` sets the block size, by default from the free device
+memory) and the two-body term in recompute blocks of edges
+(``recompute_pairs: true``): memory bounded by one block at every derivative
+order (force training included), no ``(N, N)`` C6 matrix and no retained
+``(E, 23)`` polarizability products. The three-body blocks form the pair C6
+once per edge, visit each triangle of distinct atoms once, and take their
+first derivative in closed form; on 5184 water atoms (float32, A100) the
+full D4 step with forces and stress went from 3.7 s to 0.7 s at an 8 Å
+triple cutoff and from 7.6 s to 1.8 s at 10 Å. On an A100 a 5000-atom water cell with 12 / 8 A
+cutoffs takes 5 s for energy, forces and stress and 13 s for a force-loss
+training step in 21 GB, where the dense regime runs out of 80 GB at 1500
+atoms. Both are eager-only; TorchScript exports pin the dense paths.
+
+For molecular dynamics two more options pay. ``triplet_cache`` (on by
+default: a quarter of the free device memory; a number in GB, or 0 to switch
+it off) keeps each three-body block's triples from the forward to the
+backward pass, so they are enumerated once per step instead of twice; it is
+exact and costs 14 bytes per triple (0.5 GB for 5000 water atoms at an 8 Å
+triple cutoff). :meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse` (``xnn
+mdi --eeq-reuse``, ``XNNCalculator(..., eeq_reuse=True)``) carries the
+large-regime EEQ solve from one step to the next
+(:class:`~xnn.common.models.eeq.EEQReuse`), for a structure evaluated on its
+own (batches take the fresh path): a preconditioner formed once
+from an earlier step's matrix and warm-started conjugate gradients replace
+the assembly and factorization of every step, with results equal to the
+fresh solve to its tolerance (1e-9 relative residual in float64, 1e-6 in
+float32). On 5001
+water atoms (A100, float32, real 0.5 fs MD frames) MACE-LES + D4 at an 8 Å
+triple cutoff went from 0.83 s to 0.47 s per step with both and the 16 Å
+EEQ range. ``tools/d4_bench.py`` and ``tools/d4_md_step.py`` measure these
+settings on a water box or on a trajectory.
 
 The geometry-only predecessor **DFT-D3** (Grimme *et al.*, *J. Chem. Phys.*
 **132**, 154104, 2010; BJ damping from Grimme, Ehrlich & Goerigk, *J. Comput.

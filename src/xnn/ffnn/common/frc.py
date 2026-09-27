@@ -107,9 +107,7 @@ def parse_header(line: str) -> tuple[str, str, Optional[int]]:
 WILDCARD = "*"
 
 
-# ----------------------------------------------------------------------
 # versions
-# ----------------------------------------------------------------------
 def parse_version(text: str):
     """Comparable form of a version token such as ``2023.01.29`` or ``1.0``.
 
@@ -132,9 +130,7 @@ def parse_version(text: str):
     return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", text))
 
 
-# ----------------------------------------------------------------------
 # units
-# ----------------------------------------------------------------------
 # dimension vector: (energy, length, angle, charge, mass); scale converts to
 # the reference units kcal/mol, Angstrom, degree, e, Dalton
 _BASE_UNITS: dict[str, tuple[float, tuple[int, int, int, int, int]]] = {
@@ -297,9 +293,7 @@ def unit_factor(src: str, dst: str) -> float:
     return convert_units(1.0, src, dst)
 
 
-# ----------------------------------------------------------------------
 # section schema
-# ----------------------------------------------------------------------
 def _auto(tok: str):
     """Float if the token parses as one, else the token itself."""
     try:
@@ -534,9 +528,7 @@ def canonical_key(symmetry: str, atoms: Sequence[str]) -> tuple[tuple, bool]:
     return tuple(a), False
 
 
-# ----------------------------------------------------------------------
 # data classes
-# ----------------------------------------------------------------------
 @dataclass
 class Row:
     """One data row of a parameter section.
@@ -680,9 +672,7 @@ class Reference:
     source: str = ""
 
 
-# ----------------------------------------------------------------------
 # reading
-# ----------------------------------------------------------------------
 _RULE = re.compile(r"^!\s*-+[\s-]*$")
 
 
@@ -742,7 +732,7 @@ class FrcFile:
         self.missing_includes: list[str] = []
         self._read(self.path, top=True)
 
-    # -- construction from parts (for writers) --
+    # construction from parts (for writers)
     @classmethod
     def empty(cls, header: str = FRC_HEADER) -> "FrcFile":
         """A blank in-memory file to fill with sections and defines."""
@@ -763,7 +753,7 @@ class FrcFile:
         """Names of the variants this file defines, in file order."""
         return list(self.defines)
 
-    # -- parsing --
+    # parsing
     def _resolve_include(self, target: str, current: Path) -> Optional[Path]:
         """Locate an ``#include`` target, or ``None``."""
         if target.startswith("local:"):
@@ -1029,7 +1019,7 @@ class FrcFile:
             sec.modifiers.pop("units", None)
         return sec
 
-    # -- resolution --
+    # resolution
     def forcefield(self, name: Optional[str] = None,
                    version: Optional[str] = None) -> "ForceField":
         """Resolve a ``#define`` into a :class:`ForceField`.
@@ -1106,7 +1096,7 @@ class FrcFile:
                 return list(sec.columns)
         return []
 
-    # -- writing --
+    # writing
     def write(self, path: Union[str, Path]) -> Path:
         """Write the file in ``.frc`` syntax (see :func:`write_frc`)."""
         return write_frc(self, path)
@@ -1147,9 +1137,7 @@ def _latest_json(data: dict, want) -> dict:
     return out
 
 
-# ----------------------------------------------------------------------
 # resolved force field
-# ----------------------------------------------------------------------
 class ForceField:
     """One resolved force-field variant: merged sections plus lookups.
 
@@ -1199,7 +1187,7 @@ class ForceField:
         eq = self.sections.get("equivalence", {})
         self._equiv = {k[0]: r.values for k, r in eq.items()}
 
-    # -- introspection --
+    # introspection
     @property
     def ff_form(self) -> str:
         """The ``ff_form`` metadata entry (``"oplsaa"``, ``"reaxff"``, ...)."""
@@ -1244,7 +1232,7 @@ class ForceField:
                     out.append(ref)
         return out
 
-    # -- equivalences --
+    # equivalences
     def equivalent(self, atom_type: str, term: str) -> str:
         """The equivalent type used for ``term`` (``"nonbond"``, ``"bond"``,
         ``"angle"``, ``"torsion"``, ``"oop"``); the type itself if none."""
@@ -1253,7 +1241,7 @@ class ForceField:
         e = self._equiv.get(atom_type)
         return str(e[col]) if e and col in e else atom_type
 
-    # -- per-atom lookups --
+    # per-atom lookups
     def charge(self, atom_type: str) -> float:
         """Partial charge of an atom type (direct, then NonB equivalent, else 0)."""
         rows = self.sections.get("charges", {})
@@ -1294,7 +1282,7 @@ class ForceField:
         m = self.modifiers.get(kind, {}).get("combination")
         return m[0][0] if m else "geometric"
 
-    # -- bonded lookups (direct key, then equivalences, then wildcards) --
+    # bonded lookups (direct key, then equivalences, then wildcards)
     def _lookup(self, term: str, symmetry: str, atoms: Sequence[str],
                 patterns) -> Optional[tuple[str, tuple, Row]]:
         kinds = self.kinds_of(term)
@@ -1394,9 +1382,7 @@ def nonbond_to_sigma_eps(form: str, v1: float, v2: float,
     raise ValueError(f"unknown nonbond form {form!r}")
 
 
-# ----------------------------------------------------------------------
 # writing
-# ----------------------------------------------------------------------
 def _fmt(v) -> str:
     """Format a cell: floats in their shortest round-trippable form."""
     if isinstance(v, float):
@@ -1497,9 +1483,7 @@ def make_section(kind: str, label: str, key_columns: Sequence[str],
     return sec
 
 
-# ----------------------------------------------------------------------
 # registry of shipped files and the spec syntax
-# ----------------------------------------------------------------------
 _DEFINE_RE = re.compile(r"^#define\s+(\S+)", re.M)
 
 
