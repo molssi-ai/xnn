@@ -17,7 +17,7 @@ from xnn.common.data import structure_to_graph
 from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine, main
 from xnn.common.models import ForceStressOutput, build_model
 from xnn.common.models.d4 import D4Dispersion, DFTD4
-from xnn.common.models.eeq import EEQReuse
+from xnn.common.models.eeq import EEQReuse, lu_solve_implicit
 
 pytestmark = pytest.mark.usefixtures("_f64")
 
@@ -289,10 +289,43 @@ def test_float32_lu_forces_are_refined():
         assert torch.allclose(out[solver]["forces"].double(), ref["forces"], atol=2e-5, rtol=0)
 
 
+def test_lu_solve_implicit_derivatives_with_a_wrong_factor():
+    """The dense float32 solve differentiates through the residual of a fixed
+    factor. With a deliberately wrong factor (error e = |1 - R A| ~ 2e-2) the
+    value and the gradient must still be exact to O(e^4) and the Hessian to
+    O(e^2); a single correction would leave the Hessian out entirely."""
+    torch.manual_seed(0)
+    n = 40
+    m = torch.randn(n, n)
+    a0 = m @ m.t() + n * torch.eye(n)
+    p = torch.randn(n, n)
+    p = p + p.t()
+    b0, c, w, noise = (torch.randn(n, 1), torch.randn(n, 1), torch.randn(n, 1), torch.randn(n, n))
+
+    def value_grad_hess(solve):
+        theta = torch.tensor([0.3, -0.2], requires_grad=True)
+        x = solve(a0 + theta[0] * p, b0 + theta[1] * c)
+        g, = torch.autograd.grad((w * x).sum(), theta, create_graph=True)
+        h = torch.stack([torch.autograd.grad(g[i], theta, retain_graph=True)[0] for i in range(2)])
+        return x.detach(), g.detach(), h.detach()
+
+    def implicit(a, b):
+        lu, piv = torch.linalg.lu_factor(a.detach() + 0.1 * noise)
+        return lu_solve_implicit(lu, piv, a, b, 1)
+
+    exact = value_grad_hess(lambda a, b: torch.linalg.solve(a, b))
+    lu, piv = torch.linalg.lu_factor(a0 + 0.3 * p + 0.1 * noise)
+    err = torch.linalg.matrix_norm(torch.eye(n) - torch.linalg.lu_solve(lu, piv, a0 + 0.3 * p), 2)
+    assert 1e-2 < float(err) < 5e-2
+    got = value_grad_hess(implicit)
+    for mine, ref, tol in zip(got, exact, (1e-10, 1e-6, 1e-3)):
+        assert float((mine - ref).abs().max() / ref.abs().max()) < tol
+
+
 def test_float32_dense_charges_are_refined():
-    """The dense regime's LU solve is refined the same way: without it the
-    float32 charges of 375 atoms are off by 1-2e-5 e (forces 1-2e-6 eV/A)
-    against float64, with it by ~1e-6 e (forces ~1e-7 eV/A)."""
+    """The dense regime's solve is refined too: without it the float32 charges
+    of 375 atoms are off by 1-2e-5 e (forces 1-2e-6 eV/A) against float64,
+    with it by ~1e-6 e (forces ~1e-7 eV/A)."""
     pos, z, cell = _water_box(5)
 
     def run(dtype, periodic):
@@ -311,6 +344,63 @@ def test_float32_dense_charges_are_refined():
         ref, out = run(torch.float64, periodic), run(torch.float32, periodic)
         assert torch.allclose(out["eeq_charges"].double(), ref["eeq_charges"], atol=3e-6, rtol=0)
         assert torch.allclose(out["forces"].double(), ref["forces"], atol=5e-7, rtol=0)
+
+
+def test_float32_dense_force_training_gradients_match_float64():
+    """d(force loss)/d(theta) goes twice through the dense solve's graph; in
+    float32 it must match float64 to the refined accuracy (~1e-6 relative)."""
+    pos, z, cell = _water_box(4)
+
+    def grads(dtype, periodic):
+        prev = torch.get_default_dtype()
+        torch.set_default_dtype(dtype)
+        try:
+            s = {"pos": torch.tensor(pos, dtype=dtype), "atomic_numbers": torch.tensor(z)}
+            if periodic:
+                s.update(cell=torch.tensor(cell, dtype=dtype), pbc=torch.tensor([True] * 3))
+            m = D4Dispersion(regime="dense", trainable=True, **PER)
+            out = ForceStressOutput(m, compute_stress=periodic)(structure_to_graph(s, m.cutoff))
+            (out["forces"] ** 2).sum().backward()
+            return torch.stack([p.grad.double() for _, p in sorted(m.named_parameters())])
+        finally:
+            torch.set_default_dtype(prev)
+
+    for periodic in (False, True):
+        assert torch.allclose(grads(torch.float32, periodic), grads(torch.float64, periodic),
+                              rtol=1e-5, atol=1e-9)
+
+
+@pytest.mark.parametrize("periodic", [False, True])
+def test_float32_torchscript_export_keeps_the_refinement(periodic):
+    """A float32 export runs the refined dense solve: it matches eager float32
+    (same charges) and float64 to the refined accuracy."""
+    from xnn.common.deploy import TorchScriptPotential
+    pos, z, cell = _water_box(3)
+    cell_t = torch.tensor(cell, dtype=torch.float32) if periodic else None
+    pbc_t = torch.tensor([periodic] * 3)
+    ref = None
+    s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(z)}
+    if periodic:
+        s.update(cell=torch.tensor(cell), pbc=pbc_t)
+    m64 = D4Dispersion(regime="dense", **PER)
+    ref = ForceStressOutput(m64, compute_stress=periodic)(structure_to_graph(s, m64.cutoff))
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        m = D4Dispersion(regime="dense", **PER)
+        s32 = {"pos": torch.tensor(pos, dtype=torch.float32), "atomic_numbers": torch.tensor(z)}
+        if periodic:
+            s32.update(cell=cell_t, pbc=pbc_t)
+        eager = ForceStressOutput(m, compute_stress=periodic)(structure_to_graph(s32, m.cutoff))
+        scripted = torch.jit.script(TorchScriptPotential(m, m.cutoff).eval())
+        out = scripted(torch.tensor(pos, dtype=torch.float32), torch.tensor(z), cell_t, pbc_t)
+    finally:
+        torch.set_default_dtype(prev)
+    assert out["forces"].dtype == torch.float32
+    assert torch.equal(out["eeq_charges"].reshape(-1), eager["eeq_charges"].reshape(-1))
+    assert torch.allclose(out["forces"], eager["forces"], atol=1e-6, rtol=0)
+    assert torch.allclose(out["eeq_charges"].reshape(-1).double(), ref["eeq_charges"], atol=3e-6, rtol=0)
+    assert torch.allclose(out["forces"].double(), ref["forces"], atol=5e-7, rtol=0)
 
 
 def test_ase_calculator_eeq_reuse_opt_in():

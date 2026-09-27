@@ -180,6 +180,66 @@ class OptimConfig:
     huber_delta_stress: Optional[float] = None
 
 
+_RECORD_NOTES = ("dataset", "note")   # free-text annotations allowed in the record
+
+
+def normalize_subtracted_dispersion(spec: Any, model: ModelConfig) -> Optional[dict[str, Any]]:
+    """Validate and normalize :attr:`Config.subtracted_dispersion`.
+
+    A bare name (``"d4"``) or ``True`` becomes ``{"name": "d4"}``; ``None``
+    and ``False`` mean no record. The keys must be the constructor options of
+    the named term (:class:`~xnn.common.models.d4.DFTD4` /
+    :class:`~xnn.common.models.d3.DFTD3`) plus the annotations ``dataset``
+    and ``note``, so a misspelled option is caught here rather than dropped
+    silently at run time. A record contradicts a model that includes the
+    term itself (``model.extra["dispersion"]``): the labels cannot both have
+    had it subtracted and be fitted with it.
+
+    Parameters
+    ----------
+    spec : dict, str, bool or None
+        The record as given in the config.
+    model : ModelConfig
+        The model section, checked for a built-in dispersion term.
+
+    Returns
+    -------
+    dict or None
+        The normalized record, with ``name`` set.
+
+    Raises
+    ------
+    ValueError
+        For an unknown term name, an unknown option key, or a model that
+        already includes dispersion.
+    """
+    if spec is None or spec is False:
+        return None
+    if spec is True:
+        spec = {}
+    if isinstance(spec, str):
+        spec = {"name": spec}
+    if not isinstance(spec, dict):
+        raise ValueError(f"subtracted_dispersion must be a mapping or a name, got {spec!r}")
+    record = dict(spec)
+    name = str(record.get("name", "d4")).lower()
+    record["name"] = name
+    if name not in ("d3", "d4"):
+        raise ValueError(f"subtracted_dispersion: unknown term {name!r} (use 'd3' or 'd4')")
+    if (model.extra or {}).get("dispersion"):
+        raise ValueError(
+            "subtracted_dispersion records that the labels had dispersion removed, "
+            "but model.extra['dispersion'] includes it in the model; use one or the other")
+    from ..models.d3 import d3_options_from_extra
+    from ..models.d4 import d4_options_from_extra
+    known = (d4_options_from_extra if name == "d4" else d3_options_from_extra)
+    options = {k: v for k, v in record.items() if k != "name" and k not in _RECORD_NOTES}
+    unknown = sorted(set(options) - set(known(options)))
+    if unknown:
+        raise ValueError(f"subtracted_dispersion: unknown {name} option(s) {unknown}")
+    return record
+
+
 @dataclass
 class Config:
     """Top-level experiment configuration.
@@ -204,6 +264,18 @@ class Config:
         Random seed for reproducibility. MACE ``seed``. Defaults to ``1234``.
     output_dir : str
         Directory for run outputs (checkpoints, logs). Defaults to ``"runs/exp"``.
+    subtracted_dispersion : dict, optional
+        What was subtracted from the training labels before fitting, so that
+        a deployment adds it back: ``{"name": "d4", "s6": ..., "s8": ...,
+        "a1": ..., "a2": ..., "s9": ..., "alp": ...}`` with the exact
+        functional parameters used for the labels, plus the settings the
+        term should run with when added back (``cutoff_pair``,
+        ``switch_width_pair``, ``cutoff_triple``, ``switch_width_triple``,
+        ``cutoff_eeq``, ``regime``, ...), and optionally a ``dataset`` tag
+        or a ``note``. The record travels in the checkpoint, and
+        ``xnn mdi`` / ``xnn export`` add the term automatically. ``None``
+        (the default) records nothing. See
+        :func:`normalize_subtracted_dispersion` for the validation.
     """
 
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -212,12 +284,17 @@ class Config:
     device: str = "auto"               # auto / cpu / cuda / cuda:0 ...
     seed: int = 1234                   # MACE seed
     output_dir: str = "runs/exp"
+    subtracted_dispersion: Optional[dict[str, Any]] = None   # what deployment adds back
 
     def __post_init__(self):
-        """Synchronize the data cutoff with the model cutoff.
+        """Synchronize the data cutoff with the model cutoff and validate the
+        recorded subtraction.
 
         Overwrites ``data.cutoff`` with ``model.cutoff`` so the neighbor-list
-        radius and the model interaction radius stay in lockstep.
+        radius and the model interaction radius stay in lockstep, and
+        normalizes :attr:`subtracted_dispersion`.
         """
         # keep the neighbor-list cutoff and the model cutoff in lockstep
         self.data.cutoff = self.model.cutoff
+        self.subtracted_dispersion = normalize_subtracted_dispersion(
+            self.subtracted_dispersion, self.model)

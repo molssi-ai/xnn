@@ -53,7 +53,10 @@ warp of the radial coordinate used by the newer foundation models),
 ``pair_repulsion`` (False), which adds ZBL core repulsion,
 ``atomic_energies``, the per-species reference energies (E0s), and
 ``scale`` / ``shift`` (1, 0), the upstream *ScaleShiftMACE* affine on the
-per-atom interaction energy (``E_i = E0_i + scale * E_int,i + shift``).
+per-atom interaction energy (``E_i = E0_i + scale * E_int,i + shift``); a
+checkpoint written before this block existed carries no ``scale_shift``
+entries and loads with the values the model was built with, the identity by
+default.
 The density-normalized interaction generation is available as
 ``RealAgnosticDensity(Residual)InteractionBlock``.
 
@@ -607,11 +610,14 @@ cutoffs if that is larger (a longer range shrinks the reciprocal set as
 with charges unchanged to 2e-10 e; the neighbor list is then at most 16 Å,
 about 2.4 times the edges of a 12 Å list). ``regime: dense`` keeps the other
 cutoffs' radius, and an explicit value always wins; crystals need at least
-20 bohr. In float32 the EEQ solve of both regimes (the dense one and the
-large one's LU) refines its solution twice with float64 residuals, so its
-charges and forces are as accurate as the float32 matrix allows (dense
-regime, 1536 atoms: charges 4e-5 to 2e-6 e, forces 9e-6 to 1.5e-7 eV/Å
-against float64). The three-body term runs in
+20 bohr. In float32 the EEQ solve of both regimes refines its solution
+with float64 residuals, so charges and forces are as accurate as the
+float32 matrix allows (dense regime, 1536 atoms: charges 4e-5 to 2e-6 e,
+forces 9e-6 to 1.5e-7 eV/Å against float64). The dense path factors the
+matrix once and differentiates through the residual rather than through
+the factor, so the refined solve is no slower than the plain one, and its
+first and second derivatives (forces, force-training gradients, Hessians)
+carry the same accuracy. The three-body term runs in
 recompute blocks of centers by default (``checkpoint_triplets: true``;
 ``triplet_chunk`` sets the block size, by default from the free device
 memory) and the two-body term in recompute blocks of edges

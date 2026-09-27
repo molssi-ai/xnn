@@ -215,13 +215,17 @@ class MDIEngine:
             Floating-point dtype to serve in (``torch.float64`` for NVE energy
             conservation with a float32-trained model, ``torch.float32`` for
             speed). Defaults to the dtype of the checkpoint's weights.
-        dispersion : dict, str or None, optional
+        dispersion : dict, str, bool or None, optional
             Add a D3 / D4 dispersion correction to a checkpoint that was
             trained without one: ``"d4"`` / ``"d3"`` for the defaults or a
             mapping as in the config's ``extra["dispersion"]`` (see
-            :func:`~xnn.common.models.add_dispersion`). Refused when the
+            :func:`~xnn.common.models.add_dispersion`). A checkpoint whose
+            config records ``subtracted_dispersion`` (what the labels had
+            removed) gets that term added by default, ``None``; an explicit
+            mapping then overrides the recorded keys it names, and
+            ``False`` serves the checkpoint as is. Refused when the
             checkpoint already carries dispersion, which would count it
-            twice. Defaults to ``None`` (serve the checkpoint as is).
+            twice.
         total_charge : float, optional
             Net charge of the system in units of e, by default 0. A driver can
             change it at run time with ``>TOTCHARGE``.
@@ -247,8 +251,11 @@ class MDIEngine:
             includes a dispersion correction.
         """
         from ..models import add_dispersion, build_model, ForceStressOutput
+        from ..models.registry import recorded_dispersion, resolve_dispersion
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         cfg = ckpt["cfg"]
+        recorded = recorded_dispersion(cfg)
+        spec = resolve_dispersion(dispersion, recorded)
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.float64)
         try:
@@ -256,15 +263,26 @@ class MDIEngine:
             # ForceStressOutput has no parameters of its own; loading through
             # it matches the trainer's state-dict layout
             ForceStressOutput(base).load_state_dict(ckpt["model"])
-            if dispersion is not None:
+            if spec is not None:
                 if _has_dispersion(base):
                     raise ValueError(
                         f"{path} already includes a dispersion correction "
                         f"({cfg.model.name} with extra['dispersion']); adding "
                         f"another one would count dispersion twice")
-                base = add_dispersion(base, dispersion)
-                logger.info("added %s dispersion on top of the checkpoint",
-                            type(base).__name__)
+                base = add_dispersion(base, spec)
+                if recorded is None:
+                    logger.info("added %s dispersion on top of the checkpoint: %s",
+                                type(base).__name__, spec)
+                elif dispersion is None or dispersion is True:
+                    logger.info("adding back the dispersion recorded as subtracted "
+                                "from the training labels: %s", spec)
+                else:
+                    logger.info("adding back the dispersion recorded as subtracted "
+                                "from the training labels, with overrides %s: %s",
+                                dispersion, spec)
+            elif recorded is not None:
+                logger.warning("serving %s WITHOUT the dispersion recorded as subtracted "
+                               "from its training labels (%s)", path, recorded)
         finally:
             torch.set_default_dtype(prev_dtype)
         if dtype is None:
@@ -514,6 +532,10 @@ def main(argv=None) -> None:
         xnn mdi --ckpt best.pt --dispersion "{name: d4, cutoff_pair: 12.0}" \\
             --total-charge -1 -mdi "..."
 
+    A checkpoint whose config records ``subtracted_dispersion`` gets that
+    term added without any option (``--dispersion`` then overrides the keys
+    it names; ``--no-dispersion`` serves the checkpoint as is).
+
     For the MPI communication method, launch under ``mpirun`` alongside the
     driver (``mpi4py`` required)::
 
@@ -544,7 +566,12 @@ def main(argv=None) -> None:
                         "it: 'd4', 'd3', or a YAML mapping as in the config's "
                         "extra.dispersion, e.g. \"{name: d4, cutoff_pair: 12.0, "
                         "switch_width_pair: 2.0}\" (refused if the checkpoint "
-                        "already carries dispersion)")
+                        "already carries dispersion); a checkpoint that records "
+                        "subtracted_dispersion gets it added by default, and the "
+                        "mapping given here overrides the recorded keys it names")
+    p.add_argument("--no-dispersion", action="store_true",
+                   help="serve the checkpoint as is, ignoring a recorded "
+                        "subtracted_dispersion")
     p.add_argument("--total-charge", type=float, default=0.0,
                    help="net charge of the system in e (default 0); the driver "
                         "can change it with >TOTCHARGE")
@@ -563,9 +590,13 @@ def main(argv=None) -> None:
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
     dispersion = None
+    if args.dispersion and args.no_dispersion:
+        p.error("--dispersion and --no-dispersion exclude each other")
     if args.dispersion:
         import yaml
         dispersion = yaml.safe_load(args.dispersion)
+    elif args.no_dispersion:
+        dispersion = False
     engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
                                        dtype=dtype, dispersion=dispersion,
                                        total_charge=args.total_charge,

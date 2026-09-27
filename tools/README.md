@@ -7,6 +7,7 @@ Maintenance and benchmarking scripts that are not part of the package.
 | `build_d3_reference.py` | regenerate `xnn/common/models/d3_reference.npz` from the simple-dftd3 sources (both reference sets) |
 | `build_d4_reference.py` | regenerate `xnn/common/models/d4_reference.npz` from the dftd4 / multicharge / mctc-lib sources |
 | `d4_bench.py` | where the time goes in D4 (energy + forces + stress) on a periodic water box: neighbor list, forward / backward split, a table of the D4 stages with synchronized timers, optional CUDA kernel table; `--frames` for MD-like sequences with the EEQ reuse and the triplet cache |
+| `record_subtracted_dispersion.py` | add `subtracted_dispersion` (what the labels had removed, and the settings to add it back) to the config of a checkpoint trained before the field existed, so `xnn mdi` / `xnn export` add the term automatically |
 | `d4_md_step.py` | the full MD step through the MDI engine (a checkpoint plus D4 added at run time) on consecutive frames, comparing the D4 MD options: `cutoff_eeq` 16 A, the EEQ reuse, the triplet cache |
 
 Both D4 scripts change nothing in xnn: every tunable is a command-line option of

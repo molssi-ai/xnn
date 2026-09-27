@@ -115,30 +115,57 @@ def reciprocal_weights(grid: Tensor, cell: Tensor, alpha: float) -> tuple[Tensor
 
 
 def lu_solve_refined(lu: Tensor, pivots: Tensor, full: Tensor, rhs: Tensor,
-                     rounds64: int = 1) -> Tensor:
-    """``full^-1 @ rhs`` from the LU factor of ``full``, with iterative refinement.
+                     rounds: int) -> Tensor:
+    """``full^-1 @ rhs`` from the LU factor of ``full``, with ``rounds`` rounds
+    of iterative refinement.
 
     A float32 factor alone leaves up to ~1e-2 e in the raw EEQ solution of a
     few thousand atoms and, through the adjoint, ~1e-3 eV/A in the forces.
-    Each refinement round (residual of the current solution, in float64 when
-    the factor is float32, solved with the same factor and added back)
-    recovers about four digits, so two rounds in float32 bring the solution
-    to the accuracy of the float32 matrix itself. In float64 ``rounds64``
-    rounds are applied (``0`` keeps the plain LAPACK solution bit for bit).
-    Differentiable and scriptable: the gradient flows through the factor,
-    the solves and the residuals, so the adjoint is refined as well.
+    Each round (residual of the current solution, in float64 when the factor
+    is float32, solved with the same factor and added back) recovers about
+    four digits; one round brings the solution to the accuracy of the float32
+    matrix itself for a well-conditioned system, two for the Ewald-split
+    operator of the large regime. ``rounds=0`` is the plain LAPACK solution.
+    Scriptable; when ``full`` and ``rhs`` carry gradients, autograd runs
+    through the factor as well, which costs O(N^3) in the backward (see
+    :func:`lu_solve_implicit` for the O(N^2) form).
     """
     sol = torch.linalg.lu_solve(lu, pivots, rhs)
-    if sol.dtype == torch.float32:
+    if rounds > 0:
         full64 = full.double()
         rhs64 = rhs.double()
-        for _ in range(2):
+        for _ in range(rounds):
             resid = (rhs64 - full64 @ sol.double()).to(sol.dtype)
             sol = sol + torch.linalg.lu_solve(lu, pivots, resid)
-    else:
-        for _ in range(rounds64):
-            sol = sol + torch.linalg.lu_solve(lu, pivots, rhs - full @ sol)
     return sol
+
+
+def lu_solve_implicit(lu: Tensor, pivots: Tensor, full: Tensor, rhs: Tensor,
+                      rounds: int) -> Tensor:
+    """``full^-1 @ rhs`` with a fixed (detached) LU factor, refined, and
+    differentiable through the residual instead of through the factor.
+
+    ``lu, pivots`` is the factor of ``full.detach()``. It is applied as the
+    refined solve ``R`` of :func:`lu_solve_refined` (``rounds`` rounds) and is
+    never differentiated. The dependence on ``full`` and ``rhs`` enters through
+    the residual ``rhs - full @ x`` of a detached start ``x = R(rhs)``, which is
+    corrected twice: ``x <- x + R(rhs - full @ x)``. The value is the refined
+    solution; the first derivative is the implicit one, ``A^-1 (db - dA x)``,
+    with ``A^-1`` applied by the refined ``R``; and the second unrolled
+    correction makes the second derivatives (Hessians, force-training
+    gradients of trainable parameters) right as well. With ``e = 1 - R A``
+    the error of the factor, the value and both derivatives are accurate to
+    ``O(e^2)``. The backward costs two adjoint solves per correction,
+    O(N^2), where autograd through ``lu_factor`` costs O(N^3). Scriptable.
+    """
+    full_d = full.detach()
+    x = lu_solve_refined(lu, pivots, full_d, rhs.detach(), rounds)
+    full64 = full.double()
+    rhs64 = rhs.double()
+    for _ in range(2):
+        resid = (rhs64 - full64 @ x.double()).to(rhs.dtype)
+        x = x + lu_solve_refined(lu, pivots, full_d, resid, rounds)
+    return x
 
 
 class EEQSystem:
@@ -289,7 +316,8 @@ class EEQSystem:
                                     torch.cat([ones.t(), zero], dim=1)], dim=0)
             self._lu = torch.linalg.lu_factor(self._full)
         rhs = torch.cat([b_top, b_bot.reshape(1)]).unsqueeze(1)
-        sol = lu_solve_refined(self._lu[0], self._lu[1], self._full, rhs).squeeze(1)
+        rounds = 2 if rhs.dtype == torch.float32 else 1
+        sol = lu_solve_refined(self._lu[0], self._lu[1], self._full, rhs, rounds).squeeze(1)
         return sol[:n], sol[n]
 
     def _solve_cg(self, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:

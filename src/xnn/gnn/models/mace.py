@@ -36,6 +36,7 @@ names -- follow upstream so trained ``mace-torch`` weights transplant directly.
 # class-level attribute annotations that TorchScript needs to resolve (e.g.
 # `widths: List[int]` on _ReshapeIrreps), breaking `torch.jit.script`.
 import itertools
+import logging
 from typing import Final, List, Optional, Tuple, Union
 
 import torch
@@ -824,6 +825,20 @@ class _ScaleShift(nn.Module):
         dtype = torch.get_default_dtype()
         self.register_buffer("scale", torch.tensor(float(scale), dtype=dtype))
         self.register_buffer("shift", torch.tensor(float(shift), dtype=dtype))
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # checkpoints written before this block existed carry no
+        # ``scale``/``shift``; they were trained with the identity, so a
+        # missing pair loads as the values the module was built with
+        # instead of failing a strict load
+        missing = [n for n in ("scale", "shift") if prefix + n not in state_dict]
+        for name in missing:
+            state_dict[prefix + name] = getattr(self, name).detach().clone()
+        if missing:
+            logging.getLogger(__name__).info(
+                "checkpoint has no %s%s: keeping scale=%g, shift=%g", prefix,
+                "/".join(missing), float(self.scale), float(self.shift))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply ``scale * x + shift`` elementwise.

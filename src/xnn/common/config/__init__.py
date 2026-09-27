@@ -1,4 +1,4 @@
-from .schema import Config, ModelConfig, DataConfig, OptimConfig
+from .schema import Config, ModelConfig, DataConfig, OptimConfig, normalize_subtracted_dispersion
 from .loaders import (
     from_dict, from_yaml, from_argparse, from_hydra, apply_overrides,
 )

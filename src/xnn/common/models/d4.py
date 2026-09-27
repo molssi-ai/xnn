@@ -105,7 +105,7 @@ from .dispersion import (
     three_body_energy,
     three_body_energy_chunked,
 )
-from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_refined,
+from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit,
                   reciprocal_vectors)
 from .ops import cell_volume, scatter_sum
 from .registry import register_model
@@ -659,11 +659,17 @@ class DFTD4(nn.Module):
         full = torch.cat([torch.cat([amat, ones], dim=1),
                           torch.cat([ones.t(), zero], dim=1)], dim=0)
         rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)]).unsqueeze(1)
-        # LU with iterative refinement in float32 (the plain LAPACK solution
-        # in float64, which keeps this path bit-exact against dftd4)
-        lu, pivots = torch.linalg.lu_factor(full)
-        sol = lu_solve_refined(lu, pivots, full, rhs, rounds64=0).squeeze(1)
-        return sol[:n]
+        if pos.dtype == torch.float32:
+            # one LU factor of the detached matrix, one float64-residual
+            # refinement round, and the derivatives through the residual:
+            # O(N^2) backward, charges and forces at the float32 matrix's own
+            # accuracy (~2e-6 e, ~2e-7 eV/A at a few thousand atoms)
+            lu, pivots = torch.linalg.lu_factor(full.detach())
+            sol = lu_solve_implicit(lu, pivots, full, rhs, 1)
+        else:
+            # the plain LAPACK solution, bit-exact against dftd4
+            sol = torch.linalg.solve(full, rhs)
+        return sol[:n, 0]
 
     def select_regime(self, n_atoms: int, periodic: bool) -> str:
         """Resolve ``"auto"`` to ``"dense"`` or ``"large"`` for one structure."""

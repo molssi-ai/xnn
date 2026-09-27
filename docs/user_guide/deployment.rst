@@ -126,6 +126,59 @@ archive, so a consumer can introspect the artifact without xnn::
    fine for molecular and modest periodic systems; for large cells, supply the
    engine's own neighbor list through ``forward_lammps``.
 
+Route B: labels with the dispersion removed
+-------------------------------------------
+
+A model trained on labels from which a dispersion correction was subtracted
+(``E_ref - E_D4``, so the network learns only the rest) must have that term
+added back wherever it is served. The training config records what was
+subtracted, and the record travels in the checkpoint::
+
+   model:
+     name: mace
+     ...
+   subtracted_dispersion:
+     name: d4                     # the exact functional parameters of the labels
+     s6: 1.0
+     s8: 1.20065498
+     a1: 0.40085597
+     a2: 5.02928789
+     s9: 1.0
+     alp: 16.0
+     cutoff_pair: 12.0            # and the settings to add it back in a periodic run
+     switch_width_pair: 2.0
+     cutoff_triple: 10.0
+     switch_width_triple: 1.0
+     cutoff_eeq: 16.0
+     regime: auto
+     dataset: water_clusters_minusD4
+
+The keys are the constructor options of :class:`~xnn.common.models.d4.DFTD4`
+(or ``DFTD3``) plus the annotations ``dataset`` and ``note``; a misspelled
+option or a model that already includes the term (``model.extra.dispersion``)
+is refused when the config is built. ``xnn mdi`` and ``xnn export`` then add
+the recorded term without any option and log that they did, so a route-B
+checkpoint is correct whichever launcher starts it. ``--dispersion`` on
+``xnn mdi`` overrides the recorded keys it names (``"{cutoff_triple: 8.0}"``
+keeps the recorded functional parameters), a different term name is an
+error, and ``--no-dispersion`` serves or exports the checkpoint as is. The
+same rules apply to :meth:`MDIEngine.from_checkpoint(path, dispersion=...)
+<xnn.common.deploy.mdi_engine.MDIEngine.from_checkpoint>`.
+
+The values above are the settings recommended for periodic production runs
+(the labels themselves are usually computed on clusters, uncut and
+unswitched): a 12 Å pair cutoff with a 2 Å switch, a 10 Å three-body cutoff
+with a 1 Å switch (8 Å leaves about 24 atm of pressure error against 12 Å,
+10 Å about 7 atm, at little cost for large systems), the 16 Å default EEQ
+range and the automatic regime. Precision and the EEQ reuse remain run
+options of the engine (``--dtype``, ``--eeq-reuse``): float32 with the reuse
+is as accurate as float64 (~1e-6 eV/Å) and the fastest.
+
+For a checkpoint trained before the field existed,
+``tools/record_subtracted_dispersion.py best.pt --spec "{name: d4, ...}"``
+adds the record in place (keeping a ``.bak`` copy); checkpoints without a
+record serve as they always did.
+
 The older :func:`~xnn.common.deploy.lammps.export_to_lammps` remains for the
 short-range-only pair-style wrapper. A model is exportable when it provides
 the scriptable core
