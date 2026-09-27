@@ -331,6 +331,17 @@ class DFTD4(nn.Module):
         Exact (the backward pass uses the same triples); 14 bytes per triple,
         e.g. 0.5 GB for 5000 water atoms at an 8 A triple cutoff. Eager only.
 
+    tail_correction : bool, optional
+        Add, for periodic structures, the homogeneous long-range correction of
+        the two-body term: the energy the pair cutoff and its switching window
+        remove, ``E_tail = (2 pi / V) sum_ij int (1 - sw(r)) u_ij(r) r^2 dr``
+        over all ordered atom pairs with a uniform distribution beyond the
+        window (the analog of LAMMPS ``pair_modify tail yes``). It uses the
+        structure's own (charge- and CN-dependent) ``C6`` and the BJ damping,
+        and is differentiable, so its forces (from the ``C6``) and its stress
+        (``-E_tail / V`` on the diagonal) are consistent with the energy. By
+        default ``False``. Molecular structures are unaffected.
+
     Notes
     -----
     For molecular dynamics and geometry optimization,
@@ -377,6 +388,7 @@ class DFTD4(nn.Module):
     recompute_pairs: bool
     triplet_chunk: Optional[int]
     triplet_cache: Optional[float]
+    tail_correction: bool
     auto_large_periodic: int
     auto_large_molecular: int
 
@@ -394,7 +406,8 @@ class DFTD4(nn.Module):
                  cutoff_eeq: Optional[float] = None, eeq_solver: str = "auto",
                  checkpoint_triplets: bool = True, recompute_pairs: bool = True,
                  triplet_chunk: Optional[int] = None,
-                 triplet_cache: Optional[float] = None):
+                 triplet_cache: Optional[float] = None,
+                 tail_correction: bool = False):
         super().__init__()
         regime = str(regime).lower()
         if regime not in REGIMES:
@@ -436,6 +449,13 @@ class DFTD4(nn.Module):
         self.cutoff = max(base_cutoff, self.cutoff_eeq)
         self.switch_width_pair = float(switch_width_pair)
         self.switch_width_triple = float(switch_width_triple)
+        self.tail_correction = bool(tail_correction)
+        # Gauss-Legendre rule on [-1, 1] for the tail integrals
+        gl_x, gl_w = np.polynomial.legendre.leggauss(48)
+        self.register_buffer("gl_x", torch.tensor(gl_x, dtype=torch.get_default_dtype()),
+                             persistent=False)
+        self.register_buffer("gl_w", torch.tensor(gl_w, dtype=torch.get_default_dtype()),
+                             persistent=False)
 
         dt = torch.get_default_dtype()
         for name, value in [("s6", s6), ("s8", s8), ("a1", a1), ("a2", a2),
@@ -845,6 +865,73 @@ class DFTD4(nn.Module):
         e_pair = -0.5 * c6 * sw * (self.s6 * t6 + self.s8 * rr * t8)
         return scatter_sum(e_pair, dst, n_atoms)
 
+    def tail_integrals(self) -> Tensor:
+        """Radial integrals of the two-body term lost to the pair cutoff.
+
+        ``J_AB = -int_{r_s}^inf (1 - sw(r)) [s6 / (r^6 + R0^6) + s8 (C8/C6) /
+        (r^8 + R0^8)] r^2 dr`` per element pair, in bohr^-3 (multiply by a
+        ``C6`` in hartree bohr^6), with ``r_s`` the start of the switching
+        window (the cutoff itself for a sharp one). The window is integrated
+        with Gauss-Legendre in ``r``, the region beyond the cutoff with
+        Gauss-Legendre in ``x = 1 / r``.
+
+        Returns
+        -------
+        Tensor
+            Shape ``(Z_max + 1, Z_max + 1)``.
+        """
+        rc = self.cutoff_pair / self.bohr
+        width = min(self.switch_width_pair, self.cutoff_pair) / self.bohr
+        rr = 3.0 * self.r4r2[:, None] * self.r4r2[None, :]           # C8 / C6
+        r0 = self.a1 * torch.sqrt(rr) + self.a2
+        r06 = (r0 ** 6)[:, :, None]
+        r08 = (r0 ** 8)[:, :, None]
+        # beyond the cutoff, x = 1/r in (0, 1/rc]: r^2 dr / (r^n + R^n) ->
+        # x^(n-4) / (1 + R^n x^n) dx
+        x = (self.gl_x + 1.0) / (2.0 * rc)
+        wx = self.gl_w / (2.0 * rc)
+        outer = (self.s6 * x ** 2 / (1.0 + r06 * x ** 6)
+                 + self.s8 * rr[:, :, None] * x ** 4 / (1.0 + r08 * x ** 8))
+        total = (outer * wx).sum(-1)
+        if width > 0.0:
+            r = rc - width + width * (self.gl_x + 1.0) / 2.0
+            wr = self.gl_w * width / 2.0
+            miss = (1.0 - switching_function(r, rc, width)) * r * r
+            inner = (self.s6 / (r ** 6 + r06) + self.s8 * rr[:, :, None] / (r ** 8 + r08))
+            total = total + (inner * miss * wr).sum(-1)
+        return -total
+
+    def tail_energy(self, z: Tensor, alpha_iw: Tensor, cell: Tensor) -> Tensor:
+        """Per-atom homogeneous tail correction of one periodic structure (hartree).
+
+        ``E_tail = (2 pi / V) sum_AB J_AB S_AB`` with ``S_AB`` the sum of
+        ``C6`` over the ordered pairs of atoms of elements ``A`` and ``B``,
+        which the Casimir-Polder form reduces to per-element sums of the
+        dynamic polarizabilities. Each atom carries its pairs with every
+        other atom.
+
+        Parameters
+        ----------
+        z : Tensor
+            Atomic numbers, shape ``(N,)``.
+        alpha_iw : Tensor
+            Dynamic polarizabilities, shape ``(N, 23)``.
+        cell : Tensor
+            Lattice vectors as rows in bohr, shape ``(3, 3)``.
+
+        Returns
+        -------
+        Tensor
+            Shape ``(N,)``.
+        """
+        vol = torch.det(cell).abs()
+        n_el = self.r4r2.shape[0]
+        per_element = torch.zeros((n_el, alpha_iw.shape[1]), dtype=alpha_iw.dtype,
+                                  device=alpha_iw.device).index_add(0, z, alpha_iw)
+        field = self.tail_integrals() @ per_element                    # (Z, 23)
+        # (2 pi / V) (3 / pi) sum_w alpha_i(w) field(z_i, w)
+        return (6.0 / vol) * (alpha_iw * self.cp_weights * field[z]).sum(-1)
+
     def pair_radius_table(self) -> Tensor:
         """BJ critical radii ``a1 sqrt(3 Q_A Q_B) + a2`` for all element pairs, bohr."""
         return self.a1 * torch.sqrt(3.0 * self.r4r2[:, None] * self.r4r2[None, :]) + self.a2
@@ -936,6 +1023,15 @@ class DFTD4(nn.Module):
             e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
                                       alpha_iw, n_atoms)
         node_energy = e2
+        e_tail = torch.zeros_like(e2)
+        if self.tail_correction:
+            for b in range(num_graphs):
+                cell_b = cell[b] / self.bohr
+                if bool(pbc[b].any()) and bool(cell_b.abs().sum() > 1e-8):
+                    members = torch.nonzero(batch == b).squeeze(1)
+                    e_tail = e_tail.index_add(
+                        0, members, self.tail_energy(z[members], alpha_iw[members], cell_b))
+            node_energy = node_energy + e_tail
         e3 = torch.zeros_like(e2)
         if bool(self.s9 != 0.0):
             # the ATM term uses C6 coefficients of the *neutral* atoms
@@ -960,6 +1056,7 @@ class DFTD4(nn.Module):
             "node_energy": node_energy * self.hartree,
             "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
             "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_tail": scatter_sum(e_tail, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn_d4,
             "charges": q,
             "polarizabilities": alpha_iw[:, 0],
@@ -1038,7 +1135,7 @@ _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",
             "cutoff_pair", "cutoff_triple", "cutoff_cn", "cutoff_eeq_cn",
             "switch_width_pair", "switch_width_triple", "trainable",
             "regime", "cutoff_eeq", "eeq_solver", "checkpoint_triplets", "recompute_pairs",
-            "triplet_chunk", "triplet_cache")
+            "triplet_chunk", "triplet_cache", "tail_correction")
 
 
 def enable_eeq_reuse(model, enabled: bool = True, **options) -> int:
