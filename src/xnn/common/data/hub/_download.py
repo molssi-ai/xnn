@@ -171,7 +171,13 @@ def extract_archive(path: Path, dest_dir: Path) -> Path:
             z.extractall(dest_dir)
     elif tarfile.is_tarfile(path):
         with tarfile.open(path) as t:
-            t.extractall(dest_dir)
+            # the "data" filter refuses absolute paths, links out of
+            # dest_dir and device files (Python >= 3.12, backported to
+            # 3.8.17+/3.10.12+/3.11.4+)
+            if hasattr(tarfile, "data_filter"):
+                t.extractall(dest_dir, filter="data")
+            else:
+                t.extractall(dest_dir)
     else:
         raise ValueError(f"unrecognized archive format: {path}")
     return dest_dir

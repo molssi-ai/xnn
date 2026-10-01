@@ -1120,6 +1120,12 @@ class MACE(EquivariantGNN):
         upstream ``ScaleShiftMACE`` convention. The defaults (1, 0) recover
         the plain MACE energy expression, so one class covers both upstream
         variants.
+    rbf_prefactor : float or None, optional
+        Normalization of the Bessel radial basis. ``None`` (default) uses the
+        MACE value ``sqrt(2 / cutoff)``. A converted foundation checkpoint
+        passes its stored value, which a float32 checkpoint has quantized,
+        so a model rebuilt from its config reproduces the conversion
+        exactly.
 
     Raises
     ------
@@ -1155,6 +1161,7 @@ class MACE(EquivariantGNN):
         atomic_energies: Optional[Tensor] = None,
         scale: float = 1.0,
         shift: float = 0.0,
+        rbf_prefactor: Optional[float] = None,
     ):
         if num_interactions < 0:
             raise ValueError("num_interactions (T) must be >= 0")
@@ -1171,6 +1178,8 @@ class MACE(EquivariantGNN):
             self.set_atomic_energies(atomic_energies)
         self.distance_transform = DISTANCE_TRANSFORMS[distance_transform]()
         self.scale_shift = _ScaleShift(scale, shift)
+        if rbf_prefactor is not None and radial_type == "bessel":
+            self.edge_feat.rbf.norm = float(rbf_prefactor)
 
         num_elements = len(self.species)
         hid = (o3.Irreps(hidden_irreps) if hidden_irreps is not None
@@ -1416,10 +1425,11 @@ class MACE(EquivariantGNN):
             atomic_energies=atomic_energies,
             scale=float(extra.get("scale", 1.0)),
             shift=float(extra.get("shift", 0.0)),
+            rbf_prefactor=extra.get("rbf_prefactor"),
         )
 
     @classmethod
-    def from_foundation(cls, source, head=None, dtype=None) -> "MACE":
+    def from_foundation(cls, source, head=None, dtype=None, cache_dir=None) -> "MACE":
         """Load a pretrained MACE foundation model into an xnn :class:`MACE`.
 
         Downloads (and caches) the requested checkpoint if needed, unpickles
@@ -1446,6 +1456,11 @@ class MACE(EquivariantGNN):
         dtype : torch.dtype or str, optional
             Final dtype of the converted model; ``None`` keeps the
             checkpoint's (float64 for most foundation models).
+        cache_dir : str or Path, optional
+            Model hub cache directory. A registered alias, URL or DOI is
+            converted once and cached there as a portable xnn model (see
+            :func:`xnn.common.models.from_pretrained`), so later loads need
+            neither the network nor ``mace-torch``.
 
         Returns
         -------
@@ -1453,4 +1468,4 @@ class MACE(EquivariantGNN):
             The converted model, ready for evaluation or fine-tuning.
         """
         from .mace_foundation import foundation_to_xnn
-        return foundation_to_xnn(source, head=head, dtype=dtype)
+        return foundation_to_xnn(source, head=head, dtype=dtype, cache_dir=cache_dir)

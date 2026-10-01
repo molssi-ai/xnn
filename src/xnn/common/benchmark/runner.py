@@ -118,7 +118,10 @@ class Benchmark:
     def _load_model(self, entry: ModelEntry):
         """Build the model and load the entry's checkpoint weights.
 
-        The architecture is taken from the checkpoint itself when it embeds a
+        The ``checkpoint`` is anything the model hub resolves (a trainer
+        ``best.pt``, a portable model directory, a registered model name, URL
+        or Zenodo DOI; see :func:`~xnn.common.models.hub.fetch_model`). The
+        architecture is taken from the checkpoint itself when it embeds a
         config (checkpoints written by :meth:`~xnn.common.train.Trainer.save`
         carry their :class:`Config`), so an entry needs only a ``checkpoint``;
         the entry's own ``model`` section is used only for checkpoints that do
@@ -150,16 +153,15 @@ class Benchmark:
                 f"[{entry.label}] no 'checkpoint' given; benchmarking scores "
                 f"pre-trained models, so every entry needs a checkpoint path "
                 f"(train one first with 'xnn train').")
-        if not os.path.exists(entry.checkpoint):
+        from ..models.hub import fetch_model, load_checkpoint
+        try:
+            ck = load_checkpoint(fetch_model(entry.checkpoint))
+        except FileNotFoundError as e:
             raise FileNotFoundError(
-                f"[{entry.label}] checkpoint not found: {entry.checkpoint}")
-
-        state = torch.load(entry.checkpoint, map_location=self.device,
-                           weights_only=False)
+                f"[{entry.label}] checkpoint not found: {entry.checkpoint} ({e})") from e
         # Prefer the architecture embedded in the checkpoint (xnn-trained
         # checkpoints store their Config), so entries need only a checkpoint.
-        stored = state.get("cfg") if isinstance(state, dict) else None
-        arch = dataclasses.asdict(stored.model) if stored is not None else None
+        arch = dataclasses.asdict(ck.config.model) if ck.config is not None else None
         cfg = entry.to_config(self.cfg, arch)
 
         model = ForceStressOutput(
@@ -167,9 +169,7 @@ class Benchmark:
             compute_forces="forces" in self.cfg.targets,
             compute_stress="stress" in self.cfg.targets,
         ).to(self.device)
-        sd = state["model"] if isinstance(state, dict) and "model" in state \
-            else state
-        model.load_state_dict(sd)
+        model.load_state_dict(ck.state_dict)
         return model, cfg
 
     # scoring

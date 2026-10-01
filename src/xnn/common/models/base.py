@@ -88,6 +88,41 @@ class InteratomicPotential(nn.Module):
         """
         raise NotImplementedError
 
+    @classmethod
+    def from_pretrained(cls, source, **kwargs) -> "InteratomicPotential":
+        """Load a pre-trained model of this class.
+
+        A thin front of :func:`xnn.common.models.hub.from_pretrained` that
+        returns the bare potential (no force wrapper) and checks its class,
+        e.g. ``MACE.from_pretrained("mace-off23-small")``. Dispersion and
+        long-range wrappers built from the config are kept around it.
+
+        Parameters
+        ----------
+        source : str or pathlib.Path
+            Registry name, local checkpoint or model directory, URL or
+            Zenodo DOI.
+        **kwargs
+            Options of :func:`~xnn.common.models.hub.load_pretrained`.
+
+        Returns
+        -------
+        InteratomicPotential
+            The model, in eval mode.
+
+        Raises
+        ------
+        TypeError
+            If the loaded model is not an instance of this class.
+        """
+        from .hub import from_pretrained
+        from .hub.checkpoint import core_model
+        model = from_pretrained(source, wrap=False, **kwargs)
+        if not isinstance(model, cls) and not isinstance(core_model(model), cls):
+            raise TypeError(f"{source!r} holds a {type(core_model(model)).__name__}, "
+                            f"not a {cls.__name__}")
+        return model
+
     def aggregate_energy(self, node_energy: torch.Tensor,
                          data: AtomicGraph) -> torch.Tensor:
         """Sum per-atom energies into per-structure energies (locality).
