@@ -41,6 +41,7 @@ training data). The engine converts at the boundary in both directions.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from typing import Any
