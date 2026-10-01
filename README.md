@@ -137,6 +137,23 @@ spellings (MACE-CLI `r_max`/`num_radial_basis`/`atomic_numbers`/`E0s`, NequIP
 spelling wins if both are given. Extend it for another code with
 `register_key_translation("name", {...})`.
 
+## Pre-trained models
+
+```python
+from xnn.common.models import from_pretrained, list_models
+
+list_models()                                         # MACE foundation models, xnn-trained models, cache
+model = from_pretrained("mace-off23-small")           # downloaded, converted once, cached
+model = from_pretrained("doi:10.5281/zenodo.18957344",
+                        filename="mace_csfapbbri_al_5_1_stagetwo.model")
+model = from_pretrained("runs/exp/best.pt", cache_dir="/scratch/models")
+```
+
+Cached models are portable directories (`card.json`, `config.yaml`,
+`model.pt`, no pickles, no absolute paths): copy them to another machine and
+load them there by name. `save_pretrained` / `xnn models pack` write your own
+models in the same layout for sharing on Zenodo.
+
 ## Deployment
 
 ```python
@@ -190,7 +207,7 @@ single run; new metrics and output formats plug in via `@register_metric` and
 | HDNNP | dnn | radial symmetry functions (G2) | Under development |
 | ANI | dnn | AEV (radial + angular symmetry functions) | Complete: Training, Evaluation, Deployment (ASE only) |
 | NequIP | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
-| MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE); loads the pretrained MACE-MP / MACE-OFF foundation models via `MACE.from_foundation()` |
+| MACE | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE); loads the pretrained MACE-MP / MACE-OFF foundation models via `from_pretrained()` (or `MACE.from_foundation()`) |
 | CACE | gnn | Cartesian monomial edges | Complete: Training, Evaluation, Deployment (ASE only) |
 | Allegro | gnn | spherical-harmonic edges | Complete: Training, Evaluation, Deployment (TorchScript, LAMMPS, ASE) |
 | BAMBOO | hybrid | exp-normal rbf + multi-head edge attention | Complete: Training, Evaluation, Deployment (ASE only) |
@@ -312,6 +329,10 @@ deep/descriptor, `ffnn` force-field, `hybrid` mixed):
     every training notebook (`load_dataset("argon_md")`, `load_dataset("rmd17",
     ...)`, `load_dataset("ani1", ...)`, `load_dataset("lode_dimers",
     subset="bio_scan")`).
+  + `models/pretrained_models_tutorial.ipynb` covers the model hub:
+    `from_pretrained("mace-off23-small")`, multi-head and Zenodo-hosted models,
+    the cache layout and its portability, and sharing your own models
+    (`save_pretrained`, `xnn models pack`, `list_models`).
   + `deploy/mdi_argon_md.ipynb` and `deploy/mdi_argon_lammps.ipynb` drive a
     trained model from an external MD code through the MDI engine.
   + `examples/quickstart.py` is a minimal train/predict script on toy data.
