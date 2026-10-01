@@ -27,7 +27,7 @@ of xnn are
   a wide range of models on a variety of datasets
 
 - upstream benchmark datasets download and preprocess in one line with a
-  HuggingFace-style ``load_dataset()``, ready to train
+  ``load_dataset()`` one-liner, ready to train
 
 - the library is accompanied by extensive documentation, tutorials, examples and
   a complete hands-on course focusing on developing and training equivariant

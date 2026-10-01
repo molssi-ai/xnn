@@ -4,8 +4,8 @@
 Load a Pre-trained Model
 *****************************
 
-The model hub loads any pre-trained potential in one line,
-HuggingFace ``from_pretrained()``-style: the MACE foundation models,
+The model hub loads any pre-trained potential with a one-line
+``from_pretrained()`` call: the MACE foundation models,
 models trained with xnn, models published on Zenodo, and your own
 checkpoints all go through the same call, the same registry and the same
 cache. See ``examples/models/pretrained_models_tutorial.ipynb`` for a
