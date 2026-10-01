@@ -14,6 +14,7 @@ see :ref:`background`, and for complete reference information see the
    :titlesonly:
 
    load_datasets
+   pretrained_models
    train_a_model
    benchmark_models
    use_upstream_configs

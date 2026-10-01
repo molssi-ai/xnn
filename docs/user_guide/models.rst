@@ -25,6 +25,28 @@ frontend:
 Each model can also be constructed directly; the constructor arguments below
 double as the keys accepted in ``model.extra`` of a config file.
 
+Pre-trained models
+==================
+
+:func:`~xnn.common.models.hub.from_pretrained` loads a pre-trained model by
+name, path, URL or Zenodo DOI, and :func:`~xnn.common.models.hub.list_models`
+lists what is available: the registry shipped with xnn (the MACE foundation
+models and xnn-trained models alike) plus everything in the model cache.
+
+.. code-block:: python
+
+   from xnn.common.models import from_pretrained, list_models
+
+   list_models()                                   # ['mace-matpes-pbe-0-medium', ..., 'xnn-mace-argon']
+   model = from_pretrained("mace-off23-small", cache_dir="/scratch/models")
+   bare = MACE.from_pretrained("mace-off23-small")  # the potential itself, class-checked
+
+Each cached model is a portable directory (``card.json``, ``config.yaml``,
+``model.pt``) written by :func:`~xnn.common.models.hub.save_pretrained`;
+foreign formats are converted into it once. The model card
+(:class:`~xnn.common.models.hub.ModelCard`) records the source, license,
+citation, cutoff, elements and heads. See :ref:`howto-pretrained-models`.
+
 .. note::
 
    The GNN models (NequIP, MACE, Allegro, CACE) register themselves when
@@ -60,18 +82,22 @@ default.
 The density-normalized interaction generation is available as
 ``RealAgnosticDensity(Residual)InteractionBlock``.
 
-**Pretrained foundation models.** ``MACE.from_foundation()`` loads any of
-the published MACE-MP / MACE-OFF checkpoints (MP-0, 0b/0b2/0b3, MPA-0,
-OMAT-0, MATPES, the multi-head MH-0, OFF23; see
-:data:`xnn.gnn.models.mace_foundation.FOUNDATION_MODELS` for the aliases
-and licenses) and converts it weight-for-weight into this implementation,
+**Pretrained foundation models.** The published MACE-MP / MACE-OFF
+checkpoints (MP-0, 0b/0b2/0b3, MPA-0, OMAT-0, MATPES, the multi-head MH-0,
+OFF23) are entries of the model hub registry in the ``mace-torch`` format:
+``from_pretrained("mace-mp-0-medium")``, or equivalently
+``MACE.from_foundation()``, downloads one, converts it weight-for-weight into
+this implementation and caches the converted model, so later loads need
+neither the network nor ``mace-torch``
+(:data:`xnn.gnn.models.mace_foundation.FOUNDATION_MODELS` lists the aliases
+and licenses). The conversion is
 verified to float64 round-off against ``mace-torch``
 (:ref:`fidelity`). Multi-head checkpoints are sliced to a chosen ``head``.
 In a config, ``foundation: mace-off23-small`` (with ``cutoff`` set to the
 checkpoint's ``r_max``) builds the pretrained model instead of a fresh
 one, so the standard :class:`~xnn.common.train.Trainer` fine-tunes it
-directly. Loading requires the ``mace-torch`` package to unpickle the
-checkpoint; the converted model does not. The one unsupported checkpoint
+directly. The first conversion requires the ``mace-torch`` package to
+unpickle the checkpoint; the cached converted model does not. The one unsupported checkpoint
 is ``mace-mh-1`` (a next-generation architecture); the converter raises
 ``NotImplementedError`` naming the unsupported piece.
 
