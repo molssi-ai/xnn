@@ -6,6 +6,8 @@ from .les import EwaldSummation, LatentEwald
 from .dispersion import DispersionCorrection
 from .d4 import DFTD4, D4Dispersion, c6_matrix
 from .d3 import DFTD3, D3Dispersion
+from .hub import (from_pretrained, load_pretrained, save_pretrained, list_models,
+                  model_card, register_pretrained, ModelCard)
 
 __all__ = [
     "InteratomicPotential",
@@ -24,4 +26,11 @@ __all__ = [
     "c6_matrix",
     "DFTD3",
     "D3Dispersion",
+    "from_pretrained",
+    "load_pretrained",
+    "save_pretrained",
+    "list_models",
+    "model_card",
+    "register_pretrained",
+    "ModelCard",
 ]

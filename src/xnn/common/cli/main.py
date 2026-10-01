@@ -57,7 +57,7 @@ def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
 
 
 def main(argv=None):
-    """Command-line entry point dispatching the ``train``, ``benchmark``, ``export`` and ``mdi`` commands.
+    """Command-line entry point dispatching the ``train``, ``benchmark``, ``export``, ``mdi`` and ``models`` commands.
 
     The first argument selects the command; the rest are that command's options.
     ``train`` builds a :class:`Config` from the arguments, constructs the
@@ -66,7 +66,9 @@ def main(argv=None):
     pre-trained models on the dataset, writing a comparison table. ``export``
     loads a checkpoint into a :class:`ForceStressOutput`-wrapped model and
     writes it out for LAMMPS or as TorchScript. ``mdi`` serves a checkpoint as
-    an MDI engine (see :mod:`xnn.common.deploy.mdi_engine`). With no
+    an MDI engine (see :mod:`xnn.common.deploy.mdi_engine`). ``models``
+    lists, inspects, downloads and packages pre-trained models (see
+    :mod:`xnn.common.models.hub.cli`). With no
     arguments a usage line
     is printed; an unknown command prints an error message.
 
@@ -83,7 +85,7 @@ def main(argv=None):
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        print("usage: xnn {train,benchmark,export,mdi} [options]"); return
+        print("usage: xnn {train,benchmark,export,mdi,models} [options]"); return
     cmd, rest = argv[0], argv[1:]
 
     from .. import config as cfgmod
@@ -124,7 +126,12 @@ def main(argv=None):
                             "optional, and only needed for checkpoints that "
                             "do not embed their own Config (xnn-trained ones "
                             "do)")
-        p.add_argument("--ckpt", required=True, help="checkpoint to export")
+        p.add_argument("--ckpt", required=True,
+                       help="checkpoint to export: a trainer best.pt, a portable "
+                            "model directory, or a pre-trained model name, URL "
+                            "or Zenodo DOI (see `xnn models list`)")
+        p.add_argument("--cache-dir", default=None,
+                       help="model hub cache for a name, URL or DOI")
         p.add_argument("--to", choices=["lammps", "torchscript"],
                        default="lammps",
                        help="both write the same self-contained artifact, "
@@ -135,27 +142,25 @@ def main(argv=None):
                        help="export the checkpoint as is, ignoring a recorded "
                             "subtracted_dispersion")
         args, _ = p.parse_known_args(rest)
-        from ..models import add_dispersion, build_model, ForceStressOutput
-        from ..models.registry import recorded_dispersion, resolve_dispersion
+        from ..models.hub import build_potential, fetch_model, load_checkpoint
+        from ..models.registry import recorded_dispersion
         from ..deploy import export_torchscript_potential
-        state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        ck = load_checkpoint(fetch_model(args.ckpt, cache_dir=args.cache_dir))
         # prefer the architecture embedded in the checkpoint, as `benchmark`
         # does, so exporting a trained run needs nothing but the .pt
-        cfg = cfgmod.from_yaml(args.config) if args.config else state.get("cfg")
+        cfg = cfgmod.from_yaml(args.config) if args.config else ck.config
         if cfg is None:
             raise SystemExit(
                 f"{args.ckpt} embeds no config; pass --config with the "
                 f"architecture it was trained with")
-        base = build_model(cfg.model)
-        ForceStressOutput(base).load_state_dict(state["model"])
         # a route-B checkpoint records what its labels had subtracted; the
         # export adds it back unless told not to
         recorded = recorded_dispersion(cfg)
-        spec = resolve_dispersion(False if args.no_dispersion else None, recorded)
-        if spec is not None:
-            base = add_dispersion(base, spec)
+        base = build_potential(cfg, ck.state_dict, label=args.ckpt,
+                               dispersion=False if args.no_dispersion else None).model
+        if recorded is not None and not args.no_dispersion:
             print("adding back the dispersion recorded as subtracted from the "
-                  f"training labels: {spec}")
+                  f"training labels: {recorded}")
         elif recorded is not None:
             print(f"exporting WITHOUT the recorded subtracted dispersion ({recorded})")
         meta = {"model": cfg.model.name,
@@ -169,6 +174,10 @@ def main(argv=None):
     elif cmd == "mdi":
         from ..deploy.mdi_engine import main as mdi_main
         mdi_main(rest)
+
+    elif cmd == "models":
+        from ..models.hub.cli import main as models_main
+        models_main(rest)
 
     else:
         print(f"unknown command: {cmd}")

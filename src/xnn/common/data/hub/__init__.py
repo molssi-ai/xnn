@@ -1,4 +1,4 @@
-"""Dataset hub: HuggingFace ``load_dataset()``-style one-liner loading.
+"""Dataset hub: one-liner ``load_dataset()`` loading.
 
 Download and preprocess upstream atomistic datasets into xnn' native structure
 dicts (optionally ready-to-train :class:`~xnn.common.data.dataset.AtomicDataset`

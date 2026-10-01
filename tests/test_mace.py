@@ -411,13 +411,16 @@ def test_from_mace_torch_multihead_slicing():
 
 
 def test_foundation_registry_and_errors():
+    from xnn.common.models import list_models
     from xnn.gnn.models.mace_foundation import FOUNDATION_MODELS, _checkpoint_path
 
     assert "mace-mp-0-medium" in FOUNDATION_MODELS
     assert "mace-off23-small" in FOUNDATION_MODELS
     for url, license_ in FOUNDATION_MODELS.values():
         assert url.startswith("https://") and license_ in ("MIT", "ASL")
-    with pytest.raises(FileNotFoundError, match="alias"):
+    # one list: the aliases are the mace-torch entries of the model hub registry
+    assert sorted(FOUNDATION_MODELS) == list_models(format="mace-torch")
+    with pytest.raises(FileNotFoundError, match="registered foundation model"):
         _checkpoint_path("not-a-model")
 
 

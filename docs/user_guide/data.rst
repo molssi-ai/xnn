@@ -133,7 +133,7 @@ wrapped into the cell first: the neighbor-list builder handles unwrapped
 Downloading upstream datasets: ``load_dataset``
 ===============================================
 The dataset *hub* downloads and preprocesses standard benchmark datasets in one
-call, HuggingFace ``load_dataset()``-style, with no manual downloading,
+``load_dataset()`` call, with no manual downloading,
 unpacking, or unit conversion:
 
 .. code-block:: python

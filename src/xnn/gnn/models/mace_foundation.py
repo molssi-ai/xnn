@@ -20,9 +20,14 @@ block by block, those checkpoints convert weight-for-weight into
 
 Loading a checkpoint requires the ``mace-torch`` package (the pickle
 references its classes); the conversion itself and the converted model do
-not. Checkpoints are cached under the xnn dataset cache
-(``<cache>/foundations/``); a file already in ``mace-torch``'s own cache
-(``~/.cache/mace``) is reused instead of re-downloading.
+not. The foundation models are entries of the model hub registry
+(:func:`xnn.common.models.list_models`) in the ``"mace-torch"`` format, which
+this module registers: :func:`xnn.common.models.from_pretrained` downloads a
+checkpoint, converts it once, and caches the converted model as a portable
+xnn directory, so later loads need neither the network nor ``mace-torch``. A
+file already in ``mace-torch``'s own cache (``~/.cache/mace``) or in the
+earlier xnn location (``<datasets>/foundations/``) is reused instead of
+downloading it again.
 
 Not covered: checkpoints trained with ``apply_cutoff=False`` radial
 embeddings or interaction blocks outside the xnn registry (currently only
@@ -42,44 +47,63 @@ from torch import nn
 
 from e3nn import o3
 
+from xnn.common.config import ModelConfig
+
 from xnn.common.data.hub._download import default_cache_dir, download_file
+from xnn.common.models.hub import ModelFormat, register_format
+from xnn.common.models.hub.cache import resolve_cache_dir, sanitize, url_slot
+from xnn.common.models.hub.card import ModelCard
+from xnn.common.models.hub.registry import get_card, registered_cards
 
 from .mace import MACE, GATES, INTERACTIONS
 
-# Published foundation checkpoints: alias -> (download URL, license).
-# URLs are the upstream release assets (github.com/ACEsuit); the materials
-# series up to MPA-0 and the MH series are MIT-licensed, while OMAT-0,
-# MATPES and MACE-OFF23 are distributed under the Academic Software License
-# (ASL, https://github.com/gabor1/ASL): by downloading those you accept its
-# terms (no commercial use).
-_MP = "https://github.com/ACEsuit/mace-mp/releases/download"
-_FOUND = "https://github.com/ACEsuit/mace-foundations/releases/download"
-_OFF = "https://raw.githubusercontent.com/ACEsuit/mace-off/main/mace_off23"
+# Published foundation checkpoints: alias -> (download URL, license), a view of
+# the "mace-torch" entries of the model hub registry (models.json), which is
+# the single list. The materials series up to MPA-0 and the MH series are
+# MIT-licensed, while OMAT-0, MATPES and MACE-OFF23 are distributed under the
+# Academic Software License (ASL, https://github.com/gabor1/ASL): by
+# downloading those you accept its terms (no commercial use).
 FOUNDATION_MODELS = {
-    "mace-mp-0-small": (f"{_MP}/mace_mp_0/2023-12-10-mace-128-L0_energy_epoch-249.model", "MIT"),
-    "mace-mp-0-medium": (f"{_MP}/mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model", "MIT"),
-    "mace-mp-0-large": (f"{_MP}/mace_mp_0/MACE_MPtrj_2022.9.model", "MIT"),
-    "mace-mp-0b-small": (f"{_MP}/mace_mp_0b/mace_agnesi_small.model", "MIT"),
-    "mace-mp-0b-medium": (f"{_MP}/mace_mp_0b/mace_agnesi_medium.model", "MIT"),
-    "mace-mp-0b2-small": (f"{_MP}/mace_mp_0b2/mace-small-density-agnesi-stress.model", "MIT"),
-    "mace-mp-0b2-medium": (f"{_MP}/mace_mp_0b2/mace-medium-density-agnesi-stress.model", "MIT"),
-    "mace-mp-0b2-large": (f"{_MP}/mace_mp_0b2/mace-large-density-agnesi-stress.model", "MIT"),
-    "mace-mp-0b3-medium": (f"{_MP}/mace_mp_0b3/mace-mp-0b3-medium.model", "MIT"),
-    "mace-mpa-0-medium": (f"{_MP}/mace_mpa_0/mace-mpa-0-medium.model", "MIT"),
-    "mace-omat-0-small": (f"{_MP}/mace_omat_0/mace-omat-0-small.model", "ASL"),
-    "mace-omat-0-medium": (f"{_MP}/mace_omat_0/mace-omat-0-medium.model", "ASL"),
-    "mace-matpes-pbe-0-medium": (f"{_FOUND}/mace_matpes_0/MACE-matpes-pbe-omat-ft.model", "ASL"),
-    "mace-matpes-r2scan-0-medium": (f"{_FOUND}/mace_matpes_0/MACE-matpes-r2scan-omat-ft.model", "ASL"),
-    "mace-mh-0": (f"{_FOUND}/mace_mh_1/mace-mh-0.model", "MIT"),
-    "mace-mh-1": (f"{_FOUND}/mace_mh_1/mace-mh-1.model", "MIT"),
-    "mace-off23-small": (f"{_OFF}/MACE-OFF23_small.model", "ASL"),
-    "mace-off23-medium": (f"{_OFF}/MACE-OFF23_medium.model", "ASL"),
-    "mace-off23-large": (f"{_OFF}/MACE-OFF23_large.model", "ASL"),
+    card.name: (card.url, card.license) for card in registered_cards("mace-torch")
 }
 
 
+def _legacy_cached(card: ModelCard) -> Optional[Path]:
+    """A copy of a foundation checkpoint that another cache already holds.
+
+    ``mace-torch``'s own downloader keeps files in ``~/.cache/mace`` (named
+    after the URL's basename with everything but letters, digits and ``_``
+    stripped), and earlier xnn versions used ``<datasets>/foundations/``.
+
+    Parameters
+    ----------
+    card : ModelCard
+        Card with the checkpoint's ``url``.
+
+    Returns
+    -------
+    pathlib.Path or None
+        The cached file, if there is one.
+    """
+    if not card.url:
+        return None
+    base = os.path.basename(card.url)
+    for path in (
+        Path.home() / ".cache" / "mace" / "".join(c for c in base if c.isalnum() or c == "_"),
+        default_cache_dir() / "foundations" / "".join(
+            c for c in base if c.isalnum() or c in "._-"),
+    ):
+        if path.is_file():
+            return path
+    return None
+
+
 def _checkpoint_path(source: Union[str, Path]) -> Path:
-    """Resolve an alias, URL or local path to a cached checkpoint file.
+    """Resolve an alias, URL or local path to a local checkpoint file.
+
+    Registered aliases and URLs are downloaded (MD5-verified for aliases)
+    into the raw folder of the model's directory in the model hub cache,
+    unless another cache already holds the file.
 
     Parameters
     ----------
@@ -95,30 +119,25 @@ def _checkpoint_path(source: Union[str, Path]) -> Path:
     Raises
     ------
     FileNotFoundError
-        If ``source`` is neither a known alias, a URL, nor an existing file.
+        If ``source`` is neither a registered model, a URL, nor an existing
+        file.
     """
-    if isinstance(source, str) and source in FOUNDATION_MODELS:
-        url, license_ = FOUNDATION_MODELS[source]
-        if license_ == "ASL":
-            print(f"{source} is distributed under the Academic Software "
-                  "License (https://github.com/gabor1/ASL); by using it you "
-                  "accept its terms (no commercial use).")
-    elif isinstance(source, str) and source.startswith(("http://", "https://")):
-        url = source
-    else:
-        path = Path(source)
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"{source!r} is not a known foundation alias "
-                f"({sorted(FOUNDATION_MODELS)}), a URL, or an existing file")
+    s = str(source)
+    path = Path(s).expanduser()
+    if "://" not in s and path.is_file():
         return path
-    fname = "".join(c for c in os.path.basename(url) if c.isalnum() or c in "._-")
-    # reuse a file already fetched by mace-torch's own downloader
-    mace_cache = Path.home() / ".cache" / "mace" / \
-        "".join(c for c in os.path.basename(url) if c.isalnum() or c in "_")
-    if mace_cache.is_file():
-        return mace_cache
-    return download_file(url, default_cache_dir() / "foundations" / fname)
+    card = get_card(s)
+    if card is None:
+        if not s.startswith(("http://", "https://")):
+            raise FileNotFoundError(
+                f"{source!r} is not a registered foundation model "
+                f"({sorted(FOUNDATION_MODELS)}), a URL, or an existing file")
+        card = ModelCard(name=url_slot(s), url=s, format="mace-torch")
+    cached = _legacy_cached(card)
+    if cached is not None:
+        return cached
+    raw = resolve_cache_dir(None) / card.name / "raw" / sanitize(os.path.basename(card.url))
+    return download_file(card.url, raw, md5=card.md5)
 
 
 def load_foundation(source: Union[str, Path]) -> nn.Module:
@@ -309,6 +328,19 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
         embeddings, unknown interaction blocks / radial bases / transforms,
         readout layouts other than one readout per interaction).
     """
+    return _convert_mace_torch(upstream, head=head, dtype=dtype)[0]
+
+
+def _convert_mace_torch(upstream: nn.Module, head: Optional[str] = None,
+                        dtype=None) -> tuple[MACE, ModelConfig]:
+    """Convert a ``mace-torch`` model; return the model and its config.
+
+    The body of :func:`from_mace_torch`. The model is built from the
+    returned :class:`~xnn.common.config.ModelConfig` through
+    :meth:`MACE.from_config`, so the config plus the transplanted weights
+    rebuild exactly this model: the model hub caches a converted
+    foundation model in that form.
+    """
     head_idx, n_heads = _resolve_head(upstream, head)
     up_dtype = next(upstream.parameters()).dtype
 
@@ -384,21 +416,30 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
     e0s = torch.atleast_2d(
         upstream.atomic_energies_fn.atomic_energies.detach().cpu())[head_idx]
 
+    # the architecture as a config, built through MACE.from_config
+    extra = dict(
+        species=species, max_ell=max_ell, correlation=correlation,
+        MLP_irreps=f"{mlp_mul}x0e", radial_MLP=radial_MLP,
+        interaction=inter_names[-1], interaction_first=inter_names[0],
+        gate=gate, avg_num_neighbors=float(first.avg_num_neighbors),
+        hidden_irreps=hidden_irreps, num_polynomial_cutoff=cutoff_p,
+        radial_type=radial_type, distance_transform=transform_name,
+        pair_repulsion=pair_repulsion, atomic_energies=[float(e) for e in e0s],
+        scale=scale, shift=shift)
+    if radial_type == "bessel":
+        # as stored: a float32 checkpoint quantizes it, and regenerating it
+        # exactly would leave ~1e-7 residuals
+        extra["rbf_prefactor"] = float(embed.bessel_fn.prefactor)
+    model_cfg = ModelConfig(
+        name="mace", cutoff=r_max,
+        n_features=o3.Irreps(hidden_irreps).count(o3.Irrep("0e")),
+        n_interactions=T, n_rbf=n_rbf, extra=extra)
+
     # build the xnn twin under the checkpoint's dtype
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(up_dtype)
     try:
-        model = MACE(
-            species=species, cutoff=r_max, max_ell=max_ell,
-            n_rbf=n_rbf, num_interactions=T, correlation=correlation,
-            MLP_irreps=f"{mlp_mul}x0e", radial_MLP=radial_MLP,
-            interaction=inter_names[-1], interaction_first=inter_names[0],
-            gate=gate, avg_num_neighbors=float(first.avg_num_neighbors),
-            hidden_irreps=hidden_irreps, num_cutoff_basis=cutoff_p,
-            radial_type=radial_type, distance_transform=transform_name,
-            pair_repulsion=pair_repulsion, atomic_energies=e0s,
-            scale=scale, shift=shift,
-        )
+        model = MACE.from_config(model_cfg)
     finally:
         torch.set_default_dtype(prev_dtype)
 
@@ -433,43 +474,86 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
         if pair_repulsion:
             _copy_matching_buffers(model.pair_repulsion_fn,
                                    upstream.pair_repulsion_fn)
-        # the Bessel frequencies and prefactor as stored (a float32
-        # checkpoint quantizes them; regenerating exactly would leave ~1e-7
-        # residuals). Upstream stores n*pi/r_max, xnn n*pi with the division
-        # at evaluation time.
+        # the Bessel frequencies as stored (a float32 checkpoint quantizes
+        # them, like the prefactor passed through the config above).
+        # Upstream stores n*pi/r_max, xnn n*pi with the division at
+        # evaluation time.
         if radial_type == "bessel":
             model.edge_feat.rbf.freqs.copy_(
                 embed.bessel_fn.bessel_weights.detach().reshape(-1)
                 .to(model.edge_feat.rbf.freqs.dtype) * r_max)
-            model.edge_feat.rbf.norm = float(embed.bessel_fn.prefactor)
 
     if dtype is not None:
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         model = model.to(dtype)
-    return model
+    return model, model_cfg
 
 
-def foundation_to_xnn(source, head: Optional[str] = None, dtype=None) -> MACE:
+def foundation_to_xnn(source, head: Optional[str] = None, dtype=None,
+                      cache_dir=None) -> MACE:
     """Resolve, load and convert a foundation checkpoint (or model).
 
-    The one-call form behind :meth:`MACE.from_foundation`.
+    The one-call form behind :meth:`MACE.from_foundation`. A registered
+    alias, URL or Zenodo DOI goes through the model hub
+    (:func:`xnn.common.models.from_pretrained`), which converts the
+    checkpoint once and caches the converted model; a local file or an
+    already-loaded module is converted directly.
 
     Parameters
     ----------
     source : str, Path or torch.nn.Module
-        Alias / URL / local path of a checkpoint, or an already-loaded
+        Alias / URL / DOI / local path of a checkpoint, or an already-loaded
         ``mace-torch`` model.
     head : str, optional
         Head to keep for multi-head checkpoints.
     dtype : torch.dtype or str, optional
         Final dtype; ``None`` keeps the checkpoint's.
+    cache_dir : str or Path, optional
+        Model hub cache directory (see
+        :func:`~xnn.common.models.hub.cache.default_model_cache_dir`).
 
     Returns
     -------
     MACE
         The converted model.
+
+    Raises
+    ------
+    TypeError
+        If ``source`` names a model that is not a MACE.
     """
     if isinstance(source, nn.Module):
         return from_mace_torch(source, head=head, dtype=dtype)
-    return from_mace_torch(load_foundation(source), head=head, dtype=dtype)
+    s = str(source)
+    if "://" not in s and Path(s).expanduser().is_file():
+        return from_mace_torch(load_foundation(s), head=head, dtype=dtype)
+    from xnn.common.models.hub import from_pretrained
+    model = from_pretrained(source, head=head, dtype=dtype, wrap=False, cache_dir=cache_dir,
+                            format=None if get_card(s) is not None else "mace-torch")
+    if not isinstance(model, MACE):
+        raise TypeError(f"{source!r} is a {type(model).__name__}, not a MACE model")
+    return model
+
+
+def _convert_file(path: Path, head: Optional[str]) -> tuple[MACE, ModelConfig]:
+    """The model hub's ``mace-torch`` converter: file -> (model, config).
+
+    Raises
+    ------
+    NotImplementedError
+        For a checkpoint whose interaction layers use different
+        ``avg_num_neighbors`` values, which a config cannot express.
+    """
+    upstream = load_foundation(path)
+    avg = {float(b.avg_num_neighbors) for b in upstream.interactions}
+    if len(avg) > 1:
+        raise NotImplementedError(
+            f"{Path(path).name} normalizes each interaction layer by a different "
+            f"avg_num_neighbors ({sorted(avg)}), which the MACE config cannot express")
+    return _convert_mace_torch(upstream, head=head)
+
+
+register_format(ModelFormat(
+    name="mace-torch", suffixes=(".model",), convert=_convert_file,
+    find_cached=_legacy_cached, requires="mace-torch (pip install mace-torch)"))

@@ -50,6 +50,7 @@ import numpy as np
 import torch
 
 from ..data import structure_to_graph
+from ..models.hub.checkpoint import float_dtype
 
 try:
     import mdi
@@ -72,31 +73,6 @@ _COMMANDS = (
     "<ENERGY", "<FORCES", "<STRESS",
     "SCF", "EXIT",
 )
-
-
-def _float_dtype(source) -> torch.dtype:
-    """Floating-point dtype of a module's parameters or of a state dict."""
-    # a module's parameters first, then its buffers: a standalone dispersion
-    # model (``name: d4``) has buffers only
-    tensors = (source.values() if isinstance(source, dict)
-               else itertools.chain(source.parameters(), source.buffers()))
-    for t in tensors:
-        if torch.is_tensor(t) and t.is_floating_point():
-            return t.dtype
-    return torch.get_default_dtype()
-
-
-def _has_dispersion(model: torch.nn.Module) -> bool:
-    """Whether a model already includes a D3 / D4 wrapper (at any nesting)."""
-    from ..models.dispersion import DispersionCorrection
-    from ..models.les import LatentEwald
-    while True:
-        if isinstance(model, DispersionCorrection):
-            return True
-        if isinstance(model, LatentEwald):
-            model = model.model
-        else:
-            return False
 
 
 class MDIEngine:
@@ -160,7 +136,7 @@ class MDIEngine:
             p.requires_grad_(False)
         self.cutoff = float(cutoff)
         self.total_charge = float(total_charge)
-        self.dtype = _float_dtype(model)
+        self.dtype = float_dtype(model)
 
         # system state, set by driver commands (MDI atomic units)
         self.natoms: int | None = None
@@ -187,16 +163,19 @@ class MDIEngine:
                         dtype: torch.dtype | None = None,
                         dispersion: Any = None,
                         total_charge: float = 0.0,
-                        eeq_reuse: bool = False) -> "MDIEngine":
-        """Build an engine from a trainer checkpoint (``best.pt``).
+                        eeq_reuse: bool = False,
+                        cache_dir: str | None = None) -> "MDIEngine":
+        """Build an engine from a checkpoint or a pre-trained model.
 
-        The checkpoint is the dictionary written by
-        :meth:`~xnn.common.train.Trainer.save`: ``{"model": state_dict,
-        "cfg": Config}``. The model is rebuilt with
+        ``path`` is anything :func:`~xnn.common.models.from_pretrained`
+        loads: a trainer checkpoint (``best.pt``, the ``{"model":
+        state_dict, "cfg": Config}`` dictionary written by
+        :meth:`~xnn.common.train.Trainer.save`), a portable model directory,
+        a registered model name such as ``mace-off23-small``, a URL or a
+        Zenodo DOI. The model is rebuilt with
         :func:`~xnn.common.models.build_model` from the stored config,
-        wrapped in :class:`~xnn.common.models.ForceStressOutput` (with the
-        stress head enabled, matching the state-dict layout the trainer
-        saves), and the weights are loaded.
+        wrapped in :class:`~xnn.common.models.ForceStressOutput` with the
+        stress head enabled, and the weights are loaded.
 
         The model is built in float64, so the constant tables of the
         physics terms (D3 / D4 reference data, LES kernels) hold their exact
@@ -236,6 +215,9 @@ class MDIEngine:
             the previous one closely. Results agree with the fresh solve to
             the solver tolerance (1e-9 relative residual in float64). By
             default ``False``.
+        cache_dir : str, optional
+            Model hub cache for a registered name, URL or DOI (see
+            :func:`~xnn.common.models.hub.cache.default_model_cache_dir`).
 
         Returns
         -------
@@ -250,55 +232,14 @@ class MDIEngine:
             If ``dispersion`` is given for a checkpoint whose model already
             includes a dispersion correction.
         """
-        from ..models import add_dispersion, build_model, ForceStressOutput
-        from ..models.registry import recorded_dispersion, resolve_dispersion
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        cfg = ckpt["cfg"]
-        recorded = recorded_dispersion(cfg)
-        spec = resolve_dispersion(dispersion, recorded)
-        prev_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float64)
-        try:
-            base = build_model(cfg.model)
-            # ForceStressOutput has no parameters of its own; loading through
-            # it matches the trainer's state-dict layout
-            ForceStressOutput(base).load_state_dict(ckpt["model"])
-            if spec is not None:
-                if _has_dispersion(base):
-                    raise ValueError(
-                        f"{path} already includes a dispersion correction "
-                        f"({cfg.model.name} with extra['dispersion']); adding "
-                        f"another one would count dispersion twice")
-                base = add_dispersion(base, spec)
-                if recorded is None:
-                    logger.info("added %s dispersion on top of the checkpoint: %s",
-                                type(base).__name__, spec)
-                elif dispersion is None or dispersion is True:
-                    logger.info("adding back the dispersion recorded as subtracted "
-                                "from the training labels: %s", spec)
-                else:
-                    logger.info("adding back the dispersion recorded as subtracted "
-                                "from the training labels, with overrides %s: %s",
-                                dispersion, spec)
-            elif recorded is not None:
-                logger.warning("serving %s WITHOUT the dispersion recorded as subtracted "
-                               "from its training labels (%s)", path, recorded)
-        finally:
-            torch.set_default_dtype(prev_dtype)
-        if dtype is None:
-            dtype = _float_dtype(ckpt["model"])
-        model = ForceStressOutput(base, compute_stress=True).to(dtype)
-        if eeq_reuse:
-            from ..models.d4 import enable_eeq_reuse
-            n_terms = enable_eeq_reuse(model)
-            if n_terms:
-                logger.info("EEQ reuse between steps enabled for %d D4 term(s)", n_terms)
-            else:
-                logger.info("--eeq-reuse has no effect: the model has no D4 term")
-        cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
+        from ..models.hub import load_pretrained
+        loaded = load_pretrained(path, cache_dir=cache_dir, dtype=dtype,
+                                 dispersion=dispersion, compute_stress=True,
+                                 eeq_reuse=eeq_reuse)
+        model, cfg, cutoff = loaded.model, loaded.config, loaded.cutoff
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
-                    cfg.model.name, path, cutoff, str(dtype).replace("torch.", ""),
-                    total_charge)
+                    cfg.model.name, path, cutoff,
+                    str(float_dtype(model)).replace("torch.", ""), total_charge)
         return cls(model, cutoff=cutoff, device=device, total_charge=total_charge)
 
     # evaluation
@@ -553,7 +494,12 @@ def main(argv=None) -> None:
         prog="xnn mdi",
         description="Serve a trained xnn checkpoint as an MDI engine.")
     p.add_argument("--ckpt", required=True,
-                   help="trainer checkpoint (best.pt) holding model + config")
+                   help="trainer checkpoint (best.pt) holding model + config, a "
+                        "portable model directory, or a pre-trained model name, "
+                        "URL or Zenodo DOI (see `xnn models list`)")
+    p.add_argument("--cache-dir", default=None,
+                   help="model hub cache for a name, URL or DOI (default: "
+                        "$XNN_MODELS, else the repository's models/ directory)")
     p.add_argument("-mdi", "--mdi", dest="mdi_options", required=True,
                    help='MDI option string, e.g. "-role ENGINE -name xnn '
                         '-method TCP -port 8021 -hostname localhost"')
@@ -600,7 +546,8 @@ def main(argv=None) -> None:
     engine = MDIEngine.from_checkpoint(args.ckpt, device=args.device,
                                        dtype=dtype, dispersion=dispersion,
                                        total_charge=args.total_charge,
-                                       eeq_reuse=args.eeq_reuse)
+                                       eeq_reuse=args.eeq_reuse,
+                                       cache_dir=args.cache_dir)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

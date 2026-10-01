@@ -5,7 +5,7 @@ Download an Upstream Dataset
 ******************************
 
 The dataset hub downloads and preprocesses standard benchmark datasets in a
-single line, HuggingFace ``load_dataset()``-style. It handles the download,
+single ``load_dataset()`` call. It handles the download,
 caching, MD5 verification, unit conversion, and conversion into xnn structure
 dictionaries, so you can go straight to training. See :ref:`data` for the full
 reference and ``examples/data/load_dataset_tutorial.ipynb`` for a runnable

@@ -20,6 +20,19 @@ Data
 
    nb/data/load_dataset_tutorial
 
+Models
+======
+
+The model hub: MACE foundation models, xnn-trained models and Zenodo uploads
+under one ``from_pretrained()`` call, the cache layout, portability, and
+sharing your own models.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Models
+
+   nb/models/pretrained_models_tutorial
+
 ANI (dnn)
 =========
 

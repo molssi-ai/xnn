@@ -153,11 +153,9 @@ Multi-node (one such command per node, e.g. from a Slurm step):
             --rdzv-backend c10d --rdzv-endpoint "$HEAD_NODE":29500 \
             -m xnn train --config train.yaml
 
-Hugging Face's ``accelerate launch`` works as well (it exports the same
-environment variables), e.g. ``accelerate launch --multi_gpu --num_processes 2
--m xnn train --config train.yaml``, but note that it acts purely as a
-process launcher here: FSDP or DeepSpeed options in an accelerate config are
-not picked up, since the trainer deliberately uses DDP only. Sharded
+Any other launcher that exports the same environment variables works as
+well, but it acts purely as a process launcher here: FSDP or DeepSpeed
+options in its own config are not picked up, since the trainer deliberately uses DDP only. Sharded
 strategies cannot train forces or stress anyway: those losses back-propagate
 through gradients taken with ``create_graph=True`` (a double backward), which
 DDP supports and FSDP/DeepSpeed do not.

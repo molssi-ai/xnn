@@ -4,7 +4,7 @@ A :class:`DatasetBuilder` knows how to download and preprocess one upstream
 dataset into xnn' native *structure dicts* (the list-of-dicts format consumed
 by :class:`~xnn.common.data.dataset.AtomicDataset`). Builders self-register
 under a short name via :func:`register_dataset`; :func:`load_dataset` looks one
-up and drives it, giving a HuggingFace ``load_dataset()``-style one-liner.
+up and drives it, giving a ``load_dataset()`` one-liner.
 """
 from __future__ import annotations
 

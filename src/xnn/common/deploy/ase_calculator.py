@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from ..data import structure_to_graph
+from ..models.hub.checkpoint import float_dtype
 
 try:
     from ase.calculators.calculator import Calculator, all_changes
@@ -60,6 +61,8 @@ class XNNCalculator(Calculator):
         The neighbor-list cutoff radius.
     device : str
         The torch device string.
+    dtype : torch.dtype
+        Floating-point dtype of the model; graph tensors are built in it.
     eeq_reuse : bool, optional
         Carry the large-regime EEQ solve of a D4 term from one step to the
         next (:meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse`), for
@@ -80,6 +83,7 @@ class XNNCalculator(Calculator):
             raise ImportError("ASE is required: pip install \"xnn[ase]\"")
         super().__init__(**kwargs)
         self.model = model.to(device).eval()
+        self.dtype = float_dtype(self.model)
         self.cutoff = cutoff
         self.device = device
         if eeq_reuse:
@@ -87,6 +91,44 @@ class XNNCalculator(Calculator):
             # step to the next (no effect on a model without a D4 term)
             from ..models.d4 import enable_eeq_reuse
             enable_eeq_reuse(self.model)
+
+    @classmethod
+    def from_pretrained(cls, source, device: str = "cpu", eeq_reuse: bool = False,
+                        calculator_kwargs: dict | None = None, **kwargs) -> "XNNCalculator":
+        """Build a calculator for a pre-trained model.
+
+        Loads ``source`` with :func:`~xnn.common.models.hub.load_pretrained`
+        (a registered name such as ``"mace-off23-small"``, a local checkpoint
+        or model directory, a URL or a Zenodo DOI) with the stress head on,
+        and takes the neighbor-list cutoff from the loaded model::
+
+            atoms.calc = XNNCalculator.from_pretrained("mace-mp-0-medium")
+
+        Parameters
+        ----------
+        source : str or pathlib.Path
+            The model to load.
+        device : str, optional
+            Torch device. Defaults to ``"cpu"``.
+        eeq_reuse : bool, optional
+            As for the constructor.
+        calculator_kwargs : dict, optional
+            Keyword arguments for the base ASE ``Calculator``.
+        **kwargs
+            Options of :func:`~xnn.common.models.hub.load_pretrained`
+            (``cache_dir``, ``head``, ``filename``, ``dtype``,
+            ``dispersion``, ``local_files_only``, ...).
+
+        Returns
+        -------
+        XNNCalculator
+            The calculator.
+        """
+        from ..models.hub import load_pretrained
+        kwargs.setdefault("compute_stress", True)
+        loaded = load_pretrained(source, **kwargs)
+        return cls(loaded.model, cutoff=loaded.cutoff, device=device,
+                   eeq_reuse=eeq_reuse, **(calculator_kwargs or {}))
 
     def calculate(self, atoms=None, properties=("energy",),
                   system_changes=all_changes):
@@ -118,10 +160,13 @@ class XNNCalculator(Calculator):
             Results are written into ``self.results``.
         """
         super().calculate(atoms, properties, system_changes)
+        # graph tensors in the model's dtype, so a float64 model (most
+        # foundation models) runs in a float32 session and vice versa
         struct = {
-            "pos": np.asarray(atoms.get_positions()),
+            "pos": torch.as_tensor(np.asarray(atoms.get_positions()), dtype=self.dtype),
             "atomic_numbers": np.asarray(atoms.get_atomic_numbers()),
-            "cell": np.asarray(atoms.get_cell()) if atoms.pbc.any() else None,
+            "cell": (torch.as_tensor(np.asarray(atoms.get_cell()), dtype=self.dtype)
+                     if atoms.pbc.any() else None),
             "pbc": np.asarray(atoms.pbc),
         }
         graph = structure_to_graph(struct, self.cutoff, device=self.device)

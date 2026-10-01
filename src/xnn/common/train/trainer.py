@@ -6,8 +6,8 @@ pipeline is easy to follow and extend.
 Multi-GPU / multi-node data parallelism uses native PyTorch DDP and is driven
 purely by the environment: when the process was spawned by a distributed
 launcher that sets ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` (``torchrun
---nproc-per-node N -m xnn train ...``, Slurm + torchrun, or an
-``accelerate launch`` configured for multi-GPU), the trainer initializes the
+--nproc-per-node N -m xnn train ...``, Slurm + torchrun, or any launcher
+that exports the same variables), the trainer initializes the
 process group, shards the data loaders with ``DistributedSampler``, wraps the
 model in ``DistributedDataParallel``, all-reduces the logged metrics, and
 writes checkpoints from rank 0 only. A plain ``python`` / ``xnn`` invocation
@@ -198,7 +198,7 @@ class Trainer:
     def _init_distributed(self, dev: torch.device) -> torch.device:
         """Join the process group of a distributed launcher, if there is one.
 
-        A launcher such as ``torchrun`` (or ``accelerate launch``) exports
+        A launcher such as ``torchrun`` exports
         ``RANK`` / ``LOCAL_RANK`` / ``WORLD_SIZE`` into every process it
         spawns; ``self.distributed`` reflects whether that happened. In a
         distributed run each rank is pinned to one CUDA device selected by
@@ -463,3 +463,32 @@ class Trainer:
             torch.save({"model": self.module.state_dict(), "cfg": self.cfg}, path)
         if self.distributed and dist.is_initialized():
             dist.barrier()
+
+    def save_pretrained(self, save_directory: str, **card_fields):
+        """Write the current model as a portable model directory.
+
+        The layout :func:`~xnn.common.models.hub.from_pretrained` loads and
+        the model hub caches (``card.json``, ``config.yaml``, ``model.pt``),
+        with no pickled objects, so the directory can be shared, uploaded to
+        Zenodo, or copied to another machine. Only rank 0 writes.
+
+        Parameters
+        ----------
+        save_directory : str
+            Output directory.
+        **card_fields
+            Model card fields (``name``, ``description``, ``license``,
+            ``citation``, ...); see :class:`~xnn.common.models.hub.ModelCard`.
+
+        Returns
+        -------
+        pathlib.Path or None
+            The directory on rank 0, ``None`` on the other ranks.
+        """
+        from ..models.hub import save_pretrained
+        out = None
+        if self.is_main:
+            out = save_pretrained(self.module, save_directory, config=self.cfg, **card_fields)
+        if self.distributed and dist.is_initialized():
+            dist.barrier()
+        return out
