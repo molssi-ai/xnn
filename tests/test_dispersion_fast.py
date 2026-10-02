@@ -264,3 +264,38 @@ def test_torchscript_export_after_a_fast_request(tmp_path):
     model(_graph(model, "small_cell", device="cpu"))
     path = export_torchscript_potential(model.model, model.model.cutoff, str(tmp_path / "d4.pt"))
     assert torch.jit.load(path) is not None
+
+
+@needs_gpu
+def test_eeq_reuse_with_the_fast_system_forms_no_dense_matrix(monkeypatch):
+    """Above DENSE_REUSE_MAX_ATOMS the reuse preconditions with the fast system's
+    own low-rank preconditioner: no (N, N) matrix, charges as a fresh solve."""
+    import xnn.common.models.eeq as eeq
+
+    rng = np.random.default_rng(5)
+    s = _water(4, True)
+    frames = []
+    for _ in range(4):
+        s = {**s, "pos": s["pos"] + rng.normal(scale=0.01, size=s["pos"].shape)}
+        frames.append(s)
+    fresh = _model("d4", regime="large")
+    fast.set_use_fast(fresh, True)
+    graphs = [structure_to_graph({**f, "pos": torch.tensor(f["pos"]), "cell": torch.tensor(f["cell"])},
+                                 fresh.model.cutoff, device="cuda") for f in frames]
+    expected = [fresh(copy.copy(g))["eeq_charges"].detach() for g in graphs]
+
+    monkeypatch.setattr(eeq, "DENSE_REUSE_MAX_ATOMS", 0)
+
+    def no_dense(self):
+        raise AssertionError("the reuse assembled the dense EEQ matrix")
+
+    monkeypatch.setattr(eeq.EEQSystem, "assemble", no_dense)
+    reused = _model("d4", regime="large")
+    fast.set_use_fast(reused, True)
+    reused.model.d4.enable_eeq_reuse()
+    for g, q in zip(graphs, expected):
+        out = reused(copy.copy(g))
+        # two iterative solves, each to a 1e-9 relative residual
+        assert float((out["eeq_charges"] - q).abs().max()) < 5e-8
+    stats = reused.model.d4.__dict__["_eeq_reuse"].stats
+    assert stats["preconditioners"] == 0 and stats["fallbacks"] == 0
