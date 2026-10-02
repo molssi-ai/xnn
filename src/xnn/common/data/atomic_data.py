@@ -206,44 +206,70 @@ class AtomicGraph:
         Tensor
             Edge displacement vectors ``r_ij`` of shape ``(E, 3)``.
         """
+        if self.cell is None or self.cell.shape[0] == 1:
+            # molecules and single structures: one function that forms the
+            # vectors block by block in the geometry dtype, so a float64
+            # geometry never holds (E, 3) float64 temporaries for every edge
+            # (4.8 GB at 71 million edges), and whose backward keeps no float
+            # copy of the shifts. A single cell is a plain product: gathering
+            # it onto every edge makes the stress backward accumulate 9 E
+            # values into nine entries (1.5 s of a D4 step on 5000 atoms).
+            cell = (self.cell[0].to(self.pos.dtype) if self.cell is not None
+                    else self.pos.new_zeros(0))
+            return _EdgeVectors.apply(self.pos, cell, self.edge_index, self.cell_shifts,
+                                      self.model_dtype)
         src, dst = self.edge_index[0], self.edge_index[1]
         vec = self.pos[dst] - self.pos[src]
-        if self.cell is not None:
-            if self.cell.shape[0] == 1:
-                # one structure: a plain matmul. Gathering the cell onto every
-                # edge makes the backward pass (the stress) accumulate 9 E
-                # values into the same nine entries through the sort-based
-                # index backward, which cost 1.5 s of a D4 step and half of a
-                # MACE step on 5000 periodic atoms.
-                shift = _LatticeShift.apply(self.cell_shifts, self.cell[0].to(vec.dtype))
-            else:
-                # cell of the structure each edge belongs to (via its src node)
-                cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
-                shift = torch.einsum("ei,eij->ej",
-                                     self.cell_shifts.to(vec.dtype), cell_per_edge)
-            vec = vec + shift
+        # cell of the structure each edge belongs to (via its src node)
+        cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
+        vec = vec + torch.einsum("ei,eij->ej", self.cell_shifts.to(vec.dtype), cell_per_edge)
         return vec.to(self.model_dtype)
 
 
-class _LatticeShift(torch.autograd.Function):
-    """``cell_shifts @ cell`` that saves the integer shifts, not a float copy.
+#: Edges per block of :class:`_EdgeVectors` (its temporaries: three ``(block, 3)``
+#: tensors in the geometry dtype, 100 MB each in float64).
+EDGE_BLOCK = 1 << 22
 
-    The plain product keeps the ``(E, 3)`` shifts converted to the geometry
-    dtype for the cell gradient (the stress): 1.6 GB in float64 for 71 million
-    edges. The backward converts them again instead; both products are the ones
-    autograd forms.
+
+class _EdgeVectors(torch.autograd.Function):
+    """``pos[dst] - pos[src] + cell_shifts @ cell``, in blocks of edges.
+
+    Each block is formed in the geometry dtype exactly as the whole would be and
+    written into the result in the model dtype. The backward accumulates the
+    position and cell gradients block by block from the integer shifts; it is
+    made of differentiable operations, so force training (``create_graph``)
+    differentiates through it.
     """
 
     @staticmethod
-    def forward(ctx, cell_shifts: Tensor, cell: Tensor) -> Tensor:
-        ctx.save_for_backward(cell_shifts)
-        ctx.dtype = cell.dtype
-        return cell_shifts.to(cell.dtype) @ cell
+    def forward(ctx, pos: Tensor, cell: Tensor, edge_index: Tensor, cell_shifts: Tensor,
+                out_dtype: torch.dtype) -> Tensor:
+        ctx.save_for_backward(edge_index, cell_shifts)
+        ctx.n_atoms, ctx.dtype, ctx.periodic = pos.shape[0], pos.dtype, cell.numel() > 0
+        n_edges = edge_index.shape[1]
+        out = torch.empty((n_edges, 3), dtype=out_dtype, device=pos.device)
+        for e0 in range(0, n_edges, EDGE_BLOCK):
+            e1 = min(n_edges, e0 + EDGE_BLOCK)
+            vec = pos[edge_index[1, e0:e1]] - pos[edge_index[0, e0:e1]]
+            if ctx.periodic:
+                vec = vec + cell_shifts[e0:e1].to(pos.dtype) @ cell
+            out[e0:e1] = vec
+        return out
 
     @staticmethod
     def backward(ctx, grad: Tensor):
-        (cell_shifts,) = ctx.saved_tensors
-        grad_cell = None
-        if ctx.needs_input_grad[1]:
-            grad_cell = cell_shifts.to(ctx.dtype).t() @ grad
-        return None, grad_cell
+        edge_index, cell_shifts = ctx.saved_tensors
+        need_pos = ctx.needs_input_grad[0]
+        need_cell = ctx.needs_input_grad[1] and ctx.periodic
+        grad_pos = grad.new_zeros((ctx.n_atoms, 3), dtype=ctx.dtype) if need_pos else None
+        grad_cell = grad.new_zeros((3, 3), dtype=ctx.dtype) if need_cell else None
+        n_edges = edge_index.shape[1]
+        for e0 in range(0, n_edges, EDGE_BLOCK):
+            e1 = min(n_edges, e0 + EDGE_BLOCK)
+            g = grad[e0:e1].to(ctx.dtype)
+            if grad_pos is not None:
+                grad_pos = (grad_pos.index_add(0, edge_index[1, e0:e1], g)
+                            .index_add(0, edge_index[0, e0:e1], g, alpha=-1))
+            if grad_cell is not None:
+                grad_cell = grad_cell + cell_shifts[e0:e1].to(ctx.dtype).t() @ g
+        return grad_pos, grad_cell, None, None, None
