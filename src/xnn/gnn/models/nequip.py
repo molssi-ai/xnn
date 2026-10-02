@@ -49,7 +49,6 @@ import torch
 from torch import Tensor, nn
 
 from e3nn import o3
-from e3nn.nn import FullyConnectedNet
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.registry import register_model
@@ -57,6 +56,7 @@ from ..fast import ConvTensorProduct
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as ACTS
 from .blocks import (
+    RadialNet,
     ScalarActivation,
     tp_out_irreps_with_instructions,
     tp_path_exists,
@@ -329,7 +329,7 @@ class InteractionBlock(nn.Module):
             irreps_in, irreps_edge_attr, irreps_mid, instructions,
             shared_weights=False, internal_weights=False,
         )
-        self.fc = FullyConnectedNet(
+        self.fc = RadialNet(
             [n_radial] + invariant_layers * [invariant_neurons] + [self.tp.weight_numel],
             ACTS[nonlinearity_scalars["e"]],
         )
