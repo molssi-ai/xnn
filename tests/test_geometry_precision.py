@@ -132,29 +132,45 @@ def test_vesin_retries_after_releasing_cached_memory(monkeypatch):
     assert g.edge_index.shape[1] > 0
 
 
-def test_lattice_shift_gradients_match_the_plain_product():
-    # edge_vectors saves only the integer shifts for the cell gradient; its first
-    # and second derivatives are those of pos[dst] - pos[src] + shifts @ cell
+@pytest.mark.parametrize("periodic", [True, False])
+@pytest.mark.parametrize("block", [None, 7])
+def test_edge_vectors_match_the_plain_product(periodic, block, monkeypatch):
+    # edge_vectors forms the vectors in blocks of edges and keeps only the
+    # integer shifts for its backward; values, first and second derivatives are
+    # those of pos[dst] - pos[src] + shifts @ cell
     from dataclasses import replace
 
-    s = _water(2)
-    g = structure_to_graph({**s, "pos": torch.tensor(s["pos"]), "cell": torch.tensor(s["cell"])},
-                           4.0)
-    assert bool(g.cell_shifts.abs().sum() > 0)
-    pos = g.pos.to(torch.float64).requires_grad_(True)
-    cell = g.cell.to(torch.float64).requires_grad_(True)
+    from xnn.common.data import atomic_data
 
-    def ours(p, c):
+    if block is not None:
+        monkeypatch.setattr(atomic_data, "EDGE_BLOCK", block)
+    s = _water(2)
+    if periodic:
+        g = structure_to_graph({**s, "pos": torch.tensor(s["pos"]),
+                                "cell": torch.tensor(s["cell"])}, 4.0)
+        assert bool(g.cell_shifts.abs().sum() > 0)
+    else:
+        g = structure_to_graph({"pos": torch.tensor(s["pos"]),
+                                "atomic_numbers": s["atomic_numbers"]}, 4.0)
+    pos = g.pos.to(torch.float64).requires_grad_(True)
+    cell = g.cell.to(torch.float64).requires_grad_(True) if periodic else None
+    args = (pos, cell) if periodic else (pos,)
+
+    def ours(p, c=None):
         return replace(g, pos=p, cell=c).edge_vectors()
 
-    def plain(p, c):
+    def plain(p, c=None):
         src, dst = g.edge_index
-        return p[dst] - p[src] + g.cell_shifts.to(p.dtype) @ c[0]
+        vec = p[dst] - p[src]
+        return vec + g.cell_shifts.to(p.dtype) @ c[0] if c is not None else vec
 
-    assert torch.equal(ours(pos, cell), plain(pos, cell))
-    probe = torch.randn_like(ours(pos, cell))
-    grads = [torch.autograd.grad((f(pos, cell) * probe).sum(), (pos, cell)) for f in (ours, plain)]
+    assert torch.equal(ours(*args), plain(*args))
+    probe = torch.randn_like(ours(*args))
+    grads = [torch.autograd.grad((f(*args) * probe).sum(), args) for f in (ours, plain)]
     for a, b in zip(*grads):
         assert torch.allclose(a, b, rtol=0, atol=1e-12)
-    assert torch.autograd.gradcheck(ours, (pos, cell))
-    assert torch.autograd.gradgradcheck(ours, (pos, cell))
+    assert torch.autograd.gradcheck(ours, args)
+    assert torch.autograd.gradgradcheck(ours, args)
+    # a float32 model's vectors from the float64 geometry
+    out = replace(g, pos=pos, cell=cell, compute_dtype=torch.float32).edge_vectors()
+    assert out.dtype == torch.float32 and torch.equal(out, plain(*args).float())
