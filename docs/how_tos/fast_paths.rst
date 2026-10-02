@@ -132,6 +132,25 @@ for periodic structures of at least 3000 atoms
 needs 10-30 times less memory. Molecular structures take the real-space sum
 either way.
 
+Memory of large evaluations
+===========================
+
+The per-edge radial networks of MACE and NequIP
+(:class:`~xnn.gnn.models.RadialNet`) keep their hidden-layer activations for the
+force and stress backward pass. In evaluation mode, from one million edges
+(:data:`xnn.gnn.models.blocks.RECOMPUTE_MIN_EDGES`), they run their hidden layers
+again in the backward pass instead, with identical results. On 12 000-41 000
+water atoms with D4, this lowers the peak by 22% for a 32-channel MACE and by
+5-7% for MACE-OFF23 medium and MACE-MP-0b2 large, for 0-5% more time per step.
+:func:`~xnn.gnn.models.set_recompute_radial` sets it per model
+(``"auto"``, ``True`` or ``False``):
+
+.. code-block:: python
+
+   from xnn.gnn.models import set_recompute_radial
+
+   set_recompute_radial(model, False)     # keep the activations at every size
+
 Export
 ======
 
