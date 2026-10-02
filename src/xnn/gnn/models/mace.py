@@ -58,6 +58,7 @@ from ..fast import symmetric_contraction as _fast_sc
 from .base import EquivariantGNN
 from ..featurizers import DISTANCE_TRANSFORMS
 from .blocks import SCALAR_ACTIVATIONS as GATES
+from .blocks import RadialNet
 from .blocks import ScalarActivation as _ScalarActivation
 from .blocks import hidden_irreps as _hidden_irreps
 from .blocks import tp_out_irreps_with_instructions
@@ -678,7 +679,7 @@ class _InteractionBase(nn.Module):
             self.node_feats_irreps, self.edge_attrs_irreps, irreps_mid,
             instructions=instructions, shared_weights=False, internal_weights=False,
         )
-        self.conv_tp_weights = e3nn_nn.FullyConnectedNet(
+        self.conv_tp_weights = RadialNet(
             [self.edge_feats_irreps.num_irreps] + self.radial_MLP + [self.conv_tp.weight_numel],
             F.silu,
         )
