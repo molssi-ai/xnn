@@ -35,6 +35,10 @@ CUDA kernels are distributed by NVIDIA under its own license, which is why
 they are optional; without them, or on a CPU, every model runs its reference
 implementation.
 
+The kernels need cuBLAS 12.5 or newer, so install a PyTorch build for CUDA 12.4
+or later (``cu124``, ``cu126``) first; a ``cu121`` build pins an older cuBLAS
+and the extra does not resolve against it.
+
 Choose the implementation
 =========================
 
