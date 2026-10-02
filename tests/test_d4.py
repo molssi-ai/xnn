@@ -376,9 +376,9 @@ def test_total_charge_flows_through_the_data_layer():
     batch = collate([g, structure_to_graph({"pos": WATER[0], "atomic_numbers": WATER[1],
                                             "charge": -1.0}, 9.0)])
     assert batch.total_charge.tolist() == [1.0, -1.0]
-    # dropped when not every structure carries one
+    # a structure without one is neutral (D4's own default) when others carry one
     assert collate([g, structure_to_graph({"pos": WATER[0], "atomic_numbers": WATER[1]}, 9.0)]
-                   ).total_charge is None
+                   ).total_charge.tolist() == [1.0, 0.0]
 
 
 # deploy channels
