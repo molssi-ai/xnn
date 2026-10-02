@@ -130,3 +130,31 @@ def test_vesin_retries_after_releasing_cached_memory(monkeypatch):
                            4.0, device="cuda")
     assert calls == {"compute": 2, "empty_cache": 1}
     assert g.edge_index.shape[1] > 0
+
+
+def test_lattice_shift_gradients_match_the_plain_product():
+    # edge_vectors saves only the integer shifts for the cell gradient; its first
+    # and second derivatives are those of pos[dst] - pos[src] + shifts @ cell
+    from dataclasses import replace
+
+    s = _water(2)
+    g = structure_to_graph({**s, "pos": torch.tensor(s["pos"]), "cell": torch.tensor(s["cell"])},
+                           4.0)
+    assert bool(g.cell_shifts.abs().sum() > 0)
+    pos = g.pos.to(torch.float64).requires_grad_(True)
+    cell = g.cell.to(torch.float64).requires_grad_(True)
+
+    def ours(p, c):
+        return replace(g, pos=p, cell=c).edge_vectors()
+
+    def plain(p, c):
+        src, dst = g.edge_index
+        return p[dst] - p[src] + g.cell_shifts.to(p.dtype) @ c[0]
+
+    assert torch.equal(ours(pos, cell), plain(pos, cell))
+    probe = torch.randn_like(ours(pos, cell))
+    grads = [torch.autograd.grad((f(pos, cell) * probe).sum(), (pos, cell)) for f in (ours, plain)]
+    for a, b in zip(*grads):
+        assert torch.allclose(a, b, rtol=0, atol=1e-12)
+    assert torch.autograd.gradcheck(ours, (pos, cell))
+    assert torch.autograd.gradgradcheck(ours, (pos, cell))
