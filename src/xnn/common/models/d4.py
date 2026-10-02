@@ -1032,25 +1032,40 @@ class DFTD4(nn.Module, FastPathModule):
         if bool((z > self.max_z).any()) or bool((z < 1).any()):
             raise ValueError("D4 with EEQ charges supports atomic numbers 1..103")
         pos_au = pos / self.bohr
+        # only the EEQ real-space sum reaches the neighbor-list radius: the other
+        # terms get the edges within their largest cutoff (same order and values),
+        # so their per-edge work and saved tensors skip the rest
+        with torch.no_grad():
+            r_all = torch.linalg.norm(edge_vec / self.bohr, dim=-1)
+        near = max(max(self.cutoff_pair, self.cutoff_triple),
+                   max(self.cutoff_cn, self.cutoff_eeq_cn)) / self.bohr
+        edge_all, edge_vec_all = edge_index, edge_vec
+        if bool((r_all > near).any()):
+            keep = torch.nonzero(r_all <= near).squeeze(1)
+            edge_index, edge_vec = edge_index[:, keep], edge_vec[keep]
         vec_au = edge_vec / self.bohr
         r = torch.linalg.norm(vec_au, dim=-1)
 
         cn_d4, cn_eeq = self.coordination_numbers(z, edge_index, r, n_atoms)
 
         charges: List[Tensor] = []
-        in_eeq = r <= self.cutoff_eeq / self.bohr
+        in_eeq = r_all <= self.cutoff_eeq / self.bohr
         for b in range(num_graphs):
             members = torch.nonzero(batch == b).squeeze(1)
             cell_b = cell[b] / self.bohr
             periodic = bool(pbc[b].any()) and bool(cell_b.abs().sum() > 1e-8)
             regime = self.select_regime(int(members.shape[0]), periodic)
             if regime == "large" and not torch.jit.is_scripting():
-                # the structure's EEQ-range edges in local numbering
-                local = torch.full((n_atoms,), -1, dtype=torch.long, device=z.device)
-                local[members] = torch.arange(members.shape[0], device=z.device)
-                sel = in_eeq & (batch[edge_index[1]] == b)
+                if num_graphs == 1 and bool(in_eeq.all()):
+                    ei_b, vec_b = edge_all, edge_vec_all / self.bohr
+                else:
+                    # the structure's EEQ-range edges in local numbering
+                    local = torch.full((n_atoms,), -1, dtype=torch.long, device=z.device)
+                    local[members] = torch.arange(members.shape[0], device=z.device)
+                    sel = in_eeq & (batch[edge_all[1]] == b)
+                    ei_b, vec_b = local[edge_all[:, sel]], edge_vec_all[sel] / self.bohr
                 charges.append(self._eeq_charges_large(
-                    z[members], pos_au[members], local[edge_index[:, sel]], vec_au[sel],
+                    z[members], pos_au[members], ei_b, vec_b,
                     cn_eeq[members], total_charge[b], cell_b, periodic, num_graphs == 1))
             else:
                 charges.append(self.eeq_charges(z[members], pos_au[members],
