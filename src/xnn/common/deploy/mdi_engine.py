@@ -164,7 +164,8 @@ class MDIEngine:
                         dispersion: Any = None,
                         total_charge: float = 0.0,
                         eeq_reuse: bool = False,
-                        cache_dir: str | None = None) -> "MDIEngine":
+                        cache_dir: str | None = None,
+                        use_fast: bool | str = "auto") -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -218,6 +219,9 @@ class MDIEngine:
         cache_dir : str, optional
             Model hub cache for a registered name, URL or DOI (see
             :func:`~xnn.common.models.hub.cache.default_model_cache_dir`).
+        use_fast : bool or str, optional
+            ``"auto"`` (default), ``True`` or ``False``: the fused GPU kernels
+            or the reference implementation (see :mod:`xnn.common.models.fast`).
 
         Returns
         -------
@@ -235,7 +239,7 @@ class MDIEngine:
         from ..models.hub import load_pretrained
         loaded = load_pretrained(path, cache_dir=cache_dir, dtype=dtype,
                                  dispersion=dispersion, compute_stress=True,
-                                 eeq_reuse=eeq_reuse)
+                                 eeq_reuse=eeq_reuse, use_fast=use_fast)
         model, cfg, cutoff = loaded.model, loaded.config, loaded.cutoff
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff,
@@ -525,6 +529,11 @@ def main(argv=None) -> None:
                    help="carry the large-regime D4 EEQ solve over between steps "
                         "(MD, optimization); results agree with the fresh solve "
                         "to the solver tolerance")
+    p.add_argument("--fast", choices=["auto", "on", "off"], default="auto",
+                   help="fused GPU kernels (cuEquivariance) for the blocks that have "
+                        "them: 'auto' (default) where available and faster for the "
+                        "system size, 'on' wherever available, 'off' never; in "
+                        "float32 they agree with the reference to about 1e-6")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -547,7 +556,9 @@ def main(argv=None) -> None:
                                        dtype=dtype, dispersion=dispersion,
                                        total_charge=args.total_charge,
                                        eeq_reuse=args.eeq_reuse,
-                                       cache_dir=args.cache_dir)
+                                       cache_dir=args.cache_dir,
+                                       use_fast={"auto": "auto", "on": True,
+                                                 "off": False}[args.fast])
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

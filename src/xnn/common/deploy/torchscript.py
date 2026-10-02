@@ -59,6 +59,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
+from ..models.fast import deactivate as deactivate_fast_paths
 from ..models.ops import cell_volume
 
 
@@ -753,6 +754,8 @@ def export_torchscript_potential(model: nn.Module, cutoff: float, path: str,
     str
         The ``path`` written.
     """
+    # the fused kernels are eager-only: the scripted model is the reference one
+    deactivate_fast_paths(model)
     wrapper = TorchScriptPotential(model, cutoff, total_charge).eval()
     scripted = torch.jit.script(wrapper)
     extra = {"cutoff": str(cutoff),

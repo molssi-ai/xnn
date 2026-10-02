@@ -201,6 +201,10 @@ class EEQSystem:
         :class:`EEQReuse` compares before reusing its state.
     """
 
+    #: keep the ``(N, N_G)`` cos / sin tables when they fit in :data:`SF_BUDGET`
+    #: (a subclass with its own reciprocal sum turns this off)
+    keep_structure_factors = True
+
     def __init__(self, diag: Tensor, rad: Tensor, pos: Tensor,
                  edge_index: Optional[Tensor] = None, edge_vec: Optional[Tensor] = None,
                  alpha: float = 0.0, gvec: Optional[Tensor] = None,
@@ -232,7 +236,7 @@ class EEQSystem:
             gamma = torch.rsqrt(self.rad[src] ** 2 + self.rad[dst] ** 2)
             self.kernel_e = _real_kernel(r, gamma, self.alpha)
             n_g = int(gvec.shape[0])
-            if self.n * n_g <= SF_BUDGET:
+            if self.keep_structure_factors and self.n * n_g <= SF_BUDGET:
                 phase = self.pos @ gvec.t()
                 self._sf = (torch.cos(phase), torch.sin(phase))
             self.n_g = n_g

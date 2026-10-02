@@ -720,6 +720,39 @@ class DispersionCorrection(InteratomicPotential):
         self.cutoff = max(inner_cutoff, float(term.cutoff))
         self.node_feature_dim = (int(getattr(model, "node_feature_dim", 0))
                                  if model is not None else int(term.n_features))
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "DispersionCorrection":
+        """Choose the implementation of the dispersion term.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (default): the fast paths of
+            :mod:`~xnn.common.models.dispersion_fast` on a CUDA device where
+            they are measured to be faster; ``True``: wherever they run;
+            ``False``: always the reference. A wrapped model's own fast paths
+            are set by :func:`~xnn.common.models.fast.set_use_fast`, which
+            reaches both.
+
+        Returns
+        -------
+        DispersionCorrection
+            ``self``.
+        """
+        from .fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, data: AtomicGraph) -> None:
+        """Switch the term's fast paths on or off for one evaluation."""
+        from .fast import FastPathModule, select
+        if isinstance(self.term, FastPathModule):
+            from .dispersion_fast import AUTO_POLICY
+            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.pos.dtype,
+                   int(data.edge_index.shape[1]))
 
     def inner_graph(self, data: AtomicGraph) -> AtomicGraph:
         """``data`` restricted to the edges within the wrapped model's cutoff."""
@@ -748,6 +781,8 @@ class DispersionCorrection(InteratomicPotential):
         dict of str to Tensor
             See the class notes.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(data)
         disp = self.dispersion(data)
         node_disp = disp.pop("node_energy")
         energy_disp = disp.pop("energy")

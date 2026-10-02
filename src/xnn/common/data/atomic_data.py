@@ -60,7 +60,9 @@ class AtomicGraph:
         Number of atoms per structure, of shape ``(B,)``.
     cell : Tensor, optional
         Lattice vectors as rows, of shape ``(B, 3, 3)``. ``None`` for
-        molecular systems.
+        molecular systems. In a batch mixing molecular and periodic
+        structures, a molecular structure has a zero cell and no periodic
+        flag (its edges carry no image shift).
     pbc : Tensor, optional
         Boolean periodicity flags, of shape ``(B, 3)``. ``None`` for molecular
         systems.
@@ -71,6 +73,12 @@ class AtomicGraph:
         Target forces, of shape ``(N, 3)``. Present during training.
     stress : Tensor, optional
         Target stress, of shape ``(B, 3, 3)``. Present during training.
+    forces_mask : Tensor, optional
+        Which structures carry force labels, bool ``(B,)``: set when a batch
+        mixes structures with and without them (the missing ones are zeros
+        in ``forces`` and excluded from the loss). ``None`` means all do.
+    stress_mask : Tensor, optional
+        The same for ``stress``.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
         Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF).
@@ -104,6 +112,8 @@ class AtomicGraph:
         Target forces ``(N, 3)``.
     stress : Tensor or None
         Target stress ``(B, 3, 3)``.
+    forces_mask, stress_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry force / stress labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
     weight : Tensor or None
@@ -124,6 +134,10 @@ class AtomicGraph:
     energy: Optional[Tensor] = None   # (B,)
     forces: Optional[Tensor] = None   # (N, 3)
     stress: Optional[Tensor] = None   # (B, 3, 3)
+    # which structures carry forces / stress when a batch mixes labelled and
+    # unlabelled ones; None = all of them
+    forces_mask: Optional[Tensor] = None   # (B,) bool
+    stress_mask: Optional[Tensor] = None   # (B,) bool
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal

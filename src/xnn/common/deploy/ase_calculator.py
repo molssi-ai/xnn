@@ -117,7 +117,7 @@ class XNNCalculator(Calculator):
         **kwargs
             Options of :func:`~xnn.common.models.hub.load_pretrained`
             (``cache_dir``, ``head``, ``filename``, ``dtype``,
-            ``dispersion``, ``local_files_only``, ...).
+            ``dispersion``, ``local_files_only``, ``use_fast``, ...).
 
         Returns
         -------

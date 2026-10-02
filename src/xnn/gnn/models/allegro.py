@@ -48,6 +48,7 @@ from e3nn.nn import FullyConnectedNet
 from xnn.common.data import AtomicGraph
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+from ..constants import register_constant, restore_exact
 from .base import EquivariantGNN
 from .blocks import tp_path_exists
 
@@ -70,9 +71,9 @@ class _ChannelWeighter(nn.Module):
     mul_out : int
         Number of output channels (``num_tensor_features``).
     alpha : float, optional
-        Constant folded into the weights (the env-sum normalization). Kept as
-        a floating buffer so that module dtype conversions round it the same
-        way they round any other floating buffer.
+        Constant folded into the weights (the env-sum normalization), a
+        floating buffer that follows the module dtype (exact in float64, see
+        :func:`~xnn.gnn.constants.register_constant`).
     """
 
     weight_numel: Final[int]
@@ -91,7 +92,7 @@ class _ChannelWeighter(nn.Module):
             torch.tensor([mul_ir.ir.dim for mul_ir in irreps])
         )
         self.register_buffer("_which_irrep", which, persistent=False)
-        self.register_buffer("_alpha", torch.tensor(alpha), persistent=False)
+        register_constant(self, "_alpha", alpha, persistent=False)
 
     def forward(self, edge_attr: Tensor, weights: Tensor) -> Tensor:
         """Apply per-irrep channel weights.
@@ -141,14 +142,32 @@ class _Contracter(nn.Module):
         for ir in irs_in2:
             off2.append(off2[-1] + ir.dim)
         self.dim_out = sum(ir.dim for _, _, ir in instructions)
-        w3j = torch.zeros(self.dim_out, dim1, dim2)
+        # (row, l_out, l1, l2, column offsets) per block: what exact_constants
+        # rebuilds the tensor from (python-only, outside TorchScript)
+        blocks = []
         k = 0
         for i1, i2, ir_out in instructions:
-            block = o3.wigner_3j(ir_out.l, irs_in1[i1].l, irs_in2[i2].l)  # (k, i, j)
-            block = block * math.sqrt(2 * ir_out.l + 1)
-            w3j[k:k + ir_out.dim, off1[i1]:off1[i1 + 1], off2[i2]:off2[i2 + 1]] = block
+            blocks.append((k, ir_out.l, irs_in1[i1].l, irs_in2[i2].l, off1[i1], off2[i2]))
             k += ir_out.dim
-        self.register_buffer("_w3j", w3j)
+        self.__dict__["_blocks"] = (blocks, dim1, dim2)
+        self.register_buffer("_w3j", self._block_w3j(torch.get_default_dtype()))
+
+    def _block_w3j(self, dtype: torch.dtype) -> Tensor:
+        """The block Wigner-3j tensor ``(dim_out, dim1, dim2)`` in ``dtype``."""
+        blocks, dim1, dim2 = self.__dict__["_blocks"]
+        w3j = torch.zeros(self.dim_out, dim1, dim2, dtype=dtype)
+        for k, l_out, l1, l2, o1, o2 in blocks:
+            block = o3.wigner_3j(l_out, l1, l2, dtype=dtype)  # (k, i, j)
+            block = block * math.sqrt(2 * l_out + 1)
+            w3j[k:k + 2 * l_out + 1, o1:o1 + 2 * l1 + 1, o2:o2 + 2 * l2 + 1] = block
+        return w3j
+
+    def exact_constants(self) -> bool:
+        """Rebuild a float64 block tensor exactly from the irreps (see
+        :func:`~xnn.gnn.constants.exact_float64_constants`); whether it changed."""
+        if self._w3j.dtype != torch.float64 or "_blocks" not in self.__dict__:
+            return False
+        return restore_exact(self._w3j, self._block_w3j(torch.float64))
 
     def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
         """Contract ``(E, mul, dim1) x (E, mul, dim2) -> (E, mul, dim_out)``."""

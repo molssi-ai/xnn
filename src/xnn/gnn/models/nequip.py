@@ -52,8 +52,8 @@ from e3nn import o3
 from e3nn.nn import FullyConnectedNet
 
 from xnn.common.data import AtomicGraph
-from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+from ..fast import ConvTensorProduct
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as ACTS
 from .blocks import (
@@ -325,7 +325,7 @@ class InteractionBlock(nn.Module):
         # nequip keeps enumeration order for the instructions (weight layout)
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             irreps_in, irreps_edge_attr, irreps_out, sort_instructions=False)
-        self.tp = o3.TensorProduct(
+        self.tp = ConvTensorProduct(
             irreps_in, irreps_edge_attr, irreps_mid, instructions,
             shared_weights=False, internal_weights=False,
         )
@@ -366,15 +366,15 @@ class InteractionBlock(nn.Module):
         weight = self.fc(edge_radial)
         x_in = x
         x = self.linear_1(x)
-        edge_feats = self.tp(x[edge_index[0]], edge_sh, weight)
         # NequIP normalizes the messages by sqrt(<neighbours>) on the edges,
         # before summing; since the sum is linear this equals normalizing the
         # node result, and we keep the edge-side order to stay bit-for-bit.
         # (The local copy refines the Optional for TorchScript.)
         n_avg: Optional[float] = self.avg_num_neighbors
+        divisor: Optional[float] = None
         if n_avg is not None:
-            edge_feats = edge_feats / n_avg ** 0.5
-        out = scatter_sum(edge_feats, edge_index[1], x.shape[0])
+            divisor = n_avg ** 0.5
+        out = self.tp.conv(x, edge_sh, weight, edge_index, x.shape[0], divisor)
         out = self.linear_2(out)
         if self.use_sc:
             out = out + self.sc(x_in, node_attrs)
@@ -663,6 +663,8 @@ class NequIP(EquivariantGNN):
             The invariant conv-to-output features ``(N, node_feature_dim)``
             and the per-atom energy ``(N,)``.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(edge_index.shape[1]), edge_vec)
         node_attrs = self.node_attr(atomic_numbers)
         # NequIP evaluates Y_l on r_j - r_i (neighbour minus centre); the xnn
         # edge vector points the other way (centre minus neighbour), so flip.

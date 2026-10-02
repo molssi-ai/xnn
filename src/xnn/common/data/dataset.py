@@ -217,59 +217,96 @@ class AtomicDataset(Dataset):
 
 
 def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
-    """Concatenate single-structure graphs into one batched graph.
+    """Concatenate graphs into one batched graph.
 
     Nodes and edges are concatenated along their respective axes, ``edge_index``
     entries are offset by the running node count, and a ``batch`` vector mapping
-    each node to its structure index is built. Optional fields (``cell``/``pbc``,
-    ``energy``, ``forces``, ``stress``, ``total_charge``, ``weight``) are only
-    included when present in every input graph. Using ``batch_size=1`` effectively disables batching.
+    each node to its structure index is built. Using ``batch_size=1``
+    effectively disables batching.
+
+    A batch may mix any structures:
+
+    * molecular and periodic ones: when any structure has a cell, the batch
+      keeps ``cell`` / ``pbc`` and a molecular structure gets a zero cell and no
+      periodic flag (its edges carry no image shift, so every edge keeps its
+      length, and its stress is zero);
+    * structures with and without force or stress labels: the missing ones are
+      zeros, and ``forces_mask`` / ``stress_mask`` (per structure) mark the
+      labelled ones for the loss and the metrics;
+    * structures with and without ``total_charge`` (missing = neutral) or
+      ``weight`` (missing = 1).
+
+    ``energy`` is kept only when every structure has one.
 
     Parameters
     ----------
     graphs : list of AtomicGraph
-        Single-structure graphs to concatenate.
+        Graphs (single structures or batches) to concatenate.
 
     Returns
     -------
     AtomicGraph
-        One batched graph with ``num_graphs`` equal to ``len(graphs)``.
+        One batched graph with ``num_graphs`` equal to the total number of
+        structures.
     """
     pos, z, batch, n_atoms = [], [], [], []
     edge_index, cell_shifts = [], []
     cells, pbcs = [], []
     energies, forces, stresses, charges, weights = [], [], [], [], []
+    f_masks, s_masks = [], []
+
+    dtype, device = graphs[0].pos.dtype, graphs[0].pos.device
+    has_cell = any(g.cell is not None for g in graphs)
+    has_e = all(g.energy is not None for g in graphs)
+    has_f = any(g.forces is not None for g in graphs)
+    has_s = any(g.stress is not None for g in graphs)
+    has_q = any(g.total_charge is not None for g in graphs)
+    has_w = any(g.weight is not None for g in graphs)
+
+    def label_mask(g: AtomicGraph, value, mask) -> Tensor:
+        if mask is not None:
+            return mask
+        return torch.full((g.num_graphs,), value is not None, dtype=torch.bool, device=device)
 
     node_offset = 0
-    has_cell = all(g.cell is not None for g in graphs)
-    has_e = all(g.energy is not None for g in graphs)
-    has_f = all(g.forces is not None for g in graphs)
-    has_s = all(g.stress is not None for g in graphs)
-    has_q = all(g.total_charge is not None for g in graphs)
-    has_w = all(g.weight is not None for g in graphs)
-
-    for b, g in enumerate(graphs):
+    graph_offset = 0
+    for g in graphs:
+        b = g.num_graphs
         pos.append(g.pos)
         z.append(g.atomic_numbers)
-        batch.append(torch.full((g.num_nodes,), b, dtype=torch.long))
+        batch.append(g.batch + graph_offset)
         n_atoms.append(g.n_atoms)
         edge_index.append(g.edge_index + node_offset)
         cell_shifts.append(g.cell_shifts)
         node_offset += g.num_nodes
+        graph_offset += b
         if has_cell:
-            cells.append(g.cell)
-            pbcs.append(g.pbc)
+            if g.cell is not None:
+                cells.append(g.cell)
+                # graphs built on a GPU keep pbc on the CPU (structure_to_graph)
+                pbcs.append(g.pbc.to(device) if g.pbc is not None
+                            else torch.ones((b, 3), dtype=torch.bool, device=device))
+            else:
+                cells.append(torch.zeros((b, 3, 3), dtype=dtype, device=device))
+                pbcs.append(torch.zeros((b, 3), dtype=torch.bool, device=device))
         if has_e:
             energies.append(g.energy)
         if has_f:
-            forces.append(g.forces)
+            forces.append(g.forces if g.forces is not None else torch.zeros_like(g.pos))
+            f_masks.append(label_mask(g, g.forces, g.forces_mask))
         if has_s:
-            stresses.append(g.stress)
+            stresses.append(g.stress if g.stress is not None
+                            else torch.zeros((b, 3, 3), dtype=dtype, device=device))
+            s_masks.append(label_mask(g, g.stress, g.stress_mask))
         if has_q:
-            charges.append(g.total_charge)
+            charges.append(g.total_charge if g.total_charge is not None
+                           else torch.zeros(b, dtype=dtype, device=device))
         if has_w:
-            weights.append(g.weight)
+            weights.append(g.weight if g.weight is not None
+                           else torch.ones(b, dtype=dtype, device=device))
 
+    f_mask = torch.cat(f_masks, 0) if has_f else None
+    s_mask = torch.cat(s_masks, 0) if has_s else None
     return AtomicGraph(
         pos=torch.cat(pos, 0),
         atomic_numbers=torch.cat(z, 0),
@@ -282,6 +319,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         energy=torch.cat(energies, 0) if has_e else None,
         forces=torch.cat(forces, 0) if has_f else None,
         stress=torch.cat(stresses, 0) if has_s else None,
+        # a mask only where the batch mixes labelled and unlabelled structures
+        forces_mask=None if f_mask is None or bool(f_mask.all()) else f_mask,
+        stress_mask=None if s_mask is None or bool(s_mask.all()) else s_mask,
         total_charge=torch.cat(charges, 0) if has_q else None,
         weight=torch.cat(weights, 0) if has_w else None,
     )

@@ -16,14 +16,16 @@ import math
 import torch
 from torch import Tensor, nn
 
+from ..constants import register_constant, restore_exact
 
-def _covalent_radii_table() -> Tensor:
+
+def _covalent_radii_table():
     """The ASE covalent-radii table (Cordero et al. 2008), indexed by Z.
 
     Returns
     -------
-    Tensor
-        Covalent radii in Angstrom, shape ``(n_elements,)``.
+    numpy.ndarray
+        Covalent radii in Angstrom (float64), shape ``(n_elements,)``.
 
     Raises
     ------
@@ -35,7 +37,7 @@ def _covalent_radii_table() -> Tensor:
     except ModuleNotFoundError as e:  # pragma: no cover
         raise ImportError(
             'distance transforms need ase: pip install "xnn[ase]"') from e
-    return torch.tensor(covalent_radii, dtype=torch.get_default_dtype())
+    return covalent_radii
 
 
 class IdentityDistanceTransform(nn.Module):
@@ -91,11 +93,10 @@ class AgnesiDistanceTransform(nn.Module):
     def __init__(self, a: float = 1.0805, q: float = 0.9183,
                  p: float = 4.5791):
         super().__init__()
-        dtype = torch.get_default_dtype()
-        self.register_buffer("a", torch.tensor(a, dtype=dtype))
-        self.register_buffer("q", torch.tensor(q, dtype=dtype))
-        self.register_buffer("p", torch.tensor(p, dtype=dtype))
-        self.register_buffer("covalent_radii", _covalent_radii_table())
+        register_constant(self, "a", a)
+        register_constant(self, "q", q)
+        register_constant(self, "p", p)
+        register_constant(self, "covalent_radii", _covalent_radii_table())
 
     def forward(self, r: Tensor, atomic_numbers: Tensor,
                 edge_index: Tensor) -> Tensor:
@@ -142,9 +143,8 @@ class SoftDistanceTransform(nn.Module):
 
     def __init__(self, alpha: float = 4.0):
         super().__init__()
-        self.register_buffer(
-            "alpha", torch.tensor(alpha, dtype=torch.get_default_dtype()))
-        self.register_buffer("covalent_radii", _covalent_radii_table())
+        register_constant(self, "alpha", alpha)
+        register_constant(self, "covalent_radii", _covalent_radii_table())
 
     def forward(self, r: Tensor, atomic_numbers: Tensor,
                 edge_index: Tensor) -> Tensor:
@@ -227,6 +227,25 @@ class BesselRBF(nn.Module):
         else:
             self.register_buffer("freqs", freqs)
         self.norm = math.sqrt(2.0 / cutoff) if prefactor is None else float(prefactor)
+
+    def exact_constants(self) -> bool:
+        """Rebuild fixed float64 frequencies as the exact ``n * pi``.
+
+        A float32 build or checkpoint leaves them float32-rounded; trainable
+        frequencies are learned values and stay, as do stored ones that are not
+        ``n * pi`` up to rounding. See
+        :func:`~xnn.gnn.constants.exact_float64_constants`.
+
+        Returns
+        -------
+        bool
+            Whether any value changed.
+        """
+        freqs = self.freqs
+        if isinstance(freqs, nn.Parameter) or freqs.dtype != torch.float64:
+            return False
+        return restore_exact(freqs, math.pi * torch.arange(1, freqs.numel() + 1,
+                                                           dtype=torch.float64))
 
     def forward(self, r: Tensor) -> Tensor:
         """Expand distances into the Bessel radial basis.

@@ -223,12 +223,22 @@ def collect_predictions(model, loader, device, targets: list[str],
                 e_ref = e_ref / n
             preds["energy"].append(e_pred.detach().cpu())
             refs["energy"].append(e_ref.detach().cpu())
+        # a batch mixing labelled and unlabelled structures scores the labelled ones
         if "forces" in targets and data.forces is not None and "forces" in out:
-            preds["forces"].append(out["forces"].detach().reshape(-1).cpu())
-            refs["forces"].append(data.forces.detach().reshape(-1).cpu())
+            f_pred, f_ref = out["forces"].detach(), data.forces.detach()
+            mask = getattr(data, "forces_mask", None)
+            if mask is not None:
+                atoms = mask[data.batch]
+                f_pred, f_ref = f_pred[atoms], f_ref[atoms]
+            preds["forces"].append(f_pred.reshape(-1).cpu())
+            refs["forces"].append(f_ref.reshape(-1).cpu())
         if "stress" in targets and data.stress is not None and "stress" in out:
-            preds["stress"].append(out["stress"].detach().reshape(-1).cpu())
-            refs["stress"].append(data.stress.detach().reshape(-1).cpu())
+            s_pred, s_ref = out["stress"].detach(), data.stress.detach()
+            mask = getattr(data, "stress_mask", None)
+            if mask is not None:
+                s_pred, s_ref = s_pred[mask], s_ref[mask]
+            preds["stress"].append(s_pred.reshape(-1).cpu())
+            refs["stress"].append(s_ref.reshape(-1).cpu())
 
     out_pairs: dict[str, tuple[Tensor, Tensor]] = {}
     for t in targets:
