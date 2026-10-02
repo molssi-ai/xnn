@@ -98,10 +98,11 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
             _cueq.warn_fallback(type(self).__name__, exc)
             messages = self(node_feats[edge_index[0]], edge_attrs, edge_weights)
             return scatter_sum(messages, edge_index[1], num_nodes)
-        w = edge_weights
         if kernel["weight_index"] is not None:
-            w = w.index_select(1, kernel["weight_index"])
-        w = w * kernel["weight_scale"]
+            # scaled in place: the reordered copy is the only (E, W) tensor kept
+            w = edge_weights.index_select(1, kernel["weight_index"]).mul_(kernel["weight_scale"])
+        else:
+            w = edge_weights * kernel["weight_scale"]
         out = kernel["op"](node_feats, edge_attrs, w, indices_1=edge_index[0],
                            indices_out=edge_index[1], size_out=num_nodes)
         if kernel["out_index"] is not None:

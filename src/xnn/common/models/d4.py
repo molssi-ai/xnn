@@ -1077,11 +1077,13 @@ class DFTD4(nn.Module, FastPathModule):
         alpha_iw = self.dynamic_polarizabilities(z, weights)
 
         in_pair = r <= self.cutoff_pair / self.bohr
+        edge_pair, r_pair = edge_index, r
+        if not bool(in_pair.all()):
+            edge_pair, r_pair = edge_index[:, in_pair], r[in_pair]
         if self.recompute_pairs and not torch.jit.is_scripting():
-            e2 = self._two_body_chunked(z, edge_index[:, in_pair], r[in_pair], alpha_iw, n_atoms)
+            e2 = self._two_body_chunked(z, edge_pair, r_pair, alpha_iw, n_atoms)
         else:
-            e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
-                                      alpha_iw, n_atoms)
+            e2 = self.two_body_energy(z, edge_pair, r_pair, alpha_iw, n_atoms)
         node_energy = e2
         e_tail = torch.zeros_like(e2)
         if self.tail_correction:

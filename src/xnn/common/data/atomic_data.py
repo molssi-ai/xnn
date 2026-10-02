@@ -215,7 +215,7 @@ class AtomicGraph:
                 # values into the same nine entries through the sort-based
                 # index backward, which cost 1.5 s of a D4 step and half of a
                 # MACE step on 5000 periodic atoms.
-                shift = self.cell_shifts.to(vec.dtype) @ self.cell[0]
+                shift = _LatticeShift.apply(self.cell_shifts, self.cell[0].to(vec.dtype))
             else:
                 # cell of the structure each edge belongs to (via its src node)
                 cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
@@ -223,3 +223,27 @@ class AtomicGraph:
                                      self.cell_shifts.to(vec.dtype), cell_per_edge)
             vec = vec + shift
         return vec.to(self.model_dtype)
+
+
+class _LatticeShift(torch.autograd.Function):
+    """``cell_shifts @ cell`` that saves the integer shifts, not a float copy.
+
+    The plain product keeps the ``(E, 3)`` shifts converted to the geometry
+    dtype for the cell gradient (the stress): 1.6 GB in float64 for 71 million
+    edges. The backward converts them again instead; both products are the ones
+    autograd forms.
+    """
+
+    @staticmethod
+    def forward(ctx, cell_shifts: Tensor, cell: Tensor) -> Tensor:
+        ctx.save_for_backward(cell_shifts)
+        ctx.dtype = cell.dtype
+        return cell_shifts.to(cell.dtype) @ cell
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        (cell_shifts,) = ctx.saved_tensors
+        grad_cell = None
+        if ctx.needs_input_grad[1]:
+            grad_cell = cell_shifts.to(ctx.dtype).t() @ grad
+        return None, grad_cell

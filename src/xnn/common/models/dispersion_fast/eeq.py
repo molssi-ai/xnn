@@ -109,17 +109,27 @@ class FastEEQSystem(EEQSystem):
 
     # set-up
     def _build_real_space(self) -> None:
+        # the CSR matrix of the real-space kernel, rows = dst, built directly so
+        # that only its values and 32-bit columns outlive the set-up (a COO
+        # coalesce left the 64-bit index pairs alive: 1.1 GB at 71 million edges)
         src, dst = self.edge_index[0], self.edge_index[1]
+        n = self.n
+        key, order = torch.sort(dst.to(torch.int64) * n + src)
+        values = self.kernel_e[order]
+        del order
+        key, inverse = torch.unique_consecutive(key, return_inverse=True)
+        if key.numel() < values.numel():      # one pair at several images (small cells)
+            values = values.new_zeros(key.numel()).index_add_(0, inverse, values)
+        del inverse
+        # 32-bit indices: half the index traffic of the sparse product
+        index_dtype = torch.int32 if values.numel() < 2 ** 31 else torch.int64
+        crow = torch.zeros(n + 1, dtype=index_dtype, device=key.device)
+        crow[1:] = torch.cumsum(torch.bincount(torch.div(key, n, rounding_mode="floor"),
+                                               minlength=n), 0)
+        col = torch.remainder(key, n).to(index_dtype)
+        del key
         try:
-            coo = torch.sparse_coo_tensor(torch.stack([dst, src]), self.kernel_e,
-                                          (self.n, self.n)).coalesce()
-            csr = coo.to_sparse_csr()
-            if csr.values().numel() < 2 ** 31:
-                # 32-bit indices: half the index traffic of the sparse product
-                csr = torch.sparse_csr_tensor(csr.crow_indices().to(torch.int32),
-                                              csr.col_indices().to(torch.int32),
-                                              csr.values(), csr.shape)
-            self._csr = csr
+            self._csr = torch.sparse_csr_tensor(crow, col, values, (n, n))
         except RuntimeError:          # no sparse kernels for this device / dtype
             self._csr = None
 
