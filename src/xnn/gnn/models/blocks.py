@@ -1,8 +1,8 @@
 """Shared E(3)-equivariant building blocks (e3nn) for the GNN potentials.
 
 Holds the pieces used by more than one equivariant model (NequIP / MACE /
-Allegro): irreps helpers, the tensor-product path test, and a TorchScript-safe
-normalized scalar activation. Model-specific blocks (MACE's interaction /
+Allegro): irreps helpers, the tensor-product path test, a TorchScript-safe
+normalized scalar activation and the per-edge radial network. Model-specific blocks (MACE's interaction /
 product blocks, NequIP's convnet layer, ...) live in the model modules.
 Requires e3nn.
 """
@@ -15,6 +15,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from e3nn import nn as e3nn_nn
 from e3nn import o3
 from e3nn.math import normalize2mom
 
@@ -207,3 +208,92 @@ class ScalarActivation(nn.Module):
         if self.has_act:
             return self.act(x)
         return x
+
+
+#: Rows (edges) from which a radial network in evaluation mode recomputes its
+#: hidden layers in the backward pass instead of keeping their activations
+#: (``recompute="auto"``). Measured on an L40S with the D4 of the production
+#: water model, 5k-41k water atoms: the peak falls by 22% for the production
+#: model (32 channels) and 5-7% for MACE-OFF23 medium and MACE-MP-0b2 large; the
+#: step takes 0-5% longer (one forward of the hidden layers, 4-5% of a step).
+RECOMPUTE_MIN_EDGES = 1_000_000
+
+
+class RadialNet(e3nn_nn.FullyConnectedNet):
+    """Per-edge radial network that can recompute its hidden layers in the backward.
+
+    An :class:`e3nn.nn.FullyConnectedNet` (same parameters, ``state_dict`` keys
+    and outputs). When a gradient flows through it (forces, stress), the hidden
+    layers' activations, ``E x hidden`` per layer whatever the tensor product's
+    size, are kept for the backward pass; with recomputation only the last hidden
+    output is kept and the hidden layers run again in the backward, giving the
+    same values. TorchScript always keeps the activations.
+
+    Attributes
+    ----------
+    recompute : str
+        ``"auto"`` (default): recompute in evaluation mode from
+        :data:`RECOMPUTE_MIN_EDGES` edges; ``"on"``: whenever a gradient is
+        needed; ``"off"``: never. Set with :func:`set_recompute_radial`.
+    """
+
+    recompute: str
+
+    def __init__(self, hs, act=None, variance_in=1, variance_out=1, out_act=False):
+        super().__init__(hs, act, variance_in, variance_out, out_act)
+        self.recompute = "auto"
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply the network to ``x`` of shape ``(E, hs[0])``."""
+        if not torch.jit.is_scripting() and self._recomputes(x):
+            return self._forward_recomputed(x)
+        for layer in self:
+            x = layer(x)
+        return x
+
+    @torch.jit.unused
+    def _recomputes(self, x: Tensor) -> bool:
+        if self.recompute == "off" or len(self) < 2:
+            return False
+        if not (torch.is_grad_enabled() and x.requires_grad):
+            return False
+        if self.recompute == "on":
+            return True
+        return not self.training and x.shape[0] >= RECOMPUTE_MIN_EDGES
+
+    @torch.jit.unused
+    def _forward_recomputed(self, x: Tensor) -> Tensor:
+        from torch.utils.checkpoint import checkpoint
+        layers = list(self)
+
+        def hidden(h: Tensor) -> Tensor:
+            for layer in layers[:-1]:
+                h = layer(h)
+            return h
+
+        return layers[-1](checkpoint(hidden, x, use_reentrant=False))
+
+
+def set_recompute_radial(model: nn.Module, recompute="auto") -> nn.Module:
+    """Choose when the radial networks of ``model`` recompute their hidden layers.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Any model; every :class:`RadialNet` in it is set.
+    recompute : bool or str
+        ``"auto"`` (default), ``True`` (whenever a gradient is needed) or
+        ``False`` (never); see :class:`RadialNet`.
+
+    Returns
+    -------
+    torch.nn.Module
+        ``model``.
+    """
+    modes = {"auto": "auto", True: "on", False: "off"}
+    if recompute not in modes:
+        raise ValueError(f"recompute must be 'auto', True or False, got {recompute!r}")
+    for module in model.modules():
+        if isinstance(module, RadialNet):
+            module.recompute = modes[recompute]
+    return model
