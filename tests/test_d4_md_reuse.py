@@ -74,9 +74,7 @@ def count_enumerations(monkeypatch):
     return calls
 
 
-# ----------------------------------------------------------------------------
 # the triple cache
-# ----------------------------------------------------------------------------
 
 
 
@@ -124,9 +122,7 @@ def test_triplet_cache_option_from_config():
     assert model.d4.triplet_cache == 0.5
 
 
-# ----------------------------------------------------------------------------
 # the EEQ reuse
-# ----------------------------------------------------------------------------
 
 def _trajectory(pos, n=6, step=0.01, seed=3):
     """A random walk of small displacements, like consecutive MD steps."""
@@ -202,9 +198,7 @@ def test_eeq_reuse_state_is_not_a_scripted_attribute():
     torch.jit.script(term)
 
 
-# ----------------------------------------------------------------------------
 # the MDI engine
-# ----------------------------------------------------------------------------
 
 BASE = {"name": "schnet", "cutoff": 4.0, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
 D4_LARGE = {"name": "d4", "regime": "large", **PER}
@@ -263,9 +257,7 @@ def test_cli_eeq_reuse_flag(tmp_path, monkeypatch):
     assert seen["reuse"] == [False]
 
 
-# ----------------------------------------------------------------------------
 # float32 LU accuracy, the ASE opt-in, and batches
-# ----------------------------------------------------------------------------
 
 def test_float32_lu_forces_are_refined():
     """The float32 factor alone leaves ~1e-3 eV/A in the forces (the adjoint

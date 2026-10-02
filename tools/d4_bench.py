@@ -95,9 +95,7 @@ def sync():
         torch.cuda.synchronize()
 
 
-# ----------------------------------------------------------------------------
 # labeled, synchronized timers around the real functions
-# ----------------------------------------------------------------------------
 PHASE = ["forward"]
 STACK = []
 STATS = {}          # (phase, label) -> [inclusive, self, calls]
@@ -215,9 +213,7 @@ def grad_with_phase(*a, **k):
 
 torch.autograd.grad = grad_with_phase
 
-# ----------------------------------------------------------------------------
 # the structure: a jittered lattice of randomly oriented waters, ~1.0 g/cm^3
-# ----------------------------------------------------------------------------
 WATER = np.array([[0.0, 0.0, 0.119262], [0.0, 0.763239, -0.477047],
                   [0.0, -0.763239, -0.477047]])
 rng = np.random.default_rng(args.seed)
@@ -285,9 +281,7 @@ else:
 print(f"system: {len(z)} atoms, L = {cell[0, 0]:.2f} A, {args.method.upper()}{eeq_note}, "
       f"neighbor-list radius {model.model.cutoff:.2f} A", flush=True)
 
-# ----------------------------------------------------------------------------
 # neighbor list, then the evaluation
-# ----------------------------------------------------------------------------
 graph_times = []
 for _ in range(3):
     sync()
@@ -358,9 +352,7 @@ for (ph, label), (incl, self_, calls) in rows:
     if incl >= 0.001:
         print(f"{ph:9s} {label:44s} {incl:9.3f} {self_:9.3f} {calls:6d}")
 
-# ----------------------------------------------------------------------------
 # frames: an MD-like sequence of small displacements
-# ----------------------------------------------------------------------------
 frame_times, frame_dq, frame_df = [], [], []
 if args.frames > 0:
     fresh = ForceStressOutput(Dispersion(**d4_options), compute_stress=True).to(dev)
@@ -387,9 +379,7 @@ if args.frames > 0:
         print(f"EEQ reuse: {st['solves']} solves, {st['iterations'] / max(st['solves'], 1):.1f} iterations "
               f"per solve, preconditioner formed {st['preconditioners']}x, {st['fallbacks']} fallbacks")
 
-# ----------------------------------------------------------------------------
 # kernels
-# ----------------------------------------------------------------------------
 if args.kernels and cuda:
     from torch.profiler import ProfilerActivity, profile
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
