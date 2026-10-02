@@ -533,7 +533,7 @@ class BAMBOO(InteratomicPotential):
             node_energy = node_energy + electroneg_atom
             row, col = self._all_pairs(batch)
             if row.numel() > 0:
-                pair_vec = data.pos[row] - data.pos[col]
+                pair_vec = (data.pos[row] - data.pos[col]).to(charges.dtype)
                 ecoul = self.coulomb_energy(charges, pair_vec, row, col)
                 node_coul = 0.5 * scatter_sum(ecoul, row, N)
                 node_energy = node_energy + node_coul
@@ -545,7 +545,7 @@ class BAMBOO(InteratomicPotential):
             node_energy = node_energy + disp_atom
 
         energy = self.aggregate_energy(node_energy, data)
-        dipole = scatter_sum(charges.unsqueeze(-1) * data.pos, batch, B) / DEBYE_EA
+        dipole = scatter_sum(charges.unsqueeze(-1) * data.pos.to(charges.dtype), batch, B) / DEBYE_EA
         return {
             "node_energy": node_energy,
             "energy": energy,

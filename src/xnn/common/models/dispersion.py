@@ -28,7 +28,7 @@ from torch import Tensor, nn
 
 from ..data import AtomicGraph
 from .base import InteratomicPotential
-from .ops import build_triplets, scatter_sum, segment_sum
+from .ops import build_triplets, scatter_sum, segment_sum, structure_sum
 
 # CODATA 2018, derived from h, m_e, c, alpha and e exactly as the reference
 # codes (mctc-lib) do: a_0 = hbar / (m_e c alpha), E_h = m_e c^2 alpha^2. The
@@ -751,7 +751,7 @@ class DispersionCorrection(InteratomicPotential):
         from .fast import FastPathModule, select
         if isinstance(self.term, FastPathModule):
             from .dispersion_fast import AUTO_POLICY
-            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.pos.dtype,
+            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.model_dtype,
                    int(data.edge_index.shape[1]))
 
     def inner_graph(self, data: AtomicGraph) -> AtomicGraph:
@@ -823,17 +823,20 @@ def evaluate_on_graph(term: nn.Module, data: AtomicGraph) -> Dict[str, Tensor]:
         The term's outputs plus ``"energy"``.
     """
     b = data.num_graphs
-    dtype, device = data.pos.dtype, data.pos.device
-    cell = (data.cell if data.cell is not None
+    # the term computes in the model's dtype (a float64 geometry is cast; its
+    # pair vectors come from edge_vectors(), formed in float64)
+    dtype, device = data.model_dtype, data.pos.device
+    pos = data.pos.to(dtype)
+    cell = (data.cell.to(dtype) if data.cell is not None
             else torch.zeros((b, 3, 3), dtype=dtype, device=device))
     pbc = (data.pbc if data.pbc is not None
            else torch.zeros((b, 3), dtype=torch.bool, device=device))
     charge = getattr(data, "total_charge", None)
     if charge is None:
         charge = torch.zeros(b, dtype=dtype, device=device)
-    out = term.evaluate(data.atomic_numbers, data.pos, data.edge_index,
+    out = term.evaluate(data.atomic_numbers, pos, data.edge_index,
                         data.edge_vectors(), data.batch, b, cell, pbc, charge.to(dtype))
-    out["energy"] = scatter_sum(out["node_energy"], data.batch, b)
+    out["energy"] = structure_sum(out["node_energy"], data.batch, b)
     return out
 
 

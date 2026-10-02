@@ -144,6 +144,14 @@ class FastEEQSystem(EEQSystem):
         inner = torch.diag(1.0 / torch.cat([w_low, w_low])) + u.t() @ (d_inv[:, None] * u)
         return u, d_inv, torch.linalg.cholesky(inner)
 
+    def precondition(self, r: Tensor) -> Tensor:
+        """``M^-1 r`` for ``r`` of shape ``(N,)`` or ``(N, K)``: the matrix-free
+        preconditioner :class:`~xnn.common.models.eeq.EEQReuse` uses for large
+        systems in place of a dense inverse."""
+        if r.dim() == 1:
+            return self._precondition(r[:, None])[:, 0]
+        return self._precondition(r)
+
     def _precondition(self, r: Tensor) -> Tensor:
         """``M^-1 r`` for ``r (N, K)``."""
         if self._preconditioner is None:

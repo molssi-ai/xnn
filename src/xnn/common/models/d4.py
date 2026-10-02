@@ -108,7 +108,7 @@ from .dispersion import (
 from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit,
                   reciprocal_vectors)
 from .fast import FastPathModule
-from .ops import cell_volume, scatter_sum
+from .ops import cell_volume, scatter_sum, structure_sum
 from .registry import register_model
 
 # D4 model constants
@@ -1099,9 +1099,9 @@ class DFTD4(nn.Module, FastPathModule):
             node_energy = node_energy + e3
         return {
             "node_energy": node_energy * self.hartree,
-            "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
-            "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
-            "energy_tail": scatter_sum(e_tail, batch, num_graphs) * self.hartree,
+            "energy_2body": structure_sum(e2, batch, num_graphs) * self.hartree,
+            "energy_3body": structure_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_tail": structure_sum(e_tail, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn_d4,
             "charges": q,
             "polarizabilities": alpha_iw[:, 0],

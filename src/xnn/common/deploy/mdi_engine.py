@@ -252,9 +252,9 @@ class MDIEngine:
         """Evaluate the model on the current system state.
 
         Converts positions and cell from Bohr to angstrom, builds the graph
-        with :func:`~xnn.common.data.structure_to_graph` (tensors are created
-        in the model's dtype so float32 and float64 models both work; the
-        current ``total_charge`` rides along), runs the model and stores
+        with :func:`~xnn.common.data.structure_to_graph` (positions and cell
+        in float64, the model computing in its own dtype; the current
+        ``total_charge`` rides along), runs the model and stores
         ``energy`` (Hartree), ``forces`` (Hartree/Bohr) and, for periodic
         systems, ``stress`` (Hartree/Bohr^3).
 
@@ -273,20 +273,24 @@ class MDIEngine:
         # part and it is rebuilt every step, so where it runs decides the cost
         # of the step: on 5001 atoms this was 1.8 s of CPU per step against
         # 36 ms on the GPU, and 0.6 ms once vesin's cell list is available.
+        # positions and cell in float64 whatever the model's dtype: edge vectors
+        # formed from float32 absolute coordinates carry an error that grows
+        # with the box (graph.compute_dtype gives the model its own dtype)
         struct = {
             "pos": torch.as_tensor(self.coords_bohr * BOHR_TO_ANGSTROM,
-                                   dtype=self.dtype, device=self.device),
+                                   dtype=torch.float64, device=self.device),
             "atomic_numbers": torch.as_tensor(self.atomic_numbers,
                                               dtype=torch.long,
                                               device=self.device),
             "cell": (torch.as_tensor(self.cell_bohr * BOHR_TO_ANGSTROM,
-                                     dtype=self.dtype, device=self.device)
+                                     dtype=torch.float64, device=self.device)
                      if self.cell_bohr is not None else None),
             "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
                     if self.cell_bohr is not None else None),
             "total_charge": self.total_charge,
         }
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
+        graph.compute_dtype = self.dtype
         self._sync()
         t_graph = time.perf_counter()
 

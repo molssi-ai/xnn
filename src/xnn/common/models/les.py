@@ -464,7 +464,7 @@ class LatentEwald(InteratomicPotential):
     @torch.jit.unused
     def _select_fast(self, data: AtomicGraph) -> None:
         from .fast import select
-        device, dtype = data.pos.device, data.pos.dtype
+        device, dtype = data.pos.device, data.model_dtype
         # "auto" decides per structure (by its atoms) in EwaldSummation.forward
         select([self.ewald], self.use_fast, None, device, dtype, 0)
         self.ewald.fast_min_atoms = (AUTO_POLICY.threshold(device, dtype)
@@ -494,8 +494,10 @@ class LatentEwald(InteratomicPotential):
         q = self.q_net(features)
         if self.q_linear is not None:
             q = q + self.q_linear(features)
-        energy_lr = self.ewald(q, data.pos, data.batch, data.num_graphs,
-                               data.cell, data.pbc)
+        # the Ewald sum computes in the model's dtype (a float64 geometry is cast)
+        cell = data.cell.to(q.dtype) if data.cell is not None else None
+        energy_lr = self.ewald(q, data.pos.to(q.dtype), data.batch, data.num_graphs,
+                               cell, data.pbc)
         n_atoms = torch.bincount(data.batch, minlength=data.num_graphs)
         out["energy_sr"] = out["energy"]
         out["energy_lr"] = energy_lr

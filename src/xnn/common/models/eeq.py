@@ -389,6 +389,13 @@ class EEQSystem:
         return out
 
 
+#: :class:`EEQReuse`: above this many atoms a system with its own matrix-free
+#: preconditioner (the fast path's low-rank one) is preconditioned with it; up
+#: to it, the explicit inverse of an earlier step's matrix (at 10000 atoms 0.8 GB
+#: in float64, 2.4 GB while it is formed)
+DENSE_REUSE_MAX_ATOMS = 10_000
+
+
 class EEQReuse:
     """Carry the EEQ solve from one structure to the next of an MD run or optimization.
 
@@ -399,7 +406,10 @@ class EEQReuse:
 
     * the preconditioner is the explicit inverse of an *earlier* step's matrix,
       formed once and re-formed only when a solve needs more than ``refresh``
-      iterations; applying it is one matrix-vector product;
+      iterations; applying it is one matrix-vector product. Above
+      :data:`DENSE_REUSE_MAX_ATOMS` atoms, a system that brings its own
+      matrix-free preconditioner (the fast path's) is preconditioned with that
+      instead, so no ``(N, N)`` matrix is formed;
     * each of the step's solves is conjugate gradients from a good initial
       guess: the charges from a quadratic extrapolation of the last three
       steps, the adjoint (forces) from the previous step's adjoint, ``A^-1 1``
@@ -413,7 +423,8 @@ class EEQReuse:
     poor preconditioner or guess only costs iterations. If a solve
     does not converge within ``maxiter`` the preconditioner is re-formed from
     the current matrix and the solve retried once, and failing that the step
-    falls back to the LU path.
+    falls back to the LU path (a cold iterative solve for a matrix-free
+    system).
 
     Measured on 5001 water atoms at 0.997 g/cm^3 (A100, cutoff_eeq 16 A, a
     real 0.5 fs trajectory): the three solves of a step take 20 ms in float32
@@ -423,8 +434,9 @@ class EEQReuse:
     One instance serves one sequence of structures of the same system (atom
     count, elements, dtype, device); it resets itself when any of these
     change, and :class:`~xnn.common.models.d4.DFTD4` uses it only for a
-    structure evaluated on its own, never inside a batch. It holds an
-    ``(N, N)`` matrix (0.1 GB at 5000 atoms in float32).
+    structure evaluated on its own, never inside a batch. With the dense
+    preconditioner it holds an ``(N, N)`` matrix (0.1 GB at 5000 atoms in
+    float32).
 
     Parameters
     ----------
@@ -447,6 +459,7 @@ class EEQReuse:
     def reset(self) -> None:
         """Forget the previous structures (a new run, or a different system)."""
         self._key = None
+        self._matrix_free = False
         self._inv: Optional[Tensor] = None
         self._stale = False
         self._history: list = []
@@ -471,13 +484,18 @@ class EEQReuse:
         self._stale = False
         self.stats["preconditioners"] += 1
 
+    def _apply_preconditioner(self, system: EEQSystem, r: Tensor) -> Tensor:
+        if self._matrix_free:
+            return system.precondition(r)
+        return self._inv @ r
+
     def _pcg(self, system: EEQSystem, b: Tensor, x0: Tensor, tol_abs: float):
         """PCG for ``A y = b``; returns ``(y, iterations)``, iterations ``-1`` if not converged."""
         x = x0.clone()
         r = b - system.matvec(x)
         if float(torch.linalg.norm(r)) <= tol_abs:
             return x, 0
-        z = self._inv @ r
+        z = self._apply_preconditioner(system, r)
         p = z.clone()
         rz = torch.dot(r, z)
         for it in range(1, self.maxiter + 1):
@@ -487,7 +505,7 @@ class EEQReuse:
             r = r - a * ap
             if float(torch.linalg.norm(r)) <= tol_abs:
                 return x, it
-            z = self._inv @ r
+            z = self._apply_preconditioner(system, r)
             rz_new = torch.dot(r, z)
             p = z + (rz_new / rz) * p
             rz = rz_new
@@ -503,16 +521,23 @@ class EEQReuse:
             if key != self._key:
                 self.reset()
                 self._key = key
-            if self._inv is None or self._stale:
+            # a large system with its own matrix-free preconditioner is never
+            # assembled; the warm starts below are what the reuse buys there
+            self._matrix_free = (callable(getattr(system, "precondition", None))
+                                 and hasattr(system, "_solve_cg_lockstep")
+                                 and system.n > DENSE_REUSE_MAX_ATOMS)
+            if not self._matrix_free and (self._inv is None or self._stale):
                 self._precondition(system)
             call = {"charges": 0, "residual": 1}.get(role, 2)
             out = self._attempt(system, b_top, b_bot, call)
-            if out is None:                # re-form from this matrix and retry once
+            if out is None and not self._matrix_free:   # re-form from this matrix, retry once
                 self._precondition(system)
                 out = self._attempt(system, b_top, b_bot, call)
             if out is None:
                 self.stats["fallbacks"] += 1
                 self._stale = True
+                if self._matrix_free:          # a cold iterative solve: no dense LU
+                    return system._solve_cg_lockstep(b_top, b_bot, role)
                 return system._solve_lu(b_top, b_bot)
             return out
 

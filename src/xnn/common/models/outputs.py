@@ -106,6 +106,14 @@ class ForceStressOutput(nn.Module):
         """
         create_graph = self.training  # needed for force-loss backprop
 
+        # a geometry kept in float64 for a float32 model (the deploy paths): the
+        # model sees its own dtype through edge_vectors(); forces and stress
+        # are derivatives with respect to the float64 leaves
+        if data.compute_dtype is None:
+            dtype = _float_dtype(self.model)
+            if dtype is not None and dtype != data.pos.dtype:
+                data.compute_dtype = dtype
+
         strain = None
         if self.compute_stress and data.cell is not None:
             strain = torch.zeros((data.num_graphs, 3, 3), dtype=data.pos.dtype,
@@ -162,3 +170,14 @@ class ForceStressOutput(nn.Module):
             else:
                 out["stress"] = torch.zeros_like(strain)
         return out
+
+
+def _float_dtype(model: nn.Module):
+    """The floating dtype of ``model``'s parameters (or buffers), None if it has none."""
+    for t in model.parameters():
+        if t.is_floating_point():
+            return t.dtype
+    for t in model.buffers():
+        if t.is_floating_point():
+            return t.dtype
+    return None

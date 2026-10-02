@@ -141,6 +141,15 @@ class AtomicGraph:
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
+    # dtype the model computes in, when the geometry is kept in a wider one
+    # (float64 positions for a float32 model); None = the positions' dtype
+    compute_dtype: Optional[torch.dtype] = None
+
+    @property
+    def model_dtype(self) -> torch.dtype:
+        """torch.dtype : The dtype the model computes in (``compute_dtype``, or
+        the positions' dtype when it is not set)."""
+        return self.compute_dtype if self.compute_dtype is not None else self.pos.dtype
 
     @property
     def num_graphs(self) -> int:
@@ -186,6 +195,12 @@ class AtomicGraph:
         (stress). Works for molecular (``cell`` is ``None``) and periodic
         systems alike.
 
+        The difference is formed in the dtype of the geometry and returned in
+        :attr:`model_dtype`: absolute coordinates of size ``L`` in float32 leave
+        every vector with an error of about ``6e-8 L``, so the deploy paths keep
+        the positions and cell in float64 for a float32 model and only the
+        (short) vectors are rounded.
+
         Returns
         -------
         Tensor
@@ -207,4 +222,4 @@ class AtomicGraph:
                 shift = torch.einsum("ei,eij->ej",
                                      self.cell_shifts.to(vec.dtype), cell_per_edge)
             vec = vec + shift
-        return vec
+        return vec.to(self.model_dtype)

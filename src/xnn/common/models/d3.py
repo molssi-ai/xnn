@@ -101,7 +101,7 @@ from .dispersion import (
     three_body_energy_chunked,
 )
 from .fast import FastPathModule
-from .ops import scatter_sum
+from .ops import scatter_sum, structure_sum
 from .registry import register_model
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -819,8 +819,8 @@ class DFTD3(nn.Module, FastPathModule):
                                    torch.arange(n_atoms, device=z.device))
         return {
             "node_energy": node_energy * self.hartree,
-            "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
-            "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_2body": structure_sum(e2, batch, num_graphs) * self.hartree,
+            "energy_3body": structure_sum(e3, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn,
             "c6_matrix": c6_mat,
             "node_features": torch.stack([cn, c6_self], dim=1),

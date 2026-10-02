@@ -57,16 +57,18 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor) -> Tensor:
     Tensor
         Displacements of shape ``(M, 3)``.
     """
+    # formed in the geometry's dtype, returned in the model's (see
+    # AtomicGraph.edge_vectors)
     vec = data.pos[b] - data.pos[a]
     if data.cell is None or vec.shape[0] == 0:
-        return vec
+        return vec.to(data.model_dtype)
     cell = data.cell[data.batch[a]]                       # (M, 3, 3)
     inv = torch.linalg.inv(data.cell)[data.batch[a]]
     frac = torch.einsum("mi,mij->mj", vec, inv)
     shift = -torch.round(frac).detach()
     if data.pbc is not None:
         shift = shift * data.pbc[data.batch[a]].to(shift.dtype)
-    return vec + torch.einsum("mi,mij->mj", shift, cell)
+    return (vec + torch.einsum("mi,mij->mj", shift, cell)).to(data.model_dtype)
 
 
 def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
