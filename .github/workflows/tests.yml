@@ -1,6 +1,7 @@
 name: Tests
 
-# Runs the test suite on CPU with coverage and uploads the report to Codecov.
+# Runs the test suite on CPU with coverage and uploads the coverage report and
+# the JUnit test results to Codecov (coverage graphs and test analytics).
 # GPU-only tests (fast paths, Triton kernels) skip themselves without CUDA.
 
 on:
@@ -37,7 +38,11 @@ jobs:
       - name: Run the tests with coverage
         env:
           XNN_OFFLINE: "1"
-        run: pytest -q -rfEs --cov=xnn --cov-report=xml --cov-report=term-missing:skip-covered
+        # junit.xml (legacy family, the schema Codecov Test Analytics reads)
+        # feeds the per-test insights: flaky tests, slowest tests, failure rates
+        run: >
+          pytest -q -rfEs --cov=xnn --cov-report=xml --cov-report=term-missing:skip-covered
+          --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}
@@ -50,3 +55,12 @@ jobs:
           # visible in the run instead of only as an empty dashboard
           fail_ci_if_error: true
           verbose: true
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: molssi-ai/xnn
+          files: junit.xml
+          fail_ci_if_error: true

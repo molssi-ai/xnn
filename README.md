@@ -1,5 +1,8 @@
 # xnn
 
+[![Tests](https://github.com/molssi-ai/xnn/actions/workflows/tests.yml/badge.svg)](https://github.com/molssi-ai/xnn/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/molssi-ai/xnn/graph/badge.svg)](https://codecov.io/gh/molssi-ai/xnn)
+
 Machine-learning interatomic potentials for molecules and materials behind one
 PyTorch interface. 
 
