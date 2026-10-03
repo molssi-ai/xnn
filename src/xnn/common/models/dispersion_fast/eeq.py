@@ -58,7 +58,7 @@ LIVE_BUDGET = 5 * 10 ** 7
 #: LU solve reaches 2e-6 e; 1e-6 matches that at a few more iterations
 #: (EEQReuse uses the same value)
 CG_TOL_FLOAT32 = 1e-6
-#: reciprocal vectors (smallest |G|, largest weight) in the low-rank part of the
+#: reciprocal vectors (smallest ``|G|``, largest weight) in the low-rank part of the
 #: conjugate-gradient preconditioner; 0 for plain Jacobi. Measured on water boxes
 #: (A100, 5k-24k atoms): 256 cuts the operator applications of a step 3-5x
 #: (94 -> 31 at 5k, 154 -> 43 at 24k atoms in float32) and is the fastest or
