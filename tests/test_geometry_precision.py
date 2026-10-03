@@ -132,6 +132,47 @@ def test_vesin_retries_after_releasing_cached_memory(monkeypatch):
     assert g.edge_index.shape[1] > 0
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("periodic", [True, False])
+def test_vesin_falls_back_to_the_cpu_when_the_gpu_stays_full(periodic, monkeypatch):
+    from xnn.common.data import neighborlist
+
+    if not neighborlist._HAS_VESIN:
+        pytest.skip("needs vesin")
+    real = neighborlist.VesinNeighborList
+    s = _water(3)
+    inputs = {**s, "pos": torch.tensor(s["pos"])}
+    if periodic:
+        inputs["cell"] = torch.tensor(s["cell"])
+    else:
+        inputs.pop("cell", None)
+        inputs.pop("pbc", None)
+    expected = structure_to_graph(inputs, 4.0, device="cuda")
+
+    class GpuFull:
+        def __init__(self, **kwargs):
+            self.inner = real(**kwargs)
+
+        def compute(self, **kwargs):
+            if kwargs["points"].is_cuda:
+                raise RuntimeError("cudaMalloc failed: out of memory")
+            return self.inner.compute(**kwargs)
+
+    monkeypatch.setattr(neighborlist, "VesinNeighborList", GpuFull)
+    monkeypatch.setattr(neighborlist, "_CPU_FALLBACK_WARNED", False)
+    with pytest.warns(RuntimeWarning, match="building it on the CPU"):
+        g = structure_to_graph(inputs, 4.0, device="cuda")
+    assert g.edge_index.is_cuda and g.cell_shifts.is_cuda
+
+    # vesin's CPU and GPU cell lists list the same edges in different orders
+    def edges(graph):
+        rows = torch.cat([graph.edge_index.t(), graph.cell_shifts], dim=1).tolist()
+        return sorted(map(tuple, rows))
+
+    assert g.edge_index.shape == expected.edge_index.shape
+    assert edges(g) == edges(expected)
+
+
 @pytest.mark.parametrize("periodic", [True, False])
 @pytest.mark.parametrize("block", [None, 7])
 def test_edge_vectors_match_the_plain_product(periodic, block, monkeypatch):
