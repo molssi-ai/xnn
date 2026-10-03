@@ -71,21 +71,36 @@ def test_hidden_irreps_upstream_order():
     assert nequip_hidden_irreps(8, 1, parity=False) == o3.Irreps("8x0e+8x1e")
 
 
-def test_gate_matches_e3nn():
-    """The scriptable _Gate reproduces e3nn.nn.Gate bit-for-bit and scripts."""
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("scalars,gated", [
+    ("4x0e+4x0o", "4x1o+4x2e"),  # parity=True layout: two scalar entries
+    ("8x0e", "8x1e"),            # parity=False layout: one scalar entry
+])
+def test_gate_matches_e3nn(scalars, gated, dtype):
+    """The scriptable _Gate reproduces e3nn.nn.Gate bit-for-bit and scripts.
+
+    Checked in both dtypes and over many draws: the CPU activation kernels
+    round differently depending on the operand's memory layout, so a single
+    float64 draw on one machine proves little.
+    """
     from e3nn.nn import Gate
 
-    scalars = o3.Irreps("4x0e+4x0o")
-    gates = o3.Irreps("8x0e")
-    gated = o3.Irreps("4x1o+4x2e")
-    ref = Gate(scalars, [F.silu, torch.tanh], gates, [F.silu], gated)
-    mine = _Gate(scalars, [F.silu, torch.tanh], gates, [F.silu], gated)
+    scalars = o3.Irreps(scalars)
+    gated = o3.Irreps(gated)
+    gates = o3.Irreps(f"{gated.num_irreps}x0e")
+    acts = [F.silu, torch.tanh][:len(scalars)]
+    ref = Gate(scalars, acts, gates, [F.silu], gated)
+    mine = _Gate(scalars, acts, gates, [F.silu], gated)
     assert mine.irreps_in == ref.irreps_in
     assert mine.irreps_out == ref.irreps_out
-    x = torch.randn(5, ref.irreps_in.dim)
-    assert torch.equal(mine(x), ref(x))
     scripted = torch.jit.script(mine)
-    assert torch.equal(scripted(x), ref(x))
+    gen = torch.Generator().manual_seed(0)
+    for n in (1, 5, 7, 64):
+        for _ in range(25):
+            x = torch.randn(n, ref.irreps_in.dim, generator=gen, dtype=dtype)
+            expected = ref(x)
+            assert torch.equal(mine(x), expected)
+            assert torch.equal(scripted(x), expected)
 
 
 @pytest.mark.parametrize("n_layers", [1, 2, 3])
