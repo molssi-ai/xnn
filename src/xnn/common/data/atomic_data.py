@@ -81,7 +81,12 @@ class AtomicGraph:
         The same for ``stress``.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
-        Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF).
+        Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF,
+        AIMNet2).
+    spin_multiplicity : Tensor, optional
+        Spin multiplicity ``2S + 1`` per structure, of shape ``(B,)``.
+        ``None`` means closed shell (1). Read by the open-shell AIMNet2
+        models (``aimnet2-nse``).
     weight : Tensor, optional
         Per-structure loss weight, of shape ``(B,)``. ``None`` means every
         structure counts equally, which is the default and reproduces the
@@ -116,6 +121,8 @@ class AtomicGraph:
         Bool ``(B,)``: the structures that carry force / stress labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
+    spin_multiplicity : Tensor or None
+        Spin multiplicity per structure ``(B,)``.
     weight : Tensor or None
         Per-structure loss weight ``(B,)``.
     """
@@ -140,6 +147,7 @@ class AtomicGraph:
     stress_mask: Optional[Tensor] = None   # (B,) bool
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
+    spin_multiplicity: Optional[Tensor] = None   # (B,) 2S+1; None = closed shell
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
     # dtype the model computes in, when the geometry is kept in a wider one
     # (float64 positions for a float32 model); None = the positions' dtype

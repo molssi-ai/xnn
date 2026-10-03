@@ -141,6 +141,12 @@ def main(argv=None):
         p.add_argument("--no-dispersion", action="store_true",
                        help="export the checkpoint as is, ignoring a recorded "
                             "subtracted_dispersion")
+        p.add_argument("--total-charge", type=float, default=0.0,
+                       help="net charge of the deployed system (D4 EEQ charges, "
+                            "charge-predicting models such as AIMNet2)")
+        p.add_argument("--spin-multiplicity", type=float, default=1.0,
+                       help="spin multiplicity of the deployed system (the "
+                            "two-channel AIMNet2 models)")
         args, _ = p.parse_known_args(rest)
         from ..models.hub import build_potential, fetch_model, load_checkpoint
         from ..models.registry import recorded_dispersion
@@ -169,7 +175,9 @@ def main(argv=None):
         # the model's own cutoff (a dispersion wrapper widens it beyond the
         # config's core-model radius)
         cutoff = float(getattr(base, "cutoff", cfg.model.cutoff))
-        print("wrote", export_torchscript_potential(base, cutoff, args.out, meta))
+        print("wrote", export_torchscript_potential(
+            base, cutoff, args.out, meta, total_charge=args.total_charge,
+            spin_multiplicity=args.spin_multiplicity))
 
     elif cmd == "mdi":
         from ..deploy.mdi_engine import main as mdi_main

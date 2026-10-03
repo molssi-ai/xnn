@@ -33,7 +33,8 @@ def structure_to_graph(
         ``atomic_numbers`` ``(N,)``. Optional keys: ``cell`` ``(3, 3)``,
         ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)``,
         ``stress`` ``(3, 3)``, ``total_charge`` (scalar net charge; the
-        key ``charge`` is accepted as a synonym) and ``weight`` (scalar
+        key ``charge`` is accepted as a synonym), ``spin_multiplicity``
+        (scalar ``2S + 1``; ``multiplicity`` is a synonym) and ``weight`` (scalar
         per-structure loss weight; see
         :func:`~xnn.common.train.losses.weighted_loss`).
     cutoff : float
@@ -82,6 +83,7 @@ def structure_to_graph(
 
     n = pos.shape[0]
     charge = s.get("total_charge", s.get("charge"))
+    mult = s.get("spin_multiplicity", s.get("multiplicity"))
     return AtomicGraph(
         pos=pos,
         atomic_numbers=z,
@@ -90,11 +92,12 @@ def structure_to_graph(
         batch=torch.zeros(n, dtype=torch.long, device=device),
         n_atoms=torch.tensor([n], dtype=torch.long, device=device),
         cell=cell[None] if cell is not None else None,
-        pbc=pbc[None] if pbc is not None else None,
+        pbc=t(pbc)[None] if pbc is not None else None,
         energy=t([s["energy"]]).reshape(1) if s.get("energy") is not None else None,
         forces=t(s["forces"]) if s.get("forces") is not None else None,
         stress=t(s["stress"]).reshape(1, 3, 3) if s.get("stress") is not None else None,
         total_charge=(t([charge]).reshape(1) if charge is not None else None),
+        spin_multiplicity=(t([mult]).reshape(1) if mult is not None else None),
         weight=(t([s["weight"]]).reshape(1) if s.get("weight") is not None else None),
     )
 
@@ -233,8 +236,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     * structures with and without force or stress labels: the missing ones are
       zeros, and ``forces_mask`` / ``stress_mask`` (per structure) mark the
       labelled ones for the loss and the metrics;
-    * structures with and without ``total_charge`` (missing = neutral) or
-      ``weight`` (missing = 1).
+    * structures with and without ``total_charge`` (missing = neutral),
+      ``spin_multiplicity`` (missing = 1) or ``weight`` (missing = 1).
 
     ``energy`` is kept only when every structure has one.
 
@@ -252,7 +255,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     pos, z, batch, n_atoms = [], [], [], []
     edge_index, cell_shifts = [], []
     cells, pbcs = [], []
-    energies, forces, stresses, charges, weights = [], [], [], [], []
+    energies, forces, stresses, charges, mults, weights = [], [], [], [], [], []
     f_masks, s_masks = [], []
 
     dtype, device = graphs[0].pos.dtype, graphs[0].pos.device
@@ -261,6 +264,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_f = any(g.forces is not None for g in graphs)
     has_s = any(g.stress is not None for g in graphs)
     has_q = any(g.total_charge is not None for g in graphs)
+    has_m = any(g.spin_multiplicity is not None for g in graphs)
     has_w = any(g.weight is not None for g in graphs)
 
     def label_mask(g: AtomicGraph, value, mask) -> Tensor:
@@ -301,6 +305,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         if has_q:
             charges.append(g.total_charge if g.total_charge is not None
                            else torch.zeros(b, dtype=dtype, device=device))
+        if has_m:
+            mults.append(g.spin_multiplicity if g.spin_multiplicity is not None
+                         else torch.ones(b, dtype=dtype, device=device))
         if has_w:
             weights.append(g.weight if g.weight is not None
                            else torch.ones(b, dtype=dtype, device=device))
@@ -323,5 +330,6 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         forces_mask=None if f_mask is None or bool(f_mask.all()) else f_mask,
         stress_mask=None if s_mask is None or bool(s_mask.all()) else s_mask,
         total_charge=torch.cat(charges, 0) if has_q else None,
+        spin_multiplicity=torch.cat(mults, 0) if has_m else None,
         weight=torch.cat(weights, 0) if has_w else None,
     )

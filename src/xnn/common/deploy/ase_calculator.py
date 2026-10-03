@@ -75,7 +75,7 @@ class XNNCalculator(Calculator):
         If ASE is not installed.
     """
 
-    implemented_properties = ["energy", "forces", "stress"]
+    implemented_properties = ["energy", "forces", "stress", "charges", "dipole"]
 
     def __init__(self, model, cutoff: float, device: str = "cpu", eeq_reuse: bool = False,
                  **kwargs):
@@ -130,6 +130,26 @@ class XNNCalculator(Calculator):
         return cls(loaded.model, cutoff=loaded.cutoff, device=device,
                    eeq_reuse=eeq_reuse, **(calculator_kwargs or {}))
 
+    @staticmethod
+    def _charge_state(atoms):
+        """The net charge and spin multiplicity an ``Atoms`` object declares in ``info``."""
+        info = atoms.info
+        return (info.get("total_charge", info.get("charge")),
+                info.get("spin_multiplicity", info.get("multiplicity")))
+
+    def check_state(self, atoms, tol=1e-15):
+        """ASE's change detection, plus the net charge and spin multiplicity.
+
+        ASE compares positions, numbers, cell and periodicity only, so the same
+        geometry with another ``atoms.info["charge"]`` would otherwise be served
+        the cached result.
+        """
+        changes = list(super().check_state(atoms, tol))
+        if (self.atoms is not None and not changes
+                and self._charge_state(self.atoms) != self._charge_state(atoms)):
+            changes.append("charge")
+        return changes
+
     def calculate(self, atoms=None, properties=("energy",),
                   system_changes=all_changes):
         """Compute requested properties for an ``Atoms`` object.
@@ -141,7 +161,13 @@ class XNNCalculator(Calculator):
         (node) energies. Forces, when produced, are stored as an
         ``(n_atoms, 3)`` NumPy array. Stress, when produced and the system is
         periodic, is converted from the model's ``3 x 3`` tensor to ASE's
-        Voigt 6-vector ordering ``[xx, yy, zz, yz, xz, xy]``.
+        Voigt 6-vector ordering ``[xx, yy, zz, yz, xz, xy]``. A model that
+        predicts partial charges (PhysNet, BAMBOO, AIMNet2) also fills
+        ``"charges"`` and ``"dipole"`` (in the model's units). The net charge and spin
+        multiplicity of the structure are read from ``atoms.info`` (keys
+        ``"charge"`` / ``"total_charge"`` and ``"spin_multiplicity"`` /
+        ``"multiplicity"``), as :func:`~xnn.common.data.atoms_to_structure`
+        does.
 
         Parameters
         ----------
@@ -170,6 +196,14 @@ class XNNCalculator(Calculator):
                      if atoms.pbc.any() else None),
             "pbc": np.asarray(atoms.pbc),
         }
+        for key in ("total_charge", "charge"):
+            if key in atoms.info:
+                struct["total_charge"] = float(atoms.info[key])
+                break
+        for key in ("spin_multiplicity", "multiplicity"):
+            if key in atoms.info:
+                struct["spin_multiplicity"] = float(atoms.info[key])
+                break
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
         graph.compute_dtype = self.dtype
         out = self.model(graph)
@@ -182,3 +216,7 @@ class XNNCalculator(Calculator):
             # ASE wants Voigt 6-vector
             self.results["stress"] = np.array(
                 [s[0, 0], s[1, 1], s[2, 2], s[1, 2], s[0, 2], s[0, 1]])
+        if "charges" in out:
+            self.results["charges"] = out["charges"].detach().cpu().numpy()
+        if "dipole" in out:
+            self.results["dipole"] = out["dipole"][0].detach().cpu().numpy()

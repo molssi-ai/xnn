@@ -48,6 +48,21 @@ upstream 60 / 40 / 30 / 25 bohr): the export bakes in the wrapper's cutoff and
 hands the core model only the edges within the core's own radius, exactly as
 the eager wrapper does. The total charge of the system is fixed at export
 time (``total_charge``, default neutral), since neither tensor ABI carries it.
+
+Core ABIs
+---------
+A core model exposes one of two scriptable tensor methods. Most models
+provide ``node_features_energy(atomic_numbers, edge_index, edge_vec)``
+(features and per-atom energies from the local graph alone). Models that
+predict partial charges and add their own electrostatics
+(:class:`~xnn.gnn.models.aimnet2.AIMNet2`) provide
+``node_features_energy_charges(atomic_numbers, edge_index, edge_vec, pos,
+cell, pbc, total_charge, spin_multiplicity)``, which also receives the
+positions, the cell and the charge state (the latter fixed at export, like
+``total_charge`` above, through ``spin_multiplicity``) and returns the
+charges as well; the artifact then carries them under ``"charges"``. Their
+Coulomb sum is global (all pairs, or an Ewald sum), so the same whole-system
+rule as for the add-on terms applies.
 """
 # NOTE: deliberately no ``from __future__ import annotations`` -- it turns the
 # class-level attribute annotations below into strings, which TorchScript's
@@ -390,6 +405,47 @@ class _ZeroCore(nn.Module):
                            device=edge_vec.device)
 
 
+class _PlainCore(nn.Module):
+    """Adapter of a ``node_features_energy`` core to the wrapper's uniform core call.
+
+    Returns the features, the per-atom energies and an empty ``(0,)`` charge
+    tensor (the core predicts no charges).
+    """
+
+    def __init__(self, core: nn.Module):
+        super().__init__()
+        self.core = core
+
+    def forward(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                pos: Tensor, cell: Tensor, pbc: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        out = self.core.node_features_energy(atomic_numbers, edge_index, edge_vec)
+        return out[0], out[1], torch.zeros(0, dtype=edge_vec.dtype, device=edge_vec.device)
+
+
+class _ChargedCore(nn.Module):
+    """Adapter of a charge-predicting ``node_features_energy_charges`` core.
+
+    Passes the positions, the cell and the periodicity flags through, with
+    the net charge and spin multiplicity fixed at export time, and returns
+    the predicted charges ``(N,)`` as the third output.
+    """
+
+    total_charge: float
+    spin_multiplicity: float
+
+    def __init__(self, core: nn.Module, total_charge: float, spin_multiplicity: float):
+        super().__init__()
+        self.core = core
+        self.total_charge = float(total_charge)
+        self.spin_multiplicity = float(spin_multiplicity)
+
+    def forward(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                pos: Tensor, cell: Tensor, pbc: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        return self.core.node_features_energy_charges(
+            atomic_numbers, edge_index, edge_vec, pos, cell, pbc,
+            self.total_charge, self.spin_multiplicity)
+
+
 def split_wrappers(model: nn.Module, total_charge: float = 0.0):
     """Peel the LES / D4 wrappers off a model.
 
@@ -458,21 +514,27 @@ class TorchScriptPotential(nn.Module):
     Parameters
     ----------
     model : torch.nn.Module
-        The trained model. Its core must expose the scriptable tensor core
-        ``node_features_energy(atomic_numbers, edge_index, edge_vec)``; LES
-        and D4 wrappers are unwrapped automatically and carried over as heads.
+        The trained model. Its core must expose a scriptable tensor core,
+        ``node_features_energy(atomic_numbers, edge_index, edge_vec)`` or the
+        charge-predicting ``node_features_energy_charges(...)`` (see the
+        module docstring); LES and D4 wrappers are unwrapped automatically
+        and carried over as heads.
     cutoff : float
         Neighbor-list cutoff, baked in so :meth:`forward` is self-contained.
         For a D4-wrapped model this is the wrapper's (widened) cutoff; the core
         receives only the edges within its own radius.
     total_charge : float, optional
-        Net charge of the deployed system, used by the D4 EEQ charges; by
-        default 0 (neutral).
+        Net charge of the deployed system, used by the D4 EEQ charges and by
+        a charge-predicting core; by default 0 (neutral).
+    spin_multiplicity : float, optional
+        Spin multiplicity of the deployed system, read by the two-channel
+        AIMNet2 models; by default 1.
 
     Attributes
     ----------
-    model : torch.nn.Module
-        The short-range core.
+    core : torch.nn.Module
+        The short-range core behind its adapter (:class:`_PlainCore` or
+        :class:`_ChargedCore`; the model itself is ``core.core``).
     lr : torch.nn.Module
         The long-range head (:class:`_LatentEwaldHead` or :class:`_NoLongRange`).
     disp : torch.nn.Module
@@ -485,24 +547,33 @@ class TorchScriptPotential(nn.Module):
         Whether a long-range term is present.
     has_dispersion : bool
         Whether a D4 dispersion term is present.
+    has_charges : bool
+        Whether the core predicts partial charges (returned as ``charges``).
     """
 
     cutoff: float
     core_cutoff: float
     has_long_range: bool
     has_dispersion: bool
+    has_charges: bool
 
-    def __init__(self, model: nn.Module, cutoff: float, total_charge: float = 0.0):
+    def __init__(self, model: nn.Module, cutoff: float, total_charge: float = 0.0,
+                 spin_multiplicity: float = 1.0):
         super().__init__()
         core, head, disp, core_cutoff = split_wrappers(model, total_charge)
         self.has_long_range = isinstance(head, _LatentEwaldHead)
         self.has_dispersion = isinstance(disp, _DispersionHead)
-        if not hasattr(core, "node_features_energy"):
+        self.has_charges = hasattr(core, "node_features_energy_charges")
+        if self.has_charges:
+            self.core: nn.Module = _ChargedCore(core, total_charge, spin_multiplicity)
+        elif hasattr(core, "node_features_energy"):
+            self.core = _PlainCore(core)
+        else:
             raise TypeError(
                 f"{type(core).__name__} has no scriptable "
-                "'node_features_energy(atomic_numbers, edge_index, edge_vec)' "
-                "core, which the TorchScript export requires")
-        self.model = core
+                "'node_features_energy(atomic_numbers, edge_index, edge_vec)' (or "
+                "'node_features_energy_charges(...)') core, which the TorchScript "
+                "export requires")
         self.lr = head
         self.disp = disp
         self.cutoff = float(cutoff)
@@ -585,9 +656,10 @@ class TorchScriptPotential(nn.Module):
             keep = torch.linalg.norm(edge_vec.detach(), dim=-1) < self.core_cutoff
             core_index = edge_index[:, keep]
             core_vec = edge_vec[keep]
-        out = self.model.node_features_energy(atomic_numbers, core_index, core_vec)
+        out = self.core(atomic_numbers, core_index, core_vec, p_s, cell_s, pbc)
         features = out[0]
         node_energy = out[1]
+        model_charges = out[2]
         energy_sr = node_energy.sum(dtype=torch.float64)
         node_lr, charges = self.lr(features, atomic_numbers, p_s, cell_s, pbc,
                                    edge_index, edge_vec)
@@ -629,6 +701,7 @@ class TorchScriptPotential(nn.Module):
             "virial": -stress * volume,
             "latent_charges": charges,
             "eeq_charges": eeq,
+            "charges": model_charges,
         }
         if out_dtype != dtype:
             converted: Dict[str, Tensor] = {}
@@ -665,7 +738,9 @@ class TorchScriptPotential(nn.Module):
             ``energy_lr`` ``(1,)``, ``energy_disp`` ``(1,)``, ``node_energy``
             ``(N,)``, ``forces`` ``(N, 3)``, ``stress`` ``(3, 3)``, ``virial``
             ``(3, 3)``, ``latent_charges`` ``(N, n_channels)`` (empty without
-            LES) and ``eeq_charges`` ``(N, 1)`` (empty without D4).
+            LES), ``eeq_charges`` ``(N, 1)`` (empty without D4) and
+            ``charges`` ``(N,)``, the partial charges of a charge-predicting
+            core (empty otherwise).
         """
         dtype = pos.dtype
         device = pos.device
@@ -727,14 +802,15 @@ class TorchScriptPotential(nn.Module):
 
 def export_torchscript_potential(model: nn.Module, cutoff: float, path: str,
                                  metadata: Optional[dict] = None,
-                                 total_charge: float = 0.0) -> str:
+                                 total_charge: float = 0.0,
+                                 spin_multiplicity: float = 1.0) -> str:
     """Script a trained model to a standalone ``.pt`` and save it.
 
     Wraps ``model`` in :class:`TorchScriptPotential`, compiles it with
     ``torch.jit.script`` and writes the archive. The cutoff and the
-    ``long_range`` / ``dispersion`` flags are embedded as extra files,
-    alongside any caller metadata, so a consumer can introspect the artifact
-    without ``xnn``.
+    ``long_range`` / ``dispersion`` / ``charges`` flags are embedded as extra
+    files, alongside any caller metadata, so a consumer can introspect the
+    artifact without ``xnn``.
 
     Parameters
     ----------
@@ -747,7 +823,10 @@ def export_torchscript_potential(model: nn.Module, cutoff: float, path: str,
     metadata : dict or None, optional
         Extra key/value metadata; values are stringified.
     total_charge : float, optional
-        Net charge of the deployed system (D4 EEQ charges), by default 0.
+        Net charge of the deployed system (D4 EEQ charges, charge-predicting
+        cores), by default 0.
+    spin_multiplicity : float, optional
+        Its spin multiplicity (two-channel AIMNet2 cores), by default 1.
 
     Returns
     -------
@@ -756,12 +835,14 @@ def export_torchscript_potential(model: nn.Module, cutoff: float, path: str,
     """
     # the fused kernels are eager-only: the scripted model is the reference one
     deactivate_fast_paths(model)
-    wrapper = TorchScriptPotential(model, cutoff, total_charge).eval()
+    wrapper = TorchScriptPotential(model, cutoff, total_charge, spin_multiplicity).eval()
     scripted = torch.jit.script(wrapper)
     extra = {"cutoff": str(cutoff),
              "long_range": str(wrapper.has_long_range),
              "dispersion": str(wrapper.has_dispersion),
-             "total_charge": str(total_charge)}
+             "charges": str(wrapper.has_charges),
+             "total_charge": str(total_charge),
+             "spin_multiplicity": str(spin_multiplicity)}
     if metadata:
         extra.update({k: str(v) for k, v in metadata.items()})
     scripted.save(path, _extra_files=extra)

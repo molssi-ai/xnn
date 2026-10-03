@@ -67,6 +67,10 @@ class ModelCard:
         MD5 digest of the file at ``url``. Zenodo supplies its own.
     tags : list of str
         Free-form keywords for filtering.
+    aliases : list of str
+        Other names the model loads under (``"aimnet2"`` for
+        ``"aimnet2-wb97m-d3-0"``); they resolve to this card and share its
+        cache directory.
     notes : str, optional
         Anything else a user should know.
     unsupported : str, optional
@@ -98,6 +102,7 @@ class ModelCard:
     filename: Optional[str] = None
     md5: Optional[str] = None
     tags: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
     notes: Optional[str] = None
     unsupported: Optional[str] = None
     source: Optional[str] = None
