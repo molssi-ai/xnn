@@ -51,6 +51,15 @@ hub = ["h5py>=3.0"]
 # NOTE: relaxed from >=0.5 -- the example notebooks compare against ACEsuit/mace
 # (mace-torch), which pins e3nn==0.4.4. xnn runs fine on 0.4.4 (all tests pass).
 gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
+# Fused GPU kernels for the MACE/NequIP fast paths (use_fast). Optional: the
+# kernels (cuequivariance-ops-torch-cu12) are NVIDIA binaries under NVIDIA's
+# license; without them every model runs its reference implementation. The
+# three packages must come from one release (0.6.1 is the tested one; later
+# releases change the descriptors). The ops package needs cuBLAS >= 12.5, so
+# torch must be a CUDA 12.6+ build (cu126, torch >= 2.6); cu121 and cu124 pin
+# an older cuBLAS.
+cueq = ["cuequivariance==0.6.1", "cuequivariance-torch==0.6.1",
+        "cuequivariance-ops-torch-cu12==0.6.1"]
 # MolSSI Driver Interface engine (xnn mdi); MPI method also needs mpi4py.
 mdi = ["pymdi>=1.4"]
 # Cell-list neighbor lists. Optional -- the built-in reference implementation is

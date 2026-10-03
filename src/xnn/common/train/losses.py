@@ -40,6 +40,30 @@ def _residual_sq(diff: Tensor, delta: float) -> Tensor:
     return torch.where(a <= delta, diff ** 2, 2.0 * delta * a - delta ** 2)
 
 
+def _masked(w: Optional[Tensor], mask: Optional[Tensor], like: Tensor) -> Optional[Tensor]:
+    """Per-structure weights restricted to the structures that carry a label.
+
+    Parameters
+    ----------
+    w : Tensor or None
+        Per-structure weights ``(B,)``; ``None`` means all equal.
+    mask : Tensor or None
+        Bool ``(B,)``, the structures with the label; ``None`` means all.
+    like : Tensor
+        Gives the dtype of the result.
+
+    Returns
+    -------
+    Tensor or None
+        ``w`` with the unlabelled structures at zero, or ``None`` when neither
+        weights nor a mask apply (the plain mean).
+    """
+    if mask is None:
+        return w
+    m = mask.to(like.dtype)
+    return m if w is None else w * m
+
+
 def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
     """Mean of ``err``, weighted by ``w`` broadcast over the trailing axes.
 
@@ -96,6 +120,12 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     a set mixing small and large structures, or dense scans with sparse
     sampling, silently allocates the fit. Set ``weight`` in the structure dicts
     (see :func:`~xnn.common.data.dataset.to_graph`) to allocate it on purpose.
+
+    **Partially labelled batches.** A batch may mix structures with and without
+    force or stress labels (``data.forces_mask`` / ``data.stress_mask``, set by
+    :func:`~xnn.common.data.dataset.collate`): those terms then average over
+    the labelled structures only, and a batch without any is skipped for that
+    term.
 
     **Huber tails.** With ``huber_delta > 0`` the squared error is replaced by
     a Huber-like function that is quadratic up to ``delta`` and linear beyond,
@@ -156,16 +186,20 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         logs["energy_mse"] = float(e_loss.detach())
 
     if data.forces is not None and force_weight > 0 and "forces" in pred:
-        # a structure's weight applies to each of its atoms
-        w_atom = None if w is None else w[data.batch]
-        f_loss = _mean(_residual_sq(pred["forces"] - data.forces, d_f), w_atom)
-        loss = loss + force_weight * f_loss
-        logs["force_mse"] = float(f_loss.detach())
+        w_f = _masked(w, getattr(data, "forces_mask", None), pred["forces"])
+        if w_f is None or bool(w_f.any()):
+            # a structure's weight (and label mask) applies to each of its atoms
+            w_atom = None if w_f is None else w_f[data.batch]
+            f_loss = _mean(_residual_sq(pred["forces"] - data.forces, d_f), w_atom)
+            loss = loss + force_weight * f_loss
+            logs["force_mse"] = float(f_loss.detach())
 
     if data.stress is not None and stress_weight > 0 and "stress" in pred:
-        s_loss = _mean(_residual_sq(pred["stress"] - data.stress, d_s), w)
-        loss = loss + stress_weight * s_loss
-        logs["stress_mse"] = float(s_loss.detach())
+        w_s = _masked(w, getattr(data, "stress_mask", None), pred["stress"])
+        if w_s is None or bool(w_s.any()):
+            s_loss = _mean(_residual_sq(pred["stress"] - data.stress, d_s), w_s)
+            loss = loss + stress_weight * s_loss
+            logs["stress_mse"] = float(s_loss.detach())
 
     logs["loss"] = float(loss.detach())
     return loss, logs

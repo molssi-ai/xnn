@@ -100,7 +100,8 @@ from .dispersion import (
     three_body_energy,
     three_body_energy_chunked,
 )
-from .ops import scatter_sum
+from .fast import FastPathModule
+from .ops import scatter_sum, structure_sum
 from .registry import register_model
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -445,7 +446,7 @@ PBE0_D3ZERO = {"s6": 1.0, "s8": 0.928, "rs6": 1.287, "rs8": 1.0, "s9": 0.0, "alp
 _DAMPINGS = ("bj", "zero", "mzero", "op")
 
 
-class DFTD3(nn.Module):
+class DFTD3(nn.Module, FastPathModule):
     """The D3 dispersion model as a TorchScript-compatible energy evaluator.
 
     Holds the damping parameters, the model constants and the reference data
@@ -528,6 +529,7 @@ class DFTD3(nn.Module):
     references: str
     checkpoint_triplets: bool
     triplet_chunk: Optional[int]
+    fast_active: bool
 
     def __init__(self, damping: str = "bj", s6: float = 1.0, s8: Optional[float] = None,
                  s9: float = 0.0, a1: float = 0.4145, a2: float = 4.8593,
@@ -540,6 +542,9 @@ class DFTD3(nn.Module):
                  trainable: bool = False, references: str = "2024",
                  checkpoint_triplets: bool = True, triplet_chunk: Optional[int] = None):
         super().__init__()
+        # the fast paths (dispersion_fast) are chosen per evaluation by the
+        # owning DispersionCorrection; off here, and always under TorchScript
+        self.fast_active = False
         self.checkpoint_triplets = bool(checkpoint_triplets)
         self.triplet_chunk = triplet_chunk
         damping = damping.lower()
@@ -630,9 +635,8 @@ class DFTD3(nn.Module):
     def pair_c6(self, z: Tensor, weights: Tensor, species_vectors: Tensor,
                 idx_i: Tensor, idx_j: Tensor) -> Tensor:
         """C6 of the pairs ``(idx_i, idx_j)`` (eq 16), ``(E,)``."""
-        v = species_vectors[idx_i]                                # (E, 7, Zmax+1)
-        zj = z[idx_j].view(-1, 1, 1).expand(-1, v.shape[1], 1)
-        v_j = torch.gather(v, 2, zj).squeeze(2)                   # (E, 7): V[i, :, Z_j]
+        # V[i, :, Z_j] gathered directly: (E, 7), never the (E, 7, Zmax+1) rows
+        v_j = species_vectors[idx_i, :, z[idx_j]]
         return (v_j * weights[idx_j]).sum(-1)
 
     def c6_matrix(self, z: Tensor, weights: Tensor, species_vectors: Tensor) -> Tensor:
@@ -693,6 +697,50 @@ class DFTD3(nn.Module):
                                          self.switch_width_triple / self.bohr, n_atoms,
                                          c6_mat=c6_mat, chunk=self.triplet_chunk)
 
+    @torch.jit.unused
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA."""
+        from .dispersion_fast import supported
+        return supported(device, dtype)
+
+    @torch.jit.unused
+    def _fast_three_body_allowed(self) -> bool:
+        """Whether the ATM kernels apply: a fixed ``s9`` (no gradient to it), and
+        not a training step, whose second derivatives (a force loss) the kernels
+        would hand to the reference anyway."""
+        if self.training and torch.is_grad_enabled():
+            return False
+        return not self.s9.requires_grad
+
+    @torch.jit.unused
+    def _three_body_fast(self, z: Tensor, weights: Tensor, vectors: Tensor, edge_index: Tensor,
+                         edge_vec: Tensor, n_atoms: int) -> Tensor:
+        """The ATM term with the Triton kernels of :mod:`~xnn.common.models.dispersion_fast.atm`.
+
+        The pair C6 ``W_i^T C6ref[Z_i, Z_j] W_j`` (eq 16) is ``<f_i, g_j>`` with
+        ``f_i[s, b] = V[i, b, Z_s]`` over the species ``s`` present and
+        ``g_j[s, b] = W_jb`` at the atom's own species (zero elsewhere).
+        """
+        from .dispersion_fast.atm import ATMConstants, atm_energy
+        species, spec = torch.unique(z, return_inverse=True)
+        n_species = int(species.shape[0])
+        f = vectors[:, :, species].transpose(1, 2).reshape(n_atoms, -1)
+        own = torch.nn.functional.one_hot(spec, n_species).to(weights.dtype)
+        g = (own[:, :, None] * weights[:, None, :]).reshape(n_atoms, -1)
+        table = (self.rs9 * self.rvdw[species][:, species]).detach()
+        alp3 = (self.alp + 2.0) / 3.0
+        cutoff, width = self.cutoff_triple / self.bohr, self.switch_width_triple / self.bohr
+        consts = ATMConstants(spec.to(torch.int32).contiguous(), table, float(self.s9), alp3,
+                              cutoff, width)
+
+        def reference(vec: Tensor, f_a: Tensor, f_b: Tensor) -> Tensor:
+            return three_body_energy_chunked(z, edge_index, vec, torch.linalg.norm(vec, dim=-1),
+                                             self.rs9 * self.rvdw, self.s9, alp3, cutoff, width,
+                                             n_atoms, alpha_a=f_a, alpha_b=f_b,
+                                             chunk=self.triplet_chunk)
+
+        return atm_energy(edge_index, edge_vec, f, g, consts, n_atoms, reference=reference)
+
     @torch.jit.export
     def evaluate(self, atomic_numbers: Tensor, pos: Tensor, edge_index: Tensor,
                  edge_vec: Tensor, batch: Tensor, num_graphs: int,
@@ -713,7 +761,9 @@ class DFTD3(nn.Module):
             ``"node_energy"`` ``(N,)`` in eV, ``"energy_2body"`` /
             ``"energy_3body"`` ``(B,)`` in eV, ``"coordination_numbers"``
             ``(N,)``, ``"c6_matrix"`` ``(N, N)`` in hartree bohr^6 (empty for
-            more than 20000 atoms) and ``"node_features"`` ``(N, 2)`` (the
+            more than 20000 atoms and on the fast three-body path, which does
+            not need it; :meth:`c6_matrix` forms it on request) and
+            ``"node_features"`` ``(N, 2)`` (the
             CN and the homoatomic C6).
         """
         z = atomic_numbers
@@ -737,15 +787,23 @@ class DFTD3(nn.Module):
         node_energy = e2
         e3 = torch.zeros_like(e2)
 
-        dense = n_atoms <= 20000
+        # the fast three-body kernels read the pair C6 from per-atom factors:
+        # no dense matrix, and no limit on the atom count
+        fast3 = False
+        if not torch.jit.is_scripting():
+            fast3 = self.fast_active and bool(self.s9 != 0.0) and self._fast_three_body_allowed()
+        dense = n_atoms <= 20000 and not fast3
         c6_mat = (self.c6_matrix(z, weights, vectors) if dense
                   else torch.zeros((0, 0), dtype=r.dtype, device=r.device))
         if bool(self.s9 != 0.0):
-            if not dense:
+            if not dense and not fast3:
                 raise ValueError("the D3 three-body term needs the dense C6 matrix "
                                  "(more than 20000 atoms); set s9 = 0")
             in_triple = r <= self.cutoff_triple / self.bohr
-            if self.checkpoint_triplets and not torch.jit.is_scripting():
+            if fast3:
+                e3 = self._three_body_fast(z, weights, vectors, edge_index[:, in_triple],
+                                           vec_au[in_triple], n_atoms)
+            elif self.checkpoint_triplets and not torch.jit.is_scripting():
                 e3 = self._three_body_chunked(z, edge_index[:, in_triple], vec_au[in_triple],
                                               r[in_triple], c6_mat, n_atoms)
             else:
@@ -761,8 +819,8 @@ class DFTD3(nn.Module):
                                    torch.arange(n_atoms, device=z.device))
         return {
             "node_energy": node_energy * self.hartree,
-            "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
-            "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_2body": structure_sum(e2, batch, num_graphs) * self.hartree,
+            "energy_3body": structure_sum(e3, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn,
             "c6_matrix": c6_mat,
             "node_features": torch.stack([cn, c6_self], dim=1),

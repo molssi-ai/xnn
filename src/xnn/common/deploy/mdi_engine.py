@@ -164,7 +164,8 @@ class MDIEngine:
                         dispersion: Any = None,
                         total_charge: float = 0.0,
                         eeq_reuse: bool = False,
-                        cache_dir: str | None = None) -> "MDIEngine":
+                        cache_dir: str | None = None,
+                        use_fast: bool | str = "auto") -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -218,6 +219,9 @@ class MDIEngine:
         cache_dir : str, optional
             Model hub cache for a registered name, URL or DOI (see
             :func:`~xnn.common.models.hub.cache.default_model_cache_dir`).
+        use_fast : bool or str, optional
+            ``"auto"`` (default), ``True`` or ``False``: the fused GPU kernels
+            or the reference implementation (see :mod:`xnn.common.models.fast`).
 
         Returns
         -------
@@ -235,7 +239,7 @@ class MDIEngine:
         from ..models.hub import load_pretrained
         loaded = load_pretrained(path, cache_dir=cache_dir, dtype=dtype,
                                  dispersion=dispersion, compute_stress=True,
-                                 eeq_reuse=eeq_reuse)
+                                 eeq_reuse=eeq_reuse, use_fast=use_fast)
         model, cfg, cutoff = loaded.model, loaded.config, loaded.cutoff
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff,
@@ -248,9 +252,9 @@ class MDIEngine:
         """Evaluate the model on the current system state.
 
         Converts positions and cell from Bohr to angstrom, builds the graph
-        with :func:`~xnn.common.data.structure_to_graph` (tensors are created
-        in the model's dtype so float32 and float64 models both work; the
-        current ``total_charge`` rides along), runs the model and stores
+        with :func:`~xnn.common.data.structure_to_graph` (positions and cell
+        in float64, the model computing in its own dtype; the current
+        ``total_charge`` rides along), runs the model and stores
         ``energy`` (Hartree), ``forces`` (Hartree/Bohr) and, for periodic
         systems, ``stress`` (Hartree/Bohr^3).
 
@@ -269,20 +273,24 @@ class MDIEngine:
         # part and it is rebuilt every step, so where it runs decides the cost
         # of the step: on 5001 atoms this was 1.8 s of CPU per step against
         # 36 ms on the GPU, and 0.6 ms once vesin's cell list is available.
+        # positions and cell in float64 whatever the model's dtype: edge vectors
+        # formed from float32 absolute coordinates carry an error that grows
+        # with the box (graph.compute_dtype gives the model its own dtype)
         struct = {
             "pos": torch.as_tensor(self.coords_bohr * BOHR_TO_ANGSTROM,
-                                   dtype=self.dtype, device=self.device),
+                                   dtype=torch.float64, device=self.device),
             "atomic_numbers": torch.as_tensor(self.atomic_numbers,
                                               dtype=torch.long,
                                               device=self.device),
             "cell": (torch.as_tensor(self.cell_bohr * BOHR_TO_ANGSTROM,
-                                     dtype=self.dtype, device=self.device)
+                                     dtype=torch.float64, device=self.device)
                      if self.cell_bohr is not None else None),
             "pbc": (torch.ones(3, dtype=torch.bool, device=self.device)
                     if self.cell_bohr is not None else None),
             "total_charge": self.total_charge,
         }
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
+        graph.compute_dtype = self.dtype
         self._sync()
         t_graph = time.perf_counter()
 
@@ -525,6 +533,11 @@ def main(argv=None) -> None:
                    help="carry the large-regime D4 EEQ solve over between steps "
                         "(MD, optimization); results agree with the fresh solve "
                         "to the solver tolerance")
+    p.add_argument("--fast", choices=["auto", "on", "off"], default="auto",
+                   help="fused GPU kernels (cuEquivariance) for the blocks that have "
+                        "them: 'auto' (default) where available and faster for the "
+                        "system size, 'on' wherever available, 'off' never; in "
+                        "float32 they agree with the reference to about 1e-6")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -547,7 +560,9 @@ def main(argv=None) -> None:
                                        dtype=dtype, dispersion=dispersion,
                                        total_charge=args.total_charge,
                                        eeq_reuse=args.eeq_reuse,
-                                       cache_dir=args.cache_dir)
+                                       cache_dir=args.cache_dir,
+                                       use_fast={"auto": "auto", "on": True,
+                                                 "off": False}[args.fast])
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

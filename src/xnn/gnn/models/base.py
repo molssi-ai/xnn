@@ -23,8 +23,14 @@ from torch.nn import functional as F
 from e3nn import o3
 
 from xnn.common.models.base import InteratomicPotential
+from ..constants import exact_float64_constants
 from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .blocks import species_irreps
+
+
+def _exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
+    """``load_state_dict`` post-hook: a float32 checkpoint brings rounded constants."""
+    exact_float64_constants(module)
 
 
 class GNNPotential(InteratomicPotential):
@@ -67,6 +73,13 @@ class GNNPotential(InteratomicPotential):
         self.register_buffer("z_to_index", z_to_index)
         self.atom_ref = nn.Embedding(200, 1)
         nn.init.zeros_(self.atom_ref.weight)
+        # float64 constants stay exact through loads and casts
+        self.register_load_state_dict_post_hook(_exact_constants_after_load)
+
+    def _apply(self, fn, recurse=True):
+        out = super()._apply(fn, recurse)
+        exact_float64_constants(self)
+        return out
 
     def set_atomic_energies(self, values) -> None:
         """Initialise the per-element reference energies ``atom_ref``.
@@ -166,3 +179,42 @@ class EquivariantGNN(GNNPotential):
         self.edge_feat = SphericalHarmonicEdgeEmbedding(
             l_max, n_rbf, cutoff, p=p, radial_type=radial_type,
             trainable_rbf=trainable_rbf, rbf_prefactor=rbf_prefactor)
+        # the fast paths of the blocks (see xnn.common.models.fast): "auto"
+        # takes them where they are available and measured to be faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "EquivariantGNN":
+        """Choose the implementation of the blocks with a fast path.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default of every model): fused GPU kernels where
+            they are available and faster for the input at hand (a CUDA device,
+            cuEquivariance installed, a graph above the measured size
+            threshold of the GPU); ``True``: wherever they are available;
+            ``False``: always the reference implementation. In float32 the
+            kernels agree with the reference to about 1e-6 relative, in float64
+            to about 1e-14.
+
+        Returns
+        -------
+        EquivariantGNN
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int, like: Tensor) -> None:
+        """Switch the fast-path blocks on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast import AUTO_POLICY
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        if blocks:
+            select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)

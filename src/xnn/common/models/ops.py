@@ -75,6 +75,32 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     return out.index_add(0, index, src)
 
 
+def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
+    """Sum per-atom values into per-structure totals, accumulated in float64.
+
+    A float32 total of tens of thousands of atoms is only good to its own
+    rounding, about ``|E| * 6e-8`` (tenths of an eV for 1e4 to 1e5 water atoms),
+    so per-structure energies are summed and returned in float64 whatever the
+    model's dtype; the per-atom values keep theirs.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Per-atom values of shape ``(N,)``.
+    index : torch.Tensor
+        Structure index of every atom, shape ``(N,)``.
+    dim_size : int
+        Number of structures.
+
+    Returns
+    -------
+    torch.Tensor
+        Float64 totals of shape ``(dim_size,)``.
+    """
+    out = torch.zeros(dim_size, dtype=torch.float64, device=src.device)
+    return out.index_add(0, index, src.to(torch.float64))
+
+
 def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, Tensor]:
     """Enumerate neighbour pairs ``(j, k)`` sharing a centre ``i``.
 

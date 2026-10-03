@@ -50,6 +50,10 @@ pygments_style = "default"
 autosummary_generate = True
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+# The Triton kernels of the dispersion fast paths import triton at module
+# level, and triton ships only with the CUDA builds of PyTorch; mocking it
+# lets those modules import so their Python-level API still documents.
+autodoc_mock_imports = ["triton"]
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True

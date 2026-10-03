@@ -107,7 +107,8 @@ from .dispersion import (
 )
 from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit,
                   reciprocal_vectors)
-from .ops import cell_volume, scatter_sum
+from .fast import FastPathModule
+from .ops import cell_volume, scatter_sum, structure_sum
 from .registry import register_model
 
 # D4 model constants
@@ -247,7 +248,7 @@ def c6_matrix(alpha_iw: Tensor) -> Tensor:
     return (3.0 / math.pi) * (alpha_iw * w) @ alpha_iw.T
 
 
-class DFTD4(nn.Module):
+class DFTD4(nn.Module, FastPathModule):
     """The D4 dispersion model as a TorchScript-compatible energy evaluator.
 
     Holds the damping parameters, the model constants and the reference
@@ -391,6 +392,7 @@ class DFTD4(nn.Module):
     tail_correction: bool
     auto_large_periodic: int
     auto_large_molecular: int
+    fast_active: bool
 
     def __init__(self, s6: float = 1.0, s8: float = 1.20065498,
                  a1: float = 0.40085597, a2: float = 5.02928789,
@@ -409,6 +411,9 @@ class DFTD4(nn.Module):
                  triplet_cache: Optional[float] = None,
                  tail_correction: bool = False):
         super().__init__()
+        # the fast paths (dispersion_fast) are chosen per evaluation by the
+        # owning DispersionCorrection; off here, and always under TorchScript
+        self.fast_active = False
         regime = str(regime).lower()
         if regime not in REGIMES:
             raise ValueError(f"regime must be one of {REGIMES}, got {regime!r}")
@@ -691,6 +696,21 @@ class DFTD4(nn.Module):
             sol = torch.linalg.solve(full, rhs)
         return sol[:n, 0]
 
+    @torch.jit.unused
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA."""
+        from .dispersion_fast import supported
+        return supported(device, dtype)
+
+    @torch.jit.unused
+    def _fast_three_body_allowed(self) -> bool:
+        """Whether the ATM kernels apply: fixed damping parameters (no gradient to
+        them), and not a training step, whose second derivatives (a force loss)
+        the kernels would hand to the reference anyway."""
+        if self.training and torch.is_grad_enabled():
+            return False
+        return not any(t.requires_grad for t in (self.s9, self.a1, self.a2))
+
     def select_regime(self, n_atoms: int, periodic: bool) -> str:
         """Resolve ``"auto"`` to ``"dense"`` or ``"large"`` for one structure."""
         if self.regime != "auto":
@@ -735,15 +755,23 @@ class DFTD4(nn.Module):
         # the system's identity for the reuse: atom count and element sequence
         signature = (int(z.shape[0]), int(z.sum()),
                      int((z * torch.arange(1, z.shape[0] + 1, device=z.device)).sum()))
+        fast = self.fast_active
+        if fast:
+            from .dispersion_fast.eeq import FastEEQSystem
         if periodic:
             alpha = ewald_alpha(self.cutoff_eeq / self.bohr)
             grid, gvec, gfac = reciprocal_vectors(cell.detach(), alpha)
             diag = diag - 2.0 * alpha / math.sqrt(math.pi)
-            system = EEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac, grid,
-                               solver=self.eeq_solver, reuse=reuse, signature=signature)
+            if fast:
+                system = FastEEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac,
+                                       grid, solver=self.eeq_solver, reuse=reuse,
+                                       signature=signature, cell=cell)
+            else:
+                system = EEQSystem(diag, rad, pos, edge_index, edge_vec, alpha, gvec, gfac, grid,
+                                   solver=self.eeq_solver, reuse=reuse, signature=signature)
             return eeq_charges_large(system, pos, edge_vec, rad, diag, x, total_charge, cell)
-        system = EEQSystem(diag, rad, pos, solver=self.eeq_solver, reuse=reuse,
-                           signature=signature)
+        system = (FastEEQSystem if fast else EEQSystem)(diag, rad, pos, solver=self.eeq_solver,
+                                                        reuse=reuse, signature=signature)
         return eeq_charges_large(system, pos, None, rad, diag, x, total_charge)
 
     @torch.jit.unused
@@ -783,17 +811,34 @@ class DFTD4(nn.Module):
         the coordination-number dependence reaches the forces), and the blocks
         gather scalars; see :func:`~xnn.common.models.dispersion.three_body_energy_chunked`.
         """
-        alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
-        c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
         shifts = edge_cell_shifts(pos, edge_index, edge_vec, cell, batch)
         r0_atom = (3.0 ** 0.25) * torch.sqrt(self.r4r2[z])      # rho_A: R0_AB = a1 rho_A rho_B + a2
-        return three_body_energy_chunked(z, edge_index, edge_vec, r, None,
-                                         self.s9, self.alp / 3.0, self.cutoff_triple / self.bohr,
-                                         self.switch_width_triple / self.bohr, n_atoms,
-                                         r0_atom=r0_atom, a1=self.a1, a2=self.a2,
-                                         c6_edge=c6_edge, edge_shift=shifts,
-                                         chunk=self.triplet_chunk,
-                                         triplet_cache=self.triplet_cache)
+
+        def reference(vec: Tensor, c6_edge: Tensor, cache: Optional[float]) -> Tensor:
+            return three_body_energy_chunked(z, edge_index, vec, torch.linalg.norm(vec, dim=-1),
+                                             None, self.s9, self.alp / 3.0,
+                                             self.cutoff_triple / self.bohr,
+                                             self.switch_width_triple / self.bohr, n_atoms,
+                                             r0_atom=r0_atom, a1=self.a1, a2=self.a2,
+                                             c6_edge=c6_edge, edge_shift=shifts,
+                                             chunk=self.triplet_chunk, triplet_cache=cache)
+
+        if self.fast_active and self._fast_three_body_allowed():
+            from .dispersion_fast.atm import ATMConstants, atm_energy
+            # C6_AB = (3 / pi) sum_w cp_w alpha_A(iw) alpha_B(iw) = <f_A, f_B>
+            feat = alpha_neutral * torch.sqrt((3.0 / math.pi) * self.cp_weights)
+            species, spec = torch.unique(z, return_inverse=True)
+            rho = (3.0 ** 0.25) * torch.sqrt(self.r4r2[species])
+            table = (self.a1 * rho[:, None] * rho[None, :] + self.a2).detach()
+            consts = ATMConstants(spec.to(torch.int32).contiguous(), table, float(self.s9),
+                                  self.alp / 3.0, self.cutoff_triple / self.bohr,
+                                  self.switch_width_triple / self.bohr)
+            return atm_energy(edge_index, edge_vec, feat, feat, consts, n_atoms,
+                              reference=lambda v, f_a, f_b: reference(
+                                  v, (f_a[edge_index[1]] * f_b[edge_index[0]]).sum(-1), 0.0))
+        alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
+        c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
+        return reference(edge_vec, c6_edge, self.triplet_cache)
 
     def reference_weights(self, z: Tensor, cn: Tensor, q: Tensor) -> Tensor:
         """Charge-scaled Gaussian weights of the reference systems (eqs 2-4, 8).
@@ -987,25 +1032,40 @@ class DFTD4(nn.Module):
         if bool((z > self.max_z).any()) or bool((z < 1).any()):
             raise ValueError("D4 with EEQ charges supports atomic numbers 1..103")
         pos_au = pos / self.bohr
+        # only the EEQ real-space sum reaches the neighbor-list radius: the other
+        # terms get the edges within their largest cutoff (same order and values),
+        # so their per-edge work and saved tensors skip the rest
+        with torch.no_grad():
+            r_all = torch.linalg.norm(edge_vec / self.bohr, dim=-1)
+        near = max(max(self.cutoff_pair, self.cutoff_triple),
+                   max(self.cutoff_cn, self.cutoff_eeq_cn)) / self.bohr
+        edge_all, edge_vec_all = edge_index, edge_vec
+        if bool((r_all > near).any()):
+            keep = torch.nonzero(r_all <= near).squeeze(1)
+            edge_index, edge_vec = edge_index[:, keep], edge_vec[keep]
         vec_au = edge_vec / self.bohr
         r = torch.linalg.norm(vec_au, dim=-1)
 
         cn_d4, cn_eeq = self.coordination_numbers(z, edge_index, r, n_atoms)
 
         charges: List[Tensor] = []
-        in_eeq = r <= self.cutoff_eeq / self.bohr
+        in_eeq = r_all <= self.cutoff_eeq / self.bohr
         for b in range(num_graphs):
             members = torch.nonzero(batch == b).squeeze(1)
             cell_b = cell[b] / self.bohr
             periodic = bool(pbc[b].any()) and bool(cell_b.abs().sum() > 1e-8)
             regime = self.select_regime(int(members.shape[0]), periodic)
             if regime == "large" and not torch.jit.is_scripting():
-                # the structure's EEQ-range edges in local numbering
-                local = torch.full((n_atoms,), -1, dtype=torch.long, device=z.device)
-                local[members] = torch.arange(members.shape[0], device=z.device)
-                sel = in_eeq & (batch[edge_index[1]] == b)
+                if num_graphs == 1 and bool(in_eeq.all()):
+                    ei_b, vec_b = edge_all, edge_vec_all / self.bohr
+                else:
+                    # the structure's EEQ-range edges in local numbering
+                    local = torch.full((n_atoms,), -1, dtype=torch.long, device=z.device)
+                    local[members] = torch.arange(members.shape[0], device=z.device)
+                    sel = in_eeq & (batch[edge_all[1]] == b)
+                    ei_b, vec_b = local[edge_all[:, sel]], edge_vec_all[sel] / self.bohr
                 charges.append(self._eeq_charges_large(
-                    z[members], pos_au[members], local[edge_index[:, sel]], vec_au[sel],
+                    z[members], pos_au[members], ei_b, vec_b,
                     cn_eeq[members], total_charge[b], cell_b, periodic, num_graphs == 1))
             else:
                 charges.append(self.eeq_charges(z[members], pos_au[members],
@@ -1017,11 +1077,13 @@ class DFTD4(nn.Module):
         alpha_iw = self.dynamic_polarizabilities(z, weights)
 
         in_pair = r <= self.cutoff_pair / self.bohr
+        edge_pair, r_pair = edge_index, r
+        if not bool(in_pair.all()):
+            edge_pair, r_pair = edge_index[:, in_pair], r[in_pair]
         if self.recompute_pairs and not torch.jit.is_scripting():
-            e2 = self._two_body_chunked(z, edge_index[:, in_pair], r[in_pair], alpha_iw, n_atoms)
+            e2 = self._two_body_chunked(z, edge_pair, r_pair, alpha_iw, n_atoms)
         else:
-            e2 = self.two_body_energy(z, edge_index[:, in_pair], r[in_pair],
-                                      alpha_iw, n_atoms)
+            e2 = self.two_body_energy(z, edge_pair, r_pair, alpha_iw, n_atoms)
         node_energy = e2
         e_tail = torch.zeros_like(e2)
         if self.tail_correction:
@@ -1054,9 +1116,9 @@ class DFTD4(nn.Module):
             node_energy = node_energy + e3
         return {
             "node_energy": node_energy * self.hartree,
-            "energy_2body": scatter_sum(e2, batch, num_graphs) * self.hartree,
-            "energy_3body": scatter_sum(e3, batch, num_graphs) * self.hartree,
-            "energy_tail": scatter_sum(e_tail, batch, num_graphs) * self.hartree,
+            "energy_2body": structure_sum(e2, batch, num_graphs) * self.hartree,
+            "energy_3body": structure_sum(e3, batch, num_graphs) * self.hartree,
+            "energy_tail": structure_sum(e_tail, batch, num_graphs) * self.hartree,
             "coordination_numbers": cn_d4,
             "charges": q,
             "polarizabilities": alpha_iw[:, 0],

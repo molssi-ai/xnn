@@ -157,11 +157,39 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
            if molecular else cell)
     if pos.is_cuda:
         _preload_nvrtc()
-    i, j, shifts = VesinNeighborList(cutoff=cutoff, full_list=True).compute(
-        points=pos, box=box, periodic=not molecular, quantities="ijS"
-    )
+
+    def compute():
+        return VesinNeighborList(cutoff=cutoff, full_list=True).compute(
+            points=pos, box=box, periodic=not molecular, quantities="ijS")
+
+    try:
+        i, j, shifts = compute()
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+        # vesin allocates its GPU memory itself, so it cannot use what PyTorch
+        # holds cached (in MD, most of the free memory): hand that back, retry once
+        if not pos.is_cuda or not _is_out_of_memory(exc):
+            raise
+        torch.cuda.empty_cache()
+        try:
+            i, j, shifts = compute()
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as again:
+            if not _is_out_of_memory(again):
+                raise
+            raise RuntimeError(
+                f"vesin ran out of GPU memory building the neighbor list of "
+                f"{pos.shape[0]} atoms at {cutoff} A, also after releasing PyTorch's "
+                f"cached memory; set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+                f"or use a GPU with more memory") from again
     edge_index = torch.stack([i, j], dim=0).to(device)
     return edge_index, shifts.to(torch.long).to(device)
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """Whether ``exc`` is a CUDA allocation failure (PyTorch's or vesin's own)."""
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text or "cudamalloc" in text or "cudaerrormemoryallocation" in text
 
 
 def build_neighbor_list(

@@ -94,7 +94,8 @@ class ForceStressOutput(nn.Module):
                 Present when ``compute_stress`` is set and the batch has a cell;
                 the symmetric stress tensor of shape ``(B, 3, 3)`` computed as
                 ``sigma = (1/V) dE/deps`` via the symmetric-strain trick, using
-                the NequIP/MACE convention.
+                the NequIP/MACE convention. Zero for the molecular structures
+                of a batch that mixes molecules and cells.
 
         Notes
         -----
@@ -104,6 +105,14 @@ class ForceStressOutput(nn.Module):
         to zeros instead of raising.
         """
         create_graph = self.training  # needed for force-loss backprop
+
+        # a geometry kept in float64 for a float32 model (the deploy paths): the
+        # model sees its own dtype through edge_vectors(); forces and stress
+        # are derivatives with respect to the float64 leaves
+        if data.compute_dtype is None:
+            dtype = _float_dtype(self.model)
+            if dtype is not None and dtype != data.pos.dtype:
+                data.compute_dtype = dtype
 
         strain = None
         if self.compute_stress and data.cell is not None:
@@ -134,17 +143,41 @@ class ForceStressOutput(nn.Module):
         # cases forces/stress are zero, so default to zeros instead of failing.
         g = {k: None for k in need}
         if inputs and energy.requires_grad:
+            # the graph is kept only when a force loss will backpropagate through
+            # it: retaining it in evaluation holds every saved activation until the
+            # outputs are released (11-28% of the peak memory of a MACE MD step)
             grads = torch.autograd.grad(
                 [energy], inputs, grad_outputs=[grad_outputs],
-                create_graph=create_graph, retain_graph=True, allow_unused=True,
+                create_graph=create_graph, retain_graph=create_graph, allow_unused=True,
             )
             g = dict(zip(need, grads))
         if self.compute_forces:
             out["forces"] = -g["pos"] if g.get("pos") is not None else torch.zeros_like(data.pos)
         if strain is not None:
             if g.get("strain") is not None:
-                volume = cell_volume(data.cell).clamp(min=1e-8)  # (B,)
-                out["stress"] = g["strain"] / volume[:, None, None]
+                # a batch mixing molecules and cells gives each molecule a zero
+                # cell: its stress is zero (dividing its virial by a clamped
+                # zero volume would give ~1e8 times the virial)
+                volume = cell_volume(data.cell)                       # (B,)
+                periodic = volume > 1e-8
+                if data.pbc is not None:
+                    # graphs built on a GPU keep pbc on the CPU (structure_to_graph)
+                    periodic = periodic & data.pbc.any(-1).to(periodic.device)
+                safe = torch.where(periodic, volume, torch.ones_like(volume))
+                out["stress"] = torch.where(periodic[:, None, None],
+                                            g["strain"] / safe[:, None, None],
+                                            torch.zeros_like(g["strain"]))
             else:
                 out["stress"] = torch.zeros_like(strain)
         return out
+
+
+def _float_dtype(model: nn.Module):
+    """The floating dtype of ``model``'s parameters (or buffers), None if it has none."""
+    for t in model.parameters():
+        if t.is_floating_point():
+            return t.dtype
+    for t in model.buffers():
+        if t.is_floating_point():
+            return t.dtype
+    return None

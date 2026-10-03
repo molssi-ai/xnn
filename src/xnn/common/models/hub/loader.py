@@ -19,6 +19,7 @@ from typing import Any, Optional, Union
 from torch import nn
 
 from ...data.hub._download import download_file, extract_archive
+from ..fast import set_use_fast
 from . import zenodo
 from .cache import (head_dir, is_cache_key, is_ready, offline, resolve_cache_dir,
                     sanitize, url_slot)
@@ -359,7 +360,7 @@ def load_pretrained(source: Union[str, Path], *, cache_dir: Optional[Union[str, 
                     local_files_only: bool = False, quiet: bool = False,
                     device: str = "cpu", dtype=None, dispersion: Any = None,
                     compute_forces: bool = True, compute_stress: bool = False,
-                    eeq_reuse: bool = False) -> PretrainedModel:
+                    eeq_reuse: bool = False, use_fast: Union[bool, str] = "auto") -> PretrainedModel:
     """Load a pre-trained model together with its config and card.
 
     The same as :func:`from_pretrained`, returning a :class:`PretrainedModel`
@@ -367,7 +368,10 @@ def load_pretrained(source: Union[str, Path], *, cache_dir: Optional[Union[str, 
     MDI engine, ``xnn export``) get them without reloading. See
     :func:`fetch_model` for the source and cache options and
     :func:`~xnn.common.models.hub.checkpoint.build_potential` for ``dtype``,
-    ``dispersion`` and ``eeq_reuse``.
+    ``dispersion`` and ``eeq_reuse``. ``use_fast`` (``"auto"``, ``True`` or
+    ``False``) chooses between the fused GPU kernels and the reference
+    implementation of the blocks that have both (see
+    :mod:`xnn.common.models.fast`).
 
     Returns
     -------
@@ -391,6 +395,7 @@ def load_pretrained(source: Union[str, Path], *, cache_dir: Optional[Union[str, 
     model = build_potential(ck.config, ck.state_dict, dtype=dtype, dispersion=dispersion,
                             compute_forces=compute_forces, compute_stress=compute_stress,
                             eeq_reuse=eeq_reuse, label=str(source)).to(device)
+    set_use_fast(model, use_fast)
     cutoff = float(getattr(model.model, "cutoff", ck.config.model.cutoff))
     return PretrainedModel(model, ck.config, card, cutoff, Path(path))
 
@@ -428,7 +433,7 @@ def from_pretrained(source: Union[str, Path], *, wrap: bool = True, **kwargs: An
         ``cache_dir``, ``filename``, ``head``, ``format``,
         ``force_download``, ``local_files_only``, ``quiet``, ``device``,
         ``dtype``, ``dispersion``, ``compute_forces``, ``compute_stress``,
-        ``eeq_reuse``; see :func:`load_pretrained`.
+        ``eeq_reuse``, ``use_fast``; see :func:`load_pretrained`.
 
     Returns
     -------

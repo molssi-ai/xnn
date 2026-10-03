@@ -35,6 +35,7 @@ names -- follow upstream so trained ``mace-torch`` weights transplant directly.
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies the
 # class-level attribute annotations that TorchScript needs to resolve (e.g.
 # `widths: List[int]` on _ReshapeIrreps), breaking `torch.jit.script`.
+import functools
 import itertools
 import logging
 from typing import Final, List, Optional, Tuple, Union
@@ -47,11 +48,17 @@ from e3nn import o3
 from e3nn import nn as e3nn_nn
 
 from xnn.common.data import AtomicGraph
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+from ..fast import ConvTensorProduct
+from ..fast import _cueq
+from ..constants import register_constant, restore_exact
+from ..fast import symmetric_contraction as _fast_sc
 from .base import EquivariantGNN
 from ..featurizers import DISTANCE_TRANSFORMS
 from .blocks import SCALAR_ACTIVATIONS as GATES
+from .blocks import RadialNet
 from .blocks import ScalarActivation as _ScalarActivation
 from .blocks import hidden_irreps as _hidden_irreps
 from .blocks import tp_out_irreps_with_instructions
@@ -208,6 +215,12 @@ def U_matrix_real(irreps_in, irreps_out, correlation: int, normalization: str = 
     return [text[: len(text) - 2], torch.zeros(shape, dtype=dtype)]
 
 
+@functools.lru_cache(maxsize=None)
+def _exact_U(irreps_in: str, irrep_out: str, nu: int) -> Tensor:
+    """The float64 ``U`` basis of :func:`U_matrix_real` (CPU, cached)."""
+    return U_matrix_real(o3.Irreps(irreps_in), o3.Irreps(irrep_out), nu, dtype=torch.float64)[-1]
+
+
 # Symmetric contraction (MACE Eq. 10-11): the learned product basis
 # free einsum labels for the correlation axes of the U tensors; anything is
 # fine as long as none collides with the reserved labels b (batch), c (channel),
@@ -223,10 +236,14 @@ class _Contraction(nn.Module):
     to ``correlation`` it registers the generalized Clebsch-Gordan basis
     ``U_matrix_{nu}`` (from :func:`U_matrix_real`) as a buffer and a
     per-element learnable weight over the coupling paths. The ``forward``
-    contracts these via a Horner-style nested :func:`torch.einsum`.
+    contracts these in a Horner-style nested evaluation.
 
-    The einsum equations are precomputed in ``__init__`` and the ``U`` buffers
-    are accessed statically (empty non-persistent placeholders fill the unused
+    Every weighting is evaluated as one matrix product: the element's weights
+    are selected first (a product with the one-hot attributes), and for the
+    highest order the outer product of those per-atom weights with the features
+    meets ``U`` over its path and last coupling axis together. The axis
+    permutations are precomputed in ``__init__`` and the ``U`` buffers are
+    accessed statically (empty non-persistent placeholders fill the unused
     orders up to 4) so ``forward`` is ``torch.jit.script``-compatible for
     LAMMPS/TorchScript deployment. This caps ``correlation`` at 4, matching the
     practical upstream MACE range (its intermediate-irrep filter also special-
@@ -267,8 +284,8 @@ class _Contraction(nn.Module):
     """
 
     correlation: int
-    eq_main: str
-    eqs_weighting: List[str]
+    perm_main: List[int]
+    perms_weighting: List[List[int]]
     eqs_contract: List[str]
 
     def __init__(self, irreps_in: o3.Irreps, irrep_out: o3.Irreps, correlation: int,
@@ -287,6 +304,8 @@ class _Contraction(nn.Module):
         for nu in range(1, correlation + 1):
             U = U_matrix_real(self.coupling_irreps, irrep_out, nu, dtype=dtype)[-1]
             self.register_buffer(f"U_matrix_{nu}", U)
+        # what exact_constants rebuilds U from (python-only, outside TorchScript)
+        self.__dict__["_irrep_out"] = str(o3.Irreps(irrep_out))
         # empty placeholders keep the static buffer references in `forward`
         # compilable; non-persistent, so the state_dict layout is unchanged
         for nu in range(correlation + 1, 5):
@@ -298,19 +317,47 @@ class _Contraction(nn.Module):
             self.weights.append(
                 nn.Parameter(torch.randn(num_elements, n_paths, self.num_features) / n_paths)
             )
-        # precompute the einsum equations (TorchScript cannot build them);
-        # non-scalar outputs carry one extra spatial (m) axis on the U tensors,
-        # scalar outputs have it squeezed away
+        # precompute the axis permutations and einsum equations (TorchScript
+        # cannot build them). U_nu has the axes (m, i_1, ..., i_nu, k):
+        # non-scalar outputs carry the spatial m axis, scalar outputs have it
+        # squeezed away. The highest order puts (k, i_nu) first, so its path and
+        # last coupling axes contract in one matrix product; the lower orders
+        # put k first.
         m_axis = 1 if self.lmax_out > 0 else 0
-        lead = _EINSUM_AXES[: correlation + m_axis - 1]
-        self.eq_main = f"{lead}ik,ekc,bci,be->bc{lead}"
-        self.eqs_weighting = []
+        rank = correlation + m_axis + 1
+        self.perm_main = [rank - 1, rank - 2] + list(range(rank - 2))
+        self.perms_weighting = []
         self.eqs_contract = []
         for order in range(1, correlation):
-            axes_w = _EINSUM_AXES[: order + m_axis]
+            rank_w = order + m_axis + 1
+            self.perms_weighting.append([rank_w - 1] + list(range(rank_w - 1)))
             axes_f = _EINSUM_AXES[: order + m_axis - 1]
-            self.eqs_weighting.append(f"{axes_w}k,ekc,be->bc{axes_w}")
             self.eqs_contract.append(f"bc{axes_f}i,bci->bc{axes_f}")
+
+    def exact_constants(self) -> bool:
+        """Rebuild the float64 ``U`` bases exactly from the irreps.
+
+        ``U`` is a function of the irreps alone but a buffer, so a model built
+        in float32 and cast, or loaded from a float32 checkpoint, carries it
+        float32-rounded. A basis that differs by more than rounding (a
+        foundation checkpoint's own) is kept. See
+        :func:`~xnn.gnn.constants.exact_float64_constants`.
+
+        Returns
+        -------
+        bool
+            Whether any value changed.
+        """
+        irrep_out = self.__dict__.get("_irrep_out")
+        changed = False
+        if irrep_out is None:
+            return changed
+        for nu in range(1, self.correlation + 1):
+            U = self._U(nu)
+            if U.dtype == torch.float64:
+                # a checkpoint's own basis (foundation models) is kept: see restore_exact
+                changed |= restore_exact(U, _exact_U(str(self.coupling_irreps), irrep_out, nu))
+        return changed
 
     def _U(self, nu: int) -> Tensor:
         """Return the registered coupling basis buffer for correlation order ``nu``.
@@ -350,18 +397,32 @@ class _Contraction(nn.Module):
             path_weights.append(w)
         bases = [self.U_matrix_1, self.U_matrix_2, self.U_matrix_3, self.U_matrix_4]
         corr = self.correlation
+        n_atoms, n_feat, dim = x.shape[0], x.shape[1], x.shape[2]
         # Horner evaluation: start at the highest order and repeatedly fold in
-        # the next-lower weighted basis before contracting one power of x away
-        acc = torch.einsum(self.eq_main, bases[corr - 1], path_weights[corr - 1], x, y)
+        # the next-lower weighted basis before contracting one power of x away.
+        # Highest order: the element's weights (B, c, k), their outer product with
+        # x (B, c, k, i), then one product with U over (k, i)
+        U = bases[corr - 1]
+        n_paths = U.shape[-1]
+        w_atom = torch.matmul(y, path_weights[corr - 1].transpose(1, 2).reshape(y.shape[1], -1))
+        outer = w_atom.reshape(n_atoms, n_feat, n_paths, 1) * x.unsqueeze(2)
+        lead: List[int] = list(U.shape[:-2])
+        acc = torch.matmul(outer.reshape(n_atoms * n_feat, n_paths * dim),
+                           U.permute(self.perm_main).reshape(n_paths * dim, -1))
+        acc = acc.reshape([n_atoms, n_feat] + lead)
         for order in range(corr - 1, 0, -1):
-            weighted = torch.einsum(
-                self.eqs_weighting[order - 1], bases[order - 1], path_weights[order - 1], y
-            )
+            U = bases[order - 1]
+            n_paths = U.shape[-1]
+            w_atom = torch.matmul(y, path_weights[order - 1].transpose(1, 2).reshape(y.shape[1], -1))
+            weighted = torch.matmul(w_atom.reshape(n_atoms * n_feat, n_paths),
+                                    U.permute(self.perms_weighting[order - 1]).reshape(n_paths, -1))
+            lead_w: List[int] = list(U.shape[:-1])
+            weighted = weighted.reshape([n_atoms, n_feat] + lead_w)
             acc = torch.einsum(self.eqs_contract[order - 1], weighted + acc, x)
-        return acc.reshape(acc.shape[0], -1)
+        return acc.reshape(n_atoms, -1)
 
 
-class SymmetricContraction(nn.Module):
+class SymmetricContraction(nn.Module, FastPathModule):
     """Per-element symmetric contraction over all output irreps (the MACE product basis).
 
     The learned, higher-body-order product basis of MACE (Batatia et al. 2022,
@@ -395,6 +456,15 @@ class SymmetricContraction(nn.Module):
             _Contraction(self.irreps_in, o3.Irreps(str(mul_ir.ir)), correlation, num_elements)
             for mul_ir in self.irreps_out
         ])
+        self.fast_active = False
+        self.fast_eligible = _fast_sc.eligible(self)
+        # cuEquivariance kernels, built on first use per (device, dtype); kept
+        # out of the state_dict
+        self.__dict__["_fast_kernels"] = {}
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Whether the cuEquivariance kernel can evaluate this contraction there."""
+        return self.fast_eligible and _cueq.supported(device, dtype)
 
     def forward(self, x: Tensor, y: Tensor) -> Tensor:
         """Run every per-irrep contraction and concatenate the results.
@@ -411,10 +481,27 @@ class SymmetricContraction(nn.Module):
         torch.Tensor
             The concatenated contracted features spanning all output irreps.
         """
+        if self.fast_active:
+            return self._forward_fast(x, y)
         outs: List[Tensor] = []
         for c in self.contractions:
             outs.append(c(x, y))
         return torch.cat(outs, dim=-1)
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor, y: Tensor) -> Tensor:
+        """The contraction as one cuEquivariance kernel (same weights)."""
+        key = f"{x.device}|{x.dtype}"
+        kernels = self.__dict__["_fast_kernels"]
+        if key not in kernels:
+            try:
+                kernels[key] = _fast_sc.SymmetricContractionKernel(self, x.device, x.dtype)
+            except Exception as exc:  # an irreps layout the kernel does not cover
+                self.fast_eligible = False
+                self.fast_active = False
+                _cueq.warn_fallback(type(self).__name__, exc)
+                return self.forward(x, y)
+        return kernels[key](x, y, _fast_sc.reference_weights(self))
 
 
 # Irreps helpers + equivariant blocks
@@ -588,11 +675,11 @@ class _InteractionBase(nn.Module):
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             self.node_feats_irreps, self.edge_attrs_irreps, self.target_irreps
         )
-        self.conv_tp = o3.TensorProduct(
+        self.conv_tp = ConvTensorProduct(
             self.node_feats_irreps, self.edge_attrs_irreps, irreps_mid,
             instructions=instructions, shared_weights=False, internal_weights=False,
         )
-        self.conv_tp_weights = e3nn_nn.FullyConnectedNet(
+        self.conv_tp_weights = RadialNet(
             [self.edge_feats_irreps.num_irreps] + self.radial_MLP + [self.conv_tp.weight_numel],
             F.silu,
         )
@@ -643,8 +730,7 @@ class RealAgnosticInteractionBlock(_InteractionBase):
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
         radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
-        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
-        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
         pooled = self.linear(pooled) / self.avg_num_neighbors
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -695,8 +781,7 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
         radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
-        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
-        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
         pooled = self.linear(pooled) / self.avg_num_neighbors
         return self.reshape(pooled), residual
 
@@ -746,8 +831,7 @@ class RealAgnosticDensityInteractionBlock(RealAgnosticInteractionBlock):
         radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
-        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
         pooled = self.linear(pooled) / (density + 1.0)
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -797,8 +881,7 @@ class RealAgnosticDensityResidualInteractionBlock(RealAgnosticResidualInteractio
         radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        edge_msg = self.conv_tp(feats[edge_index[0]], edge_attrs, radial_w)
-        pooled = scatter_sum(edge_msg, edge_index[1], n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
         pooled = self.linear(pooled) / (density + 1.0)
         return self.reshape(pooled), residual
 
@@ -822,9 +905,8 @@ class _ScaleShift(nn.Module):
 
     def __init__(self, scale: float = 1.0, shift: float = 0.0):
         super().__init__()
-        dtype = torch.get_default_dtype()
-        self.register_buffer("scale", torch.tensor(float(scale), dtype=dtype))
-        self.register_buffer("shift", torch.tensor(float(shift), dtype=dtype))
+        register_constant(self, "scale", float(scale))
+        register_constant(self, "shift", float(shift))
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # checkpoints written before this block existed carry no
@@ -959,15 +1041,13 @@ class _ZBLPairRepulsion(nn.Module):
             import ase.data
         except ModuleNotFoundError as e:  # pragma: no cover
             raise ImportError('pair_repulsion needs ase: pip install "xnn[ase]"') from e
-        self.register_buffer("c", torch.tensor([0.1818, 0.5099, 0.2802, 0.02817]))
+        register_constant(self, "c", [0.1818, 0.5099, 0.2802, 0.02817])
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
-        self.register_buffer(
-            "covalent_radii", torch.tensor(ase.data.covalent_radii, dtype=torch.get_default_dtype())
-        )
+        register_constant(self, "covalent_radii", ase.data.covalent_radii)
         # the universal screening-length constants, as buffers (upstream
-        # layout) so trained/quantized checkpoint values carry over
-        self.register_buffer("a_exp", torch.tensor(0.300))
-        self.register_buffer("a_prefactor", torch.tensor(0.4543))
+        # layout) so trained checkpoint values carry over
+        register_constant(self, "a_exp", 0.300)
+        register_constant(self, "a_prefactor", 0.4543)
 
     @staticmethod
     def _envelope(x: Tensor, r_max: Tensor, p: Tensor) -> Tensor:
@@ -1274,6 +1354,8 @@ class MACE(EquivariantGNN):
             The concatenated invariant node features
             ``(N, node_feature_dim)`` and the per-atom energy ``(N,)``.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(edge_index.shape[1]), edge_vec)
         node_attrs = self.node_attr(atomic_numbers)
         e0 = self.atom_ref(atomic_numbers).squeeze(-1)
         num_nodes = atomic_numbers.shape[0]

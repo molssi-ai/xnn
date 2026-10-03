@@ -28,7 +28,7 @@ from torch import Tensor, nn
 
 from ..data import AtomicGraph
 from .base import InteratomicPotential
-from .ops import build_triplets, scatter_sum, segment_sum
+from .ops import build_triplets, scatter_sum, segment_sum, structure_sum
 
 # CODATA 2018, derived from h, m_e, c, alpha and e exactly as the reference
 # codes (mctc-lib) do: a_0 = hbar / (m_e c alpha), E_h = m_e c^2 alpha^2. The
@@ -720,6 +720,39 @@ class DispersionCorrection(InteratomicPotential):
         self.cutoff = max(inner_cutoff, float(term.cutoff))
         self.node_feature_dim = (int(getattr(model, "node_feature_dim", 0))
                                  if model is not None else int(term.n_features))
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "DispersionCorrection":
+        """Choose the implementation of the dispersion term.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (default): the fast paths of
+            :mod:`~xnn.common.models.dispersion_fast` on a CUDA device where
+            they are measured to be faster; ``True``: wherever they run;
+            ``False``: always the reference. A wrapped model's own fast paths
+            are set by :func:`~xnn.common.models.fast.set_use_fast`, which
+            reaches both.
+
+        Returns
+        -------
+        DispersionCorrection
+            ``self``.
+        """
+        from .fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, data: AtomicGraph) -> None:
+        """Switch the term's fast paths on or off for one evaluation."""
+        from .fast import FastPathModule, select
+        if isinstance(self.term, FastPathModule):
+            from .dispersion_fast import AUTO_POLICY
+            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.model_dtype,
+                   int(data.edge_index.shape[1]))
 
     def inner_graph(self, data: AtomicGraph) -> AtomicGraph:
         """``data`` restricted to the edges within the wrapped model's cutoff."""
@@ -748,6 +781,8 @@ class DispersionCorrection(InteratomicPotential):
         dict of str to Tensor
             See the class notes.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(data)
         disp = self.dispersion(data)
         node_disp = disp.pop("node_energy")
         energy_disp = disp.pop("energy")
@@ -788,17 +823,20 @@ def evaluate_on_graph(term: nn.Module, data: AtomicGraph) -> Dict[str, Tensor]:
         The term's outputs plus ``"energy"``.
     """
     b = data.num_graphs
-    dtype, device = data.pos.dtype, data.pos.device
-    cell = (data.cell if data.cell is not None
+    # the term computes in the model's dtype (a float64 geometry is cast; its
+    # pair vectors come from edge_vectors(), formed in float64)
+    dtype, device = data.model_dtype, data.pos.device
+    pos = data.pos.to(dtype)
+    cell = (data.cell.to(dtype) if data.cell is not None
             else torch.zeros((b, 3, 3), dtype=dtype, device=device))
     pbc = (data.pbc if data.pbc is not None
            else torch.zeros((b, 3), dtype=torch.bool, device=device))
     charge = getattr(data, "total_charge", None)
     if charge is None:
         charge = torch.zeros(b, dtype=dtype, device=device)
-    out = term.evaluate(data.atomic_numbers, data.pos, data.edge_index,
+    out = term.evaluate(data.atomic_numbers, pos, data.edge_index,
                         data.edge_vectors(), data.batch, b, cell, pbc, charge.to(dtype))
-    out["energy"] = scatter_sum(out["node_energy"], data.batch, b)
+    out["energy"] = structure_sum(out["node_energy"], data.batch, b)
     return out
 
 

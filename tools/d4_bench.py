@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Where the time goes in xnn's D4 for a periodic water box: energy + forces + stress.
+"""Where the time goes in xnn's D4 (or D3) for a periodic water box: energy + forces + stress.
 
 Builds a jittered lattice of randomly oriented waters at about 1 g/cm^3, evaluates
 ``ForceStressOutput(D4Dispersion(...))`` once for warm-up and once for the measurement,
@@ -40,6 +40,8 @@ import numpy as np
 import torch
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+p.add_argument("--method", choices=["d4", "d3"], default="d4",
+               help="the dispersion term: D4 (default) or D3(BJ) with its three-body term")
 p.add_argument("--n-side", type=int, default=12, help="waters per box edge (12 -> 1728 H2O, 5184 atoms)")
 p.add_argument("--rp", type=float, default=12.0, help="D4 pair cutoff, A")
 p.add_argument("--switch", type=float, default=2.0, help="pair switching width, A")
@@ -63,15 +65,24 @@ p.add_argument("--seed", type=int, default=7)
 p.add_argument("--kernels", action="store_true", help="also print the top CUDA kernels")
 p.add_argument("--json", default=None, help="write the results to this JSON file")
 p.add_argument("--save-forces", default=None, help="save the forces and stress (.npz) of the measured call")
+p.add_argument("--train", action="store_true",
+               help="training mode (create_graph=True, as for a force loss); default: evaluation (MD, inference)")
+p.add_argument("--compare", action="store_true",
+               help="with --fast on/auto: also evaluate the reference once and report the differences")
+p.add_argument("--fast", choices=["off", "on", "auto"], default="off",
+               help="the dispersion fast paths (xnn.common.models.dispersion_fast): off (the reference, "
+                    "default), on, or auto")
 args = p.parse_args()
 
 import xnn  # noqa: E402
 from xnn.common.data import atomic_data, structure_to_graph  # noqa: E402
-from xnn.common.models import D4Dispersion, ForceStressOutput  # noqa: E402
+from xnn.common.models import D3Dispersion, D4Dispersion, ForceStressOutput  # noqa: E402
+import xnn.common.models.d3 as d3mod  # noqa: E402
 import xnn.common.models.d4 as d4mod  # noqa: E402
 import xnn.common.models.dispersion as dispmod  # noqa: E402
 import xnn.common.models.eeq as eeqmod  # noqa: E402
 import xnn.common.models.recompute as recmod  # noqa: E402
+from xnn.common.models import fast as fastmod  # noqa: E402
 
 DTYPE = getattr(torch, args.dtype)
 torch.set_default_dtype(DTYPE)
@@ -84,9 +95,7 @@ def sync():
         torch.cuda.synchronize()
 
 
-# ----------------------------------------------------------------------------
 # labeled, synchronized timers around the real functions
-# ----------------------------------------------------------------------------
 PHASE = ["forward"]
 STACK = []
 STATS = {}          # (phase, label) -> [inclusive, self, calls]
@@ -133,6 +142,13 @@ for name, label in [("coordination_numbers", "d4.coordination_numbers"),
                     ("_two_body_chunked", "d4.two_body_blocks"),
                     ("_three_body_chunked", "d4.three_body")]:
     wrap_attr(d4mod.DFTD4, name, label)
+for name, label in [("coordination_numbers", "d3.coordination_numbers"),
+                    ("reference_weights", "d3.reference_weights"),
+                    ("_species_vectors", "d3.species_vectors"),
+                    ("pair_c6", "d3.pair_c6"),
+                    ("two_body_energy", "d3.two_body"),
+                    ("_three_body_chunked", "d3.three_body")]:
+    wrap_attr(d3mod.DFTD3, name, label)
 for name, label in [("__init__", "eeq.setup"), ("assemble", "eeq.assemble"),
                     ("_solve_lu", "eeq.solve_lu"), ("_solve_cg", "eeq.solve_cg"),
                     ("matvec", "eeq.matvec"), ("apply_differentiable", "eeq.apply_differentiable")]:
@@ -151,6 +167,16 @@ for name, label in [("_triplet_block", "atm.block"),
                     ("edge_cell_shifts", "atm.edge_cell_shifts"),
                     ("pair_edge_keys", "atm.pair_edge_keys")]:
     wrap_attr(dispmod, name, label)
+if args.fast != "off":
+    import xnn.common.models.dispersion_fast.atm as fatm  # noqa: E402
+    import xnn.common.models.dispersion_fast.eeq as feeq  # noqa: E402
+    for name, label in [("__init__", "eeq.setup (fast)"), ("matvec", "eeq.matvec (fast)"),
+                        ("_solve_cg_lockstep", "eeq.solve_cg (fast)"),
+                        ("apply_differentiable", "eeq.apply_differentiable (fast)")]:
+        wrap_attr(feeq.FastEEQSystem, name, label)
+    wrap_attr(fatm, "plan_triplets", "atm.plan (fast)")
+    wrap_attr(fatm._ATMEnergy, "forward", "atm.kernel (fast)", static=True)
+    wrap_attr(fatm._ATMEnergy, "backward", "atm.kernel_grad (fast)", static=True)
 wrap_attr(recmod._RecomputeBlock, "backward", "recompute.block_backward", static=True)
 wrap_attr(recmod._RecomputeGrad, "backward", "recompute.grad_backward", static=True)
 
@@ -187,9 +213,7 @@ def grad_with_phase(*a, **k):
 
 torch.autograd.grad = grad_with_phase
 
-# ----------------------------------------------------------------------------
 # the structure: a jittered lattice of randomly oriented waters, ~1.0 g/cm^3
-# ----------------------------------------------------------------------------
 WATER = np.array([[0.0, 0.0, 0.119262], [0.0, 0.763239, -0.477047],
                   [0.0, -0.763239, -0.477047]])
 rng = np.random.default_rng(args.seed)
@@ -213,9 +237,20 @@ d4_options = dict(cutoff_pair=args.rp, switch_width_pair=args.switch,
                   triplet_chunk=args.chunk, triplet_cache=args.triplet_cache)
 if args.cutoff_eeq is not None:
     d4_options["cutoff_eeq"] = args.cutoff_eeq
-model = ForceStressOutput(D4Dispersion(**d4_options), compute_stress=True).to(dev)
-d4 = model.model.d4
-if args.eeq_reuse:
+if args.method == "d3":
+    # the D3 term takes the same cutoffs and switching widths (it has no EEQ)
+    d4_options = {k: v for k, v in d4_options.items()
+                  if k in ("cutoff_pair", "switch_width_pair", "cutoff_triple",
+                           "switch_width_triple", "s9", "cutoff_cn")}
+    Dispersion = D3Dispersion
+else:
+    Dispersion = D4Dispersion
+model = ForceStressOutput(Dispersion(**d4_options), compute_stress=True).to(dev)
+model.train(args.train)
+USE_FAST = {"off": False, "on": True, "auto": "auto"}[args.fast]
+fastmod.set_use_fast(model, USE_FAST)
+d4 = model.model.d3 if args.method == "d3" else model.model.d4
+if args.eeq_reuse and args.method == "d4":
     d4.enable_eeq_reuse()
 
 
@@ -238,13 +273,15 @@ env = {"python": platform.python_version(), "torch": torch.__version__,
        "vesin": vesin_version}
 print("environment:", json.dumps(env))
 print("options:", json.dumps(vars(args)))
-regime = d4.select_regime(len(z), True)
-print(f"system: {len(z)} atoms, L = {cell[0, 0]:.2f} A, regime = {regime}, "
-      f"neighbor-list radius {model.model.cutoff:.2f} A (cutoff_eeq {d4.cutoff_eeq:.1f} A)", flush=True)
+if args.method == "d4":
+    regime = d4.select_regime(len(z), True)
+    eeq_note = f", regime = {regime}, cutoff_eeq {d4.cutoff_eeq:.1f} A"
+else:
+    regime, eeq_note = None, ""
+print(f"system: {len(z)} atoms, L = {cell[0, 0]:.2f} A, {args.method.upper()}{eeq_note}, "
+      f"neighbor-list radius {model.model.cutoff:.2f} A", flush=True)
 
-# ----------------------------------------------------------------------------
 # neighbor list, then the evaluation
-# ----------------------------------------------------------------------------
 graph_times = []
 for _ in range(3):
     sync()
@@ -274,6 +311,28 @@ peak = torch.cuda.max_memory_allocated() / 2**30 if cuda else float("nan")
 print(f"E + F + S (warm, no timers): {total:.3f} s   E = {energy:.8f} eV   "
       f"peak GPU {peak:.1f} GB", flush=True)
 
+parity = None
+if args.compare and args.fast != "off":
+    ref_model = ForceStressOutput(Dispersion(**d4_options), compute_stress=True).to(dev)
+    ref_model.train(args.train)
+    fastmod.set_use_fast(ref_model, False)
+    ref = ref_model(graph_of(pos))
+    sync()
+    out = model(graph_of(pos))
+    f_ref = ref["forces"].detach().double()
+    parity = {"dE_rel": abs(float(out["energy"].detach()) - float(ref["energy"].detach()))
+              / abs(float(ref["energy"].detach())),
+              "dF_max": float((out["forces"].detach().double() - f_ref).abs().max()),
+              "F_max": float(f_ref.abs().max()),
+              "dS_max": float((out["stress"].detach().double() - ref["stress"].detach().double()).abs().max()),
+              "S_max": float(ref["stress"].detach().double().abs().max())}
+    if "eeq_charges" in ref:
+        parity["dq_max"] = float((out["eeq_charges"].detach().double()
+                                  - ref["eeq_charges"].detach().double()).abs().max())
+    print("parity vs the reference: " + ", ".join(f"{k} {v:.2e}" for k, v in parity.items()),
+          flush=True)
+    del ref, out, ref_model, f_ref
+
 ENABLED[0] = True
 sync()
 t0 = time.perf_counter()
@@ -293,12 +352,12 @@ for (ph, label), (incl, self_, calls) in rows:
     if incl >= 0.001:
         print(f"{ph:9s} {label:44s} {incl:9.3f} {self_:9.3f} {calls:6d}")
 
-# ----------------------------------------------------------------------------
 # frames: an MD-like sequence of small displacements
-# ----------------------------------------------------------------------------
 frame_times, frame_dq, frame_df = [], [], []
 if args.frames > 0:
-    fresh = ForceStressOutput(D4Dispersion(**d4_options), compute_stress=True).to(dev)
+    fresh = ForceStressOutput(Dispersion(**d4_options), compute_stress=True).to(dev)
+    fresh.train(args.train)
+    fastmod.set_use_fast(fresh, USE_FAST)
     x = pos.copy()
     for k in range(args.frames):
         x = x + rng.normal(scale=args.step, size=x.shape)
@@ -320,9 +379,7 @@ if args.frames > 0:
         print(f"EEQ reuse: {st['solves']} solves, {st['iterations'] / max(st['solves'], 1):.1f} iterations "
               f"per solve, preconditioner formed {st['preconditioners']}x, {st['fallbacks']} fallbacks")
 
-# ----------------------------------------------------------------------------
 # kernels
-# ----------------------------------------------------------------------------
 if args.kernels and cuda:
     from torch.profiler import ProfilerActivity, profile
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
@@ -334,7 +391,7 @@ if args.json:
     result = {"environment": env, "options": vars(args), "atoms": len(z), "edges": n_edges,
               "graph_cold_s": graph_times[0], "graph_warm_s": min(graph_times[1:]),
               "total_s": total, "backward_s": bwd, "energy_eV": energy, "peak_gb": peak,
-              "block_size": CHUNKS[-1] if CHUNKS else None,
+              "block_size": CHUNKS[-1] if CHUNKS else None, "parity": parity,
               "stages": {f"{ph}:{label}": {"inclusive": v[0], "self": v[1], "calls": v[2]}
                          for (ph, label), v in STATS.items()},
               "frames_ms": [1000 * t for t in frame_times], "frames_dq": frame_dq, "frames_df": frame_df}

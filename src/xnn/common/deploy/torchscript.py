@@ -59,6 +59,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
+from ..models.fast import deactivate as deactivate_fast_paths
 from ..models.ops import cell_volume
 
 
@@ -587,13 +588,13 @@ class TorchScriptPotential(nn.Module):
         out = self.model.node_features_energy(atomic_numbers, core_index, core_vec)
         features = out[0]
         node_energy = out[1]
-        energy_sr = node_energy.sum()
+        energy_sr = node_energy.sum(dtype=torch.float64)
         node_lr, charges = self.lr(features, atomic_numbers, p_s, cell_s, pbc,
                                    edge_index, edge_vec)
         node_disp, eeq = self.disp(features, atomic_numbers, p_s, cell_s, pbc,
                                    edge_index, edge_vec)
-        energy_lr = node_lr.sum()
-        energy_disp = node_disp.sum()
+        energy_lr = node_lr.sum(dtype=torch.float64)
+        energy_disp = node_disp.sum(dtype=torch.float64)
         energy = energy_sr + energy_lr + energy_disp
 
         # allow_unused: a purely reference-energy model has no position or
@@ -753,6 +754,8 @@ def export_torchscript_potential(model: nn.Module, cutoff: float, path: str,
     str
         The ``path`` written.
     """
+    # the fused kernels are eager-only: the scripted model is the reference one
+    deactivate_fast_paths(model)
     wrapper = TorchScriptPotential(model, cutoff, total_charge).eval()
     scripted = torch.jit.script(wrapper)
     extra = {"cutoff": str(cutoff),

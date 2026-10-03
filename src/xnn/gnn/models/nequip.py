@@ -49,14 +49,14 @@ import torch
 from torch import Tensor, nn
 
 from e3nn import o3
-from e3nn.nn import FullyConnectedNet
 
 from xnn.common.data import AtomicGraph
-from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+from ..fast import ConvTensorProduct
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as ACTS
 from .blocks import (
+    RadialNet,
     ScalarActivation,
     tp_out_irreps_with_instructions,
     tp_path_exists,
@@ -131,8 +131,16 @@ class _Gate(nn.Module):
     normalized activations; each gated irrep is multiplied channel-wise by its
     activated gate. This module precomputes the sorted slice layout in
     ``__init__`` and reproduces the e3nn ``Gate`` bit-for-bit (checked in
-    ``tests/test_nequip.py``). It carries no state, so the ``state_dict``
-    layout matches the (parameter-free) e3nn original.
+    ``tests/test_nequip.py``). Bit equality needs the same memory layout at
+    the activations, not only the same maths: e3nn's ``Extract`` copies every
+    group into a fresh contiguous buffer and its ``Activation`` narrows into
+    that buffer, and the CPU ``silu``/``tanh`` kernels round differently on an
+    operand that coalesces to 1-D than on a strided view (vectorized versus
+    scalar path), so the forward builds the same buffers before activating
+    instead of activating slices of the input. The gated product and the
+    concatenations are exactly rounded whatever the layout. It carries no
+    state, so the ``state_dict`` layout matches the (parameter-free) e3nn
+    original.
 
     Scope: one entry per distinct irrep in ``irreps_scalars``/``irreps_gated``
     and a single (merged) ``irreps_gates`` entry -- exactly what
@@ -159,12 +167,18 @@ class _Gate(nn.Module):
         Output irreps: the scalars followed by the gated irreps.
     """
 
-    scalar_starts: Final[List[int]]
-    scalar_stops: Final[List[int]]
-    gate_start: Final[int]
-    gate_stop: Final[int]
-    gated_starts: Final[List[int]]
-    gated_stops: Final[List[int]]
+    # per entry: where it sits in the sorted input, its width, and where it
+    # sits in the contiguous group buffer (the e3nn Extract output)
+    scalar_in_starts: Final[List[int]]
+    scalar_lens: Final[List[int]]
+    scalar_out_starts: Final[List[int]]
+    scalars_dim: Final[int]
+    gate_in_start: Final[int]
+    gates_dim: Final[int]
+    gated_in_starts: Final[List[int]]
+    gated_lens: Final[List[int]]
+    gated_out_starts: Final[List[int]]
+    gated_dim: Final[int]
     gated_muls: Final[List[int]]
     gated_dims: Final[List[int]]
     has_gates: Final[bool]
@@ -191,15 +205,24 @@ class _Gate(nn.Module):
         offsets = [0]
         for mul, ir in srt:
             offsets.append(offsets[-1] + mul * ir.dim)
-        slices = [(offsets[perm[k]], offsets[perm[k] + 1]) for k in range(len(unsorted))]
+        in_starts = [offsets[perm[k]] for k in range(len(unsorted))]
+        lens = [mul * ir.dim for mul, ir in unsorted]
         n_s, n_g = len(irreps_scalars), len(irreps_gates)
-        self.scalar_starts = [s for s, _ in slices[:n_s]]
-        self.scalar_stops = [e for _, e in slices[:n_s]]
+
+        def group(lo, hi):
+            out_starts, pos = [], 0
+            for width in lens[lo:hi]:
+                out_starts.append(pos)
+                pos += width
+            return in_starts[lo:hi], lens[lo:hi], out_starts, pos
+
+        (self.scalar_in_starts, self.scalar_lens, self.scalar_out_starts,
+         self.scalars_dim) = group(0, n_s)
         self.has_gates = n_g > 0
-        self.gate_start = slices[n_s][0] if self.has_gates else 0
-        self.gate_stop = slices[n_s][1] if self.has_gates else 0
-        self.gated_starts = [s for s, _ in slices[n_s + n_g:]]
-        self.gated_stops = [e for _, e in slices[n_s + n_g:]]
+        self.gate_in_start = in_starts[n_s] if self.has_gates else 0
+        self.gates_dim = lens[n_s] if self.has_gates else 0
+        (self.gated_in_starts, self.gated_lens, self.gated_out_starts,
+         self.gated_dim) = group(n_s + n_g, len(unsorted))
         self.gated_muls = [mul for mul, _ in irreps_gated]
         self.gated_dims = [ir.dim for _, ir in irreps_gated]
 
@@ -242,17 +265,30 @@ class _Gate(nn.Module):
         torch.Tensor
             Activated features of shape ``(N, irreps_out.dim)``.
         """
+        lead = list(x.shape[:-1])
+        # the e3nn Extract: each group copied into a contiguous buffer, the
+        # activations then applied to narrows of that buffer (see class doc)
+        scalars = x.new_zeros(lead + [self.scalars_dim])
+        for i in range(len(self.scalar_in_starts)):
+            scalars.narrow(-1, self.scalar_out_starts[i], self.scalar_lens[i]).copy_(
+                x.narrow(-1, self.scalar_in_starts[i], self.scalar_lens[i]))
         outs: List[Tensor] = []
         for i, act in enumerate(self.scalar_acts):
-            outs.append(act(x[:, self.scalar_starts[i]:self.scalar_stops[i]]))
+            outs.append(act(scalars.narrow(-1, self.scalar_out_starts[i], self.scalar_lens[i])))
         if self.has_gates:
-            gates = self.gate_act(x[:, self.gate_start:self.gate_stop])
+            gates = x.new_zeros(lead + [self.gates_dim])
+            gates.copy_(x.narrow(-1, self.gate_in_start, self.gates_dim))
+            gates = self.gate_act(gates)
+            gated = x.new_zeros(lead + [self.gated_dim])
+            for i in range(len(self.gated_in_starts)):
+                gated.narrow(-1, self.gated_out_starts[i], self.gated_lens[i]).copy_(
+                    x.narrow(-1, self.gated_in_starts[i], self.gated_lens[i]))
             c = 0
-            for i in range(len(self.gated_starts)):
+            for i in range(len(self.gated_in_starts)):
                 mul, d = self.gated_muls[i], self.gated_dims[i]
-                piece = x[:, self.gated_starts[i]:self.gated_stops[i]]
-                piece = piece.reshape(-1, mul, d) * gates[:, c:c + mul].unsqueeze(-1)
-                outs.append(piece.reshape(-1, mul * d))
+                piece = gated.narrow(-1, self.gated_out_starts[i], self.gated_lens[i])
+                piece = piece.reshape(lead + [mul, d]) * gates.narrow(-1, c, mul).unsqueeze(-1)
+                outs.append(piece.reshape(lead + [mul * d]))
                 c += mul
         return torch.cat(outs, dim=-1)
 
@@ -325,11 +361,11 @@ class InteractionBlock(nn.Module):
         # nequip keeps enumeration order for the instructions (weight layout)
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             irreps_in, irreps_edge_attr, irreps_out, sort_instructions=False)
-        self.tp = o3.TensorProduct(
+        self.tp = ConvTensorProduct(
             irreps_in, irreps_edge_attr, irreps_mid, instructions,
             shared_weights=False, internal_weights=False,
         )
-        self.fc = FullyConnectedNet(
+        self.fc = RadialNet(
             [n_radial] + invariant_layers * [invariant_neurons] + [self.tp.weight_numel],
             ACTS[nonlinearity_scalars["e"]],
         )
@@ -366,15 +402,15 @@ class InteractionBlock(nn.Module):
         weight = self.fc(edge_radial)
         x_in = x
         x = self.linear_1(x)
-        edge_feats = self.tp(x[edge_index[0]], edge_sh, weight)
         # NequIP normalizes the messages by sqrt(<neighbours>) on the edges,
         # before summing; since the sum is linear this equals normalizing the
         # node result, and we keep the edge-side order to stay bit-for-bit.
         # (The local copy refines the Optional for TorchScript.)
         n_avg: Optional[float] = self.avg_num_neighbors
+        divisor: Optional[float] = None
         if n_avg is not None:
-            edge_feats = edge_feats / n_avg ** 0.5
-        out = scatter_sum(edge_feats, edge_index[1], x.shape[0])
+            divisor = n_avg ** 0.5
+        out = self.tp.conv(x, edge_sh, weight, edge_index, x.shape[0], divisor)
         out = self.linear_2(out)
         if self.use_sc:
             out = out + self.sc(x_in, node_attrs)
@@ -663,6 +699,8 @@ class NequIP(EquivariantGNN):
             The invariant conv-to-output features ``(N, node_feature_dim)``
             and the per-atom energy ``(N,)``.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(edge_index.shape[1]), edge_vec)
         node_attrs = self.node_attr(atomic_numbers)
         # NequIP evaluates Y_l on r_j - r_i (neighbour minus centre); the xnn
         # edge vector points the other way (centre minus neighbour), so flip.

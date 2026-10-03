@@ -28,13 +28,20 @@ Algorithm:
   positive definite ``A`` (Jacobi preconditioner) with the constraint
   eliminated: ``q = y_1 - mu y_2``, ``A y_1 = x``, ``A y_2 = 1``.
 * **Gradients.** Implicit differentiation with a constant Jacobian: the
-  solution ``q_0`` is computed without autograd, then ``q = q_0 + J^{-1}
-  [x - A(r) q_0 - mu_0; Q - 1^T q_0]`` with the *constant* operator ``J^{-1}``
-  (a custom autograd function whose backward is another solve) and one
-  differentiable application of ``A(r)`` in recomputed blocks. The correction is
-  zero at convergence, its derivative is the exact first-order sensitivity
-  ``dq/dr = -J^{-1} (dA/dr) q``, and force training (a second derivative with
-  respect to the model parameters, on which ``A`` does not depend) is exact.
+  solution ``q_0`` is computed without autograd and refined once, ``q_1 = q_0
+  + J^{-1} [x - A q_0 - mu_0; Q - 1^T q_0]`` (also without autograd), then
+  ``q = q_1 + J^{-1} [x - A(r) q_1 - mu_1; Q - 1^T q_1]`` with the *constant*
+  operator ``J^{-1}`` as a custom autograd function whose value is taken as
+  zero (it is, to rounding: ``q_1`` is converged) and whose backward is
+  another solve, around one differentiable application of ``A(r)`` in
+  recomputed blocks. Its derivative is the exact first-order sensitivity
+  ``dq/dr = -J^{-1} (dA/dr) q`` at ``q_1``: expanding around the refined
+  charges matters because an iterative ``q_0`` carries a relative error of
+  the solver tolerance times the condition number, which the refinement
+  removes from the charges and the expansion point removes from the forces
+  (expanded around ``q_0`` the forces were off by ``~1e-10`` hartree/bohr at a
+  ``1e-12`` tolerance). Force training (a second derivative with respect to
+  the model parameters, on which ``A`` does not depend) is exact.
 
 The large regime agrees with the dense one to the truncation and solver
 tolerances (about 1e-10 hartree), not to the last bit, and it is eager-only:
@@ -201,6 +208,10 @@ class EEQSystem:
         :class:`EEQReuse` compares before reusing its state.
     """
 
+    #: keep the ``(N, N_G)`` cos / sin tables when they fit in :data:`SF_BUDGET`
+    #: (a subclass with its own reciprocal sum turns this off)
+    keep_structure_factors = True
+
     def __init__(self, diag: Tensor, rad: Tensor, pos: Tensor,
                  edge_index: Optional[Tensor] = None, edge_vec: Optional[Tensor] = None,
                  alpha: float = 0.0, gvec: Optional[Tensor] = None,
@@ -232,7 +243,7 @@ class EEQSystem:
             gamma = torch.rsqrt(self.rad[src] ** 2 + self.rad[dst] ** 2)
             self.kernel_e = _real_kernel(r, gamma, self.alpha)
             n_g = int(gvec.shape[0])
-            if self.n * n_g <= SF_BUDGET:
+            if self.keep_structure_factors and self.n * n_g <= SF_BUDGET:
                 phase = self.pos @ gvec.t()
                 self._sf = (torch.cos(phase), torch.sin(phase))
             self.n_g = n_g
@@ -385,6 +396,13 @@ class EEQSystem:
         return out
 
 
+#: :class:`EEQReuse`: above this many atoms a system with its own matrix-free
+#: preconditioner (the fast path's low-rank one) is preconditioned with it; up
+#: to it, the explicit inverse of an earlier step's matrix (at 10000 atoms 0.8 GB
+#: in float64, 2.4 GB while it is formed)
+DENSE_REUSE_MAX_ATOMS = 10_000
+
+
 class EEQReuse:
     """Carry the EEQ solve from one structure to the next of an MD run or optimization.
 
@@ -395,7 +413,10 @@ class EEQReuse:
 
     * the preconditioner is the explicit inverse of an *earlier* step's matrix,
       formed once and re-formed only when a solve needs more than ``refresh``
-      iterations; applying it is one matrix-vector product;
+      iterations; applying it is one matrix-vector product. Above
+      :data:`DENSE_REUSE_MAX_ATOMS` atoms, a system that brings its own
+      matrix-free preconditioner (the fast path's) is preconditioned with that
+      instead, so no ``(N, N)`` matrix is formed;
     * each of the step's solves is conjugate gradients from a good initial
       guess: the charges from a quadratic extrapolation of the last three
       steps, the adjoint (forces) from the previous step's adjoint, ``A^-1 1``
@@ -409,7 +430,8 @@ class EEQReuse:
     poor preconditioner or guess only costs iterations. If a solve
     does not converge within ``maxiter`` the preconditioner is re-formed from
     the current matrix and the solve retried once, and failing that the step
-    falls back to the LU path.
+    falls back to the LU path (a cold iterative solve for a matrix-free
+    system).
 
     Measured on 5001 water atoms at 0.997 g/cm^3 (A100, cutoff_eeq 16 A, a
     real 0.5 fs trajectory): the three solves of a step take 20 ms in float32
@@ -419,8 +441,9 @@ class EEQReuse:
     One instance serves one sequence of structures of the same system (atom
     count, elements, dtype, device); it resets itself when any of these
     change, and :class:`~xnn.common.models.d4.DFTD4` uses it only for a
-    structure evaluated on its own, never inside a batch. It holds an
-    ``(N, N)`` matrix (0.1 GB at 5000 atoms in float32).
+    structure evaluated on its own, never inside a batch. With the dense
+    preconditioner it holds an ``(N, N)`` matrix (0.1 GB at 5000 atoms in
+    float32).
 
     Parameters
     ----------
@@ -443,6 +466,7 @@ class EEQReuse:
     def reset(self) -> None:
         """Forget the previous structures (a new run, or a different system)."""
         self._key = None
+        self._matrix_free = False
         self._inv: Optional[Tensor] = None
         self._stale = False
         self._history: list = []
@@ -467,13 +491,18 @@ class EEQReuse:
         self._stale = False
         self.stats["preconditioners"] += 1
 
+    def _apply_preconditioner(self, system: EEQSystem, r: Tensor) -> Tensor:
+        if self._matrix_free:
+            return system.precondition(r)
+        return self._inv @ r
+
     def _pcg(self, system: EEQSystem, b: Tensor, x0: Tensor, tol_abs: float):
         """PCG for ``A y = b``; returns ``(y, iterations)``, iterations ``-1`` if not converged."""
         x = x0.clone()
         r = b - system.matvec(x)
         if float(torch.linalg.norm(r)) <= tol_abs:
             return x, 0
-        z = self._inv @ r
+        z = self._apply_preconditioner(system, r)
         p = z.clone()
         rz = torch.dot(r, z)
         for it in range(1, self.maxiter + 1):
@@ -483,7 +512,7 @@ class EEQReuse:
             r = r - a * ap
             if float(torch.linalg.norm(r)) <= tol_abs:
                 return x, it
-            z = self._inv @ r
+            z = self._apply_preconditioner(system, r)
             rz_new = torch.dot(r, z)
             p = z + (rz_new / rz) * p
             rz = rz_new
@@ -499,16 +528,23 @@ class EEQReuse:
             if key != self._key:
                 self.reset()
                 self._key = key
-            if self._inv is None or self._stale:
+            # a large system with its own matrix-free preconditioner is never
+            # assembled; the warm starts below are what the reuse buys there
+            self._matrix_free = (callable(getattr(system, "precondition", None))
+                                 and hasattr(system, "_solve_cg_lockstep")
+                                 and system.n > DENSE_REUSE_MAX_ATOMS)
+            if not self._matrix_free and (self._inv is None or self._stale):
                 self._precondition(system)
             call = {"charges": 0, "residual": 1}.get(role, 2)
             out = self._attempt(system, b_top, b_bot, call)
-            if out is None:                # re-form from this matrix and retry once
+            if out is None and not self._matrix_free:   # re-form from this matrix, retry once
                 self._precondition(system)
                 out = self._attempt(system, b_top, b_bot, call)
             if out is None:
                 self.stats["fallbacks"] += 1
                 self._stale = True
+                if self._matrix_free:          # a cold iterative solve: no dense LU
+                    return system._solve_cg_lockstep(b_top, b_bot, role)
                 return system._solve_lu(b_top, b_bot)
             return out
 
@@ -612,6 +648,28 @@ class _AugmentedSolve(torch.autograd.Function):
         return None, lam, kappa, None
 
 
+class _AugmentedSolveSlope(torch.autograd.Function):
+    """The derivative of ``J^{-1} [b_top; b_bot]`` without its value.
+
+    For a right-hand side that is zero to rounding (the residual of a
+    converged solution) the solve is not worth doing, but its slope is the
+    sensitivity :func:`eeq_charges_large` needs: the forward returns zeros and
+    the backward is the adjoint solve of :class:`_AugmentedSolve`, so higher
+    orders still differentiate.
+    """
+
+    @staticmethod
+    def forward(ctx, system: EEQSystem, b_top: Tensor, b_bot: Tensor):
+        ctx.system = system
+        return torch.zeros_like(b_top)
+
+    @staticmethod
+    def backward(ctx, g_y: Tensor):
+        g_mu = torch.zeros((), dtype=g_y.dtype, device=g_y.device)
+        lam, kappa = _AugmentedSolve.apply(ctx.system, g_y, g_mu, "adjoint")
+        return None, lam, kappa
+
+
 def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor],
                       rad: Tensor, diag: Tensor, x: Tensor, total_charge: Tensor,
                       cell: Optional[Tensor] = None) -> Tensor:
@@ -634,8 +692,12 @@ def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor]
         Live lattice vectors ``(3, 3)`` in bohr (periodic case).
     """
     total = total_charge.to(x.dtype).reshape(())
-    q0, mu0 = system.solve_augmented(x.detach(), total.detach(), "charges")
-    res_top = x - system.apply_differentiable(pos, edge_vec, rad, diag, q0, cell) - mu0
-    res_bot = total - q0.sum()
-    dq, _ = _AugmentedSolve.apply(system, res_top, res_bot, "residual")
-    return q0 + dq
+    with torch.no_grad():
+        xd, td = x.detach(), total.detach()
+        q0, mu0 = system.solve_augmented(xd, td, "charges")
+        # one round of refinement: the charges the solve is expanded around
+        dq, dmu = system.solve_augmented(xd - system.matvec(q0) - mu0, td - q0.sum(), "residual")
+        q1, mu1 = q0 + dq, mu0 + dmu
+    res_top = x - system.apply_differentiable(pos, edge_vec, rad, diag, q1, cell) - mu1
+    res_bot = total - q1.sum()
+    return q1 + _AugmentedSolveSlope.apply(system, res_top, res_bot)

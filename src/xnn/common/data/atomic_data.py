@@ -60,7 +60,9 @@ class AtomicGraph:
         Number of atoms per structure, of shape ``(B,)``.
     cell : Tensor, optional
         Lattice vectors as rows, of shape ``(B, 3, 3)``. ``None`` for
-        molecular systems.
+        molecular systems. In a batch mixing molecular and periodic
+        structures, a molecular structure has a zero cell and no periodic
+        flag (its edges carry no image shift).
     pbc : Tensor, optional
         Boolean periodicity flags, of shape ``(B, 3)``. ``None`` for molecular
         systems.
@@ -71,6 +73,12 @@ class AtomicGraph:
         Target forces, of shape ``(N, 3)``. Present during training.
     stress : Tensor, optional
         Target stress, of shape ``(B, 3, 3)``. Present during training.
+    forces_mask : Tensor, optional
+        Which structures carry force labels, bool ``(B,)``: set when a batch
+        mixes structures with and without them (the missing ones are zeros
+        in ``forces`` and excluded from the loss). ``None`` means all do.
+    stress_mask : Tensor, optional
+        The same for ``stress``.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
         Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF).
@@ -104,6 +112,8 @@ class AtomicGraph:
         Target forces ``(N, 3)``.
     stress : Tensor or None
         Target stress ``(B, 3, 3)``.
+    forces_mask, stress_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry force / stress labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
     weight : Tensor or None
@@ -124,9 +134,22 @@ class AtomicGraph:
     energy: Optional[Tensor] = None   # (B,)
     forces: Optional[Tensor] = None   # (N, 3)
     stress: Optional[Tensor] = None   # (B, 3, 3)
+    # which structures carry forces / stress when a batch mixes labelled and
+    # unlabelled ones; None = all of them
+    forces_mask: Optional[Tensor] = None   # (B,) bool
+    stress_mask: Optional[Tensor] = None   # (B,) bool
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
+    # dtype the model computes in, when the geometry is kept in a wider one
+    # (float64 positions for a float32 model); None = the positions' dtype
+    compute_dtype: Optional[torch.dtype] = None
+
+    @property
+    def model_dtype(self) -> torch.dtype:
+        """torch.dtype : The dtype the model computes in (``compute_dtype``, or
+        the positions' dtype when it is not set)."""
+        return self.compute_dtype if self.compute_dtype is not None else self.pos.dtype
 
     @property
     def num_graphs(self) -> int:
@@ -172,25 +195,81 @@ class AtomicGraph:
         (stress). Works for molecular (``cell`` is ``None``) and periodic
         systems alike.
 
+        The difference is formed in the dtype of the geometry and returned in
+        :attr:`model_dtype`: absolute coordinates of size ``L`` in float32 leave
+        every vector with an error of about ``6e-8 L``, so the deploy paths keep
+        the positions and cell in float64 for a float32 model and only the
+        (short) vectors are rounded.
+
         Returns
         -------
         Tensor
             Edge displacement vectors ``r_ij`` of shape ``(E, 3)``.
         """
+        if self.cell is None or self.cell.shape[0] == 1:
+            # molecules and single structures: one function that forms the
+            # vectors block by block in the geometry dtype, so a float64
+            # geometry never holds (E, 3) float64 temporaries for every edge
+            # (4.8 GB at 71 million edges), and whose backward keeps no float
+            # copy of the shifts. A single cell is a plain product: gathering
+            # it onto every edge makes the stress backward accumulate 9 E
+            # values into nine entries (1.5 s of a D4 step on 5000 atoms).
+            cell = (self.cell[0].to(self.pos.dtype) if self.cell is not None
+                    else self.pos.new_zeros(0))
+            return _EdgeVectors.apply(self.pos, cell, self.edge_index, self.cell_shifts,
+                                      self.model_dtype)
         src, dst = self.edge_index[0], self.edge_index[1]
         vec = self.pos[dst] - self.pos[src]
-        if self.cell is not None:
-            if self.cell.shape[0] == 1:
-                # one structure: a plain matmul. Gathering the cell onto every
-                # edge makes the backward pass (the stress) accumulate 9 E
-                # values into the same nine entries through the sort-based
-                # index backward, which cost 1.5 s of a D4 step and half of a
-                # MACE step on 5000 periodic atoms.
-                shift = self.cell_shifts.to(vec.dtype) @ self.cell[0]
-            else:
-                # cell of the structure each edge belongs to (via its src node)
-                cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
-                shift = torch.einsum("ei,eij->ej",
-                                     self.cell_shifts.to(vec.dtype), cell_per_edge)
-            vec = vec + shift
-        return vec
+        # cell of the structure each edge belongs to (via its src node)
+        cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
+        vec = vec + torch.einsum("ei,eij->ej", self.cell_shifts.to(vec.dtype), cell_per_edge)
+        return vec.to(self.model_dtype)
+
+
+#: Edges per block of :class:`_EdgeVectors` (its temporaries: three ``(block, 3)``
+#: tensors in the geometry dtype, 100 MB each in float64).
+EDGE_BLOCK = 1 << 22
+
+
+class _EdgeVectors(torch.autograd.Function):
+    """``pos[dst] - pos[src] + cell_shifts @ cell``, in blocks of edges.
+
+    Each block is formed in the geometry dtype exactly as the whole would be and
+    written into the result in the model dtype. The backward accumulates the
+    position and cell gradients block by block from the integer shifts; it is
+    made of differentiable operations, so force training (``create_graph``)
+    differentiates through it.
+    """
+
+    @staticmethod
+    def forward(ctx, pos: Tensor, cell: Tensor, edge_index: Tensor, cell_shifts: Tensor,
+                out_dtype: torch.dtype) -> Tensor:
+        ctx.save_for_backward(edge_index, cell_shifts)
+        ctx.n_atoms, ctx.dtype, ctx.periodic = pos.shape[0], pos.dtype, cell.numel() > 0
+        n_edges = edge_index.shape[1]
+        out = torch.empty((n_edges, 3), dtype=out_dtype, device=pos.device)
+        for e0 in range(0, n_edges, EDGE_BLOCK):
+            e1 = min(n_edges, e0 + EDGE_BLOCK)
+            vec = pos[edge_index[1, e0:e1]] - pos[edge_index[0, e0:e1]]
+            if ctx.periodic:
+                vec = vec + cell_shifts[e0:e1].to(pos.dtype) @ cell
+            out[e0:e1] = vec
+        return out
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        edge_index, cell_shifts = ctx.saved_tensors
+        need_pos = ctx.needs_input_grad[0]
+        need_cell = ctx.needs_input_grad[1] and ctx.periodic
+        grad_pos = grad.new_zeros((ctx.n_atoms, 3), dtype=ctx.dtype) if need_pos else None
+        grad_cell = grad.new_zeros((3, 3), dtype=ctx.dtype) if need_cell else None
+        n_edges = edge_index.shape[1]
+        for e0 in range(0, n_edges, EDGE_BLOCK):
+            e1 = min(n_edges, e0 + EDGE_BLOCK)
+            g = grad[e0:e1].to(ctx.dtype)
+            if grad_pos is not None:
+                grad_pos = (grad_pos.index_add(0, edge_index[1, e0:e1], g)
+                            .index_add(0, edge_index[0, e0:e1], g, alpha=-1))
+            if grad_cell is not None:
+                grad_cell = grad_cell + cell_shifts[e0:e1].to(ctx.dtype).t() @ g
+        return grad_pos, grad_cell, None, None, None

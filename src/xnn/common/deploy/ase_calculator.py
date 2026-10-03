@@ -117,7 +117,7 @@ class XNNCalculator(Calculator):
         **kwargs
             Options of :func:`~xnn.common.models.hub.load_pretrained`
             (``cache_dir``, ``head``, ``filename``, ``dtype``,
-            ``dispersion``, ``local_files_only``, ...).
+            ``dispersion``, ``local_files_only``, ``use_fast``, ...).
 
         Returns
         -------
@@ -160,16 +160,18 @@ class XNNCalculator(Calculator):
             Results are written into ``self.results``.
         """
         super().calculate(atoms, properties, system_changes)
-        # graph tensors in the model's dtype, so a float64 model (most
-        # foundation models) runs in a float32 session and vice versa
+        # positions and cell in float64 whatever the model's dtype (edge vectors
+        # from float32 absolute coordinates lose accuracy with the box size);
+        # the model computes in its own dtype through graph.compute_dtype
         struct = {
-            "pos": torch.as_tensor(np.asarray(atoms.get_positions()), dtype=self.dtype),
+            "pos": torch.as_tensor(np.asarray(atoms.get_positions()), dtype=torch.float64),
             "atomic_numbers": np.asarray(atoms.get_atomic_numbers()),
-            "cell": (torch.as_tensor(np.asarray(atoms.get_cell()), dtype=self.dtype)
+            "cell": (torch.as_tensor(np.asarray(atoms.get_cell()), dtype=torch.float64)
                      if atoms.pbc.any() else None),
             "pbc": np.asarray(atoms.pbc),
         }
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
+        graph.compute_dtype = self.dtype
         out = self.model(graph)
 
         self.results["energy"] = float(out["energy"].sum().detach())

@@ -1,0 +1,48 @@
+name: Tests
+
+# Runs the test suite on CPU with coverage and uploads the report to Codecov.
+# GPU-only tests (fast paths, Triton kernels) skip themselves without CUDA.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU-only torch
+        run: pip install "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install xnn and test dependencies
+        run: pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4" pytest-cov
+
+      - name: Run the tests with coverage
+        env:
+          XNN_OFFLINE: "1"
+        run: pytest -q -rfEs --cov=xnn --cov-report=xml --cov-report=term-missing:skip-covered
+
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false

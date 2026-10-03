@@ -55,6 +55,7 @@ from xnn.common.models.hub.cache import resolve_cache_dir, sanitize, url_slot
 from xnn.common.models.hub.card import ModelCard
 from xnn.common.models.hub.registry import get_card, registered_cards
 
+from ..constants import exact_float64_constants
 from .mace import MACE, GATES, INTERACTIONS
 
 # Published foundation checkpoints: alias -> (download URL, license), a view of
@@ -487,6 +488,9 @@ def _convert_mace_torch(upstream: nn.Module, head: Optional[str] = None,
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         model = model.to(dtype)
+    # the buffers copied above bypass the cast/load hooks: in float64, make the
+    # constants the transplant left float32-rounded exact, as a load would
+    exact_float64_constants(model)
     return model, model_cfg
 
 

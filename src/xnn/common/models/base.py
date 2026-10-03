@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from ..data import AtomicGraph
+from .ops import structure_sum
 
 
 class InteratomicPotential(nn.Module):
@@ -139,9 +140,7 @@ class InteratomicPotential(nn.Module):
         -------
         torch.Tensor
             Per-structure total energies of shape ``(B,)``, where
-            ``B == data.num_graphs``.
+            ``B == data.num_graphs``, in float64 (see
+            :func:`~xnn.common.models.ops.structure_sum`).
         """
-        energy = torch.zeros(data.num_graphs, dtype=node_energy.dtype,
-                             device=node_energy.device)
-        energy.index_add_(0, data.batch, node_energy)
-        return energy
+        return structure_sum(node_energy, data.batch, data.num_graphs)

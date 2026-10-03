@@ -16,6 +16,7 @@ from typing import Dict, Optional
 import torch
 from torch import Tensor, nn
 
+from ..models.fast import deactivate as deactivate_fast_paths
 from .torchscript import _DispersionHead, split_wrappers
 
 
@@ -174,6 +175,8 @@ def export_to_lammps(model: nn.Module, cutoff: float, path: str,
     str
         The ``path`` the scripted model was saved to.
     """
+    # the fused kernels are eager-only: the scripted model is the reference one
+    deactivate_fast_paths(model)
     wrapper = LAMMPSWrapper(model, cutoff, total_charge).eval()
     scripted = torch.jit.script(wrapper)
     extra = {"cutoff": str(cutoff), "dispersion": str(wrapper.has_dispersion)}
@@ -201,6 +204,7 @@ def export_torchscript(model: nn.Module, path: str) -> str:
     str
         The ``path`` the scripted model was saved to.
     """
+    deactivate_fast_paths(model)
     scripted = torch.jit.script(model.eval())
     scripted.save(path)
     return path

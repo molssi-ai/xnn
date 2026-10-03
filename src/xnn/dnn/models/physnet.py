@@ -559,7 +559,7 @@ class PhysNet(InteratomicPotential):
         if self.use_dispersion:
             Ea = Ea + self.dispersion_energy_per_atom(
                 data.atomic_numbers, Dij, idx_i, idx_j)
-        dipole = scatter_sum(Qa.unsqueeze(-1) * data.pos, data.batch,
+        dipole = scatter_sum(Qa.unsqueeze(-1) * data.pos.to(Qa.dtype), data.batch,
                              data.num_graphs)
         return {"node_energy": Ea,
                 "energy": self.aggregate_energy(Ea, data),

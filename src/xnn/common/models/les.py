@@ -39,7 +39,7 @@ The wrapped energy cost is roughly twice the short-range cost.
 from __future__ import annotations
 
 import math
-from typing import List
+from typing import List, Tuple
 
 import torch
 
@@ -48,9 +48,19 @@ from torch import Tensor, nn
 
 from ..data import AtomicGraph
 from .base import InteratomicPotential
+from .fast import AutoPolicy, FastPathModule
+
+#: complex entries of one column block of the factorized reciprocal sum (fast path)
+FAST_BLOCK_ENTRIES = 5 * 10 ** 7
+#: ``use_fast="auto"``: minimum atoms of a periodic structure (LES's cost does not
+#: depend on the neighbor graph, so this policy counts atoms, per structure). The
+#: factorized sum has a fixed cost of about 2 ms per structure; measured on A100,
+#: A30 and V100 in both precisions it breaks even between 1500 and 3000 atoms and
+#: wins 2-9x from 5000 atoms on (with 10-30x less memory)
+AUTO_POLICY = AutoPolicy(default_min_edges=3000, default_min_edges_float64=3000)
 
 
-class EwaldSummation(nn.Module):
+class EwaldSummation(nn.Module, FastPathModule):
     """Ewald energy of a (latent) per-atom variable ``q`` (paper eqs 3-5).
 
     For periodic structures, the reciprocal-space sum over a k-grid limited
@@ -101,6 +111,11 @@ class EwaldSummation(nn.Module):
         self.sigma = sigma
         self.exponent = exponent
         self.remove_self_interaction = remove_self_interaction
+        # the factorized reciprocal sum (reciprocal_fast), chosen per evaluation
+        # by the owning LatentEwald for the structures of at least
+        # fast_min_atoms atoms; off under TorchScript
+        self.fast_active = False
+        self.fast_min_atoms = 0
 
     def _kfac(self, k2: Tensor) -> Tensor:
         """Interaction kernel in reciprocal space (paper eqs 4 and 5).
@@ -124,25 +139,25 @@ class EwaldSummation(nn.Module):
         gaussian_norm = self.sigma * (2.0 * math.pi) ** 1.5
         return q.square().sum() / gaussian_norm
 
-    @torch.jit.export
-    def reciprocal(self, pos: Tensor, q: Tensor, cell: Tensor) -> Tensor:
-        """Reciprocal-space Ewald energy of one periodic structure.
+    def k_set(self, cell: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The wave vectors of the reciprocal sum of one periodic structure.
 
         Parameters
         ----------
-        pos : Tensor
-            Cartesian positions, shape ``(n, 3)``.
-        q : Tensor
-            Hidden variable, shape ``(n, n_channels)``.
         cell : Tensor
             Row-vector cell matrix, shape ``(3, 3)`` (triclinic allowed).
 
         Returns
         -------
-        Tensor
-            Scalar long-range energy (summed over channels).
+        grid : Tensor
+            Integer triples ``(M, 3)`` (long) of one half space within the
+            spherical cutoff ``|k| <= 2 pi / dl``.
+        kpts : Tensor
+            The wave vectors ``k = grid @ B``, ``(M, 3)``.
+        k2 : Tensor
+            ``|k|^2``, ``(M,)``.
         """
-        device, dtype = pos.device, pos.dtype
+        device, dtype = cell.device, cell.dtype
         # rows of the reciprocal cell, satisfying b_i . a_j = 2 pi delta_ij
         recip = 2.0 * math.pi * torch.linalg.inv(cell).T
         # per-axis integer extent of the candidate grid; the tiny nudge keeps
@@ -188,8 +203,27 @@ class EwaldSummation(nn.Module):
         # shell can drop out when its |k|^2 lands an ulp above the cutoff)
         in_shell = ((k2 > k_cut_sq * 1e-12)
                     & (k2 <= k_cut_sq * (1.0 + 1e-9)))
-        kpts, k2 = kpts[in_shell], k2[in_shell]
+        return half_grid[in_shell], kpts[in_shell], k2[in_shell]
 
+    @torch.jit.export
+    def reciprocal(self, pos: Tensor, q: Tensor, cell: Tensor) -> Tensor:
+        """Reciprocal-space Ewald energy of one periodic structure.
+
+        Parameters
+        ----------
+        pos : Tensor
+            Cartesian positions, shape ``(n, 3)``.
+        q : Tensor
+            Hidden variable, shape ``(n, n_channels)``.
+        cell : Tensor
+            Row-vector cell matrix, shape ``(3, 3)`` (triclinic allowed).
+
+        Returns
+        -------
+        Tensor
+            Scalar long-range energy (summed over channels).
+        """
+        _, kpts, k2 = self.k_set(cell)
         # |S(k)|^2 per channel via the real and imaginary parts of the
         # structure factor S(k) = sum_i q_i exp(i k . r_i)
         angles = pos @ kpts.T                       # (n, M)
@@ -198,6 +232,51 @@ class EwaldSummation(nn.Module):
         sk_sq = re_sk.square() + im_sk.square()
         energy = (2.0 * (self._kfac(k2).unsqueeze(1) * sk_sq).sum()
                   / cell_volume(cell))
+        if self.remove_self_interaction and self.exponent == 1:
+            energy = energy - self._self_energy(q)
+        return energy
+
+    @torch.jit.unused
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """The factorized reciprocal sum runs on CUDA devices."""
+        return device.type == "cuda" and dtype in (torch.float32, torch.float64)
+
+    @torch.jit.unused
+    def reciprocal_fast(self, pos: Tensor, q: Tensor, cell: Tensor) -> Tensor:
+        """:meth:`reciprocal` through factorized phases (the fast path).
+
+        The same wave vectors and weights; the structure factors of each
+        column of fixed ``(m_1, m_2)`` come from one complex matrix product
+        over tabulated phase factors (:mod:`~xnn.common.models.reciprocal`)
+        instead of ``(n, M)`` sines and cosines, in column blocks that are
+        recomputed in the backward pass. Differentiable to every order that
+        :meth:`reciprocal` is.
+        """
+        from .recompute import recompute
+        from .reciprocal import PhaseColumns, complex_dtype, structure_factors
+
+        grid, _, k2 = self.k_set(cell)
+        columns = PhaseColumns(grid)
+        cdtype = complex_dtype(q.dtype)
+        weights = self._kfac(k2)
+
+        def block(p: Tensor, v: Tensor, lat: Tensor, w: Tensor, c0: int, c1: int) -> Tensor:
+            theta = PhaseColumns.phases(p, lat)
+            sk = structure_factors(columns, columns.column_table(theta, c0, c1, cdtype),
+                                   columns.axis_table(theta, cdtype), v)       # (c, C, n_m3)
+            sk_sq = (sk.real.square() + sk.imag.square()).sum(1).to(v.dtype)
+            return (columns.scatter(w, c0, c1) * sk_sq).sum()
+
+        ranges = list(columns.blocks(pos.shape[0], FAST_BLOCK_ENTRIES))
+        if len(ranges) == 1:
+            total = block(pos, q, cell, weights, *ranges[0])
+        else:
+            total = q.new_zeros(())
+            for c0, c1 in ranges:
+                total = total + recompute(
+                    lambda p, v, lat, w, c0=c0, c1=c1: block(p, v, lat, w, c0, c1),
+                    pos, q, cell, weights)
+        energy = 2.0 * total / cell_volume(cell)
         if self.remove_self_interaction and self.exponent == 1:
             energy = energy - self._self_energy(q)
         return energy
@@ -262,7 +341,9 @@ class EwaldSummation(nn.Module):
                         and bool(cell[i].diagonal().abs().sum() > 1e-6)
                         and (pbc is None or bool(pbc[i].any())))
             if periodic:
-                out[i] = self.reciprocal(pos[mask], q[mask], cell[i])
+                use_fast = self.fast_active and int(mask.sum()) >= self.fast_min_atoms
+                reciprocal = self.reciprocal_fast if use_fast else self.reciprocal
+                out[i] = reciprocal(pos[mask], q[mask], cell[i])
             else:
                 out[i] = self.realspace(pos[mask], q[mask])
         return out
@@ -355,6 +436,40 @@ class LatentEwald(InteratomicPotential):
                          if q_add_linear else None)
         self.ewald = EwaldSummation(dl=dl, sigma=sigma, exponent=exponent,
                                     remove_self_interaction=remove_self_interaction)
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "LatentEwald":
+        """Choose the implementation of the reciprocal sum.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (default): the factorized reciprocal sum
+            (:meth:`EwaldSummation.reciprocal_fast`) on a CUDA device for the
+            periodic structures of at least :data:`AUTO_POLICY` atoms (3000);
+            ``True``: wherever it runs; ``False``: always the reference. The
+            wrapped model's own fast paths are set by
+            :func:`~xnn.common.models.fast.set_use_fast`, which reaches both.
+
+        Returns
+        -------
+        LatentEwald
+            ``self``.
+        """
+        from .fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, data: AtomicGraph) -> None:
+        from .fast import select
+        device, dtype = data.pos.device, data.model_dtype
+        # "auto" decides per structure (by its atoms) in EwaldSummation.forward
+        select([self.ewald], self.use_fast, None, device, dtype, 0)
+        self.ewald.fast_min_atoms = (AUTO_POLICY.threshold(device, dtype)
+                                     if isinstance(self.use_fast, str) and self.ewald.fast_active
+                                     else 0)
 
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Short-range prediction plus the latent-Ewald long-range energy.
@@ -372,13 +487,17 @@ class LatentEwald(InteratomicPotential):
             ``"energy_sr"`` ``(B,)``, ``"energy_lr"`` ``(B,)`` and
             ``"latent_charges"`` ``(N, n_channels)``.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(data)
         out = self.model(data)
         features = out["node_features"]
         q = self.q_net(features)
         if self.q_linear is not None:
             q = q + self.q_linear(features)
-        energy_lr = self.ewald(q, data.pos, data.batch, data.num_graphs,
-                               data.cell, data.pbc)
+        # the Ewald sum computes in the model's dtype (a float64 geometry is cast)
+        cell = data.cell.to(q.dtype) if data.cell is not None else None
+        energy_lr = self.ewald(q, data.pos.to(q.dtype), data.batch, data.num_graphs,
+                               cell, data.pbc)
         n_atoms = torch.bincount(data.batch, minlength=data.num_graphs)
         out["energy_sr"] = out["energy"]
         out["energy_lr"] = energy_lr

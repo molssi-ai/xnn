@@ -277,3 +277,18 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/bamboo_verification
    nb/fidelity_checks/opls_verification
    nb/fidelity_checks/dreiding_verification
+
+Parity checks
+=============
+
+The fast paths (fused GPU kernels behind ``use_fast``, see
+:ref:`howto-fast-paths`) against the reference implementations they replace,
+with the same weights: energies, forces, stress, charges and training
+gradients, and the time of each, on the systems the models are served on.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Parity checks
+
+   nb/parity_checks/mace_cueq_parity
+   nb/parity_checks/dispersion_parity
