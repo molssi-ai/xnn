@@ -44,5 +44,9 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          slug: molssi-ai/xnn
           files: coverage.xml
-          fail_ci_if_error: false
+          # a failed upload fails the job, so a missing or wrong token is
+          # visible in the run instead of only as an empty dashboard
+          fail_ci_if_error: true
+          verbose: true
