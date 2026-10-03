@@ -1,0 +1,21 @@
+name: aimnet2
+cutoff: 5.0               # local environment radius (AIMNet2 rc_s); the paper's value
+n_features: 16            # embedding channels per radial shell (nfeature)
+n_rbf: 16                 # Gaussian radial shells (nshifts_s)
+n_interactions: 3         # message passes (two charge passes, then the AIM vector)
+species: [1, 6, 7, 8]     # H, C, N, O (the published models cover 14 elements)
+rbf_start: 0.8            # first Gaussian center (rmin); centers stop one spacing short of cutoff
+gaussian_width: null      # Gaussian exponent eta; null -> (n_rbf / (cutoff - rbf_start))^2
+hidden: null              # MLP widths per pass; null -> [[512, 380], [512, 380], [512, 380, 380]]
+n_vector_combinations: 12 # learned shell combinations of the vector features (ncomb_v)
+aim_size: 256             # width of the AIM vector (the node features)
+readout_hidden: [128, 128]  # energy MLP hidden widths
+charge_channels: 1        # 1 closed shell; 2 for the open-shell NSE variant
+coulomb: simple           # simple (all pairs, molecules) | dsf (truncated) | ewald | pme (periodic lattice sums) | null
+coulomb_sr_cutoff: 4.6    # radius of the implicitly learned Coulomb energy that is subtracted
+coulomb_sr_envelope: exp  # its envelope: exp (mollifier) | cosine
+lr_cutoff: 15.0           # real-space cutoff of coulomb: dsf, ewald, pme (the neighbor-list radius)
+dsf_alpha: 0.2            # damping of coulomb: dsf (1/Angstrom)
+ewald_accuracy: 1.0e-6    # relative accuracy of coulomb: ewald, pme (sets alpha, the k cutoff and the PME mesh)
+pme_spline_order: 4       # B-spline order of the PME charge assignment
+atomic_energies: null     # per-species energy shifts (folded into atom_ref, kept in float64)

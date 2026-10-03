@@ -64,5 +64,7 @@ Export a trained checkpoint for deployment:
 - ``--ckpt``: a checkpoint written by ``xnn train``
 - ``--to``: ``lammps`` (TorchScript wrapped in the LAMMPS tensor ABI) or
   ``torchscript`` (plain scripted model)
+- ``--total-charge`` / ``--spin-multiplicity``: the charge state baked into
+  the artifact (D4 EEQ charges, the charge-predicting AIMNet2 models)
 
 See :ref:`deployment` for what to do with the exported file.

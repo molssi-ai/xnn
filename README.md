@@ -124,7 +124,7 @@ the MolSSI Driver Interface.
 | Family | Models |
 |---|---|
 | Add-ons for any model (`common`) | LES long-range electrostatics; DFT-D3 (zero, BJ, mzero, op damping) and DFT-D4 dispersion |
-| Graph networks (`gnn`) | NequIP, MACE, Allegro, CACE |
+| Graph networks (`gnn`) | NequIP, MACE, Allegro, CACE, AIMNet2 |
 | Descriptor networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP* |
 | Convolutional (`cnn`) | SchNet* |
 | Force fields (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING |

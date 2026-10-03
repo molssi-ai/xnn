@@ -23,6 +23,7 @@ ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")
 # file suffixes), so detection and the error messages work before the import
 _PROVIDERS: dict[str, tuple[str, tuple[str, ...]]] = {
     "mace-torch": ("xnn.gnn.models.mace_foundation", (".model",)),
+    "aimnet2": ("xnn.gnn.models.aimnet2_foundation", (".safetensors",)),
 }
 
 
@@ -37,15 +38,21 @@ class ModelFormat:
     suffixes : tuple of str
         File suffixes recognized as this format.
     convert : callable
-        ``convert(path, head) -> (model, model_config)``: the bare xnn
-        potential and the :class:`~xnn.common.config.ModelConfig` that
+        ``convert(path, head) -> (model, config)``: the bare xnn potential and
+        the :class:`~xnn.common.config.ModelConfig` that
         :func:`~xnn.common.models.build_model` rebuilds it from (the weights
-        then load strictly).
+        then load strictly), or a full :class:`~xnn.common.config.Config`
+        when the model comes with more than its architecture (a
+        ``subtracted_dispersion`` record).
     find_cached : callable, optional
         ``find_cached(card) -> path or None``: a copy of the card's file that
         some other cache already holds, so it is not downloaded again.
     requires : str
         What has to be installed to convert (shown in error messages).
+    detect : callable, optional
+        ``detect(path) -> bool``: recognizes a file or directory of this
+        format when its suffix does not tell (a ``.pt`` artifact, a directory
+        of weights and metadata); a path that does not exist is never one.
     """
 
     name: str
@@ -53,6 +60,7 @@ class ModelFormat:
     convert: Callable
     find_cached: Optional[Callable] = None
     requires: str = ""
+    detect: Optional[Callable] = None
 
 
 _FORMATS: dict[str, ModelFormat] = {}
@@ -126,7 +134,7 @@ def is_archive(path: Path) -> bool:
 
 
 def detect_format(path: Path) -> str:
-    """Guess a file's format from its suffix (xnn's own when unknown).
+    """Guess a file's format from its suffix, or a format's own ``detect`` (xnn's own when unknown).
 
     Parameters
     ----------
@@ -138,7 +146,11 @@ def detect_format(path: Path) -> str:
     str
         Format key.
     """
-    if Path(path).is_dir():
+    path = Path(path)
+    for fmt in _FORMATS.values():
+        if fmt.detect is not None and fmt.detect(path):
+            return fmt.name
+    if path.is_dir():
         return XNN_FORMAT
     name = str(path).lower()
     for fmt in _FORMATS.values():

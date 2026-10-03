@@ -9,8 +9,8 @@ Complete reference documentation, generated from the docstrings in
 
 - :mod:`xnn.common`: data pipeline, featurizer base, configuration,
   model registry and outputs, training, benchmarking, deployment, CLI
-- :mod:`xnn.gnn`: E(3)-equivariant models (NequIP, MACE, Allegro, CACE) and
-  featurizers (requires ``e3nn``)
+- :mod:`xnn.gnn`: graph-network models (NequIP, MACE, Allegro, CACE, AIMNet2)
+  and featurizers (requires ``e3nn``)
 - :mod:`xnn.cnn`: continuous-filter convolution models (SchNet)
 - :mod:`xnn.dnn`: descriptor models (HDNNP, ANI, PhysNet) and
   symmetry-function / AEV featurizers

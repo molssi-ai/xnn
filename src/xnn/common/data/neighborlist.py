@@ -17,6 +17,7 @@ reference implementation runs unchanged.
 from __future__ import annotations
 
 import itertools
+import warnings
 from typing import Optional
 
 import torch
@@ -158,12 +159,12 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
     if pos.is_cuda:
         _preload_nvrtc()
 
-    def compute():
+    def compute(points, lattice):
         return VesinNeighborList(cutoff=cutoff, full_list=True).compute(
-            points=pos, box=box, periodic=not molecular, quantities="ijS")
+            points=points, box=lattice, periodic=not molecular, quantities="ijS")
 
     try:
-        i, j, shifts = compute()
+        i, j, shifts = compute(pos, box)
     except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
         # vesin allocates its GPU memory itself, so it cannot use what PyTorch
         # holds cached (in MD, most of the free memory): hand that back, retry once
@@ -171,17 +172,32 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
             raise
         torch.cuda.empty_cache()
         try:
-            i, j, shifts = compute()
+            i, j, shifts = compute(pos, box)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as again:
             if not _is_out_of_memory(again):
                 raise
-            raise RuntimeError(
-                f"vesin ran out of GPU memory building the neighbor list of "
-                f"{pos.shape[0]} atoms at {cutoff} A, also after releasing PyTorch's "
-                f"cached memory; set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-                f"or use a GPU with more memory") from again
+            # what PyTorch still holds in partly used blocks stays out of reach; the
+            # CPU cell list gives the same edges (milliseconds for 10^4-10^5 atoms)
+            _warn_cpu_fallback(pos.shape[0], cutoff)
+            i, j, shifts = compute(pos.detach().cpu(), box.detach().cpu())
     edge_index = torch.stack([i, j], dim=0).to(device)
     return edge_index, shifts.to(torch.long).to(device)
+
+
+_CPU_FALLBACK_WARNED = False
+
+
+def _warn_cpu_fallback(n_atoms: int, cutoff: float) -> None:
+    """Say once per process that the neighbour list moved to the CPU."""
+    global _CPU_FALLBACK_WARNED
+    if _CPU_FALLBACK_WARNED:
+        return
+    _CPU_FALLBACK_WARNED = True
+    warnings.warn(
+        f"vesin ran out of GPU memory building the neighbor list of {n_atoms} atoms at "
+        f"{cutoff} A, also after releasing PyTorch's cached memory; building it on the CPU "
+        f"instead (PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True keeps PyTorch's cache "
+        f"compact and usually avoids this)", RuntimeWarning, stacklevel=3)
 
 
 def _is_out_of_memory(exc: BaseException) -> bool:

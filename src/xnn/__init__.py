@@ -10,7 +10,7 @@ Organized by model family, with everything shared factored into ``common``:
         train       -- Trainer, losses (batch + device aware)
         deploy      -- ASE calculator, LAMMPS/TorchScript export
         cli         -- the `xnn` command
-    gnn/     E(3)-equivariant GNNs (NequIP / MACE / Allegro / CACE); needs e3nn
+    gnn/     graph networks (NequIP / MACE / Allegro / CACE / AIMNet2); needs e3nn
     cnn/     continuous-filter conv net (SchNet)
     dnn/     descriptor + per-element networks (HDNNP / ANI / PhysNet)
     ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS)

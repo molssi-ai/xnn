@@ -21,6 +21,7 @@ engine, ``xnn export`` and the benchmark runner.
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import itertools
@@ -270,6 +271,15 @@ def load_checkpoint(path: Union[str, Path], *, format: Optional[str] = None,
     """
     from ...config import Config, from_dict
     path = Path(path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"no checkpoint at {path}")
+    # a foreign format first: its detect() may claim a directory or a .pt file
+    fmt = format or detect_format(path)
+    if fmt != XNN_FORMAT:
+        model, cfg = get_format(fmt).convert(path, head)
+        if not isinstance(cfg, Config):
+            cfg = Config(model=cfg)
+        return Checkpoint(cfg, wrapped_state_dict(model), None, path)
     if path.is_dir():
         missing = [f for f in (CONFIG_FILE, WEIGHTS_FILE) if not (path / f).is_file()]
         if missing:
@@ -278,13 +288,6 @@ def load_checkpoint(path: Union[str, Path], *, format: Optional[str] = None,
         sd = state["model"] if isinstance(state.get("model"), dict) else state
         card = ModelCard.load(path / CARD_FILE) if (path / CARD_FILE).is_file() else None
         return Checkpoint(read_config(path / CONFIG_FILE), sd, card, path)
-    if not path.is_file():
-        raise FileNotFoundError(f"no checkpoint at {path}")
-
-    fmt = format or detect_format(path)
-    if fmt != XNN_FORMAT:
-        model, model_cfg = get_format(fmt).convert(path, head)
-        return Checkpoint(Config(model=model_cfg), wrapped_state_dict(model), None, path)
 
     # trainer checkpoints pickle their Config, hence weights_only=False
     state = torch.load(path, map_location="cpu", weights_only=False)
@@ -421,7 +424,8 @@ def _as_dtype(dtype) -> Optional[torch.dtype]:
 
 def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: Any = None,
                     compute_forces: bool = True, compute_stress: bool = False,
-                    eeq_reuse: bool = False, label: str = "checkpoint"):
+                    eeq_reuse: bool = False, model_options: Optional[dict[str, Any]] = None,
+                    label: str = "checkpoint"):
     """Rebuild a model from its config and weights.
 
     The model is built in float64, so the constant tables of the physics
@@ -449,6 +453,11 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
         Heads of the returned :class:`ForceStressOutput`.
     eeq_reuse : bool, optional
         Carry the D4 EEQ solve over between steps (molecular dynamics).
+    model_options : dict, optional
+        Overrides of ``config.model.extra`` applied before the model is
+        built: deployment knobs that change no weights, such as AIMNet2's
+        Coulomb method (``{"coulomb": "dsf", "lr_cutoff": 15.0}``); the
+        weights still load strictly.
     label : str, optional
         Name used in log messages.
 
@@ -467,6 +476,9 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
 
     recorded = recorded_dispersion(config)
     spec = resolve_dispersion(dispersion, recorded)
+    if model_options:
+        config = copy.deepcopy(config)
+        config.model.extra = {**(config.model.extra or {}), **model_options}
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:

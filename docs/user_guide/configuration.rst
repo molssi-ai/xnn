@@ -115,7 +115,7 @@ The repository ships composable templates:
    configs/
      train.yaml        top-level training config (Hydra-style defaults list)
      data/default.yaml
-     model/{mace,nequip,allegro,cace,schnet,physnet,hdnnp,ani,bamboo,reaxff,opls}.yaml
+     model/{mace,nequip,allegro,cace,aimnet2,schnet,physnet,hdnnp,ani,bamboo,reaxff,opls}.yaml
 
 Upstream key translation
 ========================
