@@ -28,13 +28,20 @@ Algorithm:
   positive definite ``A`` (Jacobi preconditioner) with the constraint
   eliminated: ``q = y_1 - mu y_2``, ``A y_1 = x``, ``A y_2 = 1``.
 * **Gradients.** Implicit differentiation with a constant Jacobian: the
-  solution ``q_0`` is computed without autograd, then ``q = q_0 + J^{-1}
-  [x - A(r) q_0 - mu_0; Q - 1^T q_0]`` with the *constant* operator ``J^{-1}``
-  (a custom autograd function whose backward is another solve) and one
-  differentiable application of ``A(r)`` in recomputed blocks. The correction is
-  zero at convergence, its derivative is the exact first-order sensitivity
-  ``dq/dr = -J^{-1} (dA/dr) q``, and force training (a second derivative with
-  respect to the model parameters, on which ``A`` does not depend) is exact.
+  solution ``q_0`` is computed without autograd and refined once, ``q_1 = q_0
+  + J^{-1} [x - A q_0 - mu_0; Q - 1^T q_0]`` (also without autograd), then
+  ``q = q_1 + J^{-1} [x - A(r) q_1 - mu_1; Q - 1^T q_1]`` with the *constant*
+  operator ``J^{-1}`` as a custom autograd function whose value is taken as
+  zero (it is, to rounding: ``q_1`` is converged) and whose backward is
+  another solve, around one differentiable application of ``A(r)`` in
+  recomputed blocks. Its derivative is the exact first-order sensitivity
+  ``dq/dr = -J^{-1} (dA/dr) q`` at ``q_1``: expanding around the refined
+  charges matters because an iterative ``q_0`` carries a relative error of
+  the solver tolerance times the condition number, which the refinement
+  removes from the charges and the expansion point removes from the forces
+  (expanded around ``q_0`` the forces were off by ``~1e-10`` hartree/bohr at a
+  ``1e-12`` tolerance). Force training (a second derivative with respect to
+  the model parameters, on which ``A`` does not depend) is exact.
 
 The large regime agrees with the dense one to the truncation and solver
 tolerances (about 1e-10 hartree), not to the last bit, and it is eager-only:
@@ -641,6 +648,28 @@ class _AugmentedSolve(torch.autograd.Function):
         return None, lam, kappa, None
 
 
+class _AugmentedSolveSlope(torch.autograd.Function):
+    """The derivative of ``J^{-1} [b_top; b_bot]`` without its value.
+
+    For a right-hand side that is zero to rounding (the residual of a
+    converged solution) the solve is not worth doing, but its slope is the
+    sensitivity :func:`eeq_charges_large` needs: the forward returns zeros and
+    the backward is the adjoint solve of :class:`_AugmentedSolve`, so higher
+    orders still differentiate.
+    """
+
+    @staticmethod
+    def forward(ctx, system: EEQSystem, b_top: Tensor, b_bot: Tensor):
+        ctx.system = system
+        return torch.zeros_like(b_top)
+
+    @staticmethod
+    def backward(ctx, g_y: Tensor):
+        g_mu = torch.zeros((), dtype=g_y.dtype, device=g_y.device)
+        lam, kappa = _AugmentedSolve.apply(ctx.system, g_y, g_mu, "adjoint")
+        return None, lam, kappa
+
+
 def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor],
                       rad: Tensor, diag: Tensor, x: Tensor, total_charge: Tensor,
                       cell: Optional[Tensor] = None) -> Tensor:
@@ -663,8 +692,12 @@ def eeq_charges_large(system: EEQSystem, pos: Tensor, edge_vec: Optional[Tensor]
         Live lattice vectors ``(3, 3)`` in bohr (periodic case).
     """
     total = total_charge.to(x.dtype).reshape(())
-    q0, mu0 = system.solve_augmented(x.detach(), total.detach(), "charges")
-    res_top = x - system.apply_differentiable(pos, edge_vec, rad, diag, q0, cell) - mu0
-    res_bot = total - q0.sum()
-    dq, _ = _AugmentedSolve.apply(system, res_top, res_bot, "residual")
-    return q0 + dq
+    with torch.no_grad():
+        xd, td = x.detach(), total.detach()
+        q0, mu0 = system.solve_augmented(xd, td, "charges")
+        # one round of refinement: the charges the solve is expanded around
+        dq, dmu = system.solve_augmented(xd - system.matvec(q0) - mu0, td - q0.sum(), "residual")
+        q1, mu1 = q0 + dq, mu0 + dmu
+    res_top = x - system.apply_differentiable(pos, edge_vec, rad, diag, q1, cell) - mu1
+    res_bot = total - q1.sum()
+    return q1 + _AugmentedSolveSlope.apply(system, res_top, res_bot)
