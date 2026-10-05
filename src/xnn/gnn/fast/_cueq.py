@@ -3,7 +3,9 @@
 `cuEquivariance <https://github.com/NVIDIA/cuEquivariance>`_ provides fused CUDA
 kernels for equivariant tensor products. Its Python packages are Apache-2.0; its
 kernels (``cuequivariance-ops-torch-cu12``) are binaries distributed by NVIDIA
-under NVIDIA's license, so it is an optional extra (``pip install xnns[cueq]``)
+under NVIDIA's license, so it is an optional install (the three packages of one
+release, ``pip install cuequivariance==0.6.1 cuequivariance-torch==0.6.1
+cuequivariance-ops-torch-cu12==0.6.1``)
 and xnn never needs it: without it, or off a GPU, every model runs its
 reference implementation.
 
