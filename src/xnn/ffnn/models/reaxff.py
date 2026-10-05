@@ -1373,7 +1373,7 @@ class ReaxFF(InteratomicPotential):
 
     def _hbond_terms(self, s, N, src, dst, vec, r, b_src, b_dst, b_vec, b_r,
                      amask, bo0, fhb, inter):
-        """Hydrogen-bond energy over ``X-H .. Z`` triples.
+        """Hydrogen-bond energy over the ``X-H`` donor pairs and ``Z`` acceptors.
 
         The donor pair ``X-H`` is a valence bond; acceptors ``Z`` are any
         heavy atom in the nonbonded neighbor list of the hydrogen (excluding

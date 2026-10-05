@@ -1,4 +1,6 @@
-"""AIMNet2 (Anstine, Zubatyuk & Isayev, *Chem. Sci.* **16**, 10228, 2025).
+"""AIMNet2 (Anstine, Zubatyuk and Isayev, 2025).
+
+*Chem. Sci.* **16**, 10228 (2025).
 
 The atoms-in-molecules neural network potential for neutral and charged
 organic and elemental-organic molecules, written from the paper on the xnn

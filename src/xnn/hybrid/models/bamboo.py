@@ -96,7 +96,7 @@ def _make_act(act: "str | nn.Module") -> nn.Module:
 
 
 def _energy_mlp(n_layers: int, dim: int, act: str) -> nn.Sequential:
-    """Build a BAMBOO read-out MLP ``dim -> dim/2 -> ... -> 1``.
+    """Build a BAMBOO read-out MLP from ``dim`` through ``dim/2`` and so on down to ``1``.
 
     Mirrors the upstream ``get_mlp_layers``: ``n_layers`` hidden linears (the
     first ``dim -> dim/2``, the rest ``dim/2 -> dim/2``) each followed by the

@@ -75,7 +75,7 @@ class PhaseColumns:
 
     @staticmethod
     def phases(pos: Tensor, cell: Tensor) -> Tensor:
-        """``theta (N, 3)``, ``theta_ik = b_k . r_i``, in float64 (differentiable).
+        """Phases ``theta (N, 3)`` with ``theta_ik = b_k dot r_i``, in float64 (differentiable).
 
         ``cell`` rows are the lattice vectors; ``b_k`` satisfy ``b_k . a_l =
         2 pi delta_kl``.
@@ -90,7 +90,7 @@ class PhaseColumns:
         return unit(phase).to(cdtype)
 
     def axis_table(self, theta: Tensor, cdtype: torch.dtype) -> Tensor:
-        """``P[i, m] = exp(i m theta_3)`` for ``m = -M_3 .. M_3``, ``(N, 2 M_3 + 1)``."""
+        """``P[i, m] = exp(i m theta_3)`` for ``m`` from ``-M_3`` to ``M_3``, shape ``(N, 2 M_3 + 1)``."""
         m3 = torch.arange(-self.m3_max, self.m3_max + 1, device=theta.device, dtype=torch.float64)
         return unit(theta[:, 2:3] * m3[None, :]).to(cdtype)
 

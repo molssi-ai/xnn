@@ -1,4 +1,6 @@
-"""Smooth particle-mesh Ewald (Essmann *et al.*, *J. Chem. Phys.* 103, 8577, 1995).
+"""Smooth particle-mesh Ewald reciprocal sums (Essmann and co-workers, 1995).
+
+*J. Chem. Phys.* **103**, 8577 (1995).
 
 The reciprocal-space part of an Ewald sum through a charge mesh: the point
 charges are spread onto a regular grid of the unit cell with cardinal
@@ -34,7 +36,7 @@ from .ops import cell_volume
 
 
 def bspline_weights(t: Tensor, order: int) -> Tensor:
-    """Cardinal B-spline weights ``M_p(t + j)``, ``j = 0 .. p - 1``.
+    """Cardinal B-spline weights ``M_p(t + j)`` for ``j`` from ``0`` to ``p - 1``.
 
     For a scaled coordinate ``u`` with fractional part ``t = u - floor(u)``
     the charge lands on the grid points ``floor(u) - j`` with these weights
