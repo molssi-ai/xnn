@@ -1,0 +1,23 @@
+# Dependabot: keep the uv lockfile and the workflow actions current.
+# Security advisories open pull requests as soon as they are published;
+# routine version updates are grouped into one weekly pull request each.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    # torch is pinned to the CUDA build the GPU environments use and is
+    # bumped by hand together with the e3nn / mace-torch reference versions.
+    ignore:
+      - dependency-name: "torch"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
