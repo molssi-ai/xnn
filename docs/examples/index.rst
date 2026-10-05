@@ -85,6 +85,11 @@ the MACE and AIMNet2 **foundation models** in action:
 ``MACE.from_foundation()`` call and runs the butane torsion profile
 against OPLS-AA, the water dimer against CCSD(T)/CBS, and a
 ``Trainer`` fine-tune to a new DFT reference (rMD17 malonaldehyde);
+``mace_finetuning_strategies.ipynb`` compares the fine-tuning strategies
+(naive, readout-only, LoRA, multi-head pseudolabel replay) of the same
+foundation model on 50 rMD17 ethanol structures, with the model-aware
+reference-energy reestimation and the drift away from the foundation model
+on other molecules;
 ``mace_foundation_materials.ipynb`` screens equations of state (Si, Al,
 NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0);
 ``aimnet2_foundation_molecules.ipynb`` loads the published AIMNet2 models
@@ -104,6 +109,7 @@ and a periodic CO2 box with the damped shifted-force Coulomb sum.
    nb/gnn/mace/mace_argon_density_md
    nb/gnn/mace/recreate_mace_architecture
    nb/gnn/mace/mace_foundation_molecules
+   nb/gnn/mace/mace_finetuning_strategies
    nb/gnn/mace/mace_foundation_materials
    nb/gnn/allegro/allegro_argon_train_test
    nb/gnn/allegro/allegro_argon_density_md

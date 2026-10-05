@@ -119,6 +119,46 @@ uses the textbook half-square form; halve ported ``delta`` values
 accordingly. Per-term deltas matter because per-atom energies (eV) and
 forces (eV/A) differ in scale by an order of magnitude.
 
+Several heads
+-------------
+When the batch carries head labels (a multi-head model, see
+:ref:`howto-finetune`), the loss is the sum over the heads present of that
+head's weighted terms, each averaged over the head's own structures:
+
+.. math::
+
+   \mathcal{L} = \sum_h \big( w_E^h \mathcal{L}_\text{energy}^h
+                 + w_F^h \mathcal{L}_\text{forces}^h
+                 + w_\sigma^h \mathcal{L}_\text{stress}^h \big)
+
+``optim.head_weights`` gives a head its own weights (the replay head of a
+multi-head replay run usually keeps the pretraining weighting, energy 1 and
+forces 10, while the target head is weighted 10 and 10); a head not listed
+uses the global ones. The per-head values are logged as
+``"<head>/energy_mse"`` and so on. A batch with one head is the plain loss.
+
+Optimizer, clipping, weight averaging
+=====================================
+``optim.optimizer`` selects Adam (default; ``weight_decay`` is then an L2
+penalty) or AdamW (decoupled weight decay). ``optim.clip_grad`` clips the
+gradient norm before every step, and ``optim.ema_decay`` keeps an exponential
+moving average of the weights that validation, the test evaluation and the
+checkpoints use (``Trainer.eval_module``; ``Trainer.module`` stays the raw
+training model). Both are off by default and are the settings the
+fine-tuning protocols rely on to keep a pretrained model close to its
+starting point. ``optim.freeze`` / ``optim.train_only`` freeze parameters by
+name pattern; only trainable parameters enter the optimizer.
+
+Fine-tuning
+===========
+The same trainer fine-tunes a pretrained model: ``model.pretrained`` starts
+from any hub model (the architecture is taken from the checkpoint and
+recorded in the saved config), ``model.lora`` adapts it with low-rank
+updates, ``model.heads`` with ``data.replay_path`` trains a replay head on
+the pretraining distribution alongside the target head, and
+``atomic_energies: estimated`` re-sets the reference energies from the
+training data before the fit. The recipes are in :ref:`howto-finetune`.
+
 Devices and batching
 ====================
 ``cfg.device = "auto" | "cpu" | "cuda" | "cuda:0"`` is resolved by
