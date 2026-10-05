@@ -595,6 +595,10 @@ class NequIP(EquivariantGNN):
         If ``n_layers`` is negative.
     """
 
+    # one readout head = the two atom-wise output linears, the reference
+    # energies and the per-species scale (see MultiHead)
+    head_modules = ("conv_to_output_hidden", "output_hidden_to_scalar", "atom_ref", "atom_scale")
+
     def __init__(
         self,
         species: List[int],

@@ -34,9 +34,11 @@ def structure_to_graph(
         ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)``,
         ``stress`` ``(3, 3)``, ``total_charge`` (scalar net charge; the
         key ``charge`` is accepted as a synonym), ``spin_multiplicity``
-        (scalar ``2S + 1``; ``multiplicity`` is a synonym) and ``weight`` (scalar
+        (scalar ``2S + 1``; ``multiplicity`` is a synonym), ``weight`` (scalar
         per-structure loss weight; see
-        :func:`~xnn.common.train.losses.weighted_loss`).
+        :func:`~xnn.common.train.losses.weighted_loss`) and ``head`` (integer
+        index of the readout head, for multi-head models; see
+        :func:`~xnn.common.finetune.label_head`).
     cutoff : float
         Neighbor cutoff radius passed to the neighbor list builder.
     device : torch.device, optional
@@ -99,6 +101,8 @@ def structure_to_graph(
         total_charge=(t([charge]).reshape(1) if charge is not None else None),
         spin_multiplicity=(t([mult]).reshape(1) if mult is not None else None),
         weight=(t([s["weight"]]).reshape(1) if s.get("weight") is not None else None),
+        head=(t([int(s["head"])], dtype=torch.long).reshape(1)
+              if s.get("head") is not None else None),
     )
 
 
@@ -237,7 +241,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
       zeros, and ``forces_mask`` / ``stress_mask`` (per structure) mark the
       labelled ones for the loss and the metrics;
     * structures with and without ``total_charge`` (missing = neutral),
-      ``spin_multiplicity`` (missing = 1) or ``weight`` (missing = 1).
+      ``spin_multiplicity`` (missing = 1), ``weight`` (missing = 1) or
+      ``head`` (missing = 0, the first head).
 
     ``energy`` is kept only when every structure has one.
 
@@ -256,6 +261,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     edge_index, cell_shifts = [], []
     cells, pbcs = [], []
     energies, forces, stresses, charges, mults, weights = [], [], [], [], [], []
+    heads = []
     f_masks, s_masks = [], []
 
     dtype, device = graphs[0].pos.dtype, graphs[0].pos.device
@@ -266,6 +272,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_q = any(g.total_charge is not None for g in graphs)
     has_m = any(g.spin_multiplicity is not None for g in graphs)
     has_w = any(g.weight is not None for g in graphs)
+    has_h = any(g.head is not None for g in graphs)
 
     def label_mask(g: AtomicGraph, value, mask) -> Tensor:
         if mask is not None:
@@ -311,6 +318,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         if has_w:
             weights.append(g.weight if g.weight is not None
                            else torch.ones(b, dtype=dtype, device=device))
+        if has_h:
+            heads.append(g.head if g.head is not None
+                         else torch.zeros(b, dtype=torch.long, device=device))
 
     f_mask = torch.cat(f_masks, 0) if has_f else None
     s_mask = torch.cat(s_masks, 0) if has_s else None
@@ -332,4 +342,5 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         total_charge=torch.cat(charges, 0) if has_q else None,
         spin_multiplicity=torch.cat(mults, 0) if has_m else None,
         weight=torch.cat(weights, 0) if has_w else None,
+        head=torch.cat(heads, 0) if has_h else None,
     )

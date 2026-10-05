@@ -213,16 +213,9 @@ def has_dispersion(model: nn.Module) -> bool:
 
 
 def core_model(model: nn.Module) -> nn.Module:
-    """The innermost potential under the force, dispersion and LES wrappers."""
-    from ..dispersion import DispersionCorrection
-    from ..les import LatentEwald
-    from ..outputs import ForceStressOutput
-    while isinstance(model, (ForceStressOutput, DispersionCorrection, LatentEwald)):
-        inner = getattr(model, "model", None)
-        if inner is None:
-            break
-        model = inner
-    return model
+    """The innermost potential under the force, dispersion, LES and multi-head wrappers."""
+    from ..registry import core_model as _core
+    return _core(model)
 
 
 def wrapped_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -255,7 +248,9 @@ def load_checkpoint(path: Union[str, Path], *, format: Optional[str] = None,
         Force the format instead of detecting it from the suffix
         (``"xnn"``, ``"mace-torch"``).
     head : str, optional
-        Head to keep when converting a multi-head foreign checkpoint.
+        Head to keep when converting a multi-head foreign checkpoint. For an
+        xnn checkpoint the heads are kept and chosen at build time
+        (:func:`build_potential`).
 
     Returns
     -------
@@ -386,6 +381,7 @@ def save_pretrained(model: Union[nn.Module, str, Path],
         fields.update(card)
     fields.update(card_fields)
     fields.pop("files", None)
+    from ...finetune.heads import find_multihead
     core = core_model(module)
     species = getattr(core, "species", None) or (model_cfg.extra or {}).get("species")
     fields.update(
@@ -393,6 +389,8 @@ def save_pretrained(model: Union[nn.Module, str, Path],
         architecture=model_cfg.name,
         cutoff=float(getattr(module, "cutoff", model_cfg.cutoff)),
         species=[int(z) for z in species] if species is not None else None,
+        heads=(list(find_multihead(module).heads) if find_multihead(module) is not None
+               else fields.get("heads")),
         dtype=str(float_dtype(sd)).replace("torch.", ""),
         xnn_version=getattr(xnn, "__version__", None),
     )
@@ -425,7 +423,7 @@ def _as_dtype(dtype) -> Optional[torch.dtype]:
 def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: Any = None,
                     compute_forces: bool = True, compute_stress: bool = False,
                     eeq_reuse: bool = False, model_options: Optional[dict[str, Any]] = None,
-                    label: str = "checkpoint"):
+                    head: Optional[str] = None, label: str = "checkpoint"):
     """Rebuild a model from its config and weights.
 
     The model is built in float64, so the constant tables of the physics
@@ -437,6 +435,12 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
     A config that records ``subtracted_dispersion`` (what the training labels
     had removed) gets that term added back unless ``dispersion=False``; see
     :func:`~xnn.common.models.registry.resolve_dispersion`.
+
+    A fine-tuned checkpoint is served as a plain potential: of a multi-head
+    model (``extra["heads"]``) the head named by ``head`` is kept
+    (:meth:`~xnn.common.finetune.MultiHead.select`), and LoRA updates
+    (``extra["lora"]``) are folded into the base weights
+    (:func:`~xnn.common.finetune.merge_lora`).
 
     Parameters
     ----------
@@ -458,6 +462,9 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
         built: deployment knobs that change no weights, such as AIMNet2's
         Coulomb method (``{"coulomb": "dsf", "lr_cutoff": 15.0}``); the
         weights still load strictly.
+    head : str, optional
+        The head of a multi-head checkpoint to serve; required when it has
+        several, ignored (if it matches) for a single-head one.
     label : str, optional
         Name used in log messages.
 
@@ -469,10 +476,14 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
     Raises
     ------
     ValueError
-        If ``dispersion`` is given for a model that already includes one.
+        If ``dispersion`` is given for a model that already includes one, or
+        ``head`` is missing or unknown for a multi-head checkpoint.
     """
+    from ...finetune.heads import find_multihead
+    from ...finetune.lora import has_lora, merge_lora
     from ..outputs import ForceStressOutput
-    from ..registry import add_dispersion, build_model, recorded_dispersion, resolve_dispersion
+    from ..registry import (add_dispersion, build_model, recorded_dispersion, replace_module,
+                            resolve_dispersion)
 
     recorded = recorded_dispersion(config)
     spec = resolve_dispersion(dispersion, recorded)
@@ -486,6 +497,20 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
         # ForceStressOutput has no parameters of its own; loading through
         # it matches the trainer's state-dict layout
         ForceStressOutput(base).load_state_dict(state_dict)
+        multi = find_multihead(base)
+        if multi is not None:
+            if head is None and len(multi.heads) > 1:
+                raise ValueError(f"{label} has the heads {multi.heads}; pass head= with one of them")
+            chosen = multi.heads[0] if head is None else str(head)
+            if chosen not in multi.heads:
+                raise ValueError(f"unknown head {chosen!r} of {label}; it has {multi.heads}")
+            base = replace_module(base, multi, multi.select(chosen))
+            logger.info("serving head %s of %s", chosen, label)
+        elif head is not None:
+            logger.debug("%s has a single head; head=%r ignored", label, head)
+        if has_lora(base):
+            merge_lora(base)
+            logger.info("LoRA updates of %s folded into the base weights", label)
         if spec is not None:
             if has_dispersion(base):
                 raise ValueError(

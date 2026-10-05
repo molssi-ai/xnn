@@ -276,6 +276,10 @@ class SchNet(InteratomicPotential):
         Learnable per-element energy reference (shift), initialized to zero.
     """
 
+    # one readout head = the atom-wise readout, the DTNN scale/shift and the
+    # reference energies (see MultiHead)
+    head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
+
     def __init__(self, n_features: int = 64, n_interactions: int = 3,
                  n_rbf: int = 301, cutoff: float = 30.0,
                  gamma: Optional[float] = 10.0,
@@ -287,6 +291,8 @@ class SchNet(InteratomicPotential):
             raise ValueError(
                 f"cutoff_fn must be None or 'cosine', got {cutoff_fn!r}")
         self.cutoff = cutoff
+        if species is not None:          # the elements the references are set for
+            self.species = [int(z) for z in species]
         self.node_feature_dim = n_features  # invariant features (for e.g. LES)
         self.embedding = nn.Embedding(_MAX_Z, n_features)
         self.rbf = GaussianRBF(n_rbf, cutoff, gamma=gamma)

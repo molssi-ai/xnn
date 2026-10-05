@@ -20,6 +20,7 @@ from torch import nn
 
 from ...data.hub._download import download_file, extract_archive
 from ..fast import set_use_fast
+from ..registry import deployment_config
 from . import zenodo
 from .cache import (head_dir, is_cache_key, is_ready, offline, resolve_cache_dir,
                     sanitize, url_slot)
@@ -395,11 +396,12 @@ def load_pretrained(source: Union[str, Path], *, cache_dir: Optional[Union[str, 
     _license_notice(card)
     model = build_potential(ck.config, ck.state_dict, dtype=dtype, dispersion=dispersion,
                             compute_forces=compute_forces, compute_stress=compute_stress,
-                            eeq_reuse=eeq_reuse, model_options=model_options,
+                            eeq_reuse=eeq_reuse, model_options=model_options, head=head,
                             label=str(source)).to(device)
     set_use_fast(model, use_fast)
     cutoff = float(getattr(model.model, "cutoff", ck.config.model.cutoff))
-    return PretrainedModel(model, ck.config, card, cutoff, Path(path))
+    # the config of what is served: one head, LoRA folded in
+    return PretrainedModel(model, deployment_config(ck.config), card, cutoff, Path(path))
 
 
 def from_pretrained(source: Union[str, Path], *, wrap: bool = True, **kwargs: Any) -> nn.Module:
