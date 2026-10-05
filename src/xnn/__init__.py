@@ -7,6 +7,7 @@ Organized by model family, with everything shared factored into ``common``:
         featurizers -- Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
         config      -- one schema, loaders for yaml/argparse/hydra
         models      -- InteratomicPotential contract + registry + ForceStressOutput + ops
+        finetune    -- multi-head replay, LoRA, reference energies for pretrained models
         train       -- Trainer, losses (batch + device aware)
         deploy      -- ASE calculator, LAMMPS/TorchScript export
         cli         -- the `xnn` command

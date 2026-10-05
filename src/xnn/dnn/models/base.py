@@ -175,6 +175,10 @@ class DescriptorPotential(InteratomicPotential):
         Per-element atomic MLPs.
     """
 
+    # one readout head = the per-element networks and self energies (the
+    # descriptor is the shared trunk; see MultiHead)
+    head_modules = ("element_nets", "_self_energies_by_z")
+
     def __init__(self, featurizer: Featurizer, species: Sequence[int],
                  hidden: Union[Sequence[int], dict] = (64, 64),
                  activation: Union[str, nn.Module] = "silu", bias: bool = True,

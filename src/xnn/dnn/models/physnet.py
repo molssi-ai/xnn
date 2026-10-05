@@ -63,6 +63,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import scatter_sum, shifted_softplus
 from xnn.common.models.registry import register_model
+from xnn.common.finetune.lora import register_lora_target
 from ...common.models import d3
 
 MAX_Z = 95  # element-indexed tables cover Z = 0..94 (through Pu)
@@ -108,6 +109,8 @@ class _Dense(nn.Module):
     """Upstream ``DenseLayer``: linear with semi-orthogonal Glorot init, zero
     bias, and an optional activation applied after."""
 
+    # a dense ``(n_in, n_out)`` weight: eligible for LoRA (registered below)
+
     def __init__(self, n_in: int, n_out: int, activation: bool = False,
                  use_bias: bool = True, zero_init: bool = False):
         super().__init__()
@@ -126,6 +129,9 @@ class _Dense(nn.Module):
         if self.activation:
             y = shifted_softplus(y)
         return y
+
+
+register_lora_target(_Dense, "weight", in_axis=0)
 
 
 class _Residual(nn.Module):
@@ -317,6 +323,10 @@ class PhysNet(InteratomicPotential):
     training-loop use.
     """
 
+    # one readout head = the per-block output networks (energy and charge) and
+    # the per-element energy and charge scale/shift (see MultiHead)
+    head_modules = ("output_blocks", "Eshift", "Escale", "Qshift", "Qscale")
+
     def __init__(
         self,
         cutoff: float = 10.0,
@@ -347,6 +357,8 @@ class PhysNet(InteratomicPotential):
             raise ValueError("num_blocks must be >= 1")
         self.sr_cut = cutoff
         self.lr_cut = lr_cutoff
+        if species is not None:          # the elements the references are set for
+            self.species = [int(z) for z in species]
         # neighbor-list radius: long-range cutoff when set (rbf features
         # vanish beyond sr_cut anyway, see module docstring)
         self.cutoff = lr_cutoff if lr_cutoff is not None else cutoff

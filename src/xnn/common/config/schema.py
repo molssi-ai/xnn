@@ -112,6 +112,27 @@ class DataConfig:
     stress_key : str
         Name under which the reference stress is stored (``atoms.info``).
         Defaults to ``"stress"``.
+    head : Optional[str]
+        For a multi-head model (``model.extra["heads"]``): the head the
+        training, validation and test structures belong to. ``None`` (the
+        default) takes the first head that is not ``replay_head``.
+    replay_path : Optional[str]
+        Structures of the pretraining distribution that train the replay
+        head of a multi-head model (multi-head replay fine-tuning). ``None``
+        (default) means no replay set.
+    replay_head : str
+        The head the replay structures belong to. Defaults to ``"pt_head"``.
+    replay_samples : Optional[int]
+        Random subsample size of the replay set (seeded by ``seed``); ``None``
+        (default) keeps every structure that passes the filter.
+    replay_filter : str
+        Element filter of the replay set relative to the elements of the
+        training set: ``"none"``, ``"subset"`` (only training-set elements,
+        the default), ``"exact"`` or ``"superset"``; see
+        :data:`~xnn.common.finetune.REPLAY_FILTERS`.
+    replay_pseudolabel : bool
+        Replace the replay labels by the pretrained model's own predictions
+        (pseudolabel replay). Defaults to ``False``.
     """
 
     train_path: Optional[str] = None   # .xyz / .extxyz / .npz / ASE-readable
@@ -125,6 +146,15 @@ class DataConfig:
     energy_key: str = "energy"         # MACE-CLI spelling; e.g. "REF_energy"
     forces_key: str = "forces"
     stress_key: str = "stress"
+    # multi-head fine-tuning (model.extra["heads"]): which head the training,
+    # validation and test structures belong to (None = the first head that is
+    # not the replay head), and the replay set of the pretraining distribution
+    head: Optional[str] = None
+    replay_path: Optional[str] = None  # structures of the replay head
+    replay_head: str = "pt_head"       # the head the replay structures train
+    replay_samples: Optional[int] = None  # random subsample size; None = all
+    replay_filter: str = "subset"      # none / subset / exact / superset (elements vs the training set)
+    replay_pseudolabel: bool = False   # relabel the replay set with the pretrained model
 
 
 @dataclass
@@ -165,6 +195,28 @@ class OptimConfig:
         Per-term override of ``huber_delta`` for the force term.
     huber_delta_stress : float, optional
         Per-term override of ``huber_delta`` for the stress term.
+    optimizer : str
+        ``"adam"`` (default; ``weight_decay`` is an L2 penalty) or ``"adamw"``
+        (decoupled weight decay, the fine-tuning protocols' choice).
+    clip_grad : float
+        Maximum gradient norm per step (``torch.nn.utils.clip_grad_norm_``);
+        ``0.0`` (default) disables clipping.
+    ema_decay : float
+        Decay of an exponential moving average of the weights, updated after
+        every optimizer step and used for validation, testing and the saved
+        checkpoints (``0.99``-``0.9999`` in the fine-tuning protocols).
+        ``0.0`` (default) trains and saves the raw weights.
+    head_weights : dict, optional
+        Per-head loss weights of a multi-head model, e.g.
+        ``{"pt_head": {"energy_weight": 1.0, "force_weight": 10.0}}``; a head
+        not listed uses the global weights. Each head's terms are averaged
+        over its own structures and the heads are summed.
+    freeze : list of str
+        ``fnmatch`` patterns of parameter names to freeze (layer-freezing
+        fine-tuning), e.g. ``["model.node_embedding*", "model.interactions.0.*"]``.
+    train_only : list of str
+        Patterns of the only parameters to train; everything else is frozen
+        (``["*readouts*", "*atom_ref*"]`` trains the readout alone).
     """
 
     lr: float = 1e-3
@@ -178,6 +230,13 @@ class OptimConfig:
     huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta
     huber_delta_forces: Optional[float] = None
     huber_delta_stress: Optional[float] = None
+    optimizer: str = "adam"            # adam / adamw (decoupled weight decay)
+    clip_grad: float = 0.0             # max gradient norm per step; 0 = no clipping
+    ema_decay: float = 0.0             # > 0: exponential moving average of the weights for validation and checkpoints
+    # per-head loss weights of a multi-head model, {head: {energy_weight, force_weight, stress_weight}}
+    head_weights: Optional[dict[str, dict[str, float]]] = None
+    freeze: list[str] = field(default_factory=list)       # parameter-name patterns to freeze
+    train_only: list[str] = field(default_factory=list)   # patterns of the only parameters to train
 
 
 _RECORD_NOTES = ("dataset", "note")   # free-text annotations allowed in the record
@@ -296,5 +355,11 @@ class Config:
         """
         # keep the neighbor-list cutoff and the model cutoff in lockstep
         self.data.cutoff = self.model.cutoff
+        from ..finetune.replay import REPLAY_FILTERS
+        if self.data.replay_filter not in REPLAY_FILTERS:
+            raise ValueError(f"data.replay_filter must be one of {REPLAY_FILTERS}, "
+                             f"got {self.data.replay_filter!r}")
+        if self.optim.optimizer.lower() not in ("adam", "adamw"):
+            raise ValueError(f"optim.optimizer must be adam or adamw, got {self.optim.optimizer!r}")
         self.subtracted_dispersion = normalize_subtracted_dispersion(
             self.subtracted_dispersion, self.model)

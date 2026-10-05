@@ -165,7 +165,8 @@ class MDIEngine:
                         total_charge: float = 0.0,
                         eeq_reuse: bool = False,
                         cache_dir: str | None = None,
-                        use_fast: bool | str = "auto") -> "MDIEngine":
+                        use_fast: bool | str = "auto",
+                        head: str | None = None) -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -222,6 +223,8 @@ class MDIEngine:
         use_fast : bool or str, optional
             ``"auto"`` (default), ``True`` or ``False``: the fused GPU kernels
             or the reference implementation (see :mod:`xnn.common.models.fast`).
+        head : str, optional
+            The head of a multi-head (replay fine-tuned) checkpoint to serve.
 
         Returns
         -------
@@ -239,7 +242,7 @@ class MDIEngine:
         from ..models.hub import load_pretrained
         loaded = load_pretrained(path, cache_dir=cache_dir, dtype=dtype,
                                  dispersion=dispersion, compute_stress=True,
-                                 eeq_reuse=eeq_reuse, use_fast=use_fast)
+                                 eeq_reuse=eeq_reuse, use_fast=use_fast, head=head)
         model, cfg, cutoff = loaded.model, loaded.config, loaded.cutoff
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff,
@@ -526,6 +529,9 @@ def main(argv=None) -> None:
     p.add_argument("--no-dispersion", action="store_true",
                    help="serve the checkpoint as is, ignoring a recorded "
                         "subtracted_dispersion")
+    p.add_argument("--head", default=None,
+                   help="head of a multi-head (replay fine-tuned) checkpoint to "
+                        "serve; LoRA updates are always folded in")
     p.add_argument("--total-charge", type=float, default=0.0,
                    help="net charge of the system in e (default 0); the driver "
                         "can change it with >TOTCHARGE")
@@ -562,7 +568,8 @@ def main(argv=None) -> None:
                                        eeq_reuse=args.eeq_reuse,
                                        cache_dir=args.cache_dir,
                                        use_fast={"auto": "auto", "on": True,
-                                                 "off": False}[args.fast])
+                                                 "off": False}[args.fast],
+                                       head=args.head)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

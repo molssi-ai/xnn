@@ -101,7 +101,10 @@ def main(argv=None):
                if cfg.data.val_path else None)
         test = (AtomicDataset.from_file(cfg.data.test_path, cfg.data.cutoff, **keys)
                 if cfg.data.test_path else None)
-        Trainer(cfg, train, val, test).fit()
+        # the replay set of a multi-head fine-tuning run (model.heads)
+        replay = (AtomicDataset.from_file(cfg.data.replay_path, cfg.data.cutoff, **keys)
+                  if cfg.data.replay_path else None)
+        Trainer(cfg, train, val, test, replay_set=replay).fit()
 
     elif cmd == "benchmark":
         p = argparse.ArgumentParser(prog="xnn benchmark")
@@ -141,6 +144,9 @@ def main(argv=None):
         p.add_argument("--no-dispersion", action="store_true",
                        help="export the checkpoint as is, ignoring a recorded "
                             "subtracted_dispersion")
+        p.add_argument("--head", default=None,
+                       help="head of a multi-head (replay fine-tuned) checkpoint "
+                            "to export; LoRA updates are always folded in")
         p.add_argument("--total-charge", type=float, default=0.0,
                        help="net charge of the deployed system (D4 EEQ charges, "
                             "charge-predicting models such as AIMNet2)")
@@ -162,7 +168,7 @@ def main(argv=None):
         # a route-B checkpoint records what its labels had subtracted; the
         # export adds it back unless told not to
         recorded = recorded_dispersion(cfg)
-        base = build_potential(cfg, ck.state_dict, label=args.ckpt,
+        base = build_potential(cfg, ck.state_dict, label=args.ckpt, head=args.head,
                                dispersion=False if args.no_dispersion else None).model
         if recorded is not None and not args.no_dispersion:
             print("adding back the dispersion recorded as subtracted from the "

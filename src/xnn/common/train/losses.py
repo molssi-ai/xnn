@@ -1,7 +1,7 @@
 """Weighted energy / force / stress loss."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Mapping, Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -88,6 +88,53 @@ def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
     return (w.reshape(shape) * err).sum() / (w.sum() * per_element)
 
 
+def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
+           energy_weight: float, force_weight: float, stress_weight: float,
+           d_e: float, d_f: float, d_s: float) -> tuple[Tensor, dict[str, float]]:
+    """The weighted energy, force and stress terms over the structures weighted by ``w``.
+
+    Parameters
+    ----------
+    pred, data
+        As in :func:`weighted_loss`.
+    w : Tensor or None
+        Per-structure weights ``(B,)`` (``None`` = uniform). A zero weight
+        drops a structure from every term, so a head's terms are the means
+        over its own structures.
+
+    Returns
+    -------
+    tuple of (Tensor, dict of str to float)
+        The summed loss and the detached values of the included terms.
+    """
+    logs: dict[str, float] = {}
+    loss = pred["energy"].new_zeros(())
+
+    if data.energy is not None and energy_weight > 0:
+        # per-atom energy error -> size-extensive, well-scaled across structures
+        n = data.n_atoms.to(pred["energy"].dtype)
+        e_loss = _mean(_residual_sq((pred["energy"] - data.energy) / n, d_e), w)
+        loss = loss + energy_weight * e_loss
+        logs["energy_mse"] = float(e_loss.detach())
+
+    if data.forces is not None and force_weight > 0 and "forces" in pred:
+        w_f = _masked(w, getattr(data, "forces_mask", None), pred["forces"])
+        if w_f is None or bool(w_f.any()):
+            # a structure's weight (and label mask) applies to each of its atoms
+            w_atom = None if w_f is None else w_f[data.batch]
+            f_loss = _mean(_residual_sq(pred["forces"] - data.forces, d_f), w_atom)
+            loss = loss + force_weight * f_loss
+            logs["force_mse"] = float(f_loss.detach())
+
+    if data.stress is not None and stress_weight > 0 and "stress" in pred:
+        w_s = _masked(w, getattr(data, "stress_mask", None), pred["stress"])
+        if w_s is None or bool(w_s.any()):
+            s_loss = _mean(_residual_sq(pred["stress"] - data.stress, d_s), w_s)
+            loss = loss + stress_weight * s_loss
+            logs["stress_mse"] = float(s_loss.detach())
+    return loss, logs
+
+
 def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   energy_weight: float, force_weight: float,
                   stress_weight: float, *,
@@ -95,6 +142,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   huber_delta_energy: Optional[float] = None,
                   huber_delta_forces: Optional[float] = None,
                   huber_delta_stress: Optional[float] = None,
+                  head_weights: Optional[Mapping[int, Sequence[float]]] = None,
+                  head_names: Optional[Sequence[str]] = None,
                   ) -> tuple[Tensor, dict[str, float]]:
     """Compute a weighted sum of energy, force and stress loss terms.
 
@@ -127,6 +176,13 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     the labelled structures only, and a batch without any is skipped for that
     term.
 
+    **Several heads.** When the batch carries ``data.head`` with more than one
+    head, the loss is the sum over heads of that head's weighted terms, each
+    averaged over the head's own structures (the multi-head replay objective,
+    Tompa *et al.* eq. 3), and ``head_weights`` gives a head its own energy,
+    force and stress weights (eq. 4). A single-head batch reduces to the plain
+    loss above.
+
     **Huber tails.** With ``huber_delta > 0`` the squared error is replaced by
     a Huber-like function that is quadratic up to ``delta`` and linear beyond,
     which caps the pull of a few large residuals. The three residuals have very
@@ -143,7 +199,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     data : AtomicGraph
         The (possibly batched) target graph. Reads ``energy``, ``forces``,
         ``stress``, ``n_atoms`` (per-structure atom counts), ``batch`` (the
-        structure index of every atom) and the optional ``weight``.
+        structure index of every atom), the optional ``weight`` and the
+        optional ``head``.
     energy_weight : float
         Weight applied to the energy term. The term is skipped when this is
         not positive or ``data.energy`` is ``None``.
@@ -160,6 +217,12 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         (the default) means plain squared error throughout.
     huber_delta_energy, huber_delta_forces, huber_delta_stress : float, optional
         Per-term overrides of ``huber_delta``. ``None`` falls back to it.
+    head_weights : mapping of int to sequence of float, optional
+        ``{head_index: (energy_weight, force_weight, stress_weight)}`` for the
+        heads whose weights differ from the global ones.
+    head_names : sequence of str, optional
+        Head names for the per-head log keys (``"<head>/energy_mse"``);
+        indices are used when omitted.
 
     Returns
     -------
@@ -167,39 +230,33 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         A pair ``(loss, logs)`` where ``loss`` is the scalar weighted total
         loss (a 0-dim tensor carrying gradients) and ``logs`` maps ``"loss"``
         to the detached total plus, for each included term, its detached value
-        under ``"energy_mse"``, ``"force_mse"`` and/or ``"stress_mse"``. Those
-        keys keep their names when Huber tails are on, where they hold the
-        Huber value rather than a mean square.
+        under ``"energy_mse"``, ``"force_mse"`` and/or ``"stress_mse"`` (with a
+        ``"<head>/"`` prefix per head in a multi-head batch). Those keys keep
+        their names when Huber tails are on, where they hold the Huber value
+        rather than a mean square.
     """
-    logs: dict[str, float] = {}
-    loss = pred["energy"].new_zeros(())
-    w = data.weight
     d_e = huber_delta if huber_delta_energy is None else huber_delta_energy
     d_f = huber_delta if huber_delta_forces is None else huber_delta_forces
     d_s = huber_delta if huber_delta_stress is None else huber_delta_stress
+    weights = (energy_weight, force_weight, stress_weight)
 
-    if data.energy is not None and energy_weight > 0:
-        # per-atom energy error -> size-extensive, well-scaled across structures
-        n = data.n_atoms.to(pred["energy"].dtype)
-        e_loss = _mean(_residual_sq((pred["energy"] - data.energy) / n, d_e), w)
-        loss = loss + energy_weight * e_loss
-        logs["energy_mse"] = float(e_loss.detach())
+    heads = [] if data.head is None else [int(h) for h in torch.unique(data.head).tolist()]
+    if len(heads) <= 1:
+        w_e, w_f, w_s = (head_weights or {}).get(heads[0], weights) if heads else weights
+        loss, logs = _terms(pred, data, data.weight, w_e, w_f, w_s, d_e, d_f, d_s)
+        logs["loss"] = float(loss.detach())
+        return loss, logs
 
-    if data.forces is not None and force_weight > 0 and "forces" in pred:
-        w_f = _masked(w, getattr(data, "forces_mask", None), pred["forces"])
-        if w_f is None or bool(w_f.any()):
-            # a structure's weight (and label mask) applies to each of its atoms
-            w_atom = None if w_f is None else w_f[data.batch]
-            f_loss = _mean(_residual_sq(pred["forces"] - data.forces, d_f), w_atom)
-            loss = loss + force_weight * f_loss
-            logs["force_mse"] = float(f_loss.detach())
-
-    if data.stress is not None and stress_weight > 0 and "stress" in pred:
-        w_s = _masked(w, getattr(data, "stress_mask", None), pred["stress"])
-        if w_s is None or bool(w_s.any()):
-            s_loss = _mean(_residual_sq(pred["stress"] - data.stress, d_s), w_s)
-            loss = loss + stress_weight * s_loss
-            logs["stress_mse"] = float(s_loss.detach())
-
+    loss = pred["energy"].new_zeros(())
+    logs: dict[str, float] = {}
+    for h in heads:
+        mask = (data.head == h).to(pred["energy"].dtype)
+        w = mask if data.weight is None else data.weight * mask
+        w_e, w_f, w_s = (head_weights or {}).get(h, weights)
+        part, part_logs = _terms(pred, data, w, w_e, w_f, w_s, d_e, d_f, d_s)
+        loss = loss + part
+        name = head_names[h] if head_names is not None and h < len(head_names) else str(h)
+        logs.update({f"{name}/{k}": v for k, v in part_logs.items()})
+        logs[f"{name}/loss"] = float(part.detach())
     logs["loss"] = float(loss.detach())
     return loss, logs

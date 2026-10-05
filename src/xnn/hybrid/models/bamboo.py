@@ -338,6 +338,10 @@ class BAMBOO(InteratomicPotential):
     term in that case.
     """
 
+    # one readout head = the semi-local energy MLP (charges and electrostatics
+    # stay shared; see MultiHead)
+    head_modules = ("energy_mlp",)
+
     def __init__(
         self,
         dim: int = 64,

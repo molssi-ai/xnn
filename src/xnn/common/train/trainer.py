@@ -17,19 +17,28 @@ Sharded strategies (FSDP, DeepSpeed ZeRO) are deliberately not used: force and
 stress losses back-propagate through gradients taken with
 ``create_graph=True`` (see ``ForceStressOutput``), a double backward that DDP
 supports but sharded wrappers do not.
+
+Fine-tuning a pretrained model is the same loop: ``model.extra["pretrained"]``
+starts from any hub model, ``extra["lora"]`` adapts it with low-rank
+updates, ``extra["heads"]`` plus a replay set trains a second readout on the
+pretraining distribution, and ``atomic_energies: estimated`` re-sets the
+per-element references from the training data (see
+:mod:`xnn.common.finetune`).
 """
 from __future__ import annotations
 
+import contextlib
 import os
 
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler, random_split
+from torch.utils.data import ConcatDataset, DataLoader, DistributedSampler, random_split
 
 from ..config import Config
 from ..data import AtomicDataset, collate
-from ..models import build_model, ForceStressOutput
+from ..models import ForceStressOutput
+from ..models.registry import prepare_model
 from .losses import weighted_loss
 
 
@@ -54,6 +63,16 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def _structures(dataset, what: str) -> list[dict]:
+    """The structure dicts behind a dataset (an ``AtomicDataset`` or a list of dicts)."""
+    if isinstance(dataset, AtomicDataset):
+        return dataset.structures
+    if isinstance(dataset, (list, tuple)):
+        return list(dataset)
+    raise TypeError(f"{what} must be an AtomicDataset (or a list of structure dicts) for "
+                    f"multi-head training, got {type(dataset).__name__}")
+
+
 class Trainer:
     """Batch training loop with validation, scheduling and checkpointing.
 
@@ -70,6 +89,14 @@ class Trainer:
     so every rank sees global averages, and only rank 0 logs and writes
     checkpoints.
 
+    Fine-tuning options of the config are applied while building: the model
+    section's ``pretrained`` / ``lora`` / ``heads`` entries (see
+    :func:`~xnn.common.models.registry.prepare_model`), the reference-energy
+    markers ``atomic_energies: estimated`` / ``average`` (resolved on the
+    training structures and written back into ``cfg.model`` as numbers),
+    ``optim.freeze`` / ``optim.train_only`` and, for a multi-head model, the
+    head labels of the datasets and the replay set.
+
     Parameters
     ----------
     cfg : Config
@@ -77,7 +104,10 @@ class Trainer:
         ``model`` (model config), ``optim`` (learning rate, weight decay,
         epochs, scheduler name and the energy/force/stress loss weights),
         ``data`` (batch size, number of workers, validation fraction) and
-        ``output_dir`` (where checkpoints are written).
+        ``output_dir`` (where checkpoints are written). ``cfg.model`` is
+        replaced by the resolved model config (a ``pretrained`` source is
+        expanded into the architecture it holds), so the saved checkpoints
+        rebuild the model from their weights alone.
     train_set : AtomicDataset
         Training dataset of atomic structures.
     val_set : AtomicDataset or None, optional
@@ -91,11 +121,18 @@ class Trainer:
         split is carved out of ``train_set`` (alongside the validation split,
         from the same seeded permutation). When ``None`` and the fraction is
         zero, no test evaluation is performed.
+    replay_set : AtomicDataset or None, optional
+        Structures of the pretraining distribution for the replay head of a
+        multi-head model (``cfg.data.replay_head``). They are element-filtered
+        and subsampled as ``cfg.data.replay_filter`` / ``replay_samples`` say,
+        relabelled by the pretrained model when ``cfg.data.replay_pseudolabel``
+        is set, split by ``val_fraction`` like the training set, and trained
+        alongside it. Requires ``model.extra["heads"]``.
 
     Attributes
     ----------
     cfg : Config
-        The configuration passed in.
+        The configuration passed in, with ``model`` resolved.
     distributed : bool
         Whether this process is part of a distributed launch (``WORLD_SIZE``
         in the environment is greater than one).
@@ -110,6 +147,12 @@ class Trainer:
         The model wrapped with force/stress output heads, moved to ``device``
         (and wrapped in DDP when distributed); :attr:`module` always gives the
         bare :class:`ForceStressOutput`.
+    heads : list of str or None
+        The head names of a multi-head model, ``None`` otherwise.
+    ema : torch.optim.swa_utils.AveragedModel or None
+        The exponential moving average of the weights when
+        ``cfg.optim.ema_decay > 0``; :attr:`eval_module` is what validation,
+        testing and the checkpoints use.
     train_loader : torch.utils.data.DataLoader
         Shuffled loader over the training set. Batch training is simply
         ``batch_size > 1``; set the batch size to 1 to disable it.
@@ -119,15 +162,20 @@ class Trainer:
     test_loader : torch.utils.data.DataLoader or None
         Non-shuffled loader over the test set, or ``None`` if there is no
         test set.
-    opt : torch.optim.Adam
-        The Adam optimizer.
+    opt : torch.optim.Adam or torch.optim.AdamW
+        The optimizer over the trainable parameters.
     sched : torch.optim.lr_scheduler._LRScheduler or ReduceLROnPlateau or None
         The learning-rate scheduler, or ``None`` when disabled.
     """
 
     def __init__(self, cfg: Config, train_set: AtomicDataset,
                  val_set: AtomicDataset | None = None,
-                 test_set: AtomicDataset | None = None):
+                 test_set: AtomicDataset | None = None,
+                 replay_set: AtomicDataset | None = None):
+        from ..finetune.freeze import freeze_parameters
+        from ..finetune.heads import find_multihead, label_head
+        from ..finetune.reference import reference_markers
+
         self.cfg = cfg
         self.distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
         self.device = self._init_distributed(resolve_device(cfg.device))
@@ -136,28 +184,60 @@ class Trainer:
 
         torch.manual_seed(cfg.seed)
 
-        base = build_model(cfg.model)
+        # reference-energy markers need data: they are resolved below, after
+        # the model exists, and the config then records the numbers
+        model_cfg, markers = reference_markers(cfg.model)
+        base, cfg.model = prepare_model(model_cfg)
         # A wrapper such as the D4 dispersion correction can need a larger
         # neighbor list than the core model's cutoff that the config carries;
         # graphs are built lazily, so widening the datasets' radius here (before
         # any graph exists) keeps data and model consistent.
-        for ds in (train_set, val_set, test_set):
+        for ds in (train_set, val_set, test_set, replay_set):
             model_cutoff = getattr(base, "cutoff", None)
             if (ds is not None and model_cutoff is not None
                     and hasattr(ds, "cutoff") and model_cutoff > ds.cutoff):
                 ds.cutoff = float(model_cutoff)
                 if hasattr(ds, "_cache"):
                     ds._cache.clear()
-        self.model = ForceStressOutput(
-            base,
-            compute_forces=cfg.optim.force_weight > 0,
-            compute_stress=cfg.optim.stress_weight > 0,
-        ).to(self.device)
+
+        o = cfg.optim
+        self._head_weights = {}
+        multi = find_multihead(base)
+        self.heads = list(multi.heads) if multi is not None else None
+        if self.heads:
+            self._head_weights = self._resolve_head_weights(multi)
+        force_on = o.force_weight > 0 or any(w[1] > 0 for w in self._head_weights.values())
+        stress_on = o.stress_weight > 0 or any(w[2] > 0 for w in self._head_weights.values())
+        self.model = ForceStressOutput(base, compute_forces=force_on,
+                                       compute_stress=stress_on).to(self.device)
+
+        # multi-head: the target sets belong to one head, the replay set to another
+        replay_train = replay_val = None
+        if self.heads:
+            target = self._target_head(multi)
+            for ds in (train_set, val_set, test_set):
+                if ds is not None:
+                    label_head(_structures(ds, "the dataset"), multi.index(target))
+            if replay_set is not None:
+                replay_train, replay_val = self._prepare_replay(multi, train_set, replay_set)
+        elif replay_set is not None:
+            raise ValueError("a replay set needs a multi-head model: set model.heads "
+                             "(for example [pt_head, Default])")
+
+        self._resolve_reference_energies(base, multi, markers, train_set)
+
+        if o.freeze or o.train_only:
+            n_train, n_total = freeze_parameters(self.module, o.freeze, o.train_only)
+            if self.is_main:
+                print(f"trainable parameters: {n_train} of {n_total}")
+
         if self.distributed:
             self.model = DistributedDataParallel(
                 self.model,
                 device_ids=(
-                    [self.device.index] if self.device.type == "cuda" else None))
+                    [self.device.index] if self.device.type == "cuda" else None),
+                # a batch without one head leaves that head's parameters unused
+                find_unused_parameters=bool(self.heads and len(self.heads) > 1))
 
         # Carve val/test splits out of the training set for whichever of the
         # two was not given explicitly (a single seeded permutation, so the
@@ -174,6 +254,10 @@ class Trainer:
             train_set = splits[0]
             val_set = splits[1] if n_val else val_set
             test_set = splits[2] if n_test else test_set
+        if replay_train is not None:
+            train_set = ConcatDataset([train_set, replay_train])
+            if replay_val is not None:
+                val_set = replay_val if val_set is None else ConcatDataset([val_set, replay_val])
 
         # batch training is just batch_size > 1; set to 1 to disable.
         # Distributed runs shard every loader across ranks; the sampler then
@@ -189,10 +273,19 @@ class Trainer:
         self.val_loader = _loader(val_set, False) if val_set is not None else None
         self.test_loader = _loader(test_set, False) if test_set is not None else None
 
-        self.opt = torch.optim.Adam(
-            self.model.parameters(), lr=cfg.optim.lr,
-            weight_decay=cfg.optim.weight_decay)
-        self.sched = self._make_scheduler(cfg.optim.scheduler)
+        self._params = [p for p in self.model.parameters() if p.requires_grad]
+        if not self._params:
+            raise ValueError("no trainable parameters: every parameter is frozen")
+        optimizer = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}[o.optimizer.lower()]
+        self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay)
+        self.sched = self._make_scheduler(o.scheduler)
+        self.ema = None
+        if o.ema_decay > 0:
+            from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+            if not 0.0 < o.ema_decay < 1.0:
+                raise ValueError(f"optim.ema_decay must lie in (0, 1), got {o.ema_decay}")
+            self.ema = AveragedModel(self.module, multi_avg_fn=get_ema_multi_avg_fn(o.ema_decay),
+                                     use_buffers=False)
         os.makedirs(cfg.output_dir, exist_ok=True)
 
     def _init_distributed(self, dev: torch.device) -> torch.device:
@@ -236,6 +329,133 @@ class Trainer:
             return self.model.module
         return self.model
 
+    @property
+    def eval_module(self) -> ForceStressOutput:
+        """The weights used for validation, testing and checkpoints.
+
+        The exponential moving average when ``cfg.optim.ema_decay > 0``
+        (its buffers synced from the training model), otherwise
+        :attr:`module`.
+        """
+        if self.ema is None:
+            return self.module
+        with torch.no_grad():
+            for avg, cur in zip(self.ema.module.buffers(), self.module.buffers()):
+                if avg.shape == cur.shape:
+                    avg.copy_(cur)
+        return self.ema.module
+
+    def _target_head(self, multi) -> str:
+        """The head the training structures belong to (``cfg.data.head`` or the first non-replay one)."""
+        if self.cfg.data.head is not None:
+            return self.cfg.data.head
+        for name in multi.heads:
+            if name != self.cfg.data.replay_head:
+                return name
+        return multi.heads[0]
+
+    def _resolve_head_weights(self, multi) -> dict[int, tuple[float, float, float]]:
+        """``cfg.optim.head_weights`` as ``{head_index: (energy, force, stress)}``."""
+        o = self.cfg.optim
+        out = {}
+        for name, spec in (o.head_weights or {}).items():
+            spec = dict(spec or {})
+            unknown = sorted(set(spec) - {"energy_weight", "force_weight", "stress_weight"})
+            if unknown:
+                raise ValueError(f"optim.head_weights[{name!r}]: unknown key(s) {unknown}")
+            out[multi.index(str(name))] = (
+                float(spec.get("energy_weight", o.energy_weight)),
+                float(spec.get("force_weight", o.force_weight)),
+                float(spec.get("stress_weight", o.stress_weight)))
+        return out
+
+    def _prepare_replay(self, multi, train_set, replay_set):
+        """Filter, subsample, (pseudo)label and split the replay set.
+
+        Returns
+        -------
+        tuple
+            ``(replay_train, replay_val)`` datasets labelled with the replay
+            head (``replay_val`` is ``None`` without a validation fraction).
+        """
+        from ..finetune.heads import label_head
+        from ..finetune.reference import species_of
+        from ..finetune.replay import pseudolabel, select_replay
+
+        d = self.cfg.data
+        structures = _structures(replay_set, "replay_set")
+        species = species_of(_structures(train_set, "train_set")) if d.replay_filter != "none" else None
+        selected = select_replay(structures, species, n=d.replay_samples, mode=d.replay_filter,
+                                 seed=self.cfg.seed)
+        if not selected:
+            raise ValueError("the replay set is empty after the element filter "
+                             f"({d.replay_filter}); use replay_filter: none or another set")
+        if d.replay_pseudolabel:
+            selected = pseudolabel(multi, selected, batch_size=d.batch_size, device=self.device,
+                                   head=d.replay_head)
+        label_head(selected, multi.index(d.replay_head))
+        if self.is_main:
+            print(f"replay head {d.replay_head!r}: {len(selected)} structures"
+                  f"{' (pseudolabelled)' if d.replay_pseudolabel else ''}")
+        cutoff = float(getattr(replay_set, "cutoff", self.cfg.data.cutoff))
+        ds = AtomicDataset(selected, cutoff)
+        if d.val_fraction > 0 and len(ds) > 1:
+            n_val = max(1, int(len(ds) * d.val_fraction))
+            train, val = random_split(ds, [len(ds) - n_val, n_val],
+                                      generator=torch.Generator().manual_seed(self.cfg.seed + 1))
+            return train, val
+        return ds, None
+
+    def _resolve_reference_energies(self, base, multi, markers, train_set) -> None:
+        """Estimate the reference energies the config marked, set them, record them."""
+        if not markers:
+            return
+        from ..finetune.heads import head_options
+        from ..finetune.reference import (average_atomic_energies, estimate_atomic_energies,
+                                          get_atomic_energies, set_atomic_energies)
+
+        structures = _structures(train_set, "train_set")
+        extra = dict(self.cfg.model.extra or {})
+        # the recorded values cover every species of the model (a per-species
+        # list in the config must be complete), the estimate only those present
+        def complete(single, e0):
+            full = get_atomic_energies(single)
+            full.update(e0)
+            return full
+
+        heads_spec = extra.get("heads")
+        if multi is not None and isinstance(heads_spec, (list, tuple)):
+            heads_spec = {name: {} for name in heads_spec}
+        for head, marker in markers:
+            if multi is not None:
+                head = head if head is not None else self._target_head(multi)
+                target_structures = [s for s in structures
+                                     if int(s.get("head", 0)) == multi.index(head)]
+                scope = multi.using(head)
+            else:
+                target_structures = structures
+                scope = contextlib.nullcontext(base)
+            with scope as single:
+                if marker == "estimated":
+                    e0 = estimate_atomic_energies(single, target_structures,
+                                                  batch_size=self.cfg.data.batch_size,
+                                                  device=self.device)
+                else:
+                    e0 = average_atomic_energies(target_structures)
+                set_atomic_energies(single, e0)
+                recorded = complete(single, e0)
+            if self.is_main:
+                where = f"head {head!r}" if multi is not None else "the model"
+                print(f"{marker} reference energies for {where}: "
+                      + ", ".join(f"{z}: {v:.4f}" for z, v in e0.items()))
+            if multi is not None:
+                heads_spec[head] = {**head_options(heads_spec, head), "atomic_energies": recorded}
+            else:
+                extra["atomic_energies"] = recorded
+        if multi is not None:
+            extra["heads"] = heads_spec
+        self.cfg.model.extra = extra
+
     def _make_scheduler(self, name: str):
         """Construct the learning-rate scheduler named in the config.
 
@@ -264,7 +484,8 @@ class Trainer:
 
         Moves the batch to the training device, runs the model forward,
         computes the weighted energy/force/stress loss, and (when ``train``)
-        performs a single optimizer step.
+        performs a single optimizer step (with gradient clipping and the EMA
+        update when configured).
 
         Parameters
         ----------
@@ -274,32 +495,40 @@ class Trainer:
         train : bool
             When ``True``, zero the gradients, back-propagate the loss and
             step the optimizer. When ``False`` (validation), only the forward
-            pass and loss computation are performed; note that gradients are
-            still enabled because force predictions require them.
+            pass and loss computation are performed on :attr:`eval_module`;
+            note that gradients are still enabled because force predictions
+            require them.
 
         Returns
         -------
         dict of str to float
             The scalar loss logs for this batch, as returned by
             :func:`weighted_loss` (e.g. ``"loss"`` plus any of
-            ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``).
+            ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``, per head
+            for a multi-head batch).
         """
         data = data.to(self.device)
         o = self.cfg.optim
-        # Evaluation steps run the bare module: they are not followed by a
-        # backward pass, so the DDP wrapper's gradient sync must not be armed.
-        model = self.model if train else self.module
+        # Evaluation steps run the bare module (the EMA weights when kept):
+        # they are not followed by a backward pass, so the DDP wrapper's
+        # gradient sync must not be armed.
+        model = self.model if train else self.eval_module
         pred = model(data)
         loss, logs = weighted_loss(
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,
-            huber_delta_stress=o.huber_delta_stress)
+            huber_delta_stress=o.huber_delta_stress,
+            head_weights=self._head_weights or None, head_names=self.heads)
         if train:
             self.opt.zero_grad()
             loss.backward()
+            if o.clip_grad > 0:
+                torch.nn.utils.clip_grad_norm_(self._params, o.clip_grad)
             self.opt.step()
+            if self.ema is not None:
+                self.ema.update_parameters(self.module)
         return logs
 
     def fit(self):
@@ -426,7 +655,8 @@ class Trainer:
         epoch : int
             Zero-based epoch index.
         tr : dict of str to float
-            Averaged training logs; its ``"loss"`` entry is reported.
+            Averaged training logs; its ``"loss"`` entry is reported, plus the
+            per-head losses of a multi-head run.
         va : dict of str to float
             Averaged validation logs. When non-empty, its ``"loss"`` entry is
             appended to the message; when empty, only training loss is shown.
@@ -438,29 +668,33 @@ class Trainer:
         msg = f"epoch {epoch:4d} | train loss {tr.get('loss', 0):.4e}"
         if va:
             msg += f" | val loss {va.get('loss', 0):.4e}"
+        heads = [k[:-5] for k in sorted(tr) if k.endswith("/loss")]
+        if heads:
+            msg += " | " + " ".join(f"{h} {tr[h + '/loss']:.3e}" for h in heads)
         print(msg)
 
     def save(self, path: str):
         """Serialize the model state dict and configuration to disk.
 
         Only rank 0 writes (in a single-process run that is the only rank);
-        the state dict is taken from the bare module, so checkpoint keys are
-        identical with and without DDP. A barrier keeps the other ranks from
-        racing ahead of the write.
+        the state dict is taken from the bare module (the EMA weights when
+        kept), so checkpoint keys are identical with and without DDP. A
+        barrier keeps the other ranks from racing ahead of the write.
 
         Parameters
         ----------
         path : str
             Destination file path. The saved checkpoint is a dictionary with
             keys ``"model"`` (the model ``state_dict``) and ``"cfg"`` (the
-            :class:`Config` used for the run).
+            :class:`Config` used for the run, with the resolved model
+            section).
 
         Returns
         -------
         None
         """
         if self.is_main:
-            torch.save({"model": self.module.state_dict(), "cfg": self.cfg}, path)
+            torch.save({"model": self.eval_module.state_dict(), "cfg": self.cfg}, path)
         if self.distributed and dist.is_initialized():
             dist.barrier()
 
@@ -470,7 +704,10 @@ class Trainer:
         The layout :func:`~xnn.common.models.hub.from_pretrained` loads and
         the model hub caches (``card.json``, ``config.yaml``, ``model.pt``),
         with no pickled objects, so the directory can be shared, uploaded to
-        Zenodo, or copied to another machine. Only rank 0 writes.
+        Zenodo, or copied to another machine. Only rank 0 writes. A
+        multi-head or LoRA model is written as such (its config rebuilds it);
+        ``from_pretrained`` then serves one head with the LoRA updates folded
+        in.
 
         Parameters
         ----------
@@ -488,7 +725,7 @@ class Trainer:
         from ..models.hub import save_pretrained
         out = None
         if self.is_main:
-            out = save_pretrained(self.module, save_directory, config=self.cfg, **card_fields)
+            out = save_pretrained(self.eval_module, save_directory, config=self.cfg, **card_fields)
         if self.distributed and dist.is_initialized():
             dist.barrier()
         return out

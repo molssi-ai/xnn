@@ -309,6 +309,10 @@ class AIMNet2(GNNPotential):
     charge_channels: int
     aim_size: int
 
+    # one readout head = the energy MLP and the reference energies (the charge
+    # passes stay shared; see MultiHead)
+    head_modules = ("readout", "atom_ref")
+
     def __init__(
         self,
         species: list[int],

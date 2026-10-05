@@ -468,6 +468,9 @@ class CACE(GNNPotential):
         subtracts them from the training data instead).
     """
 
+    # one readout head = the readout MLP and linear plus the reference energies
+    head_modules = ("readout_mlp", "readout_linear", "atom_ref")
+
     def __init__(
         self,
         species: list[int],

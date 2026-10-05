@@ -314,6 +314,10 @@ class Allegro(EquivariantGNN):
     _env_w_numel: Final[int]
     _energy_factor: Final[float]
 
+    # one readout head = the edge-energy MLP, the reference energies and the
+    # per-species scale (see MultiHead)
+    head_modules = ("edge_eng", "atom_ref", "atom_scale")
+
     def __init__(
         self,
         species: List[int],
