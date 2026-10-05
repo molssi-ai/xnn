@@ -37,11 +37,23 @@ class InteratomicPotential(nn.Module):
     instance attribute ``cutoff`` in each subclass ``__init__``. It is
     intentionally not declared as a bare class annotation here, so subclasses
     remain compatible with :func:`torch.jit.script`.
+
+    ``head_modules`` names the attributes that form one readout head (the
+    readout layers, the per-element reference energies and any energy
+    scale/shift), so that :class:`~xnn.common.finetune.MultiHead` can give the
+    model several heads over one shared trunk. A model that leaves it empty
+    (the classical force fields) cannot be given several heads.
     """
 
     # `cutoff` (radial cutoff in Angstrom, used to build neighbor lists) is set
     # as an instance attribute in each subclass __init__. It is intentionally
     # not a bare class annotation here, so subclasses stay torch.jit.script-able.
+
+    # The attributes that make up one readout head (readout layers, per-element
+    # reference energies, energy scale/shift): what
+    # :class:`~xnn.common.finetune.MultiHead` copies per head. A plain class
+    # attribute (no annotation), again for TorchScript. Empty = no head support.
+    head_modules = ()
 
     @abstractmethod
     def forward(self, data: AtomicGraph) -> dict[str, torch.Tensor]:

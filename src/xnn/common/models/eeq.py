@@ -54,6 +54,7 @@ from typing import Optional
 
 import torch
 from torch import Tensor
+from .electrostatics import reciprocal_lattice
 from .ops import cell_volume, scatter_sum
 from .recompute import recompute
 
@@ -97,18 +98,9 @@ def reciprocal_vectors(cell: Tensor, alpha: float, eps: float = EWALD_EPS) -> tu
     ``g (N_G,) = 4 pi / V exp(-G^2 / 4 alpha^2) / G^2`` (bohr units; ``cell``
     rows are lattice vectors in bohr).
     """
-    vol = cell_volume(cell)
-    recip = 2.0 * math.pi * torch.linalg.inv(cell).t()                  # rows: b_i
     g_max = 2.0 * alpha * math.sqrt(-math.log(eps))
-    # |m_i| = |G . a_i| / 2 pi <= G_max |a_i| / 2 pi
-    a_len = torch.linalg.norm(cell, dim=1)
-    m_max = torch.ceil(g_max * a_len / (2.0 * math.pi)).to(torch.long)
-    ranges = [torch.arange(-int(m), int(m) + 1, device=cell.device) for m in m_max]
-    grid = torch.cartesian_prod(*ranges).to(cell.dtype).reshape(-1, 3)
-    gvec = grid @ recip
-    g2 = (gvec * gvec).sum(-1)
-    keep = (g2 > 0) & (g2 <= g_max * g_max)
-    return grid[keep], *reciprocal_weights(grid[keep], cell, alpha)
+    grid = reciprocal_lattice(cell, g_max)[0].to(cell.dtype)
+    return grid, *reciprocal_weights(grid, cell, alpha)
 
 
 def reciprocal_weights(grid: Tensor, cell: Tensor, alpha: float) -> tuple[Tensor, Tensor]:

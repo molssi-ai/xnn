@@ -37,7 +37,11 @@ neighbor list, so a consumer needs nothing but ``libtorch`` /
 
 ``--config`` is optional: xnn-trained checkpoints embed their own
 :class:`~xnn.common.config.schema.Config`, so the architecture is recovered
-from the checkpoint itself. The equivalent Python call is
+from the checkpoint itself. The net charge (and, for the two-channel
+AIMNet2 models, the spin multiplicity) of the deployed system is fixed in
+the artifact: ``--total-charge`` / ``--spin-multiplicity``
+(``total_charge=`` / ``spin_multiplicity=`` in Python). The equivalent
+Python call is
 
 .. code-block:: python
 
@@ -51,8 +55,9 @@ The artifact exposes two entry points:
    The whole-system ABI. Builds its own neighbor list from the cutoff baked in
    at export time, and returns ``energy``, ``node_energy``, ``forces``,
    ``stress``, ``virial`` (plus ``energy_sr`` / ``energy_lr`` /
-   ``latent_charges`` for long-range models). This is the general-purpose
-   entry point.
+   ``latent_charges`` for long-range models, and ``charges`` for a
+   charge-predicting model such as AIMNet2, whose Coulomb sum is part of the
+   artifact). This is the general-purpose entry point.
 
 ``forward_lammps(pos, edge_index, cell_shifts, atomic_numbers, cell)``
    The pair-style ABI, matching

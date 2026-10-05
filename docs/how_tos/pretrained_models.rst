@@ -5,7 +5,7 @@ Load a Pre-trained Model
 *****************************
 
 The model hub loads any pre-trained potential with a one-line
-``from_pretrained()`` call: the MACE foundation models,
+``from_pretrained()`` call: the MACE and AIMNet2 foundation models,
 models trained with xnn, models published on Zenodo, and your own
 checkpoints all go through the same call, the same registry and the same
 cache. See ``examples/models/pretrained_models_tutorial.ipynb`` for a
@@ -42,6 +42,7 @@ Load a model
 
    model = from_pretrained("mace-off23-small")                 # registered name
    model = from_pretrained("mace-mh-0", head="omat_pbe")       # one head of a multi-head model
+   model = from_pretrained("aimnet2")                          # alias of aimnet2-wb97m-d3-0, with its D3 term
    model = from_pretrained("doi:10.5281/zenodo.18957344",      # Zenodo DOI (or record link)
                            filename="mace_csfapbbri_al_5_1_stagetwo.model")
    model = from_pretrained("https://host/path/model.pt")       # plain URL

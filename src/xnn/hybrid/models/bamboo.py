@@ -51,6 +51,7 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.electrostatics import all_pairs
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 from xnn.common.featurizers import CosineCutoff
@@ -95,7 +96,7 @@ def _make_act(act: "str | nn.Module") -> nn.Module:
 
 
 def _energy_mlp(n_layers: int, dim: int, act: str) -> nn.Sequential:
-    """Build a BAMBOO read-out MLP ``dim -> dim/2 -> ... -> 1``.
+    """Build a BAMBOO read-out MLP from ``dim`` through ``dim/2`` and so on down to ``1``.
 
     Mirrors the upstream ``get_mlp_layers``: ``n_layers`` hidden linears (the
     first ``dim -> dim/2``, the rest ``dim/2 -> dim/2``) each followed by the
@@ -337,6 +338,10 @@ class BAMBOO(InteratomicPotential):
     term in that case.
     """
 
+    # one readout head = the semi-local energy MLP (charges and electrostatics
+    # stay shared; see MultiHead)
+    head_modules = ("energy_mlp",)
+
     def __init__(
         self,
         dim: int = 64,
@@ -438,27 +443,6 @@ class BAMBOO(InteratomicPotential):
         damp = self.coul_softplus((dist - r0) / r0)
         return bare * dist / r0 / (1.0 + damp)
 
-    @staticmethod
-    def _all_pairs(batch: Tensor) -> tuple[Tensor, Tensor]:
-        """All ordered intra-structure atom pairs ``(i, j)``, ``i != j``.
-
-        Parameters
-        ----------
-        batch : Tensor
-            Structure index per atom ``(N,)``.
-
-        Returns
-        -------
-        tuple of Tensor
-            The centre indices ``row`` and neighbour indices ``col`` of every
-            ordered same-structure pair.
-        """
-        same = batch.unsqueeze(0) == batch.unsqueeze(1)
-        same = same & ~torch.eye(batch.shape[0], dtype=torch.bool,
-                                 device=batch.device)
-        row, col = same.nonzero(as_tuple=True)
-        return row, col
-
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict energies, partial charges and the dipole for a graph.
 
@@ -531,7 +515,7 @@ class BAMBOO(InteratomicPotential):
         if self.use_electrostatics:
             electroneg_atom = chi ** 2 * charges + hardness ** 2 * charges ** 2
             node_energy = node_energy + electroneg_atom
-            row, col = self._all_pairs(batch)
+            row, col = all_pairs(batch)
             if row.numel() > 0:
                 pair_vec = (data.pos[row] - data.pos[col]).to(charges.dtype)
                 ecoul = self.coulomb_energy(charges, pair_vec, row, col)

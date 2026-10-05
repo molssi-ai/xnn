@@ -20,7 +20,7 @@ maintainers = [
 ]
 keywords = [
     "interatomic potentials", "machine learning", "molecular dynamics",
-    "MACE", "NequIP", "Allegro", "SchNet", "PhysNet", "ANI", "ReaxFF", "OPLS",
+    "MACE", "NequIP", "Allegro", "CACE", "AIMNet2", "SchNet", "PhysNet", "ANI", "ReaxFF", "OPLS",
     "pytorch", "LAMMPS", "ASE",
 ]
 classifiers = [

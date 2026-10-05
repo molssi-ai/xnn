@@ -60,6 +60,19 @@ NaCl across the MACE-MP generations). The conversion of every published
 checkpoint is itself verified in
 ``examples/fidelity_checks/mace_foundation_verification.ipynb``.
 
+AIMNet2 (``examples/gnn/aimnet2/``) has ``aimnet2_foundation_molecules.ipynb``,
+built on ``AIMNet2.from_foundation()``: the paper's own demonstrations with
+the published wB97M-D3 model (the net charge as an input, the chloride-water
+curve, an acetic-acid torsion with the four-member ensemble, geometry
+optimization, dipoles from the predicted charges, the open-shell NSE and
+palladium families, a periodic CO2 box with the damped shifted-force
+Coulomb sum and its exact Ewald / PME alternatives, and the TorchScript
+artifact of the served model). The conversion of all 24 published members,
+the Ewald and PME sums (kernel for kernel and end to end, in float32 and
+float64) and the artifact are verified against the reference ``aimnet``
+package (``pip install aimnet``, which needs torch >= 2.8 and is used only
+there) in ``examples/fidelity_checks/aimnet2_verification.ipynb``.
+
 Every training / MD notebook loads its data through the dataset hub
 (:func:`~xnn.common.data.hub.base.load_dataset`) rather than reading files by
 hand. The Argon set (shared by the MACE, NequIP, Allegro, CACE, and PhysNet

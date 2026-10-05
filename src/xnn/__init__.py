@@ -7,10 +7,11 @@ Organized by model family, with everything shared factored into ``common``:
         featurizers -- Featurizer base + shared basis functions (GaussianRBF, CosineCutoff)
         config      -- one schema, loaders for yaml/argparse/hydra
         models      -- InteratomicPotential contract + registry + ForceStressOutput + ops
+        finetune    -- multi-head replay, LoRA, reference energies for pretrained models
         train       -- Trainer, losses (batch + device aware)
         deploy      -- ASE calculator, LAMMPS/TorchScript export
         cli         -- the `xnn` command
-    gnn/     E(3)-equivariant GNNs (NequIP / MACE / Allegro / CACE); needs e3nn
+    gnn/     graph networks (NequIP / MACE / Allegro / CACE / AIMNet2); needs e3nn
     cnn/     continuous-filter conv net (SchNet)
     dnn/     descriptor + per-element networks (HDNNP / ANI / PhysNet)
     ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS)
@@ -47,6 +48,6 @@ except Exception as _gnn_error:  # noqa: BLE001 - optional family, degrade quiet
     )
     _HAS_GNN = False
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __all__ = ["common", "cnn", "dnn", "ffnn", "hybrid", "transformer",
            "__version__"]

@@ -44,7 +44,9 @@ All configuration funnels into a single dataclass tree
      - ``32`` / ``2`` / ``8``: shared core sizes
    * -
      - ``extra``
-     - dict of model-specific options (see :ref:`models`)
+     - dict of model-specific options (see :ref:`models`), plus the
+       fine-tuning entries ``pretrained`` (start from any hub model), ``lora``
+       and ``heads`` (see :ref:`howto-finetune`)
    * - ``DataConfig``
      - ``train_path`` / ``val_path`` / ``test_path``
      - structure files (read with ASE by the CLI); ``test_path`` is optional
@@ -66,9 +68,24 @@ All configuration funnels into a single dataclass tree
      - ``energy_key`` / ``forces_key`` / ``stress_key``
      - ``"energy"`` / ``"forces"`` / ``"stress"``: names the targets are
        stored under in the file (e.g. ``REF_energy`` for MACE-style datasets)
+   * -
+     - ``head`` / ``replay_path`` / ``replay_head``
+     - multi-head fine-tuning: the head of the training structures (default:
+       the first head that is not ``replay_head``), the replay structures and
+       their head (``"pt_head"``); see :ref:`howto-finetune`
+   * -
+     - ``replay_filter`` / ``replay_samples`` / ``replay_pseudolabel``
+     - ``"subset"`` / ``None`` / ``False``: element filter of the replay set
+       relative to the training set, random subsample size, and whether the
+       pretrained model relabels it
    * - ``OptimConfig``
      - ``lr`` / ``weight_decay``
      - ``1e-3`` / ``0.0`` (Adam)
+   * -
+     - ``optimizer`` / ``clip_grad`` / ``ema_decay``
+     - ``"adam"`` (or ``"adamw"``) / ``0.0`` (no gradient clipping) / ``0.0``
+       (no weight averaging); the fine-tuning protocols use AdamW, clipping
+       and an EMA of the weights (see :ref:`training`)
    * -
      - ``epochs``
      - ``100``
@@ -82,6 +99,10 @@ All configuration funnels into a single dataclass tree
    * -
      - ``scheduler``
      - ``"plateau"``: ``cosine | plateau |`` none
+   * -
+     - ``head_weights`` / ``freeze`` / ``train_only``
+     - ``None`` / ``[]`` / ``[]``: per-head loss weights of a multi-head model,
+       and parameter-name patterns to freeze or to train exclusively
 
 When loading from a file, any ``model`` key that is not a core
 ``ModelConfig`` field is folded into ``model.extra``, so model options are
@@ -115,7 +136,7 @@ The repository ships composable templates:
    configs/
      train.yaml        top-level training config (Hydra-style defaults list)
      data/default.yaml
-     model/{mace,nequip,allegro,cace,schnet,physnet,hdnnp,ani,bamboo,reaxff,opls}.yaml
+     model/{mace,nequip,allegro,cace,aimnet2,schnet,physnet,hdnnp,ani,bamboo,reaxff,opls}.yaml
 
 Upstream key translation
 ========================

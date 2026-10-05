@@ -75,22 +75,33 @@ paper's energy-conservation-by-construction claim.
    nb/cnn/schnet/schnet_rmd17_train
    nb/cnn/schnet/schnet_ethanol_md
 
-NequIP, MACE, Allegro, CACE (gnn)
-=================================
+NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
+==========================================
 
 The shared Argon train/evaluate/deploy series (one pair of notebooks per
 model), plus a block-by-block walkthrough of the MACE architecture, and
-the MACE **foundation models** in action:
+the MACE and AIMNet2 **foundation models** in action:
 ``mace_foundation_molecules.ipynb`` loads MACE-OFF23 with one
 ``MACE.from_foundation()`` call and runs the butane torsion profile
 against OPLS-AA, the water dimer against CCSD(T)/CBS, and a
 ``Trainer`` fine-tune to a new DFT reference (rMD17 malonaldehyde);
+``mace_finetuning_strategies.ipynb`` compares the fine-tuning strategies
+(naive, readout-only, LoRA, multi-head pseudolabel replay) of the same
+foundation model on 50 rMD17 ethanol structures, with the model-aware
+reference-energy reestimation and the drift away from the foundation model
+on other molecules;
 ``mace_foundation_materials.ipynb`` screens equations of state (Si, Al,
-NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0).
+NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0);
+``aimnet2_foundation_molecules.ipynb`` loads the published AIMNet2 models
+with ``AIMNet2.from_foundation()`` and follows the paper's demonstrations:
+the net charge as an input, a charged hydrogen bond (chloride-water), a
+torsion profile with the four-member ensemble, geometry optimization,
+dipoles from the predicted charges, the open-shell and palladium families,
+and a periodic CO2 box with the damped shifted-force Coulomb sum.
 
 .. toctree::
    :maxdepth: 1
-   :caption: NequIP, MACE, Allegro, CACE (gnn)
+   :caption: NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 
    nb/gnn/nequip/nequip_argon_train_test
    nb/gnn/nequip/nequip_argon_density_md
@@ -98,11 +109,13 @@ NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0).
    nb/gnn/mace/mace_argon_density_md
    nb/gnn/mace/recreate_mace_architecture
    nb/gnn/mace/mace_foundation_molecules
+   nb/gnn/mace/mace_finetuning_strategies
    nb/gnn/mace/mace_foundation_materials
    nb/gnn/allegro/allegro_argon_train_test
    nb/gnn/allegro/allegro_argon_density_md
    nb/gnn/cace/cace_argon_train_test
    nb/gnn/cace/cace_argon_density_md
+   nb/gnn/aimnet2/aimnet2_foundation_molecules
 
 Long-range: Latent Ewald Summation (gnn)
 ========================================
@@ -269,6 +282,7 @@ build verified against the manuscripts' equations instead of a reference code.
    nb/fidelity_checks/nequip_verification
    nb/fidelity_checks/mace_verification
    nb/fidelity_checks/mace_foundation_verification
+   nb/fidelity_checks/aimnet2_verification
    nb/fidelity_checks/allegro_verification
    nb/fidelity_checks/cace_verification
    nb/fidelity_checks/les_verification

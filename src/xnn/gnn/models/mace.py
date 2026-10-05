@@ -1215,6 +1215,10 @@ class MACE(EquivariantGNN):
         If ``distance_transform`` is not one of the supported options.
     """
 
+    # one readout head = the per-layer readouts, the reference energies and
+    # the interaction-energy scale/shift (see MultiHead)
+    head_modules = ("readouts", "atom_ref", "scale_shift")
+
     pair_repulsion: Final[bool]
 
     def __init__(

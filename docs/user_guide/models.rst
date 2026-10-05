@@ -19,7 +19,7 @@ frontend:
 
    from xnn.common.models import available_models, build_model
 
-   available_models()          # ['allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -49,7 +49,7 @@ citation, cutoff, elements and heads. See :ref:`howto-pretrained-models`.
 
 .. note::
 
-   The GNN models (NequIP, MACE, Allegro, CACE) register themselves when
+   The GNN models (NequIP, MACE, Allegro, CACE, AIMNet2) register themselves when
    ``xnn.gnn`` is importable, which requires the ``gnn`` extra (``e3nn``).
    CACE itself works entirely in Cartesian coordinates and does not use
    e3nn. The hybrid model (BAMBOO) and the shared building blocks in
@@ -153,6 +153,75 @@ radial-filter message / recursive edge embedding, ``embed_receiver_nodes``
 (False), ``avg_num_neighbors`` (10.0), ``num_polynomial_cutoff`` (6),
 ``trainable_rbf`` (True), ``readout_hidden`` ([32, 16]),
 ``atomic_energies``.
+
+AIMNet2 (``gnn``)
+=================
+:class:`xnn.gnn.models.aimnet2.AIMNet2`: the atoms-in-molecules neural
+network potential of Anstine, Zubatyuk and Isayev (*Chem. Sci.* 2025) for
+neutral and charged organic and elemental-organic molecules. A radial
+Gaussian basis under a cosine cutoff, one learned embedding matrix per
+element (a feature vector per radial shell), a scalar/vector convolution of
+the embeddings over the shells, and message passes whose MLPs update the
+embeddings and predict partial charges that *neural charge equilibration*
+makes exact in the net charge (``AtomicGraph.total_charge``). The final
+AIM vector is read out to the atomic energy; the Coulomb energy of the
+predicted charges is added for every pair (``coulomb: simple``, molecules),
+through a damped shifted-force truncation (``coulomb: dsf``), or as the
+Ewald sum of a periodic cell with the reciprocal part over the lattice
+vectors (``coulomb: ewald``) or on a particle mesh (``coulomb: pme``, the
+choice for large cells), after subtracting the part the network learned
+within ``coulomb_sr_cutoff``. The open-shell variant (``charge_channels: 2``)
+equilibrates two charge channels to the net charge and spin multiplicity
+(``AtomicGraph.spin_multiplicity``). No spherical harmonics, so e3nn is not
+used by the model itself. Faithful to `isayevlab/aimnetcentral
+<https://github.com/isayevlab/aimnetcentral>`_ (see :ref:`fidelity`).
+
+Key options (defaults in parentheses): ``species``, ``cutoff`` (5.0),
+``n_features`` (16), ``n_rbf`` (16), ``n_interactions`` (3, the message
+passes, when ``hidden`` is not given), ``rbf_start`` (0.8),
+``gaussian_width`` (``None``: the inverse squared shell spacing),
+``hidden`` (``[[512, 380], [512, 380], [512, 380, 380]]``),
+``n_vector_combinations`` (12), ``aim_size`` (256), ``readout_hidden``
+(``[128, 128]``), ``charge_channels`` (1), ``coulomb`` (``"simple"`` |
+``"dsf"`` | ``"ewald"`` | ``"pme"`` | ``null``), ``coulomb_sr_cutoff``
+(4.6), ``coulomb_sr_envelope`` (``"exp"`` | ``"cosine"``), ``lr_cutoff``
+(15.0, the real-space cutoff and neighbor-list radius of the three
+long-range methods), ``dsf_alpha`` (0.2), ``ewald_accuracy`` (``1e-6``, the
+relative accuracy that sets the Ewald splitting parameter, the reciprocal
+cutoff and the PME mesh), ``pme_spline_order`` (4), and
+``atomic_energies``, the per-species energy shifts, kept in float64 whatever
+the model dtype. Under ``ewald`` / ``pme`` a non-periodic structure of the
+batch gets the all-pairs sum, a charged cell its neutralizing background
+term, and a slab is refused (use ``dsf``). Besides ``energy`` and
+``node_energy`` the model returns ``charges``, ``dipole``,
+``energy_coulomb`` and (two channels) ``spin_charges``; the ASE calculator
+exposes ``charges`` and ``dipole``. The model exports to TorchScript through
+the standard :func:`~xnn.common.deploy.export_torchscript_potential` (the net
+charge and spin multiplicity fixed at export, the artifact returning the
+charges too).
+
+**Pretrained models.** The six published families (``aimnet2-wb97m-d3``,
+``aimnet2-b973c-d3``, ``aimnet2-b973c-2025-d3``, ``aimnet2-nse``,
+``aimnet2-pd``, ``aimnet2-rxn``), four ensemble members each, are entries
+of the model hub registry in the ``aimnet2`` format:
+``from_pretrained("aimnet2")`` (an alias of ``aimnet2-wb97m-d3-0``;
+``aimnet2-wb97m-d3-1`` ... are the other members) or equivalently
+``AIMNet2.from_foundation()`` downloads the artifact, converts it weight for
+weight into this implementation and caches the converted model
+(:data:`xnn.gnn.models.aimnet2_foundation.FOUNDATION_MODELS` lists the
+names, :data:`~xnn.gnn.models.aimnet2_foundation.ALIASES` the short
+names). The published models are served with the two-body D3(BJ)
+dispersion their reference calculator adds post hoc: the converter records
+it as the config's ``subtracted_dispersion``, so the hub wraps the model
+in the shared :class:`~xnn.common.models.d3.D3Dispersion` (``dispersion=False``
+serves the bare network). ``model_options={"coulomb": "dsf"}`` (or
+``AIMNet2.from_foundation("aimnet2", coulomb="dsf")``) switches the Coulomb
+sum to the truncated form for periodic structures, ``"ewald"`` or ``"pme"``
+to the exact lattice sums (with ``lr_cutoff`` and ``ewald_accuracy`` as
+further options). The conversion is
+verified against the reference code (:ref:`fidelity`). In a config,
+``foundation: aimnet2`` (with ``cutoff`` set to the model's neighbor-list
+cutoff) builds the pretrained network for fine-tuning.
 
 SchNet (``cnn``)
 ================

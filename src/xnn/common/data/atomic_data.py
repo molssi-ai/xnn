@@ -81,12 +81,22 @@ class AtomicGraph:
         The same for ``stress``.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
-        Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF).
+        Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF,
+        AIMNet2).
+    spin_multiplicity : Tensor, optional
+        Spin multiplicity ``2S + 1`` per structure, of shape ``(B,)``.
+        ``None`` means closed shell (1). Read by the open-shell AIMNet2
+        models (``aimnet2-nse``).
     weight : Tensor, optional
         Per-structure loss weight, of shape ``(B,)``. ``None`` means every
         structure counts equally, which is the default and reproduces the
         unweighted loss exactly. Read only by
         :func:`~xnn.common.train.losses.weighted_loss`; no model sees it.
+    head : Tensor, optional
+        Index of the readout head each structure belongs to, of shape
+        ``(B,)``. ``None`` means the first head. Read by
+        :class:`~xnn.common.finetune.MultiHead` (multi-head fine-tuning) and
+        by the loss, which weights every head's terms separately.
 
     Attributes
     ----------
@@ -116,8 +126,12 @@ class AtomicGraph:
         Bool ``(B,)``: the structures that carry force / stress labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
+    spin_multiplicity : Tensor or None
+        Spin multiplicity per structure ``(B,)``.
     weight : Tensor or None
         Per-structure loss weight ``(B,)``.
+    head : Tensor or None
+        Readout head per structure ``(B,)``.
     """
 
     # structure
@@ -140,7 +154,9 @@ class AtomicGraph:
     stress_mask: Optional[Tensor] = None   # (B,) bool
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
+    spin_multiplicity: Optional[Tensor] = None   # (B,) 2S+1; None = closed shell
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
+    head: Optional[Tensor] = None           # (B,) readout head; None = the first
     # dtype the model computes in, when the geometry is kept in a wider one
     # (float64 positions for a float32 model); None = the positions' dtype
     compute_dtype: Optional[torch.dtype] = None
@@ -185,6 +201,54 @@ class AtomicGraph:
             v = getattr(self, f.name)
             kwargs[f.name] = v.to(device) if isinstance(v, Tensor) else v
         return AtomicGraph(**kwargs)
+
+    def subset(self, keep: Tensor) -> "AtomicGraph":
+        """The structures flagged in ``keep`` as a batch of their own.
+
+        Nodes and edges of the other structures are dropped and the indices
+        renumbered; the kept structures stay in their original order. The
+        positions of the result are a view-like gather of ``pos``, so forces
+        and stress computed on the subset flow back to the full graph.
+
+        Parameters
+        ----------
+        keep : Tensor
+            Bool tensor of shape ``(B,)``, ``True`` for the structures to keep.
+
+        Returns
+        -------
+        AtomicGraph
+            The sub-batch, with every optional field restricted the same way.
+        """
+        keep = keep.to(device=self.batch.device, dtype=torch.bool)
+        node_keep = keep[self.batch]
+        edge_keep = node_keep[self.edge_index[0]]
+        new_node = torch.cumsum(node_keep.long(), 0) - 1
+        new_graph = torch.cumsum(keep.long(), 0) - 1
+
+        def rows(v: Optional[Tensor], mask: Tensor) -> Optional[Tensor]:
+            return None if v is None else v[mask.to(v.device)]
+
+        return AtomicGraph(
+            pos=self.pos[node_keep],
+            atomic_numbers=self.atomic_numbers[node_keep],
+            edge_index=new_node[self.edge_index[:, edge_keep]],
+            cell_shifts=self.cell_shifts[edge_keep],
+            batch=new_graph[self.batch[node_keep]],
+            n_atoms=self.n_atoms[keep],
+            cell=rows(self.cell, keep),
+            pbc=rows(self.pbc, keep),
+            energy=rows(self.energy, keep),
+            forces=rows(self.forces, node_keep),
+            stress=rows(self.stress, keep),
+            forces_mask=rows(self.forces_mask, keep),
+            stress_mask=rows(self.stress_mask, keep),
+            total_charge=rows(self.total_charge, keep),
+            spin_multiplicity=rows(self.spin_multiplicity, keep),
+            weight=rows(self.weight, keep),
+            head=rows(self.head, keep),
+            compute_dtype=self.compute_dtype,
+        )
 
     def edge_vectors(self) -> Tensor:
         """Compute the displacement vector ``r_ij`` for every edge.

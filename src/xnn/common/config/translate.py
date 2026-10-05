@@ -152,6 +152,19 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "hbond_angle_cut": "hbond_angle",
         "orders": "bond_orders",
     },
+    # AIMNet2 spellings (isayevlab/aimnetcentral model YAML and metadata)
+    "aimnet2": {
+        "nfeature": "n_features",
+        "nshifts_s": "n_rbf",
+        "rc_s": "cutoff",
+        "rmin": "rbf_start",
+        "eta_s": "gaussian_width",
+        "ncomb_v": "n_vector_combinations",
+        "num_charge_channels": "charge_channels",
+        "implemented_species": "species",
+        "atomic_numbers": "species",
+        "atomic_shifts": "atomic_energies",
+    },
     # Allegro yaml spellings
     "allegro": {
         "r_max": "cutoff",

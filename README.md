@@ -94,6 +94,21 @@ model = from_pretrained("mace-off23-small")
 model = from_pretrained("runs/exp/best.pt")
 ```
 
+## Fine-tune
+
+Any pretrained model continues training through the same `Trainer`: naive
+fine-tuning, LoRA, multi-head replay (with original or pseudolabelled replay
+data), layer freezing and model-aware reference-energy reestimation, all from
+the config:
+
+```yaml
+model:
+  pretrained: mace-off23-small
+  cutoff: 5.0
+  lora: {rank: 16}                      # or heads: [pt_head, Default] with data.replay_path
+  atomic_energies: estimated
+```
+
 ## Benchmark
 
 Score pre-trained checkpoints on one dataset (energy / force / stress MAE, MSE
@@ -124,7 +139,7 @@ the MolSSI Driver Interface.
 | Family | Models |
 |---|---|
 | Add-ons for any model (`common`) | LES long-range electrostatics; DFT-D3 (zero, BJ, mzero, op damping) and DFT-D4 dispersion |
-| Graph networks (`gnn`) | NequIP, MACE, Allegro, CACE |
+| Graph networks (`gnn`) | NequIP, MACE, Allegro, CACE, AIMNet2 |
 | Descriptor networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP* |
 | Convolutional (`cnn`) | SchNet* |
 | Force fields (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING |

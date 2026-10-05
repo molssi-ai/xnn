@@ -12,7 +12,7 @@ class GaussianRBF(nn.Module):
 
     Expands scalar interatomic distances onto a set of ``n_rbf`` Gaussians
     ``e_k(r) = exp(-gamma (r - mu_k)^2)`` whose centers ``mu_k`` are fixed and
-    evenly spaced on ``[0, cutoff]``. Registered as a non-trainable buffer.
+    evenly spaced on ``[start, cutoff]``. Registered as a non-trainable buffer.
 
     Parameters
     ----------
@@ -26,6 +26,13 @@ class GaussianRBF(nn.Module):
         deviation to the spacing between adjacent centers, i.e.
         ``gamma = 0.5 / spacing**2``. SchNet (Schuett et al., NIPS 2017) fixes
         ``gamma = 10`` per Angstrom^2 on a 0.1 Angstrom center grid.
+    start : float, optional
+        Position of the first center, by default ``0.0``.
+    endpoint : bool, optional
+        Whether the last center sits at ``cutoff`` (default) or the grid stops
+        one spacing short of it, ``mu_k = start + k (cutoff - start) / n_rbf``
+        (the AIMNet2 layout, whose Gaussians all keep some weight inside the
+        cutoff envelope).
 
     Notes
     -----
@@ -34,9 +41,13 @@ class GaussianRBF(nn.Module):
     """
 
     def __init__(self, n_rbf: int = 50, cutoff: float = 5.0,
-                 gamma: float | None = None):
+                 gamma: float | None = None, start: float = 0.0,
+                 endpoint: bool = True):
         super().__init__()
-        centers = torch.linspace(0.0, cutoff, n_rbf)
+        if endpoint:
+            centers = torch.linspace(start, cutoff, n_rbf)
+        else:
+            centers = torch.linspace(start, cutoff, n_rbf + 1)[:n_rbf]
         self.register_buffer("centers", centers)
         self.width = (centers[1] - centers[0]).item() if n_rbf > 1 else 1.0
         self.gamma = float(gamma) if gamma is not None \

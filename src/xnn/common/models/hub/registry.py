@@ -1,7 +1,7 @@
 """The registry of pre-trained models and :func:`list_models`.
 
 The models xnn knows about are listed in ``models.json``, shipped inside the
-package: xnn-trained models and the MACE foundation models alike, one
+package: xnn-trained models and the MACE and AIMNet2 foundation models alike, one
 :class:`~xnn.common.models.hub.card.ModelCard` each. :func:`register_pretrained`
 adds more at run time (a lab's own Zenodo uploads, say). :func:`list_models`
 shows the registry together with whatever else sits in the cache, so a model
@@ -18,6 +18,7 @@ from .cache import head_dir, is_cache_key, is_ready, resolve_cache_dir, scan
 from .card import ModelCard
 
 _REGISTRY: dict[str, ModelCard] = {}
+_ALIASES: dict[str, str] = {}      # alias -> registered name
 REGISTRY_FILE = "models.json"
 
 
@@ -57,7 +58,14 @@ def register_pretrained(card: Union[ModelCard, dict, None] = None, **fields: Any
     if not is_cache_key(new.name):
         raise ValueError(f"invalid model name {new.name!r}: use letters, digits, "
                          f"'.', '_' and '-' (with '/' between parts)")
+    for alias in new.aliases:
+        if not is_cache_key(alias):
+            raise ValueError(f"invalid alias {alias!r} of {new.name}")
+        if alias in _REGISTRY and alias != new.name:
+            raise ValueError(f"alias {alias!r} of {new.name} is a registered model name")
     _REGISTRY[new.name] = new
+    for alias in new.aliases:
+        _ALIASES[alias] = new.name
     return new
 
 
@@ -67,8 +75,9 @@ def registered_cards(format: Optional[str] = None) -> list[ModelCard]:
 
 
 def get_card(name: str) -> Optional[ModelCard]:
-    """The registered card for ``name``, or ``None``."""
-    return _REGISTRY.get(str(name))
+    """The registered card for ``name`` (a model name or an alias), or ``None``."""
+    name = str(name)
+    return _REGISTRY.get(name) or _REGISTRY.get(_ALIASES.get(name, ""))
 
 
 def model_card(name: str, cache_dir: Optional[Union[str, Path]] = None) -> ModelCard:
@@ -77,7 +86,7 @@ def model_card(name: str, cache_dir: Optional[Union[str, Path]] = None) -> Model
     Parameters
     ----------
     name : str
-        Registry name or cache key.
+        Registry name, alias, or cache key.
     cache_dir : str or pathlib.Path, optional
         Cache to look in for models that are not registered.
 

@@ -4,14 +4,14 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-The literature models in xnn (MACE, NequIP, Allegro, CACE, PhysNet, BAMBOO,
-ANI, SchNet) are not approximations or "inspired-by" re-implementations: they
+The literature models in xnn (MACE, NequIP, Allegro, CACE, AIMNet2, PhysNet,
+BAMBOO, ANI, SchNet) are not approximations or "inspired-by" re-implementations: they
 are faithful, self-contained xnn-native reproductions of the reference codes,
 verified numerically block by block and end to end. Models based on
 spherical-harmonic features will only need ``e3nn``: no additional packages such
 as  ``mace-torch``, ``nequip``, ``cuequivariance``, or ``opt_einsum_fx`` is
-required at the runtime. Furthermore, CACE, PhysNet, BAMBOO, ANI, and SchNet
-need no extra dependency at all. Moreover, PhysNet's original implementation in
+required at the runtime. Furthermore, CACE, AIMNet2, PhysNet, BAMBOO, ANI, and
+SchNet need no extra dependency at all. Moreover, PhysNet's original implementation in
 TensorFlow has been ported to xnn's ecosystem in pure PyTorch. The BAMBOO model
 uses Cartesian vector channels, so, it does not need the e3nn package. The ANI
 model is written in pure PyTorch and use symmetry functions. The SchNet model is
@@ -134,6 +134,70 @@ harmonics or e3nn at all:
 Given the same weights it reproduces ``cace`` to ~1e-16 (relative) in
 energies and forces, molecular and periodic, for any message-type subset
 (``tests/test_cace.py``).
+
+AIMNet2
+=======
+An independent implementation of the AIMNet2 architecture (Anstine,
+Zubatyuk and Isayev, *Chem. Sci.* 2025) written from the paper's equations,
+following the conventions of the reference code `isayevlab/aimnetcentral
+<https://github.com/isayevlab/aimnetcentral>`_ where the paper leaves them
+open, so that the published checkpoints transplant weight for weight:
+
+- the Gaussian radial basis (paper eq 2) with centers
+  :math:`r_s = r_\min + s (r_c - r_\min) / n_s` and exponent
+  :math:`\eta = (n_s / (r_c - r_\min))^2` under a cosine cutoff, the
+  per-shell element embeddings (eq 3), the scalar shell sums (eq 4) and the
+  *squared* norms of the learned shell combinations along the unit bond
+  vectors (eq 5);
+- the pass layout: embedding update, charge update and non-negative weight
+  from one GELU MLP per pass (the first pass sets the charges, the later
+  ones add to them), neural charge equilibration (eq 6) with the reference's
+  :math:`10^{-6}` regularization of the weight sum, the charges and their
+  convolution entering the input from the second pass on, the AIM vector
+  from the last pass;
+- the energy readout plus per-element shifts kept in float64, the
+  short-range Coulomb energy subtracted under the mollifier envelope
+  :math:`\exp(1 - 1/(1 - (r/r_c)^2))`, and the full Coulomb energy of the
+  partial charges (all pairs for molecules, damped shifted-force with its
+  self term for periodic structures), the pair sums accumulated in float64;
+- the Ewald and particle-mesh Ewald sums of periodic cells with the
+  reference's conventions: the Kolafa-Perram balance of the splitting
+  parameter and the reciprocal cutoff for a target accuracy, the self and
+  neutralizing-background terms, the power-of-two PME mesh
+  :math:`2 \alpha L / (3 \epsilon^{1/5})`, the Coulomb constant
+  :math:`k_e = E_h a_0`. Two deliberate differences: the reference picks
+  the real-space cutoff per structure from the accuracy, xnn keeps it at
+  ``lr_cutoff`` (the radius of the graph the data pipeline builds) and
+  balances the splitting parameter to it; and xnn's PME uses the exact
+  Euler-spline coefficients of Essmann *et al.* where the reference uses
+  the continuous :math:`\mathrm{sinc}^p` deconvolution. Both choices
+  change the result only within the target accuracy;
+- the two-channel (NSE) variant with its :math:`(Q \pm (M - 1)) / 2`
+  channel targets.
+
+The published models are served with their reference calculator's post-hoc
+two-body D3(BJ) correction (15 Angstrom cutoff, 20% switching window,
+coordination numbers over the same list); xnn records it as the config's
+``subtracted_dispersion`` and adds it through the shared
+:class:`~xnn.common.models.d3.D3Dispersion`, whose reference data agree with
+the D3 tables for the 14 elements of the models.
+
+``tests/test_aimnet2.py`` checks the implementation against a dense
+all-pairs evaluation of the paper's equations on a tiny artifact in the
+reference layout (energies and charges to ~1e-12 in float64), the
+conversion through the model hub (artifact, safetensors directory, cache),
+the Ewald and PME kernels against the Madelung constant of rock salt
+(reproduced to 1e-7 relative) and against the reference's ``nvalchemiops``
+kernels (same parameters and lattice vectors: about 1e-6 relative in
+float64 and float32, the residual sitting in the reference's real-space
+term; PME within the mesh interpolation error), the TorchScript artifact
+against the eager model for
+every Coulomb method, and the published checkpoints against reference
+values (molecules, and a periodic cell with the DSF, Ewald and PME sums)
+where the cache holds them; ``examples/fidelity_checks/aimnet2_verification.ipynb``
+compares the converted models with the ``aimnet`` package on molecules of
+every family and the lattice sums kernel for kernel and end to end in
+float32 and float64.
 
 PhysNet
 =======
