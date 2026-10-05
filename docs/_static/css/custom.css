@@ -503,3 +503,19 @@ html[data-theme="dark"] img.logo__image {
 	padding: 0.35rem 0.5rem;
 	box-sizing: border-box;
 }
+
+/* Example gallery (docs/_ext/example_gallery.py): pages not yet published are
+   listed muted with a "coming soon" marker instead of a link. */
+.example-pending {
+	color: var(--pst-color-text-muted);
+}
+
+.example-pending-marker::before {
+	content: " \00b7 ";
+}
+
+.example-pending-marker {
+	font-size: 0.8em;
+	font-style: italic;
+	white-space: nowrap;
+}

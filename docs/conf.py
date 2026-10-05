@@ -13,6 +13,8 @@ import sys
 
 # Make the package importable without installation (docs/ -> repo root -> src/)
 sys.path.insert(0, os.path.abspath(os.path.join("..", "src")))
+# Local Sphinx extensions (docs/_ext/)
+sys.path.insert(0, os.path.abspath("_ext"))
 
 # General configuration
 
@@ -28,6 +30,7 @@ extensions = [
     "sphinx_copybutton",
     "sphinx_togglebutton",
     "myst_nb",
+    "example_gallery",
 ]
 
 templates_path = ["_templates"]
@@ -104,6 +107,16 @@ def _mirror_example_notebooks():
 
 
 _mirror_example_notebooks()
+
+# Which example pages are published. docs/examples/index.rst lists every
+# notebook with the example-toctree directive (docs/_ext/example_gallery.py).
+# The notebooks are kept out of the repository until reviewed (.gitignore), so
+# by default a page is published when its notebook is in the checkout: it is
+# built and linked, every other entry reads "coming soon". A list of paths
+# under docs/examples/ (without .ipynb, e.g. "nb/dnn/ani/ani_rmd17_train")
+# overrides that, which previews the published gallery from a working tree
+# that still holds every notebook.
+examples_ready = None
 
 # Copy button
 

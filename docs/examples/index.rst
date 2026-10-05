@@ -9,16 +9,17 @@ Every example notebook in the repository's `examples/
 with its executed outputs (training curves, parity plots, MD observables, and
 the fidelity tables) so you can read them without running anything. To run
 one yourself, see :ref:`howto-examples` for the required environments and
-kernels; the notebooks below are the committed, fully executed versions.
+kernels. The pages listed below are the committed, fully executed versions;
+entries marked *coming soon* are being reviewed and become links as they are
+published.
 
 Data
 ====
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Data
 
-   nb/data/load_dataset_tutorial
+   Loading datasets with `xnn`: the data hub & `load_dataset()` <nb/data/load_dataset_tutorial>
 
 Models
 ======
@@ -27,11 +28,10 @@ The model hub: MACE foundation models, xnn-trained models and Zenodo uploads
 under one ``from_pretrained()`` call, the cache layout, portability, and
 sharing your own models.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Models
 
-   nb/models/pretrained_models_tutorial
+   Pre-trained models with `xnn`: the model hub & `from_pretrained()` <nb/models/pretrained_models_tutorial>
 
 ANI (dnn)
 =========
@@ -40,25 +40,23 @@ Training ANI from scratch on rMD17, then the four published training sets
 (ANI-1, ANI-1x, the coupled-cluster ANI-1ccx with its transfer-learning recipe,
 and the seven-element ANI-2x set), each paired with its matching model preset.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: ANI (dnn)
 
-   nb/dnn/ani/ani_rmd17_train
-   nb/dnn/ani/ani1_dataset
-   nb/dnn/ani/ani1x_dataset
-   nb/dnn/ani/ani1ccx_dataset
-   nb/dnn/ani/ani2x_dataset
+   Training ANI from scratch on rMD17 (paracetamol) <nb/dnn/ani/ani_rmd17_train>
+   The ANI-1 dataset in one line, and a paper-style correlation test <nb/dnn/ani/ani1_dataset>
+   The ANI-1x dataset in one line: forces, active learning, and the `ani-1x` preset <nb/dnn/ani/ani1x_dataset>
+   The ANI-1ccx dataset: coupled-cluster labels and transfer learning with the `ani-1ccx` preset <nb/dnn/ani/ani1ccx_dataset>
+   The ANI-2x dataset: seven elements (S, F, Cl) and the `ani-2x` preset <nb/dnn/ani/ani2x_dataset>
 
 PhysNet (dnn)
 =============
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: PhysNet (dnn)
 
-   nb/dnn/physnet/physnet_argon_train_test
-   nb/dnn/physnet/physnet_argon_density_md
+   Training & testing PhysNet on Argon MD data: `xnn` vs the original PhysNet, step by step <nb/dnn/physnet/physnet_argon_train_test>
+   Argon MD with PhysNet: `xnn` NPT density + lock-step NVE against the original <nb/dnn/physnet/physnet_argon_density_md>
 
 SchNet (cnn)
 ============
@@ -68,12 +66,11 @@ Training the paper-architecture SchNet on its own MD17-style benchmark
 thermostat-free NVE dynamics with the trained model to demonstrate the
 paper's energy-conservation-by-construction claim.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: SchNet (cnn)
 
-   nb/cnn/schnet/schnet_rmd17_train
-   nb/cnn/schnet/schnet_ethanol_md
+   Training SchNet on rMD17 (ethanol) <nb/cnn/schnet/schnet_rmd17_train>
+   SchNet-driven NVE dynamics: energy conservation by construction <nb/cnn/schnet/schnet_ethanol_md>
 
 NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 ==========================================
@@ -99,32 +96,30 @@ torsion profile with the four-member ensemble, geometry optimization,
 dipoles from the predicted charges, the open-shell and palladium families,
 and a periodic CO2 box with the damped shifted-force Coulomb sum.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 
-   nb/gnn/nequip/nequip_argon_train_test
-   nb/gnn/nequip/nequip_argon_density_md
-   nb/gnn/mace/mace_argon_train_test
-   nb/gnn/mace/mace_argon_density_md
-   nb/gnn/mace/recreate_mace_architecture
-   nb/gnn/mace/mace_foundation_molecules
-   nb/gnn/mace/mace_finetuning_strategies
-   nb/gnn/mace/mace_foundation_materials
-   nb/gnn/allegro/allegro_argon_train_test
-   nb/gnn/allegro/allegro_argon_density_md
-   nb/gnn/cace/cace_argon_train_test
-   nb/gnn/cace/cace_argon_density_md
-   nb/gnn/aimnet2/aimnet2_foundation_molecules
+   Training & testing NequIP on Argon MD data: `xnn` vs the original NequIP, step by step <nb/gnn/nequip/nequip_argon_train_test>
+   Argon density from MD: `xnn` vs the original NequIP <nb/gnn/nequip/nequip_argon_density_md>
+   Training & testing MACE on Argon MD data: `xnn` vs the original MACE, step by step <nb/gnn/mace/mace_argon_train_test>
+   Argon density from MD: `xnn` vs the original MACE <nb/gnn/mace/mace_argon_density_md>
+   04 · Recreating the MACE architecture, block by block: original MACE **and** `xnn` <nb/gnn/mace/recreate_mace_architecture>
+   MACE-OFF23 in xnn: organic chemistry with a pretrained foundation model <nb/gnn/mace/mace_foundation_molecules>
+   Fine-tuning strategies for a foundation model: naive, LoRA and multi-head replay <nb/gnn/mace/mace_finetuning_strategies>
+   MACE-MP foundation models in xnn: materials properties across generations <nb/gnn/mace/mace_foundation_materials>
+   Training & testing Allegro on Argon MD data: `xnn` vs the original Allegro, step by step <nb/gnn/allegro/allegro_argon_train_test>
+   Argon density from MD: `xnn` vs the original Allegro <nb/gnn/allegro/allegro_argon_density_md>
+   Training & testing CACE on Argon MD data: `xnn` vs the original CACE, step by step <nb/gnn/cace/cace_argon_train_test>
+   Argon density from MD: `xnn` vs the original CACE <nb/gnn/cace/cace_argon_density_md>
+   AIMNet2 in xnn: neutral, charged and open-shell molecules with a pretrained foundation model <nb/gnn/aimnet2/aimnet2_foundation_molecules>
 
 Long-range: Latent Ewald Summation (gnn)
 ========================================
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Long-range: Latent Ewald Summation (gnn)
 
-   nb/gnn/les/les_molecular_dimers
+   Why long-range matters: molecular-dimer binding curves (`xnn` LES vs a short-range model) <nb/gnn/les/les_molecular_dimers>
 
 Dispersion: DFT-D4 (common)
 ===========================
@@ -146,13 +141,12 @@ evaluated on liquid-ethanol boxes packed from rMD17 conformers up to about
 20 000 atoms, where the MACE itself fills an 80 GB GPU (time and memory scaling, dense vs. large regime, the cost of
 a training step, the EEQ solvers, and NVE dynamics through the ASE calculator).
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Dispersion: DFT-D4 (common)
 
-   nb/common/d4/d4_paper_examples
-   nb/common/d4/d4_benchmark
-   nb/common/d4/d4_large_scale_ethanol
+   DFT-D4 in xnn: reproducing examples of the D4 paper <nb/common/d4/d4_paper_examples>
+   DFT-D4 in xnn vs the reference `dftd4`: accuracy, speed, and deployment with an MLIP <nb/common/d4/d4_benchmark>
+   Large-scale DFT-D4: liquid ethanol from rMD17 conformers, up to the memory limit <nb/common/d4/d4_large_scale_ethanol>
 
 Dispersion: DFT-D3 (common)
 ===========================
@@ -168,22 +162,20 @@ the DOSD molecular C6 comparison of fig 6. ``d3_benchmark.ipynb`` benchmarks
 xnn against the reference ``s-dftd3`` (S22, crystals, all damping functions;
 timing on CPU and GPU) and deploys a D3-corrected MLIP through every channel.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Dispersion: DFT-D3 (common)
 
-   nb/common/d3/d3_paper_examples
-   nb/common/d3/d3_benchmark
+   DFT-D3 in xnn: reproducing examples of the two Grimme papers <nb/common/d3/d3_paper_examples>
+   DFT-D3 in xnn vs the reference `simple-dftd3`: accuracy, speed, and deployment with an MLIP <nb/common/d3/d3_benchmark>
 
 BAMBOO (hybrid)
 ===============
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: BAMBOO (hybrid)
 
-   nb/hybrid/bamboo/bamboo_charge_analysis
-   nb/hybrid/bamboo/bamboo_dimer_electrostatics
+   BAMBOO charges, energy decomposition, and deployment <nb/hybrid/bamboo/bamboo_charge_analysis>
+   BAMBOO on charged / polar molecular dimers: why the charge-equilibrium term matters <nb/hybrid/bamboo/bamboo_dimer_electrostatics>
 
 ReaxFF / ReaxFF-nn (ffnn)
 =========================
@@ -196,12 +188,11 @@ the reactive descriptors -- per-pair bond orders, geometry-dependent EEM
 charges, and a smooth bond-dissociation scan -- including an honest look at
 what equilibrium-only training data cannot constrain.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: ReaxFF / ReaxFF-nn (ffnn)
 
-   nb/ffnn/reaxff/reaxff_rmd17_train_test
-   nb/ffnn/reaxff/reaxff_md_bond_orders
+   Training ReaxFF-nn on rMD17 (malonaldehyde) <nb/ffnn/reaxff/reaxff_rmd17_train_test>
+   ReaxFF in action: bond orders, charges, MD and dissociation <nb/ffnn/reaxff/reaxff_md_bond_orders>
 
 OPLS / L-OPLS (ffnn)
 ====================
@@ -217,12 +208,11 @@ trainable, fit conformer energies, recover the published Fourier
 coefficients to machine precision — before exporting the trained library
 and checking NVE energy conservation.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: OPLS / L-OPLS (ffnn)
 
-   nb/ffnn/opls/opls_conformational_energetics
-   nb/ffnn/opls/opls_lopls_torsion_refit
+   OPLS-AA conformational energetics: reproducing Table 1 of Jorgensen et al. (1996) <nb/ffnn/opls/opls_conformational_energetics>
+   L-OPLS, and refitting OPLS torsions by gradient descent <nb/ffnn/opls/opls_lopls_torsion_refit>
 
 DREIDING (ffnn)
 ===============
@@ -238,12 +228,11 @@ as trainable parameters: refit them on benzene alone against rMD17 PBE
 forces and ask what that does to naphthalene and toluene, neither of which
 was trained on — a direct test of the transferability DREIDING claims.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: DREIDING (ffnn)
 
-   nb/ffnn/dreiding/dreiding_conformational_energetics
-   nb/ffnn/dreiding/dreiding_refit_aromatics
+   DREIDING conformational energetics: reproducing Tables XI and XII of the 1990 paper <nb/ffnn/dreiding/dreiding_conformational_energetics>
+   Retraining DREIDING: refitting the generators, and testing whether they transfer <nb/ffnn/dreiding/dreiding_refit_aromatics>
 
 Deployment: MDI (common)
 ========================
@@ -257,12 +246,11 @@ The companion notebook then replaces the Python driver with **LAMMPS**
 thermodynamics and a radial distribution function. The engine is model
 agnostic, so the same workflow serves any family's checkpoint.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Deployment: MDI (common)
 
-   nb/deploy/mdi_argon_md
-   nb/deploy/mdi_argon_lammps
+   Deploying a trained model as an MDI engine: liquid argon over the MolSSI Driver Interface <nb/deploy/mdi_argon_md>
+   Driving the xnn MDI engine from LAMMPS: liquid-argon NVE and $g(r)$ <nb/deploy/mdi_argon_lammps>
 
 Fidelity checks
 ===============
@@ -272,25 +260,24 @@ upstream reference (see :ref:`fidelity` for the summary of what matches and to
 what precision). SchNet is the exception that proves the rule: a clean-room
 build verified against the manuscripts' equations instead of a reference code.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Fidelity checks
 
-   nb/fidelity_checks/schnet_verification
-   nb/fidelity_checks/ani_verification
-   nb/fidelity_checks/physnet_verification
-   nb/fidelity_checks/nequip_verification
-   nb/fidelity_checks/mace_verification
-   nb/fidelity_checks/mace_foundation_verification
-   nb/fidelity_checks/aimnet2_verification
-   nb/fidelity_checks/allegro_verification
-   nb/fidelity_checks/cace_verification
-   nb/fidelity_checks/les_verification
-   nb/fidelity_checks/d4_verification
-   nb/fidelity_checks/d3_verification
-   nb/fidelity_checks/bamboo_verification
-   nb/fidelity_checks/opls_verification
-   nb/fidelity_checks/dreiding_verification
+   SchNet, block by block: verifying the `xnn` implementation against the manuscripts <nb/fidelity_checks/schnet_verification>
+   ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
+   PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>
+   NequIP, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/nequip_verification>
+   MACE, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/mace_verification>
+   MACE foundation models: verifying `MACE.from_foundation()` against `mace-torch` <nb/fidelity_checks/mace_foundation_verification>
+   AIMNet2 foundation models: verifying `AIMNet2.from_foundation()` against the `aimnet` package <nb/fidelity_checks/aimnet2_verification>
+   Allegro, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/allegro_verification>
+   CACE, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/cace_verification>
+   Latent Ewald Summation (LES), block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/les_verification>
+   DFT-D4 dispersion, block by block: reproducing the reference `dftd4` with `xnn` <nb/fidelity_checks/d4_verification>
+   DFT-D3 dispersion, block by block: reproducing the reference `simple-dftd3` with `xnn` <nb/fidelity_checks/d3_verification>
+   BAMBOO fidelity check: `xnn` vs the original `bytedance/bamboo`, block by block <nb/fidelity_checks/bamboo_verification>
+   OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/opls_verification>
+   DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/dreiding_verification>
 
 Parity checks
 =============
@@ -300,9 +287,8 @@ The fast paths (fused GPU kernels behind ``use_fast``, see
 with the same weights: energies, forces, stress, charges and training
 gradients, and the time of each, on the systems the models are served on.
 
-.. toctree::
-   :maxdepth: 1
+.. example-toctree::
    :caption: Parity checks
 
-   nb/parity_checks/mace_cueq_parity
-   nb/parity_checks/dispersion_parity
+   MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/mace_cueq_parity>
+   Dispersion fast paths: parity with the reference (DFT-D3, DFT-D4) <nb/parity_checks/dispersion_parity>

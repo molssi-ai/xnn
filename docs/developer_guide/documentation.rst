@@ -47,3 +47,20 @@ Layout
      api/                autosummary entry point (stubs generated at build)
      _static/            MolSSI palette CSS, logos
      _templates/         MolSSI footer, autosummary templates
+
+Example gallery
+===============
+The notebooks under ``examples/`` are published one at a time. ``.gitignore``
+ignores every notebook, so a notebook stays on the author's machine until it
+is un-ignored there (``!examples/<family>/<model>/<name>.ipynb``) and
+committed. The gallery page, ``docs/examples/index.rst``, lists all of them
+with the ``example-toctree`` directive (``docs/_ext/example_gallery.py``):
+an entry whose notebook is in the checkout is built and linked, every other
+entry shows its title with a *coming soon* marker. Each entry is written as
+``Title <nb/path/to/notebook>``; the title is what the pending entry shows,
+a published page carries the notebook's own heading.
+
+A local tree that still holds every notebook builds the whole gallery. To
+preview the site as it is published, set ``examples_ready`` in ``conf.py``
+(or ``-D examples_ready=nb/a,nb/b`` on the command line) to the pages that
+should count as published.
