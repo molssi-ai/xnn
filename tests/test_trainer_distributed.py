@@ -62,3 +62,57 @@ def test_ddp_two_cpu_processes(tmp_path):
 
     # only rank 0 logs: one line per epoch plus the initial epoch line count
     assert result.stdout.count("epoch    0") == 1
+
+
+# multi-head replay under DDP: a batch may lack a head, so the trainer wraps the
+# model with find_unused_parameters and the gradient sync must still complete
+_SCRIPT_HEADS = """
+import numpy as np
+
+from xnn.common.config import Config
+from xnn.common.data import AtomicDataset
+from xnn.common.train import Trainer
+
+rng = np.random.default_rng(0)
+def structs(n, labels=True):
+    out = []
+    for _ in range(n):
+        s = {"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 6, 8, 1]}
+        if labels:
+            s["energy"] = float(rng.normal()); s["forces"] = rng.normal(0, 1, (4, 3))
+        out.append(s)
+    return out
+
+cfg = Config()
+cfg.device = "cpu"
+cfg.model.name = "schnet"
+cfg.model.n_features = 16
+cfg.model.n_interactions = 1
+cfg.model.extra = {"species": [1, 6, 8], "heads": ["pt_head", "Default"]}
+cfg.optim.epochs = 2
+cfg.optim.head_weights = {"pt_head": {"energy_weight": 1.0}}
+cfg.data.batch_size = 1
+cfg.data.val_fraction = 0.25
+cfg.data.replay_pseudolabel = True
+cfg.output_dir = OUTPUT_DIR
+
+trainer = Trainer(cfg, AtomicDataset(structs(8), cfg.model.cutoff),
+                  replay_set=AtomicDataset(structs(4, labels=False), cfg.model.cutoff))
+assert trainer.distributed and trainer.heads == ["pt_head", "Default"]
+metrics = trainer.fit()
+assert metrics["train"]["loss"] > 0 and metrics["val"]["loss"] > 0
+"""
+
+
+def test_ddp_multihead_replay(tmp_path):
+    script = tmp_path / "train_ddp_heads.py"
+    script.write_text(f"OUTPUT_DIR = {str(tmp_path)!r}\n" + _SCRIPT_HEADS)
+    result = subprocess.run(
+        [sys.executable, "-m", "torch.distributed.run",
+         "--nproc-per-node", "2",
+         "--rdzv-backend", "c10d", "--rdzv-endpoint", "localhost:0",
+         str(script)],
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    ckpt = torch.load(tmp_path / "last.pt", weights_only=False)
+    assert any(k.startswith("model.extra_heads.0.") for k in ckpt["model"])
