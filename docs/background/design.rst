@@ -9,15 +9,36 @@ xnn is organized by model family, with everything shared in ``common``:
 .. code-block:: text
 
    src/xnn/
-     common/        data (AtomicGraph, neighbor lists, datasets, data hub), config,
-                    models (registry, ForceStressOutput, model hub, LES, D3, D4),
-                    finetune, train, benchmark, deploy (ASE, TorchScript, MDI), cli
-     gnn/           NequIP, MACE, Allegro, CACE, AIMNet2, fused-kernel fast paths
-     cnn/           SchNet
-     dnn/           HDNNP, ANI, PhysNet
-     ffnn/          ReaxFF, OPLS, DREIDING, the .frc force-field reader
-     transformer/   edge attention and radial basis shared by attention models
-     hybrid/        BAMBOO
+     common/
+       data/          AtomicGraph, neighbor lists, AtomicDataset, hub/ (load_dataset)
+       featurizers/   Featurizer base, GaussianRBF, CosineCutoff
+       config/        Config schema, YAML / argparse / Hydra loaders, key translation
+       models/        InteratomicPotential, registry, ForceStressOutput, les, d3, d4,
+                      hub/ (from_pretrained), dispersion_fast/ (Triton kernels)
+       finetune/      LoRA, multi-head replay, freezing, reference energies
+       train/         Trainer, losses
+       benchmark/     scoring pre-trained models
+       deploy/        ASE calculator, TorchScript export, MDI engine
+       cli/           the xnn command
+     gnn/
+       featurizers/   spherical harmonics, Cartesian monomials, Bessel, polynomial cutoff
+       models/        schnet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
+       fast/          cuEquivariance fast paths
+     cnn/
+       featurizers/   voxel grid of the atomic environment
+       models/        3D steerable CNN, conventional 3D CNN
+     dnn/
+       featurizers/   symmetry functions, AEV
+       models/        hdnnp, ani, physnet
+     ffnn/
+       common/        .frc force-field reader, SMARTS atom typing
+       data/          the shipped .frc files
+       models/        reaxff, opls, dreiding, topology
+     transformer/
+       featurizers/   exponential-normal radial basis
+       attention.py   edge multi-head attention
+     hybrid/
+       models/        bamboo
 
 Four ideas hold it together.
 

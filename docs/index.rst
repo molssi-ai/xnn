@@ -144,8 +144,11 @@ Models at a glance
      - `isayevlab/aimnetcentral <https://github.com/isayevlab/aimnetcentral>`_;
        loads the published AIMNet2 models
    * - SchNet
-     - cnn
+     - gnn
      - Schütt *et al.*, NIPS 2017 (clean-room build from the paper)
+   * - 3D steerable CNN
+     - cnn
+     - Weiler *et al.*, NeurIPS 2018; with a conventional 3D CNN baseline
    * - ANI
      - dnn
      - `aiqm/torchani <https://github.com/aiqm/torchani>`_; ANI-1, ANI-1x,

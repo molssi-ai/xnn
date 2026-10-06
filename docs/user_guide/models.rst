@@ -24,8 +24,8 @@ implements them itself.
 Every model can also be constructed directly; its constructor arguments are
 the keys accepted under ``model`` in a config file. Pre-trained models load
 with ``from_pretrained()`` (:ref:`howto-pretrained-models`). NequIP, MACE
-and Allegro need the ``gnn`` extra (e3nn); every other model is plain
-PyTorch.
+and Allegro need the ``gnn`` extra (e3nn); every other model, SchNet
+included, is plain PyTorch.
 
 MACE (``gnn``)
 ==============
@@ -116,9 +116,9 @@ Options: ``species``, ``cutoff`` (5.0), ``n_features`` (16), ``n_rbf`` (16),
 ``model_options={"coulomb": "dsf"}`` (or ``"ewald"`` / ``"pme"``) to
 ``from_pretrained``.
 
-SchNet (``cnn``)
+SchNet (``gnn``)
 ================
-:class:`~xnn.cnn.models.schnet.SchNet`: continuous-filter convolutions over
+:class:`~xnn.gnn.models.schnet.SchNet`: continuous-filter convolutions over
 a Gaussian basis with shifted-softplus activations (Schütt *et al.* 2017).
 A clean-room build of the paper, verified against an independent
 implementation of its equations. The defaults are the paper architecture.
