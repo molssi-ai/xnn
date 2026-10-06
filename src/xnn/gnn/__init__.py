@@ -1,4 +1,4 @@
-"""Graph-network family (NequIP / MACE / Allegro / CACE / AIMNet2). Requires e3nn."""
+"""Graph-network family: SchNet, and NequIP / MACE / Allegro / CACE / AIMNet2 (these need e3nn)."""
 import torch
 
 # e3nn 0.4.4 (the version mace-torch pins) reads its constants with torch.load

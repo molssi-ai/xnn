@@ -57,6 +57,27 @@ The `results.{csv,json,md}` files carry the same unit-annotated headers
 - **Target keys.** The Argon frames store references under the MACE-convention
   keys `REF_energy` / `REF_forces`, set via `data.energy_key` / `forces_key`.
 
+## Several GPUs
+
+Score every model data-parallel by starting the same command through
+`torchrun` (each rank takes a disjoint shard of the test set; the numbers equal
+the serial ones):
+
+```bash
+torchrun --nproc-per-node 2 -m xnn benchmark --config examples/benchmark/argon_benchmark.yaml
+```
+
+or give each model its own GPU with `--parallel` (one worker per GPU, logs in
+`runs/argon_benchmark/parts/`), which merges the per-model rows into the same
+`results.*` files:
+
+```bash
+xnn benchmark --config examples/benchmark/argon_benchmark.yaml --parallel
+```
+
+On a cluster, `--shard slurm` inside a job array plus a final `--merge` does the
+same across nodes (see the How-To guide).
+
 ## Variations
 
 Override any config key on the command line with `--set`:

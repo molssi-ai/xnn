@@ -3,7 +3,7 @@
 Implements the D4 model of Caldeweyher *et al.*, *J. Chem. Phys.* **150**,
 154122 (2019) (doi:10.1063/1.5090222) in pure PyTorch, as an additive
 energy term that combines with every xnn model family -- a GNN, SchNet, a
-descriptor network or a classical force field -- and deploys through the same
+dense neural network or a classical force field -- and deploys through the same
 channels (PyTorch, TorchScript, ASE, LAMMPS). In the paper's terms this is the
 default *D4 model*: EEQ partial charges, BJ (rational) damping for the
 two-body term and the approximate Axilrod-Teller-Muto three-body term

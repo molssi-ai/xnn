@@ -23,6 +23,7 @@ from xnn.common.models import (
     LatentEwald,
     build_model,
 )
+from xnn.common.models.les import LATENT_CHARGE_PER_E
 
 
 @pytest.fixture(autouse=True)
@@ -407,3 +408,129 @@ def test_parity_vs_original_cace_lr():
     q_up = out_up["q"]
     assert ((ox["latent_charges"].detach() - q_up).abs().max()
             / q_up.abs().max()) < 1e-5
+
+
+# the optional net-charge constraint
+
+SCHNET = {"name": "schnet", "cutoff": 4.5, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
+
+
+def _schnet_les(seed=3, **options):
+    torch.manual_seed(seed)
+    base = build_model(from_dict({"model": SCHNET}).model)
+    return LatentEwald(base, n_channels=3, **options)
+
+
+def _charged(seed, n, charge, periodic=False):
+    rng = np.random.default_rng(seed)
+    s = {"pos": rng.uniform(0, 5, (n, 3)), "atomic_numbers": ([1, 8] * n)[:n],
+         "total_charge": charge}
+    if periodic:
+        s.update(cell=np.eye(3) * 6.0, pbc=[True] * 3)
+    return structure_to_graph(s, 4.5)
+
+
+def test_latent_charge_unit_is_the_derived_coulomb_constant():
+    """Two opposite elementary charges 20 A apart, in the molecular path,
+    interact with -14.3996/20 eV: the latent unit is sqrt(2 pi k_e), 9.5118
+    per e (the reference's 90.0474 is a transposed 90.4744)."""
+    assert LATENT_CHARGE_PER_E == pytest.approx(math.sqrt(2 * math.pi * 14.399645), rel=1e-7)
+    ewald = EwaldSummation(sigma=1.0, remove_self_interaction=True)
+    q = torch.tensor([[1.0], [-1.0]]) * LATENT_CHARGE_PER_E
+    pos = torch.tensor([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
+    e = ewald(q, pos, torch.zeros(2, dtype=torch.long), 1, None, None)
+    assert float(e) == pytest.approx(-14.399645 / 20.0, rel=1e-6)
+
+
+@pytest.mark.parametrize("weights", ["uniform", "learned"])
+@pytest.mark.parametrize("periodic", [False, True])
+def test_charge_constraint_pins_every_structure(weights, periodic):
+    """In a batch of a charged and a neutral structure, channel 1 sums to
+    Q * LATENT_CHARGE_PER_E and the other channels to zero, structure by
+    structure; off, the charges are the reference head's."""
+    model = _schnet_les(constrain_charge=True, charge_channel=1, charge_weights=weights)
+    batch = collate([_charged(1, 7, -1.0, periodic), _charged(2, 5, 0.0, periodic)])
+    out = model(batch)
+    q = out["latent_charges"]
+    sums = torch.zeros(2, 3).index_add_(0, batch.batch, q)
+    assert torch.allclose(sums[:, 1], torch.tensor([-1.0, 0.0]) * LATENT_CHARGE_PER_E, atol=1e-10)
+    assert torch.allclose(sums[:, [0, 2]], torch.zeros(2, 2), atol=1e-10)
+    # a batch equals the single structures
+    single = model(_charged(1, 7, -1.0, periodic))
+    assert torch.allclose(single["latent_charges"], q[:7], atol=1e-10)
+    assert float(single["energy"]) == pytest.approx(float(out["energy"][0]), abs=1e-10)
+    # the net charge changes the energy, so >TOTCHARGE / charge labels matter
+    neutral = model(_charged(1, 7, 0.0, periodic))
+    assert abs(float(neutral["energy_lr"]) - float(single["energy_lr"])) > 1e-6
+    # off: the reference head, untouched
+    plain = _schnet_les()
+    assert not plain.constrain_charge and plain.charge_weight is None
+    ref = plain(_charged(1, 7, -1.0, periodic))["latent_charges"]
+    assert not torch.allclose(ref, single["latent_charges"])
+    assert torch.allclose(ref, _schnet_les(constrain_charge=False)(_charged(1, 7, -1.0, periodic))["latent_charges"])
+
+
+def test_charge_constraint_without_labels_is_neutral_and_forces_are_consistent():
+    """No total_charge in the batch means neutral; and the shift is part of
+    the differentiable graph, so the forces are the energy gradient."""
+    model = _schnet_les(constrain_charge=True)
+    s = {"pos": np.random.default_rng(4).uniform(0, 5, (6, 3)), "atomic_numbers": [1, 8] * 3}
+    g = structure_to_graph(s, 4.5)
+    assert g.total_charge is None
+    q = model(g)["latent_charges"]
+    assert torch.allclose(q.sum(0), torch.zeros(3), atol=1e-10)
+    charged = dict(s, total_charge=1.0)
+    out = ForceStressOutput(model)(structure_to_graph(charged, 4.5))
+    h = 1e-5
+    for atom, comp in ((0, 0), (3, 2)):
+        plus, minus = np.array(s["pos"]), np.array(s["pos"])
+        plus[atom, comp] += h
+        minus[atom, comp] -= h
+        e_p = float(model(structure_to_graph(dict(charged, pos=plus), 4.5))["energy"])
+        e_m = float(model(structure_to_graph(dict(charged, pos=minus), 4.5))["energy"])
+        assert float(out["forces"][atom, comp]) == pytest.approx(-(e_p - e_m) / (2 * h), abs=1e-6)
+
+
+def test_charge_constraint_options_are_validated_and_reach_the_config_hook():
+    with pytest.raises(ValueError, match="charge_channel"):
+        _schnet_les(constrain_charge=True, charge_channel=3)
+    with pytest.raises(ValueError, match="charge_weights"):
+        _schnet_les(constrain_charge=True, charge_weights="softmax")
+    cfg = from_dict({"model": {**SCHNET, "extra": {"long_range": {
+        "n_channels": 2, "constrain_charge": True, "charge_weights": "learned"}}}})
+    model = build_model(cfg.model)
+    assert isinstance(model, LatentEwald) and model.constrain_charge
+    assert model.charge_weight is not None and model.charge_channel == 0
+
+
+def test_trainer_warns_when_the_constraint_sees_no_charge_labels(tmp_path):
+    """Constraint on + a training set without any charge label: one warning
+    at start; a labeled set (even all zero) or the constraint off: none."""
+    import warnings
+    from xnn.common.data import AtomicDataset
+    from xnn.common.train import Trainer
+    rng = np.random.default_rng(0)
+
+    def structures(labeled):
+        out = []
+        for i in range(3):
+            s = {"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 8, 1, 8],
+                 "energy": 0.0, "forces": np.zeros((4, 3))}
+            if labeled:
+                s["total_charge"] = 0.0
+            out.append(s)
+        return out
+
+    def trainer(constrain, labeled):
+        cfg = from_dict({"model": {**SCHNET, "extra": {"long_range": {
+            "n_channels": 2, "constrain_charge": constrain}}},
+            "data": {"batch_size": 3, "val_fraction": 0.34},
+            "optim": {"epochs": 1}, "device": "cpu", "output_dir": str(tmp_path / "run")})
+        return Trainer(cfg, AtomicDataset(structures(labeled), cfg.model.cutoff))
+
+    with pytest.warns(UserWarning, match="no training structure carries"):
+        trainer(True, False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        trainer(True, True)
+        trainer(False, False)

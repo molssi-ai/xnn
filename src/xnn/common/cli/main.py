@@ -2,6 +2,8 @@
 
     xnn train --config configs/train.yaml --set optim.epochs=50 model.cutoff=6.0
     xnn benchmark --config configs/benchmark.yaml
+    torchrun --nproc-per-node 4 -m xnn benchmark --config configs/benchmark.yaml
+    xnn benchmark --config configs/benchmark.yaml --parallel
     xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
     xnn mdi --ckpt runs/exp/best.pt -mdi "-role ENGINE -name xnn -method TCP ..."
 
@@ -114,13 +116,40 @@ def main(argv=None):
                        default=[], metavar="KEY=VALUE",
                        help="dotted override(s) applied to the config dict; "
                             "repeatable, several per flag")
+        split = p.add_argument_group(
+            "splitting the models over several runs",
+            "A run restricted with --models or --shard writes its rows to "
+            "<output.dir>/parts/ instead of the final table; --merge assembles "
+            "the table from the parts. Data-parallel scoring of each model "
+            "needs no flag: launch the same command with torchrun.")
+        split.add_argument("--models", default=None, metavar="LABEL[,LABEL...]",
+                           help="score only these entries (labels or 0-based positions)")
+        split.add_argument("--shard", default=None, metavar="I/N|slurm",
+                           help="score every N-th entry starting at I (0-based); "
+                                "'slurm' takes I/N from the job-array variables")
+        split.add_argument("--merge", action="store_true",
+                           help="assemble the final table from the part files")
+        split.add_argument("--parallel", nargs="?", const=0, default=None, type=int,
+                           metavar="N",
+                           help="score the models concurrently in N worker "
+                                "processes (default: one per GPU), one model each, "
+                                "then merge")
         args, _ = p.parse_known_args(rest)
         import yaml
         from ..benchmark import from_dict, run_benchmark
+        from ..benchmark.runner import Benchmark, merge_parts, run_parallel, select_entries
         with open(args.config) as f:
             raw = yaml.safe_load(f) or {}
         _apply_dict_overrides(raw, args.overrides)
-        run_benchmark(from_dict(raw))
+        if args.merge:
+            merge_parts(from_dict(raw))
+        elif args.parallel is not None:
+            run_parallel(raw, args.parallel)
+        elif args.models is not None or args.shard is not None:
+            cfg = from_dict(raw)
+            Benchmark(cfg, select_entries(cfg, args.models, args.shard)).run()
+        else:
+            run_benchmark(from_dict(raw))
 
     elif cmd == "export":
         p = argparse.ArgumentParser(prog="xnn export")
