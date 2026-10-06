@@ -30,7 +30,27 @@ Invariant per-atom descriptors for the HDNNP and ANI models:
 
    from xnn.dnn.featurizers import AEV
 
-   descriptor = AEV(species=[1, 6, 8])(graph)      # (N, output_dim), rotation invariant
+   aev = AEV(species=[1, 6, 8])
+   descriptor = aev(graph)      # (N, aev.output_dim), rotation invariant
+
+Voxel featurizer (``xnn.cnn.featurizers``)
+===========================================
+- :class:`~xnn.cnn.featurizers.voxel.VoxelGrid`: one cubic grid per atom
+  (side ``2 * cutoff``, ``grid_size`` voxels per axis) with a density
+  channel per species, each neighbor deposited as a Gaussian under a
+  cosine envelope; differentiable in the positions, the input of the 3D
+  steerable CNN and the conventional 3D CNN.
+
+.. code-block:: python
+
+   from xnn.cnn.featurizers import VoxelGrid
+
+   vox = VoxelGrid(species=[1, 6, 8], cutoff=4.0, grid_size=17)
+   grids = vox(graph)           # (N, 3, 17, 17, 17) density fields
+
+Equivariant featurizers (``xnn.gnn.featurizers``)
+==================================================
+Edge attributes for the GNN models:
 
 Equivariant edge features (``xnn.gnn.featurizers``)
 ===================================================

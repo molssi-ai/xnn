@@ -125,7 +125,44 @@ Models at a glance
 
    * - Model
      - Family
-     - Reference
+     - Featurizer
+     - State
+   * - SchNet
+     - gnn
+     - Gaussian RBF
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       matches the `NIPS 2017 manuscript
+       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
+   * - 3D steerable CNN
+     - cnn
+     - voxelized environments (species density grids)
+     - Complete: training, evaluation, deployment (ASE only); matches the
+       `NeurIPS 2018 manuscript <https://arxiv.org/abs/1807.02547>`_ (Weiler
+       et al.), with its Tetris experiment reproduced
+   * - 3D CNN
+     - cnn
+     - voxelized environments (species density grids)
+     - Complete: training, evaluation, deployment (ASE only); the
+       non-equivariant control of the same paper
+   * - PhysNet
+     - dnn
+     - exp-Gaussian RBF + attention masks
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
+   * - HDNNP
+     - dnn
+     - radial symmetry functions (G2)
+     - Under development
+   * - ANI
+     - dnn
+     - AEV (radial + angular symmetry functions)
+     - Complete: training, evaluation, deployment (ASE only); matches
+       `aiqm/torchani <https://github.com/aiqm/torchani>`_
+   * - NequIP
+     - gnn
+     - spherical-harmonic edges
+     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
+       matches `mir-group/nequip <https://github.com/mir-group/nequip>`_
    * - MACE
      - gnn
      - `ACEsuit/mace <https://github.com/ACEsuit/mace>`_; loads the MACE-MP /

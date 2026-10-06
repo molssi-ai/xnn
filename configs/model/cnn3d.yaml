@@ -1,0 +1,17 @@
+# Conventional 3D CNN potential over the same voxelized environments as
+# se3cnn: the control of the 3D steerable CNN paper, with unconstrained
+# kernels (its energy is not rotation invariant). The channel count of each
+# block equals the component count of the steerable fields of that block
+# (30, 60, 32 for the default se3cnn).
+name: cnn3d
+cutoff: 4.0
+n_features: 32          # channels of the last block (readout width)
+n_interactions: 3       # convolution blocks
+extra:
+  species: [1, 6, 8]
+  grid_size: 17
+  # channels: [30, 60, 32]
+  # strides: [1, 2, 1]
+  # kernel_size: 5
+  # activation: ssp                            # the paper's networks use relu
+  # normalization: batch

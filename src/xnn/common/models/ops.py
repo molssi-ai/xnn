@@ -1,4 +1,4 @@
-"""Tensor operations shared across model families (cnn / dnn / gnn).
+"""Tensor operations shared across model families (gnn / cnn / dnn).
 
 Kept here, at the ``models`` level, because they are common to more than one
 architecture type. Per-family helpers live under the family package instead
@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn import functional as F
 
 
@@ -38,6 +38,63 @@ def shifted_softplus(x: Tensor) -> Tensor:
         ``ln(0.5 e^x + 0.5)``, same shape as ``x``.
     """
     return F.relu(x) + torch.log1p(torch.exp(-x.abs())) - math.log(2.0)
+
+
+class ShiftedSoftplus(nn.Module):
+    """Module form of :func:`shifted_softplus`, for use inside ``nn.Sequential``."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return shifted_softplus(x)
+
+
+class GaussianActivation(nn.Module):
+    """Gaussian activation ``exp(-x^2)`` (the original ANI-1 hidden activation)."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.exp(-x * x)
+
+
+def make_activation(activation) -> nn.Module:
+    """Return a fresh activation module from a name or a module instance.
+
+    The one activation factory of the model families (the per-element
+    networks of ANI / HDNNP, the voxel convolution networks of the ``cnn``
+    family).
+
+    Parameters
+    ----------
+    activation : str or torch.nn.Module
+        One of ``"silu"``, ``"celu"`` (ANI, alpha=0.1), ``"gaussian"``
+        (original ANI-1), ``"tanh"``, ``"relu"``, ``"sigmoid"``, ``"ssp"``
+        (the exact shifted softplus of SchNet / PhysNet); or an ``nn.Module``
+        used as-is.
+
+    Returns
+    -------
+    torch.nn.Module
+        A fresh activation module.
+
+    Raises
+    ------
+    ValueError
+        If ``activation`` is an unknown name.
+    """
+    if isinstance(activation, nn.Module):
+        return activation
+    factories = {
+        "silu": nn.SiLU,
+        "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
+        "gaussian": GaussianActivation,
+        "tanh": nn.Tanh,
+        "relu": nn.ReLU,
+        "sigmoid": nn.Sigmoid,
+        "ssp": ShiftedSoftplus,
+    }
+    key = str(activation).lower()
+    if key not in factories:
+        raise ValueError(f"unknown activation {activation!r}; "
+                         f"choose one of {sorted(factories)}")
+    return factories[key]()
 
 
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:

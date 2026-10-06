@@ -1,0 +1,19 @@
+# 3D steerable CNN potential (Weiler et al., NeurIPS 2018) over voxelized
+# atomic environments: a 4 A cube of 17^3 voxels per atom, three gated
+# blocks with fields of order 0, 1 and 2 (multiplicities (8, 4, 2) and
+# (16, 8, 4)), then 32 scalar fields pooled into the readout. Kernels of
+# side 5, a low-pass filtered stride of 2 in the middle block, the
+# "compromise" shell bandlimits, no batch normalization.
+name: se3cnn
+cutoff: 4.0
+n_features: 32          # scalar fields of the last block (readout width)
+n_interactions: 3       # gated blocks
+extra:
+  species: [1, 6, 8]
+  grid_size: 17
+  # fields: [[8, 4, 2], [16, 8, 4], [32]]     # explicit multiplicities per block
+  # strides: [1, 2, 1]
+  # kernel_size: 5
+  # bandlimit: compromise                      # conservative / compromise / sfcnn
+  # activation: ssp                            # the paper's networks use relu
+  # normalization: batch

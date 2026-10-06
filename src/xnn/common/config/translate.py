@@ -80,6 +80,18 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "n_radial_basis": "n_rbf",
         "atomref": "atomic_energies",
     },
+    # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
+    # the xnn models are built from the paper, these are key names only
+    "se3cnn": {
+        "size": "kernel_size",
+        "features": "fields",
+        "repr_out": "fields",
+        "radial_window": "bandlimit",
+    },
+    "cnn3d": {
+        "size": "kernel_size",
+        "features": "channels",
+    },
     # PhysNet train.py argument spellings (MMunibas/PhysNet)
     "physnet": {
         "num_features": "n_features",

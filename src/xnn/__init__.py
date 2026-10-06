@@ -11,8 +11,8 @@ Organized by model family, with everything shared factored into ``common``:
         train       -- Trainer, losses (batch + device aware)
         deploy      -- ASE calculator, LAMMPS/TorchScript export
         cli         -- the `xnn` command
-    gnn/     graph networks (NequIP / MACE / Allegro / CACE / AIMNet2); needs e3nn
-    cnn/     continuous-filter conv net (SchNet)
+    gnn/     graph networks: SchNet, and NequIP / MACE / Allegro / CACE / AIMNet2 (need e3nn)
+    cnn/     volumetric 3D CNNs over voxelized environments (CNN3D, 3D steerable CNN)
     dnn/     descriptor + per-element networks (HDNNP / ANI / PhysNet)
     ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS)
     transformer/ shared graph-transformer building blocks (attention, radial basis)
@@ -30,24 +30,11 @@ from . import common  # noqa: F401  (data, config, models, train, deploy, cli)
 # transformer building blocks need no e3nn
 from . import cnn, dnn, ffnn, hybrid, transformer  # noqa: F401
 
-# the GNN family (NequIP/MACE/Allegro) requires e3nn; register only if available.
-# Catch Exception, not just ImportError: e3nn does real work at import time --
-# it loads its Wigner constants with torch.load -- so it can fail in ways that
-# are not import errors, and an optional family must not take the whole package
-# with it when it does.
-try:
-    from . import gnn  # noqa: F401
-    _HAS_GNN = True
-except Exception as _gnn_error:  # noqa: BLE001 - optional family, degrade quietly
-    import warnings as _warnings
-
-    _warnings.warn(
-        f"xnn: the GNN family (NequIP/MACE/Allegro/CACE) is unavailable: "
-        f"{type(_gnn_error).__name__}: {_gnn_error}",
-        stacklevel=2,
-    )
-    _HAS_GNN = False
+# the GNN family registers SchNet unconditionally and its equivariant models
+# (NequIP/MACE/Allegro/CACE/AIMNet2) only when e3nn is available (it warns
+# otherwise, see gnn/models/__init__.py)
+from . import gnn  # noqa: F401
 
 __version__ = "0.7.0"
-__all__ = ["common", "cnn", "dnn", "ffnn", "hybrid", "transformer",
+__all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybrid", "transformer",
            "__version__"]
