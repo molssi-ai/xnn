@@ -7,11 +7,16 @@ xnn
 Machine-Learning Interatomic Potentials in PyTorch
 ==================================================
 **xnn** is a library of machine-learning interatomic potentials (MLIPs) for
-molecular and periodic systems. The **x** stands for the architecture
-family: **g**raph networks, **d**ense descriptor networks, **c**onvolutional
-networks on voxel grids, classical **f**orce **f**ields and **hybrid**
-models. Every model sits behind the same ``nn.Module`` interface, so one data
-object, one trainer and one deployment path serve all of them.
+molecular and periodic systems. 
+
+The *x* in **xnn** stands for the architecture family: graph neural networks
+(``gnn``), dense neural networks (``dnn``), convolutional neural networks on
+voxel grids (``cnn``), classical force field neural networks (``ffnn``) and
+hybrid models (``hybrid``). Every model is implemented using the same PyTorch
+``nn.Module`` interface. Thus, one data object, one trainer and one deployment
+path serve all model families.
+
+xnn offers several benefits out-of-the-box:
 
 - **Faithful implementations.** Each model reproduces its reference code or
   paper to round-off, verified block by block (:ref:`fidelity`).
@@ -122,99 +127,28 @@ Models at a glance
 
 .. list-table::
    :header-rows: 1
-   :widths: 22 12 66
+   :widths: 34 66
 
-   * - Model
-     - Family
-     - Featurizer
-     - State
-   * - SchNet
-     - gnn
-     - Gaussian RBF
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches the `NIPS 2017 manuscript
-       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
-   * - 3D steerable CNN
-     - cnn
-     - voxelized environments (species density grids)
-     - Complete: training, evaluation, deployment (ASE only); matches the
-       `NeurIPS 2018 manuscript <https://arxiv.org/abs/1807.02547>`_ (Weiler
-       et al.), with its Tetris experiment reproduced
-   * - 3D CNN
-     - cnn
-     - voxelized environments (species density grids)
-     - Complete: training, evaluation, deployment (ASE only); the
-       non-equivariant control of the same paper
-   * - PhysNet
-     - dnn
-     - exp-Gaussian RBF + attention masks
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
-   * - HDNNP
-     - dnn
-     - radial symmetry functions (G2)
-     - Under development
-   * - ANI
-     - dnn
-     - AEV (radial + angular symmetry functions)
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `aiqm/torchani <https://github.com/aiqm/torchani>`_
-   * - NequIP
-     - gnn
-     - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches `mir-group/nequip <https://github.com/mir-group/nequip>`_
-   * - MACE
-     - gnn
-     - `ACEsuit/mace <https://github.com/ACEsuit/mace>`_; loads the MACE-MP /
-       MACE-OFF foundation models
-   * - NequIP
-     - gnn
-     - `mir-group/nequip <https://github.com/mir-group/nequip>`_
-   * - Allegro
-     - gnn
-     - `mir-group/allegro <https://github.com/mir-group/allegro>`_
-   * - CACE
-     - gnn
-     - `BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_
-   * - AIMNet2
-     - gnn
-     - `isayevlab/aimnetcentral <https://github.com/isayevlab/aimnetcentral>`_;
-       loads the published AIMNet2 models
-   * - SchNet
-     - gnn
-     - Schütt *et al.*, NIPS 2017 (clean-room build from the paper)
-   * - SE(3) steerable CNN / 3D CNN
-     - cnn
-     - Weiler *et al.*, NeurIPS 2018 (clean-room build from the paper), with
-       a conventional 3D CNN baseline
-   * - ANI
-     - dnn
-     - `aiqm/torchani <https://github.com/aiqm/torchani>`_; ANI-1, ANI-1x,
-       ANI-1ccx and ANI-2x presets
-   * - PhysNet
-     - dnn
-     - `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
-   * - HDNNP
-     - dnn
-     - Behler and Parrinello 2007 (under development)
-   * - BAMBOO
-     - hybrid
-     - `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
-   * - ReaxFF / ReaxFF-nn
-     - ffnn
-     - the published equations, cross-checked against LAMMPS ``pair_style reaxff``
-   * - OPLS / L-OPLS
-     - ffnn
-     - Jorgensen *et al.* 1996; matches `OpenMM <https://openmm.org>`_
-   * - DREIDING / X6
-     - ffnn
-     - Mayo *et al.* 1990; matches `LAMMPS <https://lammps.org>`_
+   * - Family
+     - Models
+   * - Graph neural networks (``gnn``)
+     - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet
+   * - Dense neural networks (``dnn``)
+     - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP
+   * - Convolutional neural networks (``cnn``)
+     - SE(3) steerable CNN, 3D CNN
+   * - Classical force fields (``ffnn``)
+     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6
+   * - Hybrid neural networks (``hybrid``)
+     - BAMBOO
+   * - Add-ons for any model (``common``)
+     - LES long-range electrostatics, DFT-D3 and DFT-D4 dispersion
 
-Every model trains, evaluates and runs under ASE. SchNet, NequIP, MACE,
-Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any checkpoint
-serves as an MDI engine (:ref:`deployment`). The add-ons LES, DFT-D3 and DFT-D4 wrap
-any of them (:ref:`models`).
+Each model matches its reference code or paper to round-off
+(:ref:`fidelity`); the MACE and AIMNet2 foundation models load through the
+hub. Every model trains, evaluates and runs under ASE. SchNet, NequIP,
+MACE, Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any
+checkpoint serves as an MDI engine (:ref:`deployment`).
 
 xnn is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository
