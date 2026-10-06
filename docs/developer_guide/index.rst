@@ -4,8 +4,8 @@
 Developer Guide
 ***************
 
-How to extend xnn with new models and featurizers, run the test suite, and
-build this documentation.
+Extending xnn with models, datasets and featurizers, running the tests,
+building this documentation and releasing.
 
 .. toctree::
    :maxdepth: 2

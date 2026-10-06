@@ -4,94 +4,59 @@
 Design of xnn
 ***************
 
-xnn is organized **by model family** (``gnn``, E(3)-equivariant graph
-networks; ``cnn``, continuous-filter convolutions; ``dnn``, descriptor +
-per-element networks), with everything shared across families factored into
-``common``. A component lives with the family that uses it, or in ``common``
-when more than one family needs it; each layer still stands alone and can be
-imported on its own.
+xnn is organized by model family, with everything shared in ``common``:
 
 .. code-block:: text
 
    src/xnn/
-     common/       shared across all families
-       data/         AtomicGraph (the one data object), PBC neighbor list,
-                     AtomicDataset, batching
-       featurizers/  Featurizer base + shared basis functions
-                     (GaussianRBF, CosineCutoff)
-       config/       one dataclass schema; loaders for yaml/argparse/hydra
-       models/       InteratomicPotential interface + registry +
-                     ForceStressOutput + ops (scatter_sum), the add-on
-                     terms LES (les), DFT-D4 (d4) and DFT-D3 (d3) on shared
-                     dispersion machinery (dispersion)
-       train/        Trainer (batch + device aware), weighted
-                     energy/force/stress loss
-       benchmark/    score pre-trained models on a dataset (metrics,
-                     atomization energy, report writers)
-       deploy/       ASE Calculator, LAMMPS/TorchScript export
-       cli/          the `xnn` command
-     gnn/          E(3)-equivariant GNNs (need e3nn)
-       featurizers/  SphericalHarmonicEdgeEmbedding, BesselRBF, PolynomialCutoff
-       models/       base (EquivariantGNN, GNNPotential), blocks,
-                     nequip, mace, allegro, cace
-     cnn/          continuous-filter conv net
-       models/       schnet
-     dnn/          descriptor + per-element networks
-       featurizers/  symmetry functions, AEV
-       models/       base (DescriptorPotential), hdnnp, ani, physnet
+     common/
+       data/          AtomicGraph, neighbor lists, AtomicDataset, hub/ (load_dataset)
+       featurizers/   Featurizer base, GaussianRBF, CosineCutoff
+       config/        Config schema, YAML / argparse / Hydra loaders, key translation
+       models/        InteratomicPotential, registry, ForceStressOutput, les, d3, d4,
+                      hub/ (from_pretrained), dispersion_fast/ (Triton kernels)
+       finetune/      LoRA, multi-head replay, freezing, reference energies
+       train/         Trainer, losses
+       benchmark/     scoring pre-trained models
+       deploy/        ASE calculator, TorchScript export, MDI engine
+       cli/           the xnn command
+     gnn/
+       featurizers/   spherical harmonics, Cartesian monomials, Bessel, polynomial cutoff
+       models/        schnet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
+       fast/          cuEquivariance fast paths
+     cnn/
+       featurizers/   voxel grid of the atomic environment
+       models/        3D steerable CNN, conventional 3D CNN
+     dnn/
+       featurizers/   symmetry functions, AEV
+       models/        hdnnp, ani, physnet
+     ffnn/
+       common/        .frc force-field reader, SMARTS atom typing
+       data/          the shipped .frc files
+       models/        reaxff, opls, dreiding, topology
+     transformer/
+       featurizers/   exponential-normal radial basis
+       attention.py   edge multi-head attention
+     hybrid/
+       models/        bamboo
 
-Four ideas hold the package together.
+Four ideas hold it together.
 
-1. One data object
-==================
-Every model consumes an :class:`~xnn.common.data.atomic_data.AtomicGraph`
-and returns ``{"node_energy", "energy"}``. Molecular vs. periodic is
-invisible to models; periodicity lives only in
-:meth:`~xnn.common.data.atomic_data.AtomicGraph.edge_vectors`:
-
-.. math::
-
-   \mathbf{r}_{ij} = \mathbf{r}_j - \mathbf{r}_i + \mathbf{s}_{ij} \cdot \mathbf{h}
-
-where :math:`\mathbf{s}_{ij}` is the integer cell shift of the edge and
-:math:`\mathbf{h}` the cell matrix. Because the edge vectors are computed
-from positions and cell inside the graph, forces and stress stay
-differentiable end to end.
-
-2. Featurizers are first-class
-==============================
-A :class:`~xnn.common.featurizers.base.Featurizer` (a subclass of
-``nn.Module``) turns a graph into invariant descriptors (symmetry functions,
-AEV) or equivariant edge attributes (spherical harmonics). Descriptor models
-(HDNNP, ANI) and GNNs (NequIP, MACE, Allegro) are thin compositions over
-featurizers, so the featurization is reusable and inspectable on its own:
-
-.. code-block:: python
-
-   from xnn.dnn.featurizers import AEV
-   from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
-
-   descriptor = AEV(species=[1, 6, 8])(graph)               # (N, D) invariant
-   edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)   # equivariant
-
-3. Forces and stress in one place
-=================================
-:class:`~xnn.common.models.outputs.ForceStressOutput` wraps any model and
-differentiates the predicted energy with respect to positions (forces,
-:math:`\mathbf{F}_i = -\partial E / \partial \mathbf{r}_i`) and a symmetric
-strain (stress). Models never implement forces themselves: a model is just
-an energy function, and the physics of differentiation is written once.
-
-4. Extensibility via registry + one config, three frontends
-===========================================================
-A model becomes available everywhere with two ingredients: the
-``@register_model("name")`` decorator and a ``from_config`` classmethod. The
-registry (:func:`~xnn.common.models.registry.build_model`) dispatches on
-``cfg.model.name``, and the single :class:`~xnn.common.config.schema.Config`
-dataclass is filled from any of three frontends (YAML, argparse, or
-Hydra), which all funnel into the same place. Upstream config spellings are
-handled by a loader-level key-translation registry, never by per-model
-aliases (see :ref:`howto-upstream-configs`).
-
-Everything downstream (data, featurizers, autograd forces/stress, training,
-ASE/LAMMPS deployment) is identical across all models.
+1. **One data object.** Every model takes an
+   :class:`~xnn.common.data.atomic_data.AtomicGraph` and returns
+   ``{"node_energy", "energy"}``. Periodicity lives only in the edge
+   vectors, :math:`\mathbf{r}_{ij} = \mathbf{r}_j - \mathbf{r}_i +
+   \mathbf{s}_{ij} \cdot \mathbf{h}`, so molecules and crystals look the same
+   to a model and forces and stress stay differentiable.
+2. **Featurizers are first-class.** Descriptors and equivariant edge features
+   are standalone :class:`~xnn.common.featurizers.base.Featurizer` modules
+   that models compose and you can inspect on their own.
+3. **Physics in wrappers.** :class:`~xnn.common.models.outputs.ForceStressOutput`
+   differentiates any model's energy for forces and stress; models never
+   implement them. Long-range electrostatics (LES), dispersion (D3, D4) and
+   the fast paths wrap any model the same way.
+4. **One config, one registry.** ``@register_model`` plus ``from_config``
+   expose a model to the YAML, argparse and Hydra frontends, which all fill
+   one :class:`~xnn.common.config.schema.Config`. Datasets and pre-trained
+   models register the same way behind ``load_dataset()`` and
+   ``from_pretrained()``.

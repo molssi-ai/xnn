@@ -7,33 +7,24 @@ xnn
 Machine-Learning Interatomic Potentials in PyTorch
 ==================================================
 **xnn** is a library of machine-learning interatomic potentials (MLIPs) for
-molecular and periodic systems, implemented in PyTorch behind a single coherent
-``nn.Module`` interface. It provides faithful and self-contained implementations
-of state-of-the-art equivariant open-source models such as NequIP, MACE,
-Allegro, and CACE, alongside SchNet, HDNNP, ANI, PhysNet, the BAMBOO graph
-equivariant transformer, and the learnable classical force fields ReaxFF /
-ReaxFF-nn (reactive), OPLS / L-OPLS (fixed topology) and DREIDING
-(rule-generated). The key strengths
-of xnn are
+molecular and periodic systems. Every model, from the equivariant graph
+networks MACE, NequIP, Allegro and CACE to the classical force fields ReaxFF,
+OPLS and DREIDING, sits behind the same ``nn.Module`` interface, so one data
+object, one trainer and one deployment path serve all of them.
 
-- all models share one data object, module interface, training loop, and
-  deployment path to popular molecular dynamics packages such as ASE and LAMMPS
-
-- distributed training and evaluation on multiple GPUs is supported out of the box
-
-- the library is designed to be easily extensible with new models and featurizers
-
-- a single configuration file and command-line interface enable benchmarking of
-  a wide range of models on a variety of datasets
-
-- upstream benchmark datasets download and preprocess in one line with a
-  ``load_dataset()`` one-liner, ready to train
-
-- the library is accompanied by extensive documentation, tutorials, examples and
-  a complete hands-on course focusing on developing and training equivariant
-  graph neural network MLIPs (see the `Equivariant Graph Neural Networks with
-  e3nn <https://github.com/molssi-ai/e3nn-course>`_ repository)
-
+- **Faithful implementations.** Each model reproduces its reference code or
+  paper to round-off, verified block by block (:ref:`fidelity`).
+- **One pipeline.** Shared data object, config schema, trainer and
+  deployment to ASE, LAMMPS and the MolSSI Driver Interface.
+- **Pre-trained and benchmark data in one line.** ``from_pretrained()``
+  loads the MACE and AIMNet2 foundation models and your own checkpoints;
+  ``load_dataset()`` downloads and converts standard datasets.
+- **Fine-tuning, benchmarking and multi-GPU training** from a config file
+  and the ``xnn`` command.
+- **Physics add-ons for any model.** Latent Ewald long-range electrostatics
+  and DFT-D3 / DFT-D4 dispersion wrap every potential.
+- **Fast paths.** Fused GPU kernels for the expensive blocks, switched on
+  per run without changing the model.
 
 .. grid:: 1 1 2 2
 
@@ -130,77 +121,61 @@ Models at a glance
 
 .. list-table::
    :header-rows: 1
-   :widths: 12 10 34 44
+   :widths: 22 12 66
 
    * - Model
      - Family
-     - Featurizer
-     - State
-   * - SchNet
-     - cnn
-     - Gaussian RBF
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches the `NIPS 2017 manuscript
-       <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
-   * - PhysNet
-     - dnn
-     - exp-Gaussian RBF + attention masks
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
-   * - HDNNP
-     - dnn
-     - radial symmetry functions (G2)
-     - Under development
-   * - ANI
-     - dnn
-     - AEV (radial + angular symmetry functions)
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `aiqm/torchani <https://github.com/aiqm/torchani>`_
-   * - NequIP
-     - gnn
-     - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches `mir-group/nequip <https://github.com/mir-group/nequip>`_
+     - Reference
    * - MACE
      - gnn
-     - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches `ACEsuit/mace <https://github.com/ACEsuit/mace>`_, and loads
-       the pretrained MACE-MP / MACE-OFF foundation models
-       (``MACE.from_foundation()``, verified to float64 round-off)
-   * - CACE
+     - `ACEsuit/mace <https://github.com/ACEsuit/mace>`_; loads the MACE-MP /
+       MACE-OFF foundation models
+   * - NequIP
      - gnn
-     - Cartesian monomial edges
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_
+     - `mir-group/nequip <https://github.com/mir-group/nequip>`_
    * - Allegro
      - gnn
-     - spherical-harmonic edges
-     - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
-       matches `mir-group/allegro <https://github.com/mir-group/allegro>`_
+     - `mir-group/allegro <https://github.com/mir-group/allegro>`_
+   * - CACE
+     - gnn
+     - `BingqingCheng/cace <https://github.com/BingqingCheng/cace>`_
+   * - AIMNet2
+     - gnn
+     - `isayevlab/aimnetcentral <https://github.com/isayevlab/aimnetcentral>`_;
+       loads the published AIMNet2 models
+   * - SchNet
+     - gnn
+     - Schütt *et al.*, NIPS 2017 (clean-room build from the paper)
+   * - 3D steerable CNN
+     - cnn
+     - Weiler *et al.*, NeurIPS 2018; with a conventional 3D CNN baseline
+   * - ANI
+     - dnn
+     - `aiqm/torchani <https://github.com/aiqm/torchani>`_; ANI-1, ANI-1x,
+       ANI-1ccx and ANI-2x presets
+   * - PhysNet
+     - dnn
+     - `MMunibas/PhysNet <https://github.com/MMunibas/PhysNet>`_
+   * - HDNNP
+     - dnn
+     - Behler and Parrinello 2007 (under development)
    * - BAMBOO
      - hybrid
-     - exp-normal RBF + edge attention
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
+     - `bytedance/bamboo <https://github.com/bytedance/bamboo>`_
    * - ReaxFF / ReaxFF-nn
      - ffnn
-     - bond orders from distances (reactive)
-     - Complete: training, evaluation, deployment (ASE only); implements the
-       published equations, cross-checked against LAMMPS ``pair_style
-       reaxff`` (see the fidelity notes)
+     - the published equations, cross-checked against LAMMPS ``pair_style reaxff``
    * - OPLS / L-OPLS
      - ffnn
-     - fixed valence topology
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `OpenMM <https://openmm.org>`_ to ~1e-7 kJ/mol and Table 1 of
-       Jorgensen et al. (1996)
+     - Jorgensen *et al.* 1996; matches `OpenMM <https://openmm.org>`_
    * - DREIDING / X6
      - ffnn
-     - rule-generated valence terms
-     - Complete: training, evaluation, deployment (ASE only); matches
-       `LAMMPS <https://lammps.org>`_ DREIDING styles to ~1e-10 kcal/mol
-       and Tables XI-XII of Mayo et al. (1990)
+     - Mayo *et al.* 1990; matches `LAMMPS <https://lammps.org>`_
+
+Every model trains, evaluates and runs under ASE. SchNet, NequIP, MACE and
+Allegro also export to TorchScript for LAMMPS, and any checkpoint serves as
+an MDI engine (:ref:`deployment`). The add-ons LES, DFT-D3 and DFT-D4 wrap
+any of them (:ref:`models`).
 
 xnn is developed by `The Molecular Sciences Software Institute (MolSSI)
 <https://molssi.org>`_. Visit the `GitHub repository

@@ -4,57 +4,55 @@
 Export to LAMMPS and TorchScript
 **********************************
 
-SchNet, NequIP, MACE, and Allegro can be compiled to TorchScript and deployed
-in `LAMMPS <https://www.lammps.org>`_. A model is exportable when it provides
-the scriptable core
+SchNet, NequIP, MACE and Allegro export to a self-contained TorchScript
+file that needs nothing but ``libtorch`` or ``torch.jit.load``: no xnn, no
+Python model code, no config. The scripted models match the eager ones to
+about 1e-15.
 
-.. code-block:: python
-
-   node_energy(atomic_numbers, edge_index, edge_vec)
-
-which all four deployable models do. The scripted models reproduce their eager
-counterparts up to ~1e-15 (verified in ``tests/test_mace.py``,
-``tests/test_nequip.py``, and ``tests/test_allegro.py``).
-
-From Python
-===========
-
-.. code-block:: python
-
-   from xnn.common.deploy import export_to_lammps, export_torchscript
-
-   # LAMMPS wrapper
-   export_to_lammps(model, cutoff=5.0, path="deployed.pt")
-
-   # plain TorchScript
-   export_torchscript(model, path="model_ts.pt")
-
-``export_to_lammps`` wraps the model in
-:class:`~xnn.common.deploy.lammps.LAMMPSWrapper`, which defines the tensor
-application binary interface (ABI) expected by the LAMMPS pair styles
-(positions, atomic numbers, edge index, and edge vectors in; per-atom and total
-energies out).
-
-From the command line
-=====================
+Export
+======
 
 .. code-block:: bash
 
-   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
-   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to torchscript
+   xnn export --ckpt runs/exp/best.pt --out deployed.pt
+   xnn export --ckpt mace-off23-small --out mace_off.pt        # any hub name works
 
-Using the exported model in LAMMPS
-==================================
-Pair the exported ``.pt`` file with the matching C++ pair style, following
-the `pair_nequip <https://github.com/mir-group/pair_nequip>`_ /
-`pair_allegro <https://github.com/mir-group/pair_allegro>`_ /
-pair_mace pattern. The tensor interface is defined in one place
-(``src/xnn/common/deploy/lammps.py``), so a single pair style covers every
-exportable xnn model.
+.. code-block:: python
 
-.. note::
+   from xnn.common.deploy import export_torchscript_potential
 
-   For NequIP, TorchScript export required a scriptable, bit-exact stand-in
-   for e3nn's ``Gate`` (``xnn.gnn.models.nequip._Gate``); the e3nn 0.4.4
-   original cannot be scripted on torch 2.x. This is transparent to users:
-   the substitution is numerically identical.
+   export_torchscript_potential(model, cutoff=5.0, path="deployed.pt")
+
+Options: ``--head`` picks the head of a multi-head checkpoint (LoRA adapters
+are always folded in), ``--total-charge`` and ``--spin-multiplicity`` fix
+the charge state of the deployed system, and ``--no-dispersion`` leaves out
+a dispersion term the checkpoint records as subtracted from its labels
+(:ref:`deployment`).
+
+Use it
+======
+The file has two entry points. ``forward`` takes the whole system and builds
+its own neighbor list:
+
+.. code-block:: python
+
+   import torch
+
+   model = torch.jit.load("deployed.pt")
+   out = model(pos, atomic_numbers, cell, pbc)      # cell / pbc optional for molecules
+   energy, forces, stress = out["energy"], out["forces"], out["stress"]
+
+``forward_lammps(pos, edge_index, cell_shifts, atomic_numbers, cell)`` is
+the pair-style interface of the ``pair_nequip`` / ``pair_allegro`` /
+``pair_mace`` pattern: the MD engine supplies the neighbor list. One
+structure per call, no batch dimension; ``torch.no_grad()`` is fine,
+``torch.inference_mode()`` is not (forces need autograd).
+
+Which models export
+===================
+SchNet, NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.
+CACE, PhysNet, BAMBOO and the classical force fields deploy through ASE or
+the MDI engine instead. A long-range LES model exports, but its Ewald sum is
+global, so drive it with the whole system on one rank (``forward``, ``fix
+external`` or the :ref:`MDI engine <deployment>`), never through a
+domain-decomposed pair style.

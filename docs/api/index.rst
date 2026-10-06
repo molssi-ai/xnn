@@ -4,14 +4,15 @@
 API Reference
 *************
 
-Complete reference documentation, generated from the docstrings in
-``src/xnn``. Start from the subpackage matching what you need:
+Generated from the docstrings in ``src/xnn``. Start from the subpackage
+matching what you need:
 
 - :mod:`xnn.common`: data pipeline, featurizer base, configuration,
   model registry and outputs, training, benchmarking, deployment, CLI
-- :mod:`xnn.gnn`: graph-network models (NequIP, MACE, Allegro, CACE, AIMNet2)
-  and featurizers (requires ``e3nn``)
-- :mod:`xnn.cnn`: continuous-filter convolution models (SchNet)
+- :mod:`xnn.gnn`: graph-network models (SchNet, and NequIP, MACE, Allegro,
+  CACE, AIMNet2, which require ``e3nn``) and featurizers
+- :mod:`xnn.cnn`: volumetric convolution models over voxelized environments
+  (the 3D steerable CNN and the conventional 3D CNN) and the voxel featurizer
 - :mod:`xnn.dnn`: descriptor models (HDNNP, ANI, PhysNet) and
   symmetry-function / AEV featurizers
 - :mod:`xnn.ffnn`: learnable classical force fields

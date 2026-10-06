@@ -4,9 +4,8 @@
 Background Information
 **********************
 
-These pages explain how xnn is put together and why: the design principles
-that hold the package together, and how faithfully the equivariant models
-reproduce their reference implementations.
+How xnn is put together, and how faithfully its models reproduce their
+reference implementations.
 
 .. toctree::
    :maxdepth: 2

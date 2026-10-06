@@ -4,9 +4,8 @@
 User Guide
 **********
 
-Reference information for working with xnn: the data pipeline, the models
-and their options, the configuration system, training, deployment, and the
-command line.
+Reference information: the data pipeline, the featurizers, the models and
+their options, configuration, training, deployment and the command line.
 
 .. toctree::
    :maxdepth: 2
