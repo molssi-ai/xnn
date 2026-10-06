@@ -57,17 +57,34 @@ Training and MD against the original TensorFlow PhysNet.
    Training & testing PhysNet on Argon MD data: `xnn` vs the original PhysNet, step by step <nb/dnn/physnet/physnet_argon_train_test>
    Argon MD with PhysNet: `xnn` NPT density + lock-step NVE against the original <nb/dnn/physnet/physnet_argon_density_md>
 
-SchNet (cnn)
+SchNet (gnn)
 ============
 
 The paper architecture trained on rMD17 ethanol, then thermostat-free NVE
 dynamics to show energy conservation by construction.
 
 .. example-toctree::
-   :caption: SchNet (cnn)
+   :caption: SchNet (gnn)
 
-   Training SchNet on rMD17 (ethanol) <nb/cnn/schnet/schnet_rmd17_train>
-   SchNet-driven NVE dynamics: energy conservation by construction <nb/cnn/schnet/schnet_ethanol_md>
+   Training SchNet on rMD17 (ethanol) <nb/gnn/schnet/schnet_rmd17_train>
+   SchNet-driven NVE dynamics: energy conservation by construction <nb/gnn/schnet/schnet_ethanol_md>
+
+3D steerable CNN (cnn)
+======================
+
+The Tetris experiment of the 3D steerable CNN paper (Weiler *et al.*,
+NeurIPS 2018): steerable and conventional kernels trained on the eight
+pieces in one orientation and tested under random rotations, with the
+paper's low-pass ablation, the kernel-basis figure and the equivariance of
+the internal fields. Then the same comparison for interatomic potentials:
+the steerable and the conventional 3D CNN trained on rMD17 ethanol and
+evaluated on rotated structures.
+
+.. example-toctree::
+   :caption: 3D steerable CNN (cnn)
+
+   The Tetris experiment: rotation equivariance of 3D steerable CNNs <nb/cnn/se3cnn/tetris_equivariance>
+   Steerable against conventional 3D CNN potentials on rMD17 under rotations <nb/cnn/se3cnn/se3cnn_rmd17_rotation>
 
 NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 ==========================================
@@ -198,6 +215,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    :caption: Fidelity checks
 
    SchNet, block by block: verifying the `xnn` implementation against the manuscripts <nb/fidelity_checks/schnet_verification>
+   3D steerable CNN, block by block: the kernel basis, equivariance and the reference implementation <nb/fidelity_checks/se3cnn_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>
    NequIP, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/nequip_verification>

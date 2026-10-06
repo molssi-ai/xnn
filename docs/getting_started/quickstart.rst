@@ -44,7 +44,7 @@ runs the loop:
    from xnn.common.train import Trainer
 
    cfg = Config()
-   cfg.model.name = "schnet"          # any name from available_models()
+   cfg.model.name = "schnet"        # schnet|hdnnp|ani|physnet|nequip|mace|allegro|cace|bamboo|se3cnn|cnn3d
    cfg.model.cutoff = 5.0
    cfg.model.n_features = 32
    cfg.model.n_interactions = 2
@@ -68,10 +68,48 @@ autograd:
 .. code-block:: python
 
    model = trainer.module.to("cpu").eval()
-   out = model(dataset[0])
-   print(out["energy"], out["forces"].shape)
+   g = dataset[0]
+   out = model(g)                   # {"energy", "node_energy", "forces", ...}
+   print("energy:", round(float(out["energy"].detach()), 4),
+         "| forces shape:", tuple(out["forces"].shape))
 
-Forces come from autograd, so do not wrap inference in ``torch.no_grad()``.
+.. note::
+
+   Forces are computed by autograd, so do **not** wrap inference in
+   ``torch.no_grad()``. Also predict with the *trained* module (as above): a
+   freshly built SchNet predicts exactly its energy shift, because its
+   readout head starts zero-initialized (the DTNN convention).
+
+Run end to end, the script prints something like::
+
+   registered models: ['allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
+   training on cuda ...
+   epoch    0 | train loss 2.0641e+00 | val loss 9.3133e-01
+   epoch    1 | train loss 1.8768e+00 | val loss 8.7541e-01
+   epoch    2 | train loss 1.7326e+00 | val loss 7.9425e-01
+   energy: -0.5449 | forces shape: (5, 3)
+
+The pieces also work on their own
+=================================
+Each layer of xnn is independently importable: data, featurizers, and
+models compose but do not require each other:
+
+.. code-block:: python
+
+   # Data on its own
+   from xnn.common.data import AtomicDataset, build_neighbor_list
+   ds = AtomicDataset(structures, cutoff=5.0)
+   graph = ds[0]
+
+   # Featurizers on their own (AtomicGraph -> model inputs)
+   from xnn.dnn.featurizers import AEV, RadialSymmetryFunctions
+   from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
+   descriptor = AEV(species=[1, 6, 8])(graph)              # (N, D) invariant AEV
+   edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)  # equivariant edges
+
+   # Models on their own
+   from xnn.common.models import build_model, ForceStressOutput, available_models
+   model = ForceStressOutput(build_model(cfg.model))
 
 From the command line
 =====================

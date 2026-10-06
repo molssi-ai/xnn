@@ -22,22 +22,44 @@ on first use.
 
 What is where
 =============
-- ``examples/data``, ``examples/models``: the data hub and the model hub
-  tutorials.
-- ``examples/gnn/<model>``: for MACE, NequIP, Allegro and CACE a train/test
-  notebook and an argon NPT density notebook, each against the reference
-  code; MACE and AIMNet2 add foundation-model and fine-tuning notebooks.
-- ``examples/dnn``, ``examples/cnn``: ANI (rMD17 and the four published ANI
-  datasets), PhysNet (against the original) and SchNet (rMD17, then NVE).
-- ``examples/hybrid``, ``examples/ffnn``: BAMBOO charges and electrostatics;
-  ReaxFF, OPLS and DREIDING training, refits and conformational energetics.
-- ``examples/common``: DFT-D3 and DFT-D4 paper reproductions, benchmarks and
-  a large-system study.
-- ``examples/deploy``: a checkpoint served as an MDI engine, driven from
-  Python and from LAMMPS.
-- ``examples/fidelity_checks``, ``examples/parity_checks``: one notebook per
-  model against its upstream code, and the fast paths against the
-  reference.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 32 68
+
+   * - Directory
+     - Contents
+   * - ``examples/data``, ``examples/models``
+     - The dataset hub and the model hub (``load_dataset()``,
+       ``from_pretrained()``).
+   * - ``examples/gnn/<model>``
+     - For MACE, NequIP, Allegro and CACE: a train/test notebook and an NPT
+       argon-density MD notebook, each run with xnn and with the reference
+       code side by side. MACE and AIMNet2 add foundation-model notebooks;
+       SchNet trains on rMD17, then runs NVE dynamics.
+   * - ``examples/dnn``
+     - ANI (rMD17 training, the four published ANI data sets) and PhysNet
+       (argon train/test and MD against the original).
+   * - ``examples/cnn``
+     - The 3D steerable CNN: the paper's Tetris experiment (steerable
+       against conventional kernels under rotations) and the same
+       comparison for the potentials on rMD17.
+   * - ``examples/hybrid``, ``examples/ffnn``
+     - BAMBOO charges and electrostatics; ReaxFF, OPLS and DREIDING
+       force-field training, refits and conformational energetics.
+   * - ``examples/common``
+     - The DFT-D3 and DFT-D4 dispersion add-ons: paper reproductions,
+       benchmarks against the reference codes, a large-system study.
+   * - ``examples/deploy``
+     - Serving a checkpoint as an MDI engine, driven from Python and from
+       LAMMPS.
+   * - ``examples/fidelity_checks``
+     - One notebook per model that rebuilds it block by block against the
+       upstream code and ends with a weight transplant
+       (:ref:`howto-transplant`).
+   * - ``examples/parity_checks``
+     - The fused GPU fast paths against the reference implementations
+       (:ref:`howto-fast-paths`).
 
 Extra requirements
 ==================

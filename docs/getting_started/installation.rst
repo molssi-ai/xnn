@@ -76,9 +76,7 @@ Check the installation
    from xnn.common.models import available_models
 
    print(xnn.__version__)
-   print(available_models())
-   # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'd3', 'd4', 'dreiding',
-   #  'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet']
+   print(available_models())   # ['allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
 
 The e3nn-based models (NequIP, MACE, Allegro) only appear when the ``gnn``
 extra is installed. The test suite runs with ``pytest tests/`` (``dev`` extra).
