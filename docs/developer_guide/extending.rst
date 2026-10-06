@@ -28,7 +28,8 @@ Adding a model
 - Bases: :class:`~xnn.common.models.base.InteratomicPotential`,
   :class:`~xnn.gnn.models.base.GNNPotential`,
   :class:`~xnn.gnn.models.base.EquivariantGNN`,
-  :class:`~xnn.dnn.models.base.DescriptorPotential`.
+  :class:`~xnn.dnn.models.base.DescriptorPotential`,
+  :class:`~xnn.cnn.models.base.VoxelPotential`.
 - No forces or stress in the model;
   :class:`~xnn.common.models.outputs.ForceStressOutput` adds them.
 - Import the module from its family package and add

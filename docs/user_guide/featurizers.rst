@@ -52,6 +52,19 @@ Equivariant edge features (``xnn.gnn.featurizers``)
    unit = graph.edge_vectors()
    angular = CartesianAngularBasis(l_max=3)(unit / unit.norm(dim=-1, keepdim=True))   # (E, 20)
 
+Voxel grids (``xnn.cnn.featurizers``)
+=====================================
+:class:`~xnn.cnn.featurizers.voxel.VoxelGrid`: per-atom density grids of
+the neighbors, one channel per species, on a cube of side ``2 * cutoff``
+with ``grid_size`` voxels per axis; the input of the SE(3) steerable CNN and
+the 3D CNN.
+
+.. code-block:: python
+
+   from xnn.cnn.featurizers import VoxelGrid
+
+   grids = VoxelGrid(species=[1, 6, 8], cutoff=4.0, grid_size=17)(graph)   # (N, 3, 17, 17, 17)
+
 Transformer pieces (``xnn.transformer``)
 ========================================
 :class:`~xnn.transformer.featurizers.ExpNormalSmearing` (the exponential-normal
