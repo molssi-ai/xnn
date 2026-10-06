@@ -31,10 +31,10 @@ import contextlib
 import os
 
 import torch
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import ConcatDataset, DataLoader, DistributedSampler, random_split
 
+from .. import distributed
 from ..config import Config
 from ..data import AtomicDataset, collate
 from ..models import ForceStressOutput
@@ -177,9 +177,9 @@ class Trainer:
         from ..finetune.reference import reference_markers
 
         self.cfg = cfg
-        self.distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+        self.distributed = distributed.is_distributed()
         self.device = self._init_distributed(resolve_device(cfg.device))
-        self.rank = dist.get_rank() if self.distributed else 0
+        self.rank = distributed.rank()
         self.is_main = self.rank == 0
 
         torch.manual_seed(cfg.seed)
@@ -297,7 +297,8 @@ class Trainer:
         distributed run each rank is pinned to one CUDA device selected by
         ``LOCAL_RANK`` (the configured device only chooses cpu vs cuda), and
         the process group is initialized with the matching backend -- NCCL on
-        GPUs, Gloo on CPUs.
+        GPUs, Gloo on CPUs. The work is :func:`xnn.common.distributed.init_process_group`,
+        shared with the benchmark runner.
 
         Parameters
         ----------
@@ -311,15 +312,7 @@ class Trainer:
             single-process run, ``cuda:LOCAL_RANK`` (or ``dev`` on CPU) in a
             distributed one.
         """
-        self._owns_pg = False
-        if not self.distributed:
-            return dev
-        if dev.type == "cuda":
-            dev = torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
-            torch.cuda.set_device(dev)
-        if not dist.is_initialized():
-            dist.init_process_group("nccl" if dev.type == "cuda" else "gloo")
-            self._owns_pg = True
+        dev, self._owns_pg = distributed.init_process_group(dev)
         return dev
 
     @property
@@ -584,8 +577,7 @@ class Trainer:
             te = self.evaluate()
             if self.is_main:
                 print(f"test loss {te.get('loss', 0):.4e}")
-        if self._owns_pg and dist.is_initialized():
-            dist.destroy_process_group()
+        distributed.destroy_process_group(self._owns_pg)
         return {"train": tr, "val": va, "test": te}
 
     def evaluate(self, loader=None):
@@ -635,15 +627,11 @@ class Trainer:
             n += 1
             for k, v in logs.items():
                 agg[k] = agg.get(k, 0.0) + v
-        if self.distributed and dist.is_initialized():
+        if self.distributed:
             keys = sorted(agg)
-            # NCCL reduces on the rank's GPU; Gloo reduces on CPU.
-            t = torch.tensor(
-                [float(n)] + [agg[k] for k in keys], dtype=torch.float64,
-                device=self.device if self.device.type == "cuda" else "cpu")
-            dist.all_reduce(t)
-            n = t[0].item()
-            agg = {k: t[i + 1].item() for i, k in enumerate(keys)}
+            n, *sums = distributed.all_reduce_sum(
+                [float(n)] + [agg[k] for k in keys], self.device)
+            agg = dict(zip(keys, sums))
         return {k: v / max(n, 1) for k, v in agg.items()}
 
     @staticmethod
@@ -695,8 +683,7 @@ class Trainer:
         """
         if self.is_main:
             torch.save({"model": self.eval_module.state_dict(), "cfg": self.cfg}, path)
-        if self.distributed and dist.is_initialized():
-            dist.barrier()
+        distributed.barrier()
 
     def save_pretrained(self, save_directory: str, **card_fields):
         """Write the current model as a portable model directory.
@@ -726,6 +713,5 @@ class Trainer:
         out = None
         if self.is_main:
             out = save_pretrained(self.eval_module, save_directory, config=self.cfg, **card_fields)
-        if self.distributed and dist.is_initialized():
-            dist.barrier()
+        distributed.barrier()
         return out

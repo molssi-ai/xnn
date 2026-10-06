@@ -17,6 +17,11 @@ or programmatically::
     from xnn.common.benchmark import from_yaml, run_benchmark
     run_benchmark(from_yaml("configs/benchmark.yaml"))
 
+Several GPUs or nodes: launch the same command through ``torchrun`` to score
+each model data-parallel, or split the models over runs (``--models`` /
+``--shard``, one Slurm job-array task each, then ``--merge``), or let
+``--parallel`` fan the models out over the GPUs of one node.
+
 Extension points mirror the model registry: register new error metrics with
 :func:`register_metric` and new output formats with :func:`register_writer`.
 """
@@ -34,7 +39,9 @@ from .report import (
     register_writer, available_writers, write, write_all, format_table,
     apply_units,
 )
-from .runner import Benchmark, run_benchmark
+from .runner import (
+    Benchmark, run_benchmark, select_entries, merge_parts, run_parallel,
+)
 
 __all__ = [
     "BenchmarkConfig", "ModelEntry", "OutputConfig", "from_dict", "from_yaml",
@@ -42,5 +49,5 @@ __all__ = [
     "collect_predictions", "score", "build_e0_lookup", "fit_atomic_energies",
     "register_writer", "available_writers", "write", "write_all",
     "format_table", "apply_units",
-    "Benchmark", "run_benchmark",
+    "Benchmark", "run_benchmark", "select_entries", "merge_parts", "run_parallel",
 ]

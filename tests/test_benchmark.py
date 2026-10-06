@@ -5,6 +5,7 @@ checkpoint directly (a wrapped model's ``state_dict``) rather than training.
 """
 import csv
 import json
+import os
 
 import numpy as np
 import pytest
@@ -519,3 +520,108 @@ def test_cli_benchmark(tmp_path):
     keys = list(rows[0])            # unit-annotated in files (e.g. "energy_mae [eV/atom]")
     assert any("energy_mae" in k for k in keys)
     assert not any("forces_mae" in k for k in keys)
+
+
+# splitting a benchmark over several runs
+def _three_models(tmp_path):
+    data = _write_dataset(tmp_path / "data.extxyz", n=6)
+    ck = _make_checkpoint(tmp_path / "m.pt")
+    models = [_model_spec(label=l, checkpoint=ck) for l in ("a", "b", "c")]
+    return data, models
+
+
+def test_select_entries_by_label_position_and_shard(tmp_path):
+    from xnn.common.benchmark import select_entries
+    data, models = _three_models(tmp_path)
+    cfg = from_dict(_bench_dict(data, models))
+    labels = lambda es: [e.label for e in es]
+    assert labels(select_entries(cfg)) == ["a", "b", "c"]
+    assert labels(select_entries(cfg, "c, a")) == ["c", "a"]
+    assert labels(select_entries(cfg, ["1"])) == ["b"]
+    assert labels(select_entries(cfg, shard="0/2")) == ["a", "c"]
+    assert labels(select_entries(cfg, shard="1/2")) == ["b"]
+    assert labels(select_entries(cfg, shard="2/3")) == ["c"]
+    assert labels(select_entries(cfg, "a,b,c", shard="1/2")) == ["b"]
+    with pytest.raises(ValueError, match="unknown model"):
+        select_entries(cfg, "zzz")
+    with pytest.raises(ValueError, match="outside"):
+        select_entries(cfg, shard="2/2")
+    with pytest.raises(ValueError, match="I/N"):
+        select_entries(cfg, shard="two")
+
+
+def test_select_entries_slurm_array(tmp_path, monkeypatch):
+    from xnn.common.benchmark import select_entries
+    data, models = _three_models(tmp_path)
+    cfg = from_dict(_bench_dict(data, models))
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
+    with pytest.raises(ValueError, match="job array"):
+        select_entries(cfg, shard="slurm")
+    # arrays need not start at 0: --array=1-2 gives tasks 1 and 2
+    monkeypatch.setenv("SLURM_ARRAY_TASK_MIN", "1")
+    monkeypatch.setenv("SLURM_ARRAY_TASK_COUNT", "2")
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "2")
+    assert [e.label for e in select_entries(cfg, shard="slurm")] == ["b"]
+
+
+def test_subset_run_writes_part_and_merge_assembles_table(tmp_path, capsys):
+    from xnn.common.benchmark import merge_parts, select_entries
+    data, models = _three_models(tmp_path)
+    out = tmp_path / "out"
+    cfg = from_dict(_bench_dict(
+        data, models, output={"dir": str(out), "formats": ["csv", "json"]}))
+
+    for shard in ("0/2", "1/2"):
+        rows = Benchmark(cfg, select_entries(cfg, shard=shard)).run()
+        assert rows
+    assert sorted(os.listdir(out / "parts")) == ["results.a+c.json", "results.b.json"]
+    assert not (out / "results.json").exists()      # no final table yet
+
+    merged = merge_parts(cfg)
+    assert [r["model"] for r in merged] == ["a", "b", "c"]
+    with open(out / "results.json") as f:
+        written = json.load(f)
+    assert [r["model"] for r in written] == ["a", "b", "c"]
+    assert any("energy_mae [eV/atom]" in r for r in written)
+
+    # a missing part is reported, not fatal; a stale one is ignored
+    os.remove(out / "parts" / "results.b.json")
+    with open(out / "parts" / "results.old.json", "w") as f:
+        json.dump([{"model": "gone", "n_params": 1}], f)
+    merged = merge_parts(cfg)
+    assert [r["model"] for r in merged] == ["a", "c"]
+    err = capsys.readouterr().err
+    assert "no part for ['b']" in err and "gone" in err
+
+
+def test_merge_without_parts_raises(tmp_path):
+    from xnn.common.benchmark import merge_parts
+    data, models = _three_models(tmp_path)
+    cfg = from_dict(_bench_dict(data, models, output={"dir": str(tmp_path / "empty")}))
+    with pytest.raises(FileNotFoundError, match="no part files"):
+        merge_parts(cfg)
+
+
+def test_run_parallel_cpu_workers(tmp_path):
+    from xnn.common.benchmark import run_parallel
+    data, models = _three_models(tmp_path)
+    out = tmp_path / "out"
+    raw = _bench_dict(data, models, output={"dir": str(out), "formats": ["json"]})
+    with pytest.raises(ValueError, match="worker count"):
+        run_parallel(raw)                     # CPU-only: no default
+    rows = run_parallel(raw, workers=2)
+    assert [r["model"] for r in rows] == ["a", "b", "c"]
+    names = os.listdir(out / "parts")
+    assert "config.yaml" in names
+    assert {"a.log", "b.log", "c.log"} <= set(names)
+    with open(out / "results.json") as f:
+        assert len(json.load(f)) == 3
+
+
+def test_run_parallel_reports_failed_worker(tmp_path):
+    from xnn.common.benchmark import run_parallel
+    data, models = _three_models(tmp_path)
+    models[1]["checkpoint"] = str(tmp_path / "missing.pt")
+    raw = _bench_dict(data, models, output={"dir": str(tmp_path / "out")})
+    with pytest.raises(RuntimeError, match=r"failed: b \(see .*b\.log\)"):
+        run_parallel(raw, workers=3)
