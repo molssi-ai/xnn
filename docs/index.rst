@@ -7,9 +7,10 @@ xnn
 Machine-Learning Interatomic Potentials in PyTorch
 ==================================================
 **xnn** is a library of machine-learning interatomic potentials (MLIPs) for
-molecular and periodic systems. Every model, from the equivariant graph
-networks MACE, NequIP, Allegro and CACE to the classical force fields ReaxFF,
-OPLS and DREIDING, sits behind the same ``nn.Module`` interface, so one data
+molecular and periodic systems. The **x** stands for the architecture
+family: **g**raph networks, **d**ense descriptor networks, **c**onvolutional
+networks on voxel grids, classical **f**orce **f**ields and **hybrid**
+models. Every model sits behind the same ``nn.Module`` interface, so one data
 object, one trainer and one deployment path serve all of them.
 
 - **Faithful implementations.** Each model reproduces its reference code or
@@ -183,9 +184,10 @@ Models at a glance
    * - SchNet
      - gnn
      - Schütt *et al.*, NIPS 2017 (clean-room build from the paper)
-   * - 3D steerable CNN
+   * - SE(3) steerable CNN / 3D CNN
      - cnn
-     - Weiler *et al.*, NeurIPS 2018; with a conventional 3D CNN baseline
+     - Weiler *et al.*, NeurIPS 2018 (clean-room build from the paper), with
+       a conventional 3D CNN baseline
    * - ANI
      - dnn
      - `aiqm/torchani <https://github.com/aiqm/torchani>`_; ANI-1, ANI-1x,
@@ -209,9 +211,9 @@ Models at a glance
      - ffnn
      - Mayo *et al.* 1990; matches `LAMMPS <https://lammps.org>`_
 
-Every model trains, evaluates and runs under ASE. SchNet, NequIP, MACE and
-Allegro also export to TorchScript for LAMMPS, and any checkpoint serves as
-an MDI engine (:ref:`deployment`). The add-ons LES, DFT-D3 and DFT-D4 wrap
+Every model trains, evaluates and runs under ASE. SchNet, NequIP, MACE,
+Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any checkpoint
+serves as an MDI engine (:ref:`deployment`). The add-ons LES, DFT-D3 and DFT-D4 wrap
 any of them (:ref:`models`).
 
 xnn is developed by `The Molecular Sciences Software Institute (MolSSI)

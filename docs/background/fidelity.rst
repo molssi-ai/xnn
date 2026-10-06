@@ -4,11 +4,13 @@
 Model Fidelity to Upstream Codes
 ********************************
 
-Each model reproduces its reference code, or the paper when the reference
-is a manuscript, and is verified block by block with transplanted weights
-(``tests/``, ``examples/fidelity_checks/``). The reference packages are used
-only as external oracles; at run time NequIP, MACE and Allegro need ``e3nn``
-and every other model is plain PyTorch. Agreement under identical weights:
+Each model reproduces its reference code and its paper results when available,
+and the code is verified block by block with transplanted weights from the
+original models when accessible (``tests/``, ``examples/fidelity_checks/``). The
+reference packages are used only as external oracles and references for
+validating our implementation; at run time NequIP, MACE and Allegro need
+``e3nn`` and every other model is plain PyTorch. Numerical agreement under
+identical weights involves:
 
 - **MACE** (`ACEsuit/mace <https://github.com/ACEsuit/mace>`_): about 1e-16,
   including ScaleShift, the Agnesi and Soft distance transforms and the
@@ -35,6 +37,11 @@ and every other model is plain PyTorch. Agreement under identical weights:
 - **SchNet** (Schütt *et al.* 2017): a clean-room build, verified against an
   independent implementation of the paper's equations to about 1e-15. No
   schnetpack code is used or compared against.
+- **SE(3) steerable CNN** (Weiler *et al.* 2018): a clean-room build from
+  the paper; the steerable kernel basis is formed from Clebsch-Gordan
+  coefficients and checked against a numerical solution of the paper's
+  constraint. The energy is exactly invariant under the rotations of the
+  grid onto itself and invariant to the bandlimit under every other one.
 - **BAMBOO** (`bytedance/bamboo <https://github.com/bytedance/bamboo>`_):
   about 1e-15 layer by layer. xnn returns the conservative force, equal to
   upstream's ``forces + qeq_force``.

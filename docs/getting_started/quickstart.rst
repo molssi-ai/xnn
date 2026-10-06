@@ -34,9 +34,9 @@ data hub (``load_dataset("rmd17", molecule="aspirin", cutoff=5.0)``); see
 
 2. Configure and train
 ======================
-One :class:`~xnn.common.config.schema.Config` object holds the model, data
-and optimizer settings, and one :class:`~xnn.common.train.trainer.Trainer`
-runs the loop:
+One :class:`~xnn.common.config.schema.Config` holds the model, data and
+optimizer settings; one :class:`~xnn.common.train.trainer.Trainer` runs the
+loop:
 
 .. code-block:: python
 
@@ -44,7 +44,7 @@ runs the loop:
    from xnn.common.train import Trainer
 
    cfg = Config()
-   cfg.model.name = "schnet"        # schnet|hdnnp|ani|physnet|nequip|mace|allegro|cace|bamboo|se3cnn|cnn3d
+   cfg.model.name = "schnet"          # any name from available_models()
    cfg.model.cutoff = 5.0
    cfg.model.n_features = 32
    cfg.model.n_interactions = 2
@@ -68,57 +68,35 @@ autograd:
 .. code-block:: python
 
    model = trainer.module.to("cpu").eval()
-   g = dataset[0]
-   out = model(g)                   # {"energy", "node_energy", "forces", ...}
-   print("energy:", round(float(out["energy"].detach()), 4),
-         "| forces shape:", tuple(out["forces"].shape))
+   out = model(dataset[0])
+   print(out["energy"], out["forces"].shape)
 
-.. note::
+Forces come from autograd, so do not wrap inference in ``torch.no_grad()``.
+Predict with the trained module: a fresh SchNet predicts only its energy
+shift, because its readout starts zero-initialized.
 
-   Forces are computed by autograd, so do **not** wrap inference in
-   ``torch.no_grad()``. Also predict with the *trained* module (as above): a
-   freshly built SchNet predicts exactly its energy shift, because its
-   readout head starts zero-initialized (the DTNN convention).
-
-Run end to end, the script prints something like::
-
-   registered models: ['allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
-   training on cuda ...
-   epoch    0 | train loss 2.0641e+00 | val loss 9.3133e-01
-   epoch    1 | train loss 1.8768e+00 | val loss 8.7541e-01
-   epoch    2 | train loss 1.7326e+00 | val loss 7.9425e-01
-   energy: -0.5449 | forces shape: (5, 3)
-
-The pieces also work on their own
-=================================
-Each layer of xnn is independently importable: data, featurizers, and
-models compose but do not require each other:
+The pieces work on their own
+============================
+Data, featurizers and models compose but do not require each other:
 
 .. code-block:: python
 
-   # Data on its own
-   from xnn.common.data import AtomicDataset, build_neighbor_list
-   ds = AtomicDataset(structures, cutoff=5.0)
-   graph = ds[0]
-
-   # Featurizers on their own (AtomicGraph -> model inputs)
-   from xnn.dnn.featurizers import AEV, RadialSymmetryFunctions
+   from xnn.dnn.featurizers import AEV
    from xnn.gnn.featurizers import SphericalHarmonicEdgeEmbedding
-   descriptor = AEV(species=[1, 6, 8])(graph)              # (N, D) invariant AEV
-   edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)  # equivariant edges
+   from xnn.common.models import build_model, ForceStressOutput
 
-   # Models on their own
-   from xnn.common.models import build_model, ForceStressOutput, available_models
+   graph = dataset[0]
+   descriptor = AEV(species=[1, 6, 8])(graph)               # (N, D) invariant
+   edges = SphericalHarmonicEdgeEmbedding(l_max=2)(graph)   # equivariant edges
    model = ForceStressOutput(build_model(cfg.model))
 
 From the command line
 =====================
-The same run from a YAML config:
 
 .. code-block:: bash
 
    xnn train --config configs/train.yaml --set optim.epochs=50
-   xnn export --ckpt runs/exp/best.pt --to lammps
+   xnn export --ckpt runs/exp/best.pt --out deployed.pt
 
 Next steps
 ==========

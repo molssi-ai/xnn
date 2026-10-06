@@ -25,8 +25,8 @@ xnn is organized by model family, with everything shared in ``common``:
        models/        schnet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
        fast/          cuEquivariance fast paths
      cnn/
-       featurizers/   voxel grid of the atomic environment
-       models/        3D steerable CNN, conventional 3D CNN
+       featurizers/   voxel grids of the atomic environment
+       models/        steerable (SE(3) CNN), cnn3d
      dnn/
        featurizers/   symmetry functions, AEV
        models/        hdnnp, ani, physnet
