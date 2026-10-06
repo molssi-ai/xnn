@@ -4,67 +4,73 @@
 The Command Line
 ****************
 
-Installing xnn provides the ``xnn`` command (entry point
-``xnn.common.cli:main``) with three subcommands. Reading structure files
-requires the ``ase`` extra.
+Installing xnn provides the ``xnn`` command with five subcommands. Reading
+structure files needs the ``ase`` extra. Every ``--ckpt`` accepts a trainer
+checkpoint, a portable model directory, a hub name, a URL or a Zenodo DOI.
 
 xnn train
-==========
-Train a model from a config file:
+=========
 
 .. code-block:: bash
 
    xnn train --config configs/train.yaml
    xnn train --config configs/train.yaml --set optim.epochs=50 model.cutoff=6.0
+   torchrun --nproc-per-node 2 -m xnn train --config configs/train.yaml   # data parallel
 
-- ``--config``: a YAML config (see :ref:`configuration`)
-- ``--set KEY=VALUE``: dotted-key overrides, repeatable
-
-Structures are read from ``data.train_path`` / ``data.val_path`` /
-``data.test_path`` with ``ase.io.read`` (any ASE-readable format: extxyz,
-VASP, ...); when no ``val_path`` (``test_path``) is given,
-``data.val_fraction`` (``data.test_fraction``) of the training set is held
-out instead. The optional test set is evaluated once after training.
-Checkpoints (``best.pt``, ``last.pt``) go to ``output_dir``.
-
-The same command runs data-parallel on several GPUs or nodes when started
-through a distributed launcher (``torchrun --nproc-per-node 2 -m xnn train
---config configs/train.yaml``) with no config changes; see
-:ref:`training`.
+Reads ``data.train_path`` / ``val_path`` / ``test_path`` (and
+``replay_path`` for multi-head fine-tuning) with ASE, trains, and writes
+``best.pt`` and ``last.pt`` to ``output_dir``. ``--set KEY=VALUE`` overrides
+any config key. See :ref:`howto-train-a-model`.
 
 xnn benchmark
-==============
-Score several **pre-trained** models on one dataset and write a results table:
+=============
 
 .. code-block:: bash
 
    xnn benchmark --config configs/benchmark.yaml
    xnn benchmark --config configs/benchmark.yaml --set "metrics={'energy': ['mae']}"
 
-- ``--config``: a YAML benchmark config (see :ref:`howto-benchmark`)
-- ``--set KEY=VALUE``: dotted-key overrides applied to the config, repeatable
-
-Each model listed in ``models`` is built from its architecture, loaded from its
-``checkpoint`` (benchmarking does not train; produce checkpoints with
-``xnn train`` first), and scored with the configured ``metrics`` -- a mapping
-from each target (energy / forces / stress) to the error metrics (MAE / MSE /
-RMSE or custom) reported for it. The comparison table is printed and written to
-``output.dir`` in every configured format (CSV / JSON / Markdown). See
-:ref:`howto-benchmark` for the full config.
+Scores pre-trained checkpoints on one dataset and writes the results table in
+every configured format. See :ref:`howto-benchmark`.
 
 xnn export
-===========
-Export a trained checkpoint for deployment:
+==========
 
 .. code-block:: bash
 
-   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to lammps
-   xnn export --config configs/train.yaml --ckpt runs/exp/best.pt --to torchscript
+   xnn export --ckpt runs/exp/best.pt --out deployed.pt
+   xnn export --ckpt mace-off23-small --out mace_off.pt
 
-- ``--ckpt``: a checkpoint written by ``xnn train``
-- ``--to``: ``lammps`` (TorchScript wrapped in the LAMMPS tensor ABI) or
-  ``torchscript`` (plain scripted model)
-- ``--total-charge`` / ``--spin-multiplicity``: the charge state baked into
-  the artifact (D4 EEQ charges, the charge-predicting AIMNet2 models)
+Writes a self-contained TorchScript file with the whole-system entry point
+``forward`` and the pair-style ``forward_lammps``. Options: ``--config`` for
+a checkpoint without an embedded config, ``--head`` for a multi-head
+checkpoint, ``--total-charge`` and ``--spin-multiplicity`` for the charge
+state, ``--no-dispersion`` to skip a recorded subtracted dispersion. See
+:ref:`howto-lammps`.
 
-See :ref:`deployment` for what to do with the exported file.
+xnn mdi
+=======
+
+.. code-block:: bash
+
+   xnn mdi --ckpt runs/exp/best.pt -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
+
+Serves a checkpoint as a `MolSSI Driver Interface
+<https://github.com/MolSSI-MDI/MDI_Library>`_ engine (``mdi`` extra) for
+LAMMPS ``fix mdi/qm`` or any MDI driver. Options: ``--device``, ``--dtype``
+(default: the checkpoint's), ``--dispersion d3|d4|"{...}"`` to add a term
+to a plain checkpoint, ``--no-dispersion``, ``--head``, ``--total-charge``,
+``--eeq-reuse`` (carry the D4 charge solve between MD steps) and ``--fast
+auto|on|off``. See :ref:`deployment`.
+
+xnn models
+==========
+
+.. code-block:: bash
+
+   xnn models list --cached                 # registered and cached models
+   xnn models info mace-mh-0                # the model card
+   xnn models pull mace-off23-small         # download and convert into the cache
+   xnn models pack runs/exp/best.pt my-model --license MIT --archive
+
+See :ref:`howto-pretrained-models`.

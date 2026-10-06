@@ -6,243 +6,131 @@ Data Pipeline
 
 AtomicGraph: the one data object
 ================================
-Every xnn model consumes an
-:class:`~xnn.common.data.atomic_data.AtomicGraph`, a dataclass holding one
-structure or a batch of structures:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 22 18 60
-
-   * - Field
-     - Shape
-     - Meaning
-   * - ``pos``
-     - ``(N, 3)``
-     - atomic positions
-   * - ``atomic_numbers``
-     - ``(N,)``
-     - element of each atom
-   * - ``edge_index``
-     - ``(2, E)``
-     - neighbor pairs ``[src, dst]`` within the cutoff
-   * - ``cell_shifts``
-     - ``(E, 3)``
-     - integer periodic-image shift of each edge
-   * - ``batch``
-     - ``(N,)``
-     - which structure each atom belongs to
-   * - ``n_atoms``
-     - ``(B,)``
-     - atoms per structure
-   * - ``cell``
-     - ``(B, 3, 3)``
-     - lattice vectors (optional; periodic systems)
-   * - ``pbc``
-     - ``(B, 3)``
-     - periodic flags (optional)
-   * - ``energy`` / ``forces`` / ``stress``
-     - ``(B,)`` / ``(N, 3)`` / ``(B, 3, 3)``
-     - training targets (optional)
-
-Useful members: ``num_graphs``, ``num_nodes``, ``num_edges``, ``.to(device)``,
-and :meth:`~xnn.common.data.atomic_data.AtomicGraph.edge_vectors`, which
-computes ``pos[dst] - pos[src] + cell_shift @ cell``. It does so
-differentiably, so forces and stress can be obtained by autograd.
-
-Neighbor lists
-==============
-:func:`~xnn.common.data.neighborlist.build_neighbor_list` builds the edges:
+Every model consumes an :class:`~xnn.common.data.atomic_data.AtomicGraph`,
+a dataclass holding one structure or a batch:
 
 .. code-block:: python
 
-   from xnn.common.data import build_neighbor_list
+   graph.pos              # (N, 3) positions
+   graph.atomic_numbers   # (N,)
+   graph.edge_index       # (2, E) neighbor pairs [src, dst] within the cutoff
+   graph.cell_shifts      # (E, 3) integer periodic image shift per edge
+   graph.batch            # (N,)   structure index per atom
+   graph.n_atoms          # (B,)
+   graph.cell, graph.pbc  # (B, 3, 3), (B, 3); None for molecules
+   graph.energy, graph.forces, graph.stress        # targets, optional
+   graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
+   graph.weight, graph.head                        # (B,) loss weight and readout head, optional
 
-   edge_index, cell_shifts = build_neighbor_list(pos, cutoff=5.0)               # molecular
-   edge_index, cell_shifts = build_neighbor_list(pos, 5.0, cell=cell, pbc=pbc)  # periodic
+:meth:`~xnn.common.data.atomic_data.AtomicGraph.edge_vectors` computes
+``pos[dst] - pos[src] + cell_shift @ cell`` differentiably, which is where
+periodicity lives: models never see the difference between a molecule and a
+crystal, and forces and stress follow by autograd.
 
-It is PBC-aware and validated against ASE's neighbor list
-(``tests/test_neighborlist.py``). The reference implementation is correct but
-brute-force; for very large periodic systems you can swap in a cell-list or
-``matscipy`` builder; the ``edge_index`` / ``cell_shifts`` interface is all
-a model sees.
+Structure dictionaries
+======================
+.. _structure-dicts:
+
+The input format is a plain dictionary per structure:
+
+.. code-block:: python
+
+   {
+       "pos": ...,                # (N, 3), required
+       "atomic_numbers": ...,     # (N,),   required
+       "cell": ..., "pbc": ...,   # (3, 3), (3,): periodic systems
+       "energy": ...,             # scalar target
+       "forces": ...,             # (N, 3) target
+       "stress": ...,             # (3, 3) target
+       "total_charge": 0.0,       # or "charge"; optional
+       "spin_multiplicity": 1,    # optional
+       "weight": 1.0,             # per-structure loss weight, optional
+   }
 
 Datasets and batching
 =====================
-:class:`~xnn.common.data.dataset.AtomicDataset` is a
-``torch.utils.data.Dataset`` over a list of structure dictionaries; it
-converts each to an ``AtomicGraph`` (via
-:func:`~xnn.common.data.dataset.structure_to_graph`) and caches the graphs:
+:class:`~xnn.common.data.dataset.AtomicDataset` converts each dictionary to
+a graph at a cutoff and caches it. :func:`~xnn.common.data.dataset.collate`
+concatenates graphs into one batched graph, which the trainer uses as its
+``collate_fn``:
 
 .. code-block:: python
 
    from xnn.common.data import AtomicDataset, collate
 
    ds = AtomicDataset(structures, cutoff=5.0)
-   graph = ds[0]
+   batch = collate([ds[0], ds[1], ds[2]])     # one AtomicGraph holding 3 structures
 
-   batch = collate([ds[0], ds[1], ds[2]])   # one AtomicGraph holding 3 structures
+A batch may mix molecules and cells, and structures with and without force
+or stress labels: the missing labels are masked out of the loss. Energy
+labels are all or nothing.
 
-:func:`~xnn.common.data.dataset.collate` batches graphs by concatenation,
-offsetting ``edge_index`` (the standard disconnected-graph trick), so a
-batch is itself just an ``AtomicGraph``. The
-:class:`~xnn.common.train.trainer.Trainer` uses it as the ``collate_fn`` of
-its data loaders automatically.
-
-Loading ASE-native files (extxyz, CIF, VASP, ...)
-=================================================
-Any file format ASE can read loads in one line (requires the ``ase`` extra):
+Files
+=====
+Any format ASE can read loads in one line (``ase`` extra). Energies, forces
+and stress are picked up from the frames; stress is converted from Voigt to
+a full matrix:
 
 .. code-block:: python
-
-   from xnn.common.data import AtomicDataset
 
    ds = AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
-   ds = AtomicDataset.from_file("crystal.cif", cutoff=5.0)
-
-Energy, forces and stress targets are picked up automatically when the file
-carries them (from the frame's calculator, with ``atoms.info`` /
-``atoms.arrays`` as a fallback); stress is converted from Voigt to a full
-``(3, 3)`` matrix. Datasets that store targets under other names (e.g. the
-MACE convention ``REF_energy`` / ``REF_forces`` / ``REF_stress``) pass the
-key names explicitly (the CLI equivalents live in ``data.energy_key`` etc.):
-
-.. code-block:: python
-
    ds = AtomicDataset.from_file("dft.extxyz", cutoff=5.0,
-                                energy_key="REF_energy",
-                                forces_key="REF_forces",
-                                stress_key="REF_stress")
+                                energy_key="REF_energy", forces_key="REF_forces")   # other key names
+   ds = AtomicDataset.from_atoms(list_of_atoms, cutoff=5.0)
 
-``Atoms`` objects already in memory go through
-:meth:`~xnn.common.data.dataset.AtomicDataset.from_atoms`:
+Positions need not be wrapped into the cell. The converters
+:func:`~xnn.common.data.ase_io.load_structures` and
+:func:`~xnn.common.data.ase_io.atoms_to_structure` are public as well.
+
+Neighbor lists
+==============
+:func:`~xnn.common.data.neighborlist.build_neighbor_list` builds the edges
+and image shifts for molecular and periodic structures alike:
 
 .. code-block:: python
 
-   from ase.io import read
-   ds = AtomicDataset.from_atoms(read("relaxed.cif"), cutoff=5.0)
+   from xnn.common.data import build_neighbor_list
 
-The underlying converters are public too:
-:func:`~xnn.common.data.ase_io.load_structures` (file → list of structure
-dicts) and :func:`~xnn.common.data.ase_io.atoms_to_structure` (one ``Atoms``
-→ one dict). The :ref:`command line <cli>` reads ``data.train_path`` /
-``data.val_path`` through the same path. Positions do *not* need to be
-wrapped into the cell first: the neighbor-list builder handles unwrapped
-(e.g. MD trajectory) coordinates.
+   edge_index, cell_shifts = build_neighbor_list(pos, 5.0, cell=cell, pbc=pbc)
 
-Downloading upstream datasets: ``load_dataset``
-===============================================
-The dataset *hub* downloads and preprocesses standard benchmark datasets in one
-``load_dataset()`` call, with no manual downloading,
-unpacking, or unit conversion:
+The built-in implementation is brute force and quadratic in the atom count.
+With the ``vesin`` extra installed its cell list is used automatically, with
+the same edges and conventions; on 5000 atoms at a 6 Å cutoff that is a
+thousandfold faster. Geometry is kept in float64 whatever the model dtype.
+
+The data hub
+============
+Standard benchmark datasets download, convert and cache in one call:
 
 .. code-block:: python
 
    from xnn.common.data import load_dataset, list_datasets
 
-   list_datasets()                          # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'rmd17']
+   list_datasets()
+   splits = load_dataset("rmd17", molecule="aspirin")                      # {"train": [...], "test": [...]}
+   train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)   # AtomicDataset
 
-   # all splits, as lists of structure dictionaries
-   splits = load_dataset("rmd17", molecule="aspirin")     # {"train": [...], "test": [...]}
+- ``rmd17``: revised MD17, ten molecules with PBE energies and forces.
+  Options ``molecule``, ``fold`` (1 to 5), ``split``, ``units`` (``eV`` or
+  ``kcal/mol``), ``n_train`` / ``n_test``.
+- ``ani1``: the ANI-1 set, 20 M conformations of H/C/N/O molecules in one
+  4.8 GB archive. Options ``heavy_atoms`` (1 to 8), ``max_molecules``,
+  ``max_conformations``, ``split``, ``units``.
+- ``ani1x``: the ANI-1x set, 5 M conformations with energies and forces
+  (5.6 GB). Options ``level`` (``wb97x_dz``, ``wb97x_tz``, ``ccsd(t)_cbs``),
+  ``forces``, and the caps and splits of ``ani1``.
+- ``ani1ccx``: the coupled-cluster subset of ANI-1x (energies only), from
+  the same file.
+- ``ani2x``: the seven-element ANI-2x set (H/C/N/O/S/F/Cl) with energies
+  and forces (3.7 GB). Options ``n_atoms``, ``forces``, ``max_groups``,
+  ``max_conformations``, ``split``, ``units``.
+- ``argon_md``: periodic argon with energies, forces and stress, bundled
+  with the repository; used by the argon example notebooks.
+- ``lode_dimers``: the LODE non-bonded sets (biomolecular dimers, monomers,
+  point charges, xenon). Options ``subset``, ``label``, ``return_info``; the
+  bundled ``bio_scan`` subset loads offline.
 
-   # one split, wrapped as a ready-to-train AtomicDataset
-   train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)
-
-:func:`~xnn.common.data.hub.base.load_dataset` returns lists of
-:ref:`structure dictionaries <structure-dicts>`: a mapping of splits when
-``split`` is omitted, a single list otherwise. Pass ``cutoff=`` to get
-:class:`~xnn.common.data.dataset.AtomicDataset` objects instead, ready for a
-``DataLoader``. Downloaded files are cached and MD5-verified under
-``datasets/<name>/`` in the repository by default (override with ``cache_dir=``
-or the ``XNN_DATASETS`` / ``XNN_CACHE`` environment variable), and a tqdm
-progress bar tracks both downloading and preprocessing.
-:func:`~xnn.common.data.hub.base.list_datasets` names what is registered:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 16 22 62
-
-   * - Name
-     - Key options
-     - Contents
-   * - ``rmd17``
-     - ``molecule``, ``fold`` (1–5), ``split`` (``train`` / ``test`` /
-       ``all``), ``units`` (``eV`` / ``kcal/mol``), ``n_train`` / ``n_test``
-     - Revised MD17: ten small molecules with PBE/def2-SVP energies and forces
-       and five official 1000-structure train/test splits (converted to eV by
-       default).
-   * - ``ani1``
-     - ``heavy_atoms`` (1–8), ``max_molecules``, ``max_conformations``,
-       ``split`` (``train`` / ``val`` / ``test``), ``units`` (``eV`` /
-       ``hartree``)
-     - The ANI-1 training set (Smith *et al.* 2017): ~20 M off-equilibrium
-       conformations and wB97X energies for H/C/N/O organic molecules from
-       GDB-11 (pyanitools HDF5). One 4.8 GB archive is downloaded once; select
-       heavy-atom subsets and cap the amount materialised.
-   * - ``ani1x``
-     - ``level`` (``wb97x_dz`` / ``wb97x_tz`` / ``ccsd(t)_cbs``), ``forces``,
-       ``max_molecules``, ``max_conformations``, ``split`` (``train`` / ``val``
-       / ``test``), ``units`` (``eV`` / ``hartree``)
-     - The ANI-1x training set (Smith *et al.* 2018/2020): ~5 M
-       active-learning-selected conformations with wB97X **energies and forces**
-       (and CCSD(T)/CBS energies) for H/C/N/O molecules. The data the
-       :meth:`~xnn.dnn.models.ani.ANI.ani1x` preset was trained on. One 5.6 GB
-       HDF5 file is downloaded once; per-conformation NaN entries are dropped.
-   * - ``ani1ccx``
-     - ``max_molecules``, ``max_conformations``, ``split`` (``train`` / ``val``
-       / ``test``), ``units`` (``eV`` / ``hartree``)
-     - The ANI-1ccx training set (Smith *et al.* 2019/2020): ~500 k
-       conformations with **CCSD(T)*/CBS coupled-cluster energies** (no forces),
-       the intelligently selected ~10 % subset of ANI-1x that the
-       :meth:`~xnn.dnn.models.ani.ANI.ani1ccx` preset was transfer-learned on.
-       Shares the ``ani1x`` release file and cache; nothing extra to download.
-   * - ``ani2x``
-     - ``n_atoms`` (int or list), ``forces``, ``max_groups``,
-       ``max_conformations``, ``split`` (``train`` / ``val`` / ``test``),
-       ``units`` (``eV`` / ``hartree``)
-     - The ANI-2x training set (Devereux *et al.* 2020): ~9.6 M conformations
-       with wB97X/6-31G* **energies and forces** for the seven elements
-       H/C/N/O/S/F/Cl. The data the
-       :meth:`~xnn.dnn.models.ani.ANI.ani2x` preset was trained on. One 3.7 GB
-       pyanitools HDF5 file is downloaded once (Zenodo record 10108942), with
-       top-level groups keyed by atom count; ``n_atoms`` selects those groups.
-   * - ``argon_md``
-     - ``split`` (``train`` / ``test`` / ``all``)
-     - Periodic argon configurations with reference energies, forces and stress
-       (bundled with the repository, MACE convention). Used by the
-       ``*_argon_*`` example notebooks; no download.
-   * - ``lode_dimers``
-     - ``subset`` (``bio`` / ``bio_scan`` / ``monomers`` /
-       ``point_charges_coulomb`` / ``point_charges_dispersion`` / ``xenon``),
-       ``label`` (``CC`` / ``CP`` / ``PP`` / …), ``return_info``
-     - LODE non-bonded interactions: biomolecular sidechain dimers (energies and
-       forces, tagged by fragment polarity) plus monomers, point-charge toy
-       systems, and Xe clusters. ``return_info=True`` attaches per-frame
-       metadata (labels, distances, monomer energies), enough to build
-       binding-energy curves. The bundled ``bio_scan`` subset (a curated
-       charged/polar dimer distance scan, no download) drives the long-range
-       example notebooks.
-
-A runnable, end-to-end walkthrough lives in
-``examples/data/load_dataset_tutorial.ipynb``. To add your own dataset, register
-a :class:`~xnn.common.data.hub.base.DatasetBuilder`; see
-:ref:`developer-guide-extending`.
-
-.. _structure-dicts:
-
-Structure dictionaries
-======================
-Underneath, the input format is a plain dictionary per structure; use it
-directly for data that does not come from ASE:
-
-.. code-block:: python
-
-   {
-       "pos": ...,               # (N, 3), required
-       "atomic_numbers": ...,    # (N,),   required
-       "cell": ...,              # (3, 3), optional
-       "pbc": ...,               # (3,),   optional
-       "energy": ...,            # scalar, optional target
-       "forces": ...,            # (N, 3), optional target
-       "stress": ...,            # (3, 3), optional target
-   }
+Files are cached and MD5-verified under ``datasets/<name>/`` (``cache_dir``,
+``XNN_DATASETS`` or ``XNN_CACHE`` change that). The ANI sets need the ``hub``
+extra. :ref:`howto-load-datasets` has examples per dataset;
+:ref:`developer-guide-extending` shows how to register a new one.

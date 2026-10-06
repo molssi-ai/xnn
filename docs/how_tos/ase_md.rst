@@ -4,38 +4,33 @@
 Run Molecular Dynamics with ASE
 *********************************
 
-Any trained xnn model can drive `ASE <https://wiki.fysik.dtu.dk/ase/>`_ through
-:class:`~xnn.common.deploy.ase_calculator.XNNCalculator` (requires the ``ase``
-extra installed).
+Any xnn model drives `ASE <https://wiki.fysik.dtu.dk/ase/>`_ through
+:class:`~xnn.common.deploy.ase_calculator.XNNCalculator` (``ase`` extra).
 
 Attach the calculator
 =====================
 
 .. code-block:: python
 
-   import torch
    from ase.io import read
    from xnn.common.deploy import XNNCalculator
-   from xnn.common.models import build_model
-
-   ckpt = torch.load("runs/argon_mace/best.pt", weights_only=False)
-   model = build_model(ckpt["cfg"].model)
-   model.load_state_dict(ckpt["model"])
 
    atoms = read("liquid_argon.xyz")
-   atoms.calc = XNNCalculator(model, cutoff=ckpt["cfg"].model.cutoff)
+   atoms.calc = XNNCalculator.from_pretrained("runs/argon_mace/best.pt")   # or a hub name
 
-   print(atoms.get_potential_energy(), atoms.get_forces().shape)
+   print(atoms.get_potential_energy(), atoms.get_forces().shape, atoms.get_stress())
 
-The calculator handles molecular and periodic cells alike: it builds the
-same PBC-aware neighbor list used in training, so energies, forces, and
-stresses are consistent with the training setup.
+``from_pretrained`` takes any source the model hub accepts and the options
+of :func:`~xnn.common.models.hub.from_pretrained` (``device``, ``dtype``,
+``dispersion``, ``use_fast``). A model object you already hold goes in
+directly: ``XNNCalculator(model, cutoff=5.0)``. Molecular and periodic
+systems both work; the calculator builds the same neighbor list the trainer
+used.
 
-Run NPT dynamics
-================
-With the calculator attached, the model works in any ASE dynamics driver.
-For example, liquid-argon NPT (the workflow of the
-``*_argon_density_md.ipynb`` example notebooks):
+Run dynamics
+============
+With the calculator attached, every ASE driver works. Liquid-argon NPT, as in
+the ``*_argon_density_md`` example notebooks:
 
 .. code-block:: python
 
@@ -44,20 +39,16 @@ For example, liquid-argon NPT (the workflow of the
    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
    MaxwellBoltzmannDistribution(atoms, temperature_K=94.4)
-
-   dyn = NPT(
-       atoms,
-       timestep=2.0 * units.fs,
-       temperature_K=94.4,
-       externalstress=1.0 * units.bar,
-       ttime=25 * units.fs,
-       pfactor=(75 * units.fs) ** 2 * units.GPa,
-   )
+   dyn = NPT(atoms, timestep=2.0 * units.fs, temperature_K=94.4,
+             externalstress=1.0 * units.bar, ttime=25 * units.fs,
+             pfactor=(75 * units.fs) ** 2 * units.GPa)
    dyn.run(10_000)
 
-.. tip::
-
-   The notebooks ``examples/gnn/{mace,nequip,allegro}/*_argon_density_md.ipynb``
-   run this exact pipeline with both xnn and the corresponding reference
-   implementation and compare the resulting mass densities; with identical
-   weights the difference is essentially zero.
+Good to know
+============
+- A model with a D4 term runs faster in MD with ``eeq_reuse=True``, which
+  carries the charge solve from one step to the next.
+- Classical force fields need their customary timesteps: about 0.1 fs for
+  ReaxFF, 0.5 to 1 fs for OPLS and DREIDING with explicit hydrogens.
+- Models that predict charges (AIMNet2, PhysNet, BAMBOO, ReaxFF, OPLS,
+  DREIDING) expose them as ``atoms.calc.results["charges"]``.

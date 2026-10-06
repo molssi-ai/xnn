@@ -4,17 +4,16 @@
 Examples
 ********
 
-Every example notebook in the repository's `examples/
+Every notebook of the repository's `examples/
 <https://github.com/molssi-ai/xnn/tree/main/examples>`_ directory, rendered
-with its executed outputs (training curves, parity plots, MD observables, and
-the fidelity tables) so you can read them without running anything. To run
-one yourself, see :ref:`howto-examples` for the required environments and
-kernels. The pages listed below are the committed, fully executed versions;
-entries marked *coming soon* are being reviewed and become links as they are
-published.
+with its executed outputs. To run one yourself, see :ref:`howto-examples`
+for the environments. Entries marked *coming soon* are being reviewed and
+become links as they are published.
 
 Data
 ====
+
+The data hub: ``load_dataset()``, splits, units, caching.
 
 .. example-toctree::
    :caption: Data
@@ -24,9 +23,8 @@ Data
 Models
 ======
 
-The model hub: MACE foundation models, xnn-trained models and Zenodo uploads
-under one ``from_pretrained()`` call, the cache layout, portability, and
-sharing your own models.
+The model hub: foundation models, xnn-trained models and Zenodo uploads
+under one ``from_pretrained()`` call, the cache layout and sharing your own.
 
 .. example-toctree::
    :caption: Models
@@ -36,9 +34,8 @@ sharing your own models.
 ANI (dnn)
 =========
 
-Training ANI from scratch on rMD17, then the four published training sets
-(ANI-1, ANI-1x, the coupled-cluster ANI-1ccx with its transfer-learning recipe,
-and the seven-element ANI-2x set), each paired with its matching model preset.
+ANI from scratch on rMD17, then the four published ANI datasets, each paired
+with its model preset.
 
 .. example-toctree::
    :caption: ANI (dnn)
@@ -52,6 +49,8 @@ and the seven-element ANI-2x set), each paired with its matching model preset.
 PhysNet (dnn)
 =============
 
+Training and MD against the original TensorFlow PhysNet.
+
 .. example-toctree::
    :caption: PhysNet (dnn)
 
@@ -61,10 +60,8 @@ PhysNet (dnn)
 SchNet (cnn)
 ============
 
-Training the paper-architecture SchNet on its own MD17-style benchmark
-(rMD17 ethanol, energies + forces through the hub), then driving
-thermostat-free NVE dynamics with the trained model to demonstrate the
-paper's energy-conservation-by-construction claim.
+The paper architecture trained on rMD17 ethanol, then thermostat-free NVE
+dynamics to show energy conservation by construction.
 
 .. example-toctree::
    :caption: SchNet (cnn)
@@ -75,26 +72,12 @@ paper's energy-conservation-by-construction claim.
 NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 ==========================================
 
-The shared Argon train/evaluate/deploy series (one pair of notebooks per
-model), plus a block-by-block walkthrough of the MACE architecture, and
-the MACE and AIMNet2 **foundation models** in action:
-``mace_foundation_molecules.ipynb`` loads MACE-OFF23 with one
-``MACE.from_foundation()`` call and runs the butane torsion profile
-against OPLS-AA, the water dimer against CCSD(T)/CBS, and a
-``Trainer`` fine-tune to a new DFT reference (rMD17 malonaldehyde);
-``mace_finetuning_strategies.ipynb`` compares the fine-tuning strategies
-(naive, readout-only, LoRA, multi-head pseudolabel replay) of the same
-foundation model on 50 rMD17 ethanol structures, with the model-aware
-reference-energy reestimation and the drift away from the foundation model
-on other molecules;
-``mace_foundation_materials.ipynb`` screens equations of state (Si, Al,
-NaCl) across the MACE-MP generations (MP-0, MPA-0, OMAT-0);
-``aimnet2_foundation_molecules.ipynb`` loads the published AIMNet2 models
-with ``AIMNet2.from_foundation()`` and follows the paper's demonstrations:
-the net charge as an input, a charged hydrogen bond (chloride-water), a
-torsion profile with the four-member ensemble, geometry optimization,
-dipoles from the predicted charges, the open-shell and palladium families,
-and a periodic CO2 box with the damped shifted-force Coulomb sum.
+The argon train, evaluate and MD series, one pair of notebooks per model
+against its reference code; a block-by-block walkthrough of the MACE
+architecture; the MACE-OFF23 and MACE-MP foundation models on organic
+chemistry and materials; the fine-tuning strategies (naive, readout-only,
+LoRA, multi-head replay) side by side; and the published AIMNet2 models on
+neutral, charged and open-shell molecules.
 
 .. example-toctree::
    :caption: NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
@@ -124,22 +107,9 @@ Long-range: Latent Ewald Summation (gnn)
 Dispersion: DFT-D4 (common)
 ===========================
 
-The charge-dependent DFT-D4 dispersion correction as a model-agnostic add-on.
-``d4_paper_examples.ipynb`` reproduces examples of the D4 paper (Caldeweyher
-*et al.* 2019): the charge-scaling function of fig 2, the charge- and
-CN-dependence of the carbon and hydrogen polarizabilities of fig 5, the
-atom-in-molecule polarizabilities and the molecular C6 coefficient of
-(3Z)-hexen-1-yne (fig 3b), the molecular C6 coefficients of the DOSD
-benchmark against the experimental dipole-oscillator-strength values (table
-III), and the D4 vs D3(BJ) dispersion contributions to the S22 interaction
-energies. ``d4_benchmark.ipynb`` benchmarks the xnn implementation against
-the reference ``dftd4`` code (accuracy on S22 and crystals; timing on CPU and
-GPU versus system size, with the upstream and MD-friendly cutoffs) and shows
-D4 correcting a short-range MLIP through every deploy channel. ``d4_large_scale_ethanol.ipynb`` pushes the large-system regime to the
-memory limit of one GPU: a MACE trained on rMD17 ethanol, corrected with D4,
-evaluated on liquid-ethanol boxes packed from rMD17 conformers up to about
-20 000 atoms, where the MACE itself fills an 80 GB GPU (time and memory scaling, dense vs. large regime, the cost of
-a training step, the EEQ solvers, and NVE dynamics through the ASE calculator).
+Reproductions of the D4 paper's examples, a benchmark against the reference
+``dftd4`` with deployment through every channel, and the large-system regime
+pushed to the memory limit of one GPU.
 
 .. example-toctree::
    :caption: Dispersion: DFT-D4 (common)
@@ -151,16 +121,8 @@ a training step, the EEQ solvers, and NVE dynamics through the ASE calculator).
 Dispersion: DFT-D3 (common)
 ===========================
 
-The geometry-dependent DFT-D3 correction (Grimme *et al.* 2010; BJ damping
-Grimme, Ehrlich & Goerigk 2011) as the same model-agnostic add-on.
-``d3_paper_examples.ipynb`` reproduces examples of the two papers: the
-rare-gas and carbon C6 coefficients of table II and the rare-gas C9 of table
-III (2010), the CN-dependent C6 curves of fig 5, the two-carbon dispersion
-energy of fig 1, the zero- vs BJ-damped argon dimer of fig 1 of the 2011
-paper, the three-body share of the graphene bilayer binding (table VII), and
-the DOSD molecular C6 comparison of fig 6. ``d3_benchmark.ipynb`` benchmarks
-xnn against the reference ``s-dftd3`` (S22, crystals, all damping functions;
-timing on CPU and GPU) and deploys a D3-corrected MLIP through every channel.
+Reproductions of the two Grimme papers and a benchmark against
+``simple-dftd3`` for every damping function.
 
 .. example-toctree::
    :caption: Dispersion: DFT-D3 (common)
@@ -180,13 +142,9 @@ BAMBOO (hybrid)
 ReaxFF / ReaxFF-nn (ffnn)
 =========================
 
-Training a reactive force field by gradient descent: a generic seed library
-is fit to rMD17 malonaldehyde energies and forces through the standard
-pipeline, then exported as a portable ``ffield.json``. The companion
-notebook runs ASE molecular dynamics with the trained library and analyses
-the reactive descriptors -- per-pair bond orders, geometry-dependent EEM
-charges, and a smooth bond-dissociation scan -- including an honest look at
-what equilibrium-only training data cannot constrain.
+A reactive force field fit by gradient descent to rMD17 malonaldehyde, then
+MD with the trained library: bond orders, EEM charges and a dissociation
+scan.
 
 .. example-toctree::
    :caption: ReaxFF / ReaxFF-nn (ffnn)
@@ -197,16 +155,8 @@ what equilibrium-only training data cannot constrain.
 OPLS / L-OPLS (ffnn)
 ====================
 
-The fixed-topology classical force field, validated against its own
-literature: ``opls_conformational_energetics.ipynb`` reproduces the relaxed
-torsional energies of Table 1 of Jorgensen *et al.* (1996) with the paper's
-dihedral-driver protocol (ethane, propane, butane, methanol, ethanol), and
-``opls_lopls_torsion_refit.ipynb`` first compares the hexane torsion
-profile of OPLS-AA and L-OPLS (Siu *et al.* 2012) and then *re-derives* the
-L-OPLS ``CT-CT-CT-CT`` torsion by gradient descent — mark ``dihedral_v``
-trainable, fit conformer energies, recover the published Fourier
-coefficients to machine precision — before exporting the trained library
-and checking NVE energy conservation.
+Table 1 of the 1996 paper from relaxed dihedral scans, then the L-OPLS
+hexane torsion re-derived by gradient descent to the published coefficients.
 
 .. example-toctree::
    :caption: OPLS / L-OPLS (ffnn)
@@ -217,16 +167,8 @@ and checking NVE energy conservation.
 DREIDING (ffnn)
 ===============
 
-The rule-generated generic force field, tested against the paper that
-defined it: ``dreiding_conformational_energetics.ipynb`` reproduces the
-single-bond rotational barriers of Table XI (fourteen molecules, mean
-difference from the paper's own calculated column ~0.01 kcal/mol) and the
-butane and cyclohexane entries of Table XII, all from relaxed scans, and
-shows where DREIDING's deliberate simplifications part company with
-experiment. ``dreiding_refit_aromatics.ipynb`` then treats the generators
-as trainable parameters: refit them on benzene alone against rMD17 PBE
-forces and ask what that does to naphthalene and toluene, neither of which
-was trained on — a direct test of the transferability DREIDING claims.
+Tables XI and XII of the 1990 paper from relaxed scans, then the generators
+refit on benzene and tested for transfer to naphthalene and toluene.
 
 .. example-toctree::
    :caption: DREIDING (ffnn)
@@ -237,14 +179,8 @@ was trained on — a direct test of the transferability DREIDING claims.
 Deployment: MDI (common)
 ========================
 
-Serving a trained checkpoint as a `MolSSI Driver Interface
-<https://github.com/MolSSI-MDI/MDI_Library>`_ engine: train on the hub argon
-data, launch ``xnn mdi``, validate the wire protocol against direct
-evaluation, and drive NVE molecular dynamics from a minimal Python driver.
-The companion notebook then replaces the Python driver with **LAMMPS**
-(``fix mdi/qm``): same engine, production driver, with LAMMPS-side
-thermodynamics and a radial distribution function. The engine is model
-agnostic, so the same workflow serves any family's checkpoint.
+A checkpoint served as an MDI engine, driven first from a minimal Python
+driver and then from LAMMPS ``fix mdi/qm``.
 
 .. example-toctree::
    :caption: Deployment: MDI (common)
@@ -255,10 +191,8 @@ agnostic, so the same workflow serves any family's checkpoint.
 Fidelity checks
 ===============
 
-Block-by-block numerical verification of each xnn implementation against its
-upstream reference (see :ref:`fidelity` for the summary of what matches and to
-what precision). SchNet is the exception that proves the rule: a clean-room
-build verified against the manuscripts' equations instead of a reference code.
+Block-by-block verification of each implementation against its upstream
+reference (:ref:`fidelity`), ending with a weight transplant.
 
 .. example-toctree::
    :caption: Fidelity checks
@@ -282,10 +216,9 @@ build verified against the manuscripts' equations instead of a reference code.
 Parity checks
 =============
 
-The fast paths (fused GPU kernels behind ``use_fast``, see
-:ref:`howto-fast-paths`) against the reference implementations they replace,
-with the same weights: energies, forces, stress, charges and training
-gradients, and the time of each, on the systems the models are served on.
+The fast paths (:ref:`howto-fast-paths`) against the reference
+implementations they replace: energies, forces, stress, charges, training
+gradients and timings.
 
 .. example-toctree::
    :caption: Parity checks

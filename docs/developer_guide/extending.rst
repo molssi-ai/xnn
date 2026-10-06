@@ -4,34 +4,29 @@
 Extending xnn
 **************
 
-The guiding rules (see :ref:`design`): one canonical implementation per
-component, reuse the existing abstractions, and place code with the family
-that uses it, or in ``common`` when more than one family needs it.
+The rules (see :ref:`design`): one implementation per component, reuse the
+existing abstractions, and place code with the family that uses it, or in
+``common`` when more than one family needs it.
 
 Adding a model
 ==============
-1. **Pick the family package** (``gnn``, ``cnn``, or ``dnn``, or add a new
-   family) and add a module under ``src/xnn/<family>/models/``.
-
+1. **Pick the family** (``gnn``, ``cnn``, ``dnn``, ``ffnn``, ``hybrid``, or a
+   new one) and add a module under ``src/xnn/<family>/models/``.
 2. **Subclass the right base.**
    :class:`~xnn.common.models.base.InteratomicPotential` is the minimal
-   interface; the family bases give you more for free:
-   :class:`~xnn.gnn.models.base.GNNPotential` handles species bookkeeping
-   and per-element reference energies (CACE builds on it directly);
-   :class:`~xnn.gnn.models.base.EquivariantGNN` adds the spherical-harmonic
-   edge embedding on top (NequIP/MACE/Allegro);
-   :class:`~xnn.dnn.models.base.DescriptorPotential` composes a
+   interface. :class:`~xnn.gnn.models.base.GNNPotential` adds species
+   bookkeeping and per-element reference energies,
+   :class:`~xnn.gnn.models.base.EquivariantGNN` the spherical-harmonic edge
+   embedding, :class:`~xnn.dnn.models.base.DescriptorPotential` a
    featurizer with per-element MLPs.
-
-3. **Implement** ``forward(data)`` taking an
-   :class:`~xnn.common.data.atomic_data.AtomicGraph` and returning
-   ``{"node_energy": (N,), "energy": (B,)}``; use
-   ``self.aggregate_energy(node_energy, data)`` for the per-structure sum.
-   Do *not* compute forces or stress;
-   :class:`~xnn.common.models.outputs.ForceStressOutput` does that for
-   every model.
-
-4. **Register and configure.**
+3. **Implement** ``forward(data)``: take an
+   :class:`~xnn.common.data.atomic_data.AtomicGraph`, return
+   ``{"node_energy": (N,), "energy": (B,)}`` using
+   ``self.aggregate_energy(node_energy, data)``. Never compute forces or
+   stress; :class:`~xnn.common.models.outputs.ForceStressOutput` does that.
+   Expose the invariant per-atom features as ``"node_features"`` (with
+   ``node_feature_dim``) and the LES long-range term works on top of it.
+4. **Register.**
 
    .. code-block:: python
 
@@ -43,29 +38,21 @@ Adding a model
           def from_config(cls, cfg):          # cfg is a ModelConfig
               return cls(cutoff=cfg.cutoff, **cfg.extra)
 
-   Add a ``configs/model/mymodel.yaml`` template, and make sure the family
-   package imports your module so the registration runs on import.
+   Add a ``configs/model/mymodel.yaml`` template and import the module from
+   the family package so the registration runs.
+5. **Optionally make it exportable.** A scriptable
+   ``node_features_energy(atomic_numbers, edge_index, edge_vec, ...)`` core,
+   as in SchNet, is all :func:`~xnn.common.deploy.export_torchscript_potential`
+   needs.
 
-5. **(Optional) make it deployable.** Expose a scriptable
-   ``node_energy(atomic_numbers, edge_index, edge_vec)`` core: SchNet shows
-   the pattern; e3nn-based models need e3nn's JIT support for this. That is
-   all :func:`~xnn.common.deploy.lammps.export_to_lammps` needs.
-
-If your model should accept config keys from an upstream code, register a
-key-translation table with
-:func:`~xnn.common.config.translate.register_key_translation` rather than
-adding aliases in ``from_config``; translations live at the loader level.
+Upstream config spellings go into a key-translation table
+(:func:`~xnn.common.config.translate.register_key_translation`), never into
+``from_config`` aliases.
 
 Adding a dataset
 ================
-The dataset hub (:func:`~xnn.common.data.hub.base.load_dataset`) is extensible
-in the same register-by-name way as models. Subclass
-:class:`~xnn.common.data.hub.base.DatasetBuilder`, set its ``name``, and
-implement ``load`` to download (via
-:func:`~xnn.common.data.hub._download.download_file`, which caches and verifies
-by MD5) and return xnn :ref:`structure dictionaries <structure-dicts>`,
-``{split: [structure_dict, ...]}`` when ``split`` is ``None``, else a single
-list:
+Subclass :class:`~xnn.common.data.hub.base.DatasetBuilder` and return
+structure dictionaries, ``{split: [...]}`` when ``split`` is ``None``:
 
 .. code-block:: python
 
@@ -77,34 +64,35 @@ list:
 
        def load(self, *, split=None, cache_dir, **kwargs):
            # download_file(url, cache_dir / self.name / "raw" / fname, md5)
-           structures = [...]                       # list of structure dicts
            splits = {"train": structures}
            return splits if split is None else splits[split]
 
    register_dataset(MyDataset())
 
-Put the builder module under ``src/xnn/common/data/hub/`` and import it from
-``hub/__init__.py`` so the registration runs on import (as ``rmd17``,
-``ani1``, ``argon_md``, and ``lode_dimers`` do). ``load_dataset`` then handles
-the ``cutoff=`` wrapping into an
-:class:`~xnn.common.data.dataset.AtomicDataset` for you, so builders only
-produce structure dicts. Reuse :func:`~xnn.common.data.ase_io.atoms_to_structure`
-for any ASE-readable source, and show progress with ``tqdm`` (respect a
-``quiet`` flag). A builder need not download at all: ``argon_md`` (and the
-``lode_dimers`` ``bio_scan`` subset) read files bundled under ``datasets/`` in
-the repository, which is handy for small datasets that travel with the code.
+:func:`~xnn.common.data.hub._download.download_file` caches and verifies by
+MD5; :func:`~xnn.common.data.ase_io.atoms_to_structure` converts ASE
+frames. Put the module under ``src/xnn/common/data/hub/`` and import it
+from the package. ``load_dataset`` handles the ``cutoff=`` wrapping. A
+builder need not download: ``argon_md`` reads files bundled under
+``datasets/``.
+
+Adding a pre-trained model
+==========================
+Write the model as a portable directory (``save_pretrained`` or ``xnn models
+pack``), upload it, and add a card with
+:func:`~xnn.common.models.hub.register_pretrained` or an entry in
+``src/xnn/common/models/hub/models.json``. A new foreign checkpoint format
+needs a converter registered in :mod:`xnn.common.models.hub.formats`.
 
 Adding a featurizer
 ===================
-Subclass :class:`~xnn.common.featurizers.base.Featurizer`, implement the
-``output_dim`` property and ``forward(data)``. Put it in
-``common/featurizers/`` if it is shared, otherwise under the using family's
-``featurizers/`` package, and compose it into models.
+Subclass :class:`~xnn.common.featurizers.base.Featurizer`, implement
+``output_dim`` and ``forward(data)``, and put it under
+``common/featurizers/`` when shared, otherwise with the family that uses it.
 
-Swapping the neighbor list
-==========================
-The reference :func:`~xnn.common.data.neighborlist.build_neighbor_list` is
-correct but brute-force. For large periodic systems, swap in a cell-list or
-`matscipy <https://github.com/libAtoms/matscipy>`_ builder; as long as it
-returns the same ``edge_index`` / ``cell_shifts`` pair, nothing else
-changes.
+Neighbor lists
+==============
+:func:`~xnn.common.data.neighborlist.build_neighbor_list` returns
+``edge_index`` and ``cell_shifts``; that pair is all a model sees. The
+reference implementation is brute force, and the ``vesin`` cell list is used
+when installed. Another backend only has to return the same pair.
