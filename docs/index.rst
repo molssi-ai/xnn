@@ -137,11 +137,22 @@ Models at a glance
      - Featurizer
      - State
    * - SchNet
-     - cnn
+     - gnn
      - Gaussian RBF
      - Complete: training, evaluation, deployment (TorchScript, LAMMPS, ASE);
        matches the `NIPS 2017 manuscript
        <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
+   * - 3D steerable CNN
+     - cnn
+     - voxelized environments (species density grids)
+     - Complete: training, evaluation, deployment (ASE only); matches the
+       `NeurIPS 2018 manuscript <https://arxiv.org/abs/1807.02547>`_ (Weiler
+       et al.), with its Tetris experiment reproduced
+   * - 3D CNN
+     - cnn
+     - voxelized environments (species density grids)
+     - Complete: training, evaluation, deployment (ASE only); the
+       non-equivariant control of the same paper
    * - PhysNet
      - dnn
      - exp-Gaussian RBF + attention masks

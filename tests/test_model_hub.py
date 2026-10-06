@@ -406,7 +406,7 @@ def test_engine_calculator_and_classmethod_take_names(tmp_path):
     pytest.importorskip("ase")
     from ase import Atoms
 
-    from xnn.cnn.models.schnet import SchNet
+    from xnn.gnn.models.schnet import SchNet
     from xnn.common.deploy import MDIEngine, XNNCalculator
     from xnn.gnn.models.mace import MACE
 

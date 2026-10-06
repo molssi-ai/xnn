@@ -69,19 +69,10 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import GaussianRBF, CosineCutoff
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import scatter_sum, shifted_softplus
+from xnn.common.models.ops import ShiftedSoftplus, scatter_sum, shifted_softplus
 from xnn.common.models.registry import register_model
 
 _MAX_Z = 100
-
-
-class _ShiftedSoftplus(nn.Module):
-    """Module wrapper of the shared exact
-    :func:`~xnn.common.models.ops.shifted_softplus` (``ln(0.5 e^x + 0.5)``),
-    for use inside ``nn.Sequential``."""
-
-    def forward(self, x: Tensor) -> Tensor:
-        return shifted_softplus(x)
 
 
 class _CFConv(nn.Module):
@@ -110,8 +101,8 @@ class _CFConv(nn.Module):
                  cutoff_fn: Optional[CosineCutoff] = None):
         super().__init__()
         self.filter_net = nn.Sequential(
-            nn.Linear(n_rbf, n_features), _ShiftedSoftplus(),
-            nn.Linear(n_features, n_features), _ShiftedSoftplus(),
+            nn.Linear(n_rbf, n_features), ShiftedSoftplus(),
+            nn.Linear(n_features, n_features), ShiftedSoftplus(),
         )
         self.cutoff_fn = cutoff_fn
 
@@ -303,7 +294,7 @@ class SchNet(InteratomicPotential):
             for _ in range(n_interactions)
         ])
         self.readout = nn.Sequential(
-            nn.Linear(n_features, n_features // 2), _ShiftedSoftplus(),
+            nn.Linear(n_features, n_features // 2), ShiftedSoftplus(),
             nn.Linear(n_features // 2, 1),
         )
         # zero-init the output head (DTNN convention): the initial prediction

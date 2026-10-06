@@ -19,7 +19,7 @@ frontend:
 
    from xnn.common.models import available_models, build_model
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet']
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
 Each model can also be constructed directly; the constructor arguments below
@@ -223,16 +223,16 @@ verified against the reference code (:ref:`fidelity`). In a config,
 ``foundation: aimnet2`` (with ``cutoff`` set to the model's neighbor-list
 cutoff) builds the pretrained network for fine-tuning.
 
-SchNet (``cnn``)
+SchNet (``gnn``)
 ================
-:class:`xnn.cnn.models.schnet.SchNet`: continuous-filter convolutions over
+:class:`xnn.gnn.models.schnet.SchNet`: continuous-filter convolutions over
 a Gaussian radial basis with shifted-softplus activations (Schütt *et al.*,
 NIPS 2017). Faithful to the manuscript (see :ref:`fidelity`): the defaults
 are the paper architecture — ``F = 64`` feature maps, ``T = 3`` residual
 interaction blocks, RBF centers every 0.1 Å on ``[0, 30]`` with
 ``gamma = 10`` Å\ :sup:`-2` — plus the DTNN per-atom energy standardization
 (``energy_shift``/``energy_scale``, or
-:meth:`~xnn.cnn.models.schnet.SchNet.set_energy_scale_shift`).
+:meth:`~xnn.gnn.models.schnet.SchNet.set_energy_scale_shift`).
 
 Key options: ``n_features`` (64), ``n_interactions`` (3), ``n_rbf`` (301),
 ``cutoff`` (30.0), ``gamma`` (10.0), ``cutoff_fn`` (``None``; set
@@ -240,6 +240,53 @@ Key options: ``n_features`` (64), ``n_interactions`` (3), ``n_rbf`` (301),
 ``energy_shift`` (0.0), ``energy_scale`` (1.0), ``species`` +
 ``atomic_energies`` (per-element reference energies loaded into
 ``atom_ref``).
+
+3D steerable CNN (``cnn``)
+==========================
+:class:`xnn.cnn.models.steerable.SteerableCNN` (registry name ``se3cnn``):
+the SE(3)-equivariant 3D steerable CNN of Weiler *et al.* (NeurIPS 2018)
+applied to interatomic potentials. Every atom's environment is voxelized
+into one scalar density field per species
+(:class:`~xnn.cnn.featurizers.VoxelGrid`); gated blocks of steerable
+convolutions (kernels spanned by the analytic basis of Sec. 4.2 of the
+paper, Gaussian shells with the radius-dependent bandlimits of Sec. 4.4.1)
+map it through stacks of fields of order 0, 1, 2 to scalar fields, which a
+global average pool and the atom-wise readout turn into the per-atom energy.
+The energy is exactly invariant under the rotations of the grid onto
+itself, invariant to the bandlimit under every other rotation, and the
+forces co-rotate (see :ref:`fidelity`). Needs ``e3nn``.
+
+Key options: ``species``, ``cutoff`` (4.0, the half side of the cube),
+``grid_size`` (17 voxels per axis), ``n_features`` (32 scalar fields of the
+last block), ``n_interactions`` (3 gated blocks), ``l_max`` (2), ``fields``
+(explicit multiplicities per block, e.g. ``[[8, 4, 2], [16, 8, 4], [32]]``),
+``kernel_size`` (5), ``strides`` (2 in every block but the first and last,
+after a low-pass filter), ``bandlimit`` (``compromise`` / ``conservative``
+/ ``sfcnn`` or a list), ``shell_width`` (0.6 voxels), ``activation``
+(``ssp``; the paper uses ``relu``), ``gate_activation`` (``sigmoid``),
+``normalization`` (``None`` or ``batch``, the equivariant batch norm),
+``sigma`` (width of the atomic Gaussians, half a voxel), ``cutoff_fn``
+(``cosine`` envelope of the neighbor densities), ``include_center``,
+``energy_shift`` / ``energy_scale`` and ``atomic_energies``.
+
+Grid sizes of the form ``4k + 1`` keep every strided grid centered, which
+is what makes the invariance under the cube rotations exact. Like the
+paper's networks the model is SE(3)- but not O(3)-equivariant: a reflected
+structure is not constrained to the same energy.
+
+3D CNN (``cnn``)
+================
+:class:`xnn.cnn.models.cnn3d.CNN3D` (registry name ``cnn3d``): the same
+voxelized environments through blocks of ordinary ``Conv3d`` kernels, the
+low-pass filtered strides, optional batch normalization and a global
+average pool. It is the non-equivariant control of the paper (its channel
+counts default to the component counts of the steerable fields of each
+block): its energy changes under rotations of the structure.
+
+Key options: ``species``, ``cutoff``, ``grid_size``, ``channels`` (or
+``n_features`` + ``n_interactions``), ``kernel_size``, ``strides``,
+``activation``, ``normalization``, ``smooth_stride``, and the voxel and
+readout options of the steerable model.
 
 HDNNP (``dnn``)
 ===============
@@ -634,7 +681,17 @@ environment-aggregated edge latents, SchNet/PhysNet feature vectors, and the
 HDNNP/ANI descriptors. Key options: ``n_channels`` (4), ``hidden``
 ([24, 12] q-MLP), ``sigma`` (1.0 -- Gaussian smearing), ``dl`` (2.0 -- the
 k-space cutoff is ``2*pi/dl``), ``exponent`` (1 for electrostatics, 6 for
-dispersion), ``remove_self_interaction`` (False). Non-periodic structures use
+dispersion), ``remove_self_interaction`` (False), and the optional net-charge
+constraint ``constrain_charge`` (False): after the q head, each structure's
+charges are shifted so that channel ``charge_channel`` (0) sums to its
+``total_charge`` in latent units (``LATENT_CHARGE_PER_E`` = 9.5118 per e,
+the unit in which two charges interact with the Coulomb energy in eV and Å)
+and every other channel to zero, uniformly over the atoms or with learned
+per-atom weights (``charge_weights: uniform | learned``). The sum is then
+exact for any system size, which a bias in the q head (``q_bias``) only
+approximates, and charged clusters get the monopole energy of their net
+charge; charged training structures must carry their ``total_charge``
+(``charge``) label, since a missing label means neutral. Non-periodic structures use
 the equivalent real-space direct sum, which is exact and needs no k-space
 cutoff: on a dataset without cells ``dl`` is therefore **inert**, and
 ``exponent = 6`` is rejected outright (the real-space branch implements the

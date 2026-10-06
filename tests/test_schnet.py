@@ -17,7 +17,7 @@ from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.common.models.ops import shifted_softplus
-from xnn.cnn.models.schnet import SchNet
+from xnn.gnn.models.schnet import SchNet
 
 SPECIES = [1, 6, 8]
 
