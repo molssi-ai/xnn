@@ -95,7 +95,7 @@ examples = [
     "rdkit>=2023.9",
 ]
 # The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
-ani = ["torchani==2.2.4", "h5py>=3.0"]
+ani = ["torchani==2.9.0", "h5py>=3.0"]
 # The DFT-D4 fidelity notebook and parity tests compare against the reference
 # dftd4 Python package (used only as an external oracle). tomli is what
 # its parameter loader wants on Python >= 3.11.
