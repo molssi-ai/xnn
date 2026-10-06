@@ -21,48 +21,7 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
 from xnn.common.models.base import InteratomicPotential
-
-
-class _Gaussian(nn.Module):
-    """Gaussian activation ``exp(-x^2)`` (the original ANI-1 hidden activation)."""
-
-    def forward(self, x: Tensor) -> Tensor:
-        return torch.exp(-x * x)
-
-
-def _make_activation(activation: Union[str, nn.Module]) -> nn.Module:
-    """Return an activation ``nn.Module`` from a name or a module instance.
-
-    Parameters
-    ----------
-    activation : str or torch.nn.Module
-        One of ``"silu"``, ``"celu"`` (ANI, alpha=0.1), ``"gaussian"`` (original
-        ANI-1), ``"tanh"``, ``"relu"``; or an ``nn.Module`` used as-is.
-
-    Returns
-    -------
-    torch.nn.Module
-        A fresh activation module.
-
-    Raises
-    ------
-    ValueError
-        If ``activation`` is an unknown name.
-    """
-    if isinstance(activation, nn.Module):
-        return activation
-    factories = {
-        "silu": nn.SiLU,
-        "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
-        "gaussian": _Gaussian,
-        "tanh": nn.Tanh,
-        "relu": nn.ReLU,
-    }
-    key = activation.lower()
-    if key not in factories:
-        raise ValueError(f"unknown activation {activation!r}; "
-                         f"choose one of {sorted(factories)}")
-    return factories[key]()
+from xnn.common.models.ops import make_activation
 
 
 class _ElementNetworks(nn.Module):
@@ -84,7 +43,7 @@ class _ElementNetworks(nn.Module):
         architecture (as ANI-1x does). Defaults to ``(64, 64)``.
     activation : str or torch.nn.Module, optional
         Hidden-layer activation, by default ``"silu"``. See
-        :func:`_make_activation`.
+        :func:`~xnn.common.models.ops.make_activation`.
     bias : bool, optional
         Whether the linear layers carry a bias, by default ``True``.
 
@@ -106,7 +65,7 @@ class _ElementNetworks(nn.Module):
             widths = hidden[z] if isinstance(hidden, dict) else hidden
             layers, d = [], input_dim
             for h in widths:
-                layers += [nn.Linear(d, h, bias=bias), _make_activation(activation)]
+                layers += [nn.Linear(d, h, bias=bias), make_activation(activation)]
                 d = h
             layers += [nn.Linear(d, 1, bias=bias)]
             self.nets[str(z)] = nn.Sequential(*layers)
