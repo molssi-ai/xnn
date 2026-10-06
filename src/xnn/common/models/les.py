@@ -39,12 +39,15 @@ The wrapped energy cost is roughly twice the short-range cost.
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
-from .ops import cell_volume
 from torch import Tensor, nn
+from torch.nn import functional as F
+
+from .dispersion import BOHR, HARTREE
+from .ops import cell_volume, scatter_sum
 
 from ..data import AtomicGraph
 from .base import InteratomicPotential
@@ -58,6 +61,12 @@ FAST_BLOCK_ENTRIES = 5 * 10 ** 7
 #: A30 and V100 in both precisions it breaks even between 1500 and 3000 atoms and
 #: wins 2-9x from 5000 atoms on (with 10-30x less memory)
 AUTO_POLICY = AutoPolicy(default_min_edges=3000, default_min_edges_float64=3000)
+#: latent charge of one elementary charge: the LES kernels carry no Coulomb
+#: constant and no 2 pi (two charges interact as ``q1 q2 / (2 pi r)``), so
+#: ``q = Q * sqrt(2 pi e^2/(4 pi eps0))`` with the Coulomb constant in eV
+#: Angstrom (``HARTREE * BOHR``); 9.5118 per e. The reference code quotes
+#: sqrt(90.0474); e/(2 eps0) is 90.4744 eV Angstrom, a transposed digit there.
+LATENT_CHARGE_PER_E = math.sqrt(2.0 * math.pi * HARTREE * BOHR)
 
 
 class EwaldSummation(nn.Module, FastPathModule):
@@ -98,8 +107,9 @@ class EwaldSummation(nn.Module, FastPathModule):
     Notes
     -----
     Charges are in scaled units (upstream ``norm_factor = 1``): a physical
-    charge ``Q`` in e corresponds to ``q = Q * sqrt(90.0474)`` for energies
-    in eV and distances in Angstrom.
+    charge ``Q`` in e corresponds to ``q = Q * LATENT_CHARGE_PER_E``
+    (``sqrt(2 pi * 14.3996) = 9.5118``) for energies in eV and distances in
+    Angstrom; see :data:`LATENT_CHARGE_PER_E`.
     """
 
     def __init__(self, dl: float = 2.0, sigma: float = 1.0, exponent: int = 1,
@@ -382,6 +392,23 @@ class LatentEwald(InteratomicPotential):
         Add a parallel bias-free linear layer to the ``q`` head, by default
         ``True`` (the water script). The charged-dimer script uses ``False``
         (MLP only).
+    constrain_charge : bool, optional
+        Pin each structure's latent charges to its net charge after the q
+        head: the channel ``charge_channel`` sums to ``total_charge *
+        LATENT_CHARGE_PER_E`` (the batch's ``total_charge``, neutral when
+        absent) and every other channel to zero, by a per-structure shift
+        ``q_i <- q_i - w_i (sum q - Q') / sum w`` (the correction of
+        PhysNet). The sum is then exact for any system size, where a bias in
+        the q head (``q_bias``) only learns an offset per atom, and in the
+        molecular path the monopole energy of charged structures follows.
+        Off by default (the reference behavior). Charged training structures
+        must carry their ``total_charge`` label, or they are forced neutral.
+    charge_channel : int, optional
+        The channel that carries the physical net charge, by default 0.
+    charge_weights : str, optional
+        ``"uniform"`` (default): the same shift for every atom;
+        ``"learned"``: ``w_i = softplus(linear(features_i))``, a learned
+        per-atom capacity for the residual.
     dl, sigma, exponent, remove_self_interaction
         Passed to :class:`EwaldSummation`. Note that ``dl`` acts on periodic
         structures only and ``exponent = 6`` is periodic-only as well (the
@@ -412,7 +439,9 @@ class LatentEwald(InteratomicPotential):
     def __init__(self, model: InteratomicPotential, n_channels: int = 4,
                  hidden=None, q_bias: bool = False, q_add_linear: bool = True,
                  dl: float = 2.0, sigma: float = 1.0,
-                 exponent: int = 1, remove_self_interaction: bool = False):
+                 exponent: int = 1, remove_self_interaction: bool = False,
+                 constrain_charge: bool = False, charge_channel: int = 0,
+                 charge_weights: str = "uniform"):
         super().__init__()
         feature_dim = getattr(model, "node_feature_dim", None)
         if feature_dim is None:
@@ -434,6 +463,14 @@ class LatentEwald(InteratomicPotential):
         self.q_net = nn.Sequential(*layers)
         self.q_linear = (nn.Linear(feature_dim, n_channels, bias=False)
                          if q_add_linear else None)
+        if not 0 <= charge_channel < n_channels:
+            raise ValueError(f"charge_channel must be in [0, {n_channels}), got {charge_channel}")
+        if charge_weights not in ("uniform", "learned"):
+            raise ValueError(f"charge_weights must be 'uniform' or 'learned', got {charge_weights!r}")
+        self.constrain_charge = bool(constrain_charge)
+        self.charge_channel = int(charge_channel)
+        self.charge_weight = (nn.Linear(feature_dim, 1)
+                              if constrain_charge and charge_weights == "learned" else None)
         self.ewald = EwaldSummation(dl=dl, sigma=sigma, exponent=exponent,
                                     remove_self_interaction=remove_self_interaction)
         self.use_fast = "auto"
@@ -494,6 +531,8 @@ class LatentEwald(InteratomicPotential):
         q = self.q_net(features)
         if self.q_linear is not None:
             q = q + self.q_linear(features)
+        if self.constrain_charge:
+            q = self.constrain(q, features, data.batch, data.num_graphs, data.total_charge)
         # the Ewald sum computes in the model's dtype (a float64 geometry is cast)
         cell = data.cell.to(q.dtype) if data.cell is not None else None
         energy_lr = self.ewald(q, data.pos.to(q.dtype), data.batch, data.num_graphs,
@@ -506,6 +545,39 @@ class LatentEwald(InteratomicPotential):
         out["node_energy"] = out["node_energy"] + (
             energy_lr / n_atoms.to(energy_lr.dtype))[data.batch]
         return out
+
+    def constrain(self, q: Tensor, features: Tensor, batch: Tensor, num_graphs: int,
+                  total_charge: Optional[Tensor]) -> Tensor:
+        """Shift the latent charges so each structure sums to its target.
+
+        Parameters
+        ----------
+        q : Tensor
+            Latent charges, ``(N, n_channels)``.
+        features : Tensor
+            Per-atom features, ``(N, F)`` (the learned weights read them).
+        batch : Tensor
+            Structure index of every atom, ``(N,)``.
+        num_graphs : int
+            Number of structures.
+        total_charge : Tensor or None
+            Net charge of every structure in e, ``(B,)``; ``None`` is neutral.
+
+        Returns
+        -------
+        Tensor
+            ``q`` with channel ``charge_channel`` summing to
+            ``total_charge * LATENT_CHARGE_PER_E`` and the others to zero.
+        """
+        target = torch.zeros((num_graphs, q.shape[1]), dtype=q.dtype, device=q.device)
+        if total_charge is not None:
+            target[:, self.charge_channel] = total_charge.to(q.dtype) * LATENT_CHARGE_PER_E
+        residual = scatter_sum(q, batch, num_graphs) - target            # (B, n_channels)
+        if self.charge_weight is not None:
+            w = F.softplus(self.charge_weight(features))                 # (N, 1)
+            return q - w * (residual / scatter_sum(w, batch, num_graphs))[batch]
+        n_atoms = torch.bincount(batch, minlength=num_graphs).to(q.dtype)
+        return q - (residual / n_atoms.unsqueeze(1))[batch]
 
     @classmethod
     def from_config(cls, cfg) -> "LatentEwald":
