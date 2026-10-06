@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import warnings
 
 import torch
 import torch.distributed as dist
@@ -61,6 +62,29 @@ def resolve_device(name: str) -> torch.device:
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(name)
+
+
+def _check_charge_labels(base, train_set) -> None:
+    """Warn when a LatentEwald net-charge constraint will never see a charge label.
+
+    With ``constrain_charge`` on, a structure without ``total_charge`` is
+    pinned to neutrality. A training set in which no structure carries the
+    key at all is either genuinely neutral, in which case the warning is
+    harmless, or unlabeled, in which case every charged structure would be
+    fitted wrong, silently; this makes it visible once, at start.
+    """
+    from ..models.les import LatentEwald
+    if not any(isinstance(m, LatentEwald) and m.constrain_charge for m in base.modules()):
+        return
+    structures = getattr(train_set, "structures", None)
+    if not structures or any(s.get("total_charge", s.get("charge")) is not None
+                             for s in structures):
+        return
+    warnings.warn(
+        "the model constrains its latent charges to each structure's total_charge, "
+        "but no training structure carries a 'total_charge' (or 'charge') label: all "
+        f"{len(structures)} are treated as neutral. Label charged structures, or turn "
+        "constrain_charge off.", stacklevel=3)
 
 
 def _structures(dataset, what: str) -> list[dict]:
@@ -210,6 +234,8 @@ class Trainer:
         stress_on = o.stress_weight > 0 or any(w[2] > 0 for w in self._head_weights.values())
         self.model = ForceStressOutput(base, compute_forces=force_on,
                                        compute_stress=stress_on).to(self.device)
+        if self.is_main:
+            _check_charge_labels(base, train_set)
 
         # multi-head: the target sets belong to one head, the replay set to another
         replay_train = replay_val = None

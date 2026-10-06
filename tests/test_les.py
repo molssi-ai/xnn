@@ -501,3 +501,36 @@ def test_charge_constraint_options_are_validated_and_reach_the_config_hook():
     model = build_model(cfg.model)
     assert isinstance(model, LatentEwald) and model.constrain_charge
     assert model.charge_weight is not None and model.charge_channel == 0
+
+
+def test_trainer_warns_when_the_constraint_sees_no_charge_labels(tmp_path):
+    """Constraint on + a training set without any charge label: one warning
+    at start; a labeled set (even all zero) or the constraint off: none."""
+    import warnings
+    from xnn.common.data import AtomicDataset
+    from xnn.common.train import Trainer
+    rng = np.random.default_rng(0)
+
+    def structures(labeled):
+        out = []
+        for i in range(3):
+            s = {"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 8, 1, 8],
+                 "energy": 0.0, "forces": np.zeros((4, 3))}
+            if labeled:
+                s["total_charge"] = 0.0
+            out.append(s)
+        return out
+
+    def trainer(constrain, labeled):
+        cfg = from_dict({"model": {**SCHNET, "extra": {"long_range": {
+            "n_channels": 2, "constrain_charge": constrain}}},
+            "data": {"batch_size": 3, "val_fraction": 0.34},
+            "optim": {"epochs": 1}, "device": "cpu", "output_dir": str(tmp_path / "run")})
+        return Trainer(cfg, AtomicDataset(structures(labeled), cfg.model.cutoff))
+
+    with pytest.warns(UserWarning, match="no training structure carries"):
+        trainer(True, False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        trainer(True, True)
+        trainer(False, False)
