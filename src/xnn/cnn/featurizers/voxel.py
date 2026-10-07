@@ -60,8 +60,11 @@ class VoxelGrid(Featurizer):
         Voxels per axis ``s``, by default 17 (0.47 Angstrom voxels at 4.0).
     sigma : float or None, optional
         Standard deviation of the Gaussian density of one atom. ``None``
-        (default) uses half the voxel width, the choice of the paper's CATH
-        data set.
+        (default) uses the voxel width, which keeps the density sampled
+        without aliasing so a rotation of the structure rotates the grids
+        to the interpolation error; the paper's CATH data set uses half the
+        voxel width (``sigma = cutoff / grid_size``), a sharper but aliased
+        choice.
     cutoff_fn : str or None, optional
         ``"cosine"`` (default) multiplies each neighbor's density by the
         :class:`~xnn.common.featurizers.CosineCutoff` envelope so the fields
@@ -93,7 +96,7 @@ class VoxelGrid(Featurizer):
         self.cutoff = float(cutoff)
         self.grid_size = int(grid_size)
         self.spacing = 2.0 * self.cutoff / self.grid_size
-        self.sigma = float(sigma) if sigma is not None else 0.5 * self.spacing
+        self.sigma = float(sigma) if sigma is not None else self.spacing
         self.include_center = bool(include_center)
         self.envelope = CosineCutoff(self.cutoff) if cutoff_fn == "cosine" else None
         index = torch.full((_MAX_Z,), -1, dtype=torch.long)
