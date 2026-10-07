@@ -1,0 +1,16 @@
+# DimeNet, the paper architecture (Gasteiger, Gross & Guennemann, ICLR 2020,
+# Appendix B): F = 128 message features, T = 6 interaction blocks, N_RBF =
+# N_SRBF = 6 Bessel functions, N_SHBF = 7 spherical-harmonic degrees,
+# N_bilinear = 8, cutoff 5 A and the p = 6 polynomial envelope.
+name: dimenet
+cutoff: 5.0
+n_features: 128
+n_interactions: 6
+n_rbf: 6
+extra:
+  n_spherical: 7
+  n_bilinear: 8
+  # p: 6                        # envelope exponent of eq 8 (reference code: envelope_exponent = p - 1)
+  # output_init: glorot_orthogonal   # or zeros (fresh model predicts exactly atom_ref)
+  # species: [1, 6, 8]
+  # atomic_energies: average    # per-element reference energies from the training set

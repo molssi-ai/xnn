@@ -1,0 +1,16 @@
+# DimeNet++, the paper architecture (Gasteiger, Giri, Margraf & Guennemann,
+# NeurIPS-W 2020, Table 1): F = 128 message features, 4 interaction blocks,
+# 64 triplet features, 8 basis features, 256 output features, N_RBF = 6,
+# N_SHBF = 7, cutoff 5 A. About 8x faster than DimeNet at equal accuracy.
+name: dimenet++
+cutoff: 5.0
+n_features: 128
+n_interactions: 4
+n_rbf: 6
+extra:
+  n_spherical: 7
+  n_triplet_features: 64
+  n_basis_features: 8
+  n_output_features: 256
+  # species: [1, 6, 8]
+  # atomic_energies: average    # per-element reference energies from the training set
