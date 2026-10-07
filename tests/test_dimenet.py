@@ -646,12 +646,16 @@ def _parity(mode):
 
 def test_parity_vs_reference_random_weights():
     """Weight transplant from the TF DimeNet and DimeNet++ (float64, random
-    weights) gives identical energies and forces (energies of order 100 eV
-    agree to about 1e-12, forces to about 1e-11 eV/A)."""
-    assert _parity("random") < 1e-9
+    weights) gives identical energies and forces: the worst relative error
+    (energy relative to ``|E|``, forces relative to ``max|F|``) is at the float64
+    floor, measured at 7e-14 over both models; a convention error (angle,
+    envelope, basis order) would show as O(1)."""
+    assert _parity("random") < 1e-12
 
 
 def test_parity_vs_reference_pretrained():
-    """The published DimeNet++ U0 weights give the same energies in xnn
-    (float32: the published models exist in that precision only)."""
+    """The published DimeNet++ U0 weights give the same energies and forces
+    in xnn. The published models exist in float32 only; measured floors over
+    four molecules: energies 1e-7 relative (float32 epsilon), forces 1.5e-5
+    of the largest force component (gradients of a 4-block float32 net)."""
     assert _parity("pretrained") < 1e-4

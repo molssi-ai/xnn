@@ -5,12 +5,12 @@
 ``random``: builds the authors' TensorFlow DimeNet and DimeNet++ with random
 weights in float64, transplants every variable into the xnn models and
 compares energies and forces on toy molecules. The last stdout line is the
-worst absolute difference.
+worst relative error (energy relative to ``|E|``, forces relative to ``max|F|``).
 
 ``pretrained``: restores the published DimeNet++ ``U0`` checkpoint (float32,
 the only precision it exists in) into the reference model and into xnn and
-compares the atomization energies of a few molecules. The last stdout line
-is the worst absolute energy difference in eV.
+compares the atomization energies and forces of a few molecules. The last
+stdout line is the worst relative error.
 
 Run in a subprocess: :func:`setup` patches module attributes of TensorFlow,
 NumPy and the reference code before importing the latter (the fidelity
@@ -67,6 +67,10 @@ def setup(upstream: str, mode: str):
     np.math = math
     import tensorflow as _tf
     tf = _tf
+    try:                       # the reference runs on the CPU (the models are small; the float64
+        tf.config.set_visible_devices([], "GPU")   # patches are not exercised on GPU kernels)
+    except Exception:          # noqa: BLE001 - already initialized or no GPU
+        pass
     if F64:
         tf.keras.backend.set_floatx("float64")
         tf.float32 = tf.float64
@@ -214,7 +218,8 @@ def xnn_energy_forces(model, graph):
 
 
 def compare(label, tf_model, model, n_spherical, n_radial, structures, forces=True):
-    """Transplant and compare on every structure; return the worst difference."""
+    """Transplant and compare on every structure; return the worst relative error
+    (energy relative to ``|E|``, forces relative to the largest force component)."""
     from xnn.common.data import structure_to_graph
     worst = 0.0
     for s in structures:
@@ -226,9 +231,12 @@ def compare(label, tf_model, model, n_spherical, n_radial, structures, forces=Tr
         e_x, f_x = xnn_energy_forces(model, g)
         de = abs(e_tf - e_x)
         df = float(np.abs(f_tf - f_x).max())
-        print(f"{label}: E_tf={e_tf:+.10f} E_xnn={e_x:+.10f} |dE|={de:.3e} "
-              f"max|dF|={df:.3e} (edges {g.num_edges}, triplets {len(inputs['id_expand_kj'])})")
-        worst = max(worst, de, df if forces else 0.0)
+        rel_e = de / abs(e_tf)
+        rel_f = df / float(np.abs(f_tf).max())
+        print(f"{label}: E_tf={e_tf:+.10f} E_xnn={e_x:+.10f} |dE|={de:.3e} ({rel_e:.1e} relative) "
+              f"max|dF|={df:.3e} ({rel_f:.1e} of max|F|={float(np.abs(f_tf).max()):.3g}) "
+              f"(edges {g.num_edges}, triplets {len(inputs['id_expand_kj'])})")
+        worst = max(worst, rel_e, rel_f if forces else 0.0)
     return worst
 
 
@@ -300,8 +308,7 @@ def main():
     else:
         tf_pp = pretrained_pp(upstream)
         pp = DimeNetPP(reference_basis=True).float()
-        worst = compare("pretrained DimeNet++ U0", tf_pp, pp, 7, 6, list(MOLECULES.values()),
-                        forces=False)
+        worst = compare("pretrained DimeNet++ U0", tf_pp, pp, 7, 6, list(MOLECULES.values()))
     print(worst)
 
 
