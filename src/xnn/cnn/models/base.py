@@ -218,7 +218,7 @@ class VoxelPotential(InteratomicPotential):
     n_features : int, optional
         Width of the pooled features (input of the readout), by default 32.
     sigma : float or None, optional
-        Width of the atomic Gaussians (``None``: half a voxel).
+        Width of the atomic Gaussians (``None``: one voxel).
     cutoff_fn : str or None, optional
         Envelope of the neighbor densities (``"cosine"`` or ``None``).
     include_center : bool, optional
