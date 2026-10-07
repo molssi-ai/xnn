@@ -4,7 +4,7 @@
 Export to LAMMPS and TorchScript
 **********************************
 
-SchNet, NequIP, MACE and Allegro export to a self-contained TorchScript
+SchNet, DimeNet, NequIP, MACE and Allegro export to a self-contained TorchScript
 file that needs nothing but ``libtorch`` or ``torch.jit.load``: no xnn, no
 Python model code, no config. The scripted models match the eager ones to
 about 1e-15.
@@ -50,7 +50,7 @@ structure per call, no batch dimension; ``torch.no_grad()`` is fine,
 
 Which models export
 ===================
-SchNet, NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.
+SchNet, DimeNet, NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.
 CACE, PhysNet, BAMBOO and the classical force fields deploy through ASE or
 the MDI engine instead. A long-range LES model exports, but its Ewald sum is
 global, so drive it with the whole system on one rank (``forward``, ``fix

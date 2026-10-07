@@ -61,7 +61,11 @@ Equivariant edge features (``xnn.gnn.featurizers``)
   Cartesian monomials of CACE, spanning the same space without e3nn.
 - :class:`~xnn.gnn.featurizers.radial.BesselRBF` and
   :class:`~xnn.gnn.featurizers.cutoff.PolynomialCutoff`: the trainable
-  Bessel basis and polynomial envelope of NequIP and MACE.
+  Bessel basis and polynomial envelope of NequIP, MACE and DimeNet.
+- :class:`~xnn.gnn.featurizers.spherical_bessel.SphericalBesselBasis`: the
+  2D spherical Fourier-Bessel basis of DimeNet, ``n_spherical`` degrees
+  times ``n_radial`` Bessel roots over a distance and an angle; plain
+  PyTorch, no scipy.
 
 .. code-block:: python
 

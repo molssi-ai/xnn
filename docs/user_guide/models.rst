@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -157,6 +157,46 @@ architecture as defaults.
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
 Also ``gamma``, ``energy_shift`` / ``energy_scale``.
+
+DimeNet and DimeNet++
+=====================
+:class:`~xnn.gnn.models.dimenet.DimeNet` and
+:class:`~xnn.gnn.models.dimenet.DimeNetPP`: directional message passing
+(Gasteiger *et al.*, ICLR 2020 and NeurIPS-W 2020), matching
+`gasteigerjo/dimenet <https://github.com/gasteigerjo/dimenet>`_. Messages
+live on directed edges rather than atoms, and each message is updated from
+the messages of the neighbouring edges together with the angle between
+them. Distances enter through a Bessel basis and distance-angle pairs
+through a 2D spherical Fourier-Bessel basis, both under a polynomial
+envelope, so the energy is twice continuously differentiable across the
+cutoff. DimeNet++ replaces the bilinear angular layer by a Hadamard product
+in a smaller triplet space and widens the output blocks, which makes it
+about eight times faster at the same accuracy. Elements are embedded
+directly, so ``species`` is only needed for ``atomic_energies``.
+
+.. code-block:: yaml
+
+   model:
+     name: dimenet               # or dimenet++
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 6           # 4 for dimenet++
+     n_rbf: 6                    # radial Bessel functions
+     n_spherical: 7              # angular degrees of the 2D basis
+     n_bilinear: 8               # dimenet only
+     # n_triplet_features: 64    # dimenet++ only
+     # n_basis_features: 8
+     # n_output_features: 256
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Also ``p`` (envelope exponent), ``n_before_skip`` / ``n_after_skip``,
+``n_output_layers``, ``trainable_rbf``, ``output_init`` (``zeros`` makes a
+fresh model predict exactly its reference energies). The defaults follow
+the authors' code where it differs from the printed equations;
+``radial_gate: ji`` and ``reference_basis`` switch between the two
+conventions. The published DimeNet++ QM9 weights transplant into
+``DimeNetPP(reference_basis=True)``.
 
 SE(3) steerable CNN and 3D CNN
 ==============================

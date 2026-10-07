@@ -21,8 +21,8 @@ xnn is organized by model family, with everything shared in ``common``:
        deploy/        ASE calculator, TorchScript export, MDI engine
        cli/           the xnn command
      gnn/
-       featurizers/   spherical harmonics, Cartesian monomials, Bessel, polynomial cutoff
-       models/        schnet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
+       featurizers/   spherical harmonics, Cartesian monomials, Bessel, spherical Bessel, polynomial cutoff
+       models/        schnet, dimenet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
        fast/          cuEquivariance fast paths
      cnn/
        featurizers/   voxel grids of the atomic environment

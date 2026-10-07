@@ -50,6 +50,11 @@ with the transplant for its model; the notes per model:
 - **PhysNet**: crosses frameworks; each TensorFlow variable is copied as a
   NumPy array. ``dnn/physnet/physnet_argon_density_md`` shows the reverse
   direction, xnn weights back into the original graph.
+- **DimeNet, DimeNet++**: crosses frameworks like PhysNet. The reference
+  code folds basis constants and an angle convention into its weights, so
+  the map rescales the basis layers and the model takes
+  ``reference_basis=True``; ``tests/dimenet_tf_parity.py`` holds the map and
+  applies it to random weights and to the published DimeNet++ QM9 model.
 - **LES**: the upstream latent-charge head and Ewald settings map into
   ``LatentEwald(CACE)``.
 - **SchNet**: a clean-room build from the paper, verified against an
