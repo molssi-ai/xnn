@@ -35,7 +35,7 @@ _SERIES_TERMS = 30
 
 
 def spherical_bessel_jn(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> Tensor:
-    """Spherical Bessel functions of the first kind ``j_0(x) .. j_lmax(x)``.
+    """Spherical Bessel functions of the first kind, orders 0 to ``l_max``.
 
     Parameters
     ----------
@@ -94,7 +94,7 @@ def spherical_bessel_jn(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> 
 
 
 def spherical_bessel_zeros(l_max: int, n: int) -> np.ndarray:
-    """The first ``n`` positive zeros ``z_ln`` of ``j_l`` for ``l = 0 .. l_max``.
+    """The first ``n`` positive zeros ``z_ln`` of ``j_l`` for every order up to ``l_max``.
 
     Parameters
     ----------
