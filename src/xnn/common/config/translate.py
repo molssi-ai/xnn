@@ -80,6 +80,30 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "n_radial_basis": "n_rbf",
         "atomref": "atomic_energies",
     },
+    # the DimeNet reference code's config spellings (gasteigerjo/dimenet); key
+    # names only, the xnn models are built from the papers
+    "dimenet": {
+        "emb_size": "n_features",
+        "num_blocks": "n_interactions",
+        "num_radial": "n_rbf",
+        "num_spherical": "n_spherical",
+        "num_bilinear": "n_bilinear",
+        "num_before_skip": "n_before_skip",
+        "num_after_skip": "n_after_skip",
+        "num_dense_output": "n_output_layers",
+    },
+    "dimenet++": {
+        "emb_size": "n_features",
+        "num_blocks": "n_interactions",
+        "num_radial": "n_rbf",
+        "num_spherical": "n_spherical",
+        "int_emb_size": "n_triplet_features",
+        "basis_emb_size": "n_basis_features",
+        "out_emb_size": "n_output_features",
+        "num_before_skip": "n_before_skip",
+        "num_after_skip": "n_after_skip",
+        "num_dense_output": "n_output_layers",
+    },
     # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
     # the xnn models are built from the paper, these are key names only
     "se3cnn": {
