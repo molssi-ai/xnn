@@ -116,6 +116,11 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "size": "kernel_size",
         "features": "channels",
     },
+    # the reference spherical CNN (jonas-koehler/s2cnn) layer arguments
+    "s2cnn": {
+        "b_in": "bandwidth",
+        "nfeature_out": "n_features",
+    },
     # PhysNet train.py argument spellings (MMunibas/PhysNet)
     "physnet": {
         "num_features": "n_features",

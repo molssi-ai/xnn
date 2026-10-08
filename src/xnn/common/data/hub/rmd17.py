@@ -35,9 +35,7 @@ from .base import DatasetBuilder, register_dataset
 
 _FIGSHARE = "https://ndownloader.figshare.com/files/{file_id}"
 
-# eV per kcal/mol == ase.units.kcal / ase.units.mol (hard-coded to keep this a
-# pure-numpy path with no ASE dependency).
-_KCAL_MOL_TO_EV = 0.0433641153087705
+from .units import KCAL_MOL_TO_EV as _KCAL_MOL_TO_EV
 
 # molecule -> (figshare file id, md5) for the per-molecule .npz files.
 _MOLECULES: dict[str, tuple[str, str]] = {

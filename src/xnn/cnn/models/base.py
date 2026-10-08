@@ -1,10 +1,13 @@
-"""Shared body of the volumetric (voxel) models of the ``cnn`` family.
+"""Shared body of the grid-input models of the ``cnn`` family.
 
-:class:`VoxelPotential` composes the :class:`~xnn.cnn.featurizers.VoxelGrid`
-featurizer with a convolutional trunk that a subclass supplies (a
-conventional 3D CNN in :mod:`~xnn.cnn.models.cnn3d`, the SE(3)-equivariant
-3D steerable CNN of Weiler *et al.*, NeurIPS 2018, in
-:mod:`~xnn.cnn.models.steerable`) and the per-atom energy readout shared
+:class:`VoxelPotential` composes a grid featurizer of the atomic environments
+(:class:`~xnn.cnn.featurizers.VoxelGrid` by default; the spherical signals of
+:class:`~xnn.cnn.featurizers.SphericalGrid` for the spherical CNN) with a
+convolutional trunk that a subclass supplies (a conventional 3D CNN in
+:mod:`~xnn.cnn.models.cnn3d`, the SE(3)-equivariant 3D steerable CNN of
+Weiler *et al.*, NeurIPS 2018, in :mod:`~xnn.cnn.models.steerable`, the
+spherical CNN of Cohen *et al.*, ICLR 2018, in
+:mod:`~xnn.cnn.models.spherical`) and the per-atom energy readout shared
 with SchNet: a two-layer atom-wise network on the pooled features, the
 per-atom energy standardization ``E_i = energy_scale * E^hat_i +
 energy_shift`` and the per-element reference energy ``atom_ref``.
@@ -25,6 +28,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
+from xnn.common.featurizers import Featurizer
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import make_activation
 from ..featurizers import VoxelGrid
@@ -197,11 +201,12 @@ def rotate_voxels(x: Tensor, R: Tensor) -> Tensor:
 
 
 class VoxelPotential(InteratomicPotential):
-    """Shared body of the voxel models: grid featurizer, trunk, readout.
+    """Shared body of the grid-input models: featurizer, trunk, readout.
 
-    A subclass implements :meth:`trunk`, mapping the ``(N, C, s, s, s)``
-    density grids to ``(N, n_features)`` invariant per-atom features; this
-    class voxelizes the environments, reads the features out into per-atom
+    A subclass implements :meth:`trunk`, mapping the ``(N, C, ...)`` grids of
+    the featurizer (voxel density grids ``(N, C, s, s, s)`` by default) to
+    ``(N, n_features)`` invariant per-atom features; this class featurizes
+    the environments, reads the features out into per-atom
     energies (atom-wise ``n_features -> n_features/2 -> 1`` network with a
     zero-initialized last layer, the DTNN standardization and the per-element
     reference energies, as in :class:`~xnn.cnn.models.schnet.SchNet`) and
@@ -230,10 +235,14 @@ class VoxelPotential(InteratomicPotential):
         Per-atom energy standardization (buffers), by default 0 and 1.
     atomic_energies : array-like or None, optional
         Per-species reference energies loaded into ``atom_ref``.
+    featurizer : Featurizer or None, optional
+        The grid featurizer to use instead of the :class:`VoxelGrid` built
+        from the voxel options (it must expose ``n_channels`` and
+        ``grid_size``).
 
     Attributes
     ----------
-    voxelizer : VoxelGrid
+    featurizer : Featurizer
         The grid featurizer.
     readout : torch.nn.Sequential
         The atom-wise readout.
@@ -248,13 +257,14 @@ class VoxelPotential(InteratomicPotential):
                  sigma: Optional[float] = None, cutoff_fn: Optional[str] = "cosine",
                  include_center: bool = True, readout_activation: str = "ssp",
                  energy_shift: float = 0.0, energy_scale: float = 1.0,
-                 atomic_energies=None):
+                 atomic_energies=None, featurizer: Optional[Featurizer] = None):
         super().__init__()
         self.species = [int(z) for z in species]
         self.cutoff = float(cutoff)
         self.node_feature_dim = int(n_features)
-        self.voxelizer = VoxelGrid(self.species, cutoff, grid_size, sigma, cutoff_fn,
-                                   include_center)
+        if featurizer is None:
+            featurizer = VoxelGrid(self.species, cutoff, grid_size, sigma, cutoff_fn, include_center)
+        self.featurizer = featurizer
         self.readout = nn.Sequential(
             nn.Linear(n_features, max(1, n_features // 2)), make_activation(readout_activation),
             nn.Linear(max(1, n_features // 2), 1),
@@ -270,13 +280,13 @@ class VoxelPotential(InteratomicPotential):
 
     @property
     def grid_size(self) -> int:
-        """int : Voxels per axis of the environment grids."""
-        return self.voxelizer.grid_size
+        """int : Samples per axis of the environment grids."""
+        return self.featurizer.grid_size
 
     @property
     def n_channels(self) -> int:
         """int : Input channels of the trunk (one per species)."""
-        return self.voxelizer.n_channels
+        return self.featurizer.n_channels
 
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:
         """Set the per-atom energy standardization from training statistics.
@@ -347,7 +357,7 @@ class VoxelPotential(InteratomicPotential):
             ``"node_energy"`` ``(N,)``, ``"energy"`` ``(B,)`` and the pooled
             invariant ``"node_features"`` ``(N, n_features)``.
         """
-        grid = self.voxelizer(data)
+        grid = self.featurizer(data)
         features, node_energy = self.node_features_energy(grid, data.atomic_numbers)
         return {"node_energy": node_energy, "energy": self.aggregate_energy(node_energy, data),
                 "node_features": features}
