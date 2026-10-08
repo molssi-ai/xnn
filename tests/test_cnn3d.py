@@ -111,7 +111,7 @@ def test_voxel_grid_geometry():
     vox = VoxelGrid(SPECIES, cutoff=4.0, grid_size=16)
     assert vox.output_dim == 3
     assert vox.spacing == pytest.approx(0.5)
-    assert vox.sigma == pytest.approx(0.25)            # half a voxel by default
+    assert vox.sigma == pytest.approx(0.5)             # one voxel by default
     assert torch.allclose(vox.axis, torch.linspace(-3.75, 3.75, 16))
     assert VoxelGrid(SPECIES, 4.0, 16, sigma=0.7).sigma == 0.7
 
@@ -120,7 +120,7 @@ def test_voxel_grid_channels_and_center():
     """A lone H-C pair on a 1 A grid: H density only in channel 0, C only in
     channel 1, each atom's own blob at the center of its channel, and the
     neighbor at its position weighted by the cosine envelope."""
-    vox = VoxelGrid(SPECIES, cutoff=4.5, grid_size=9)       # 1.0 A voxels, sigma 0.5 A
+    vox = VoxelGrid(SPECIES, cutoff=4.5, grid_size=9, sigma=0.5)   # 1.0 A voxels
     g = _graph({"pos": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], "atomic_numbers": [1, 6]}, 4.5)
     grid = vox(g)
     assert float(grid[:, 2].abs().max()) == 0.0        # no oxygen anywhere

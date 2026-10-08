@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -158,6 +158,31 @@ architecture as defaults.
 
 Also ``gamma``, ``energy_shift`` / ``energy_scale``.
 
+DimeNet and DimeNet++
+=====================
+:class:`~xnn.gnn.models.dimenet.DimeNet` and
+:class:`~xnn.gnn.models.dimenet.DimeNetPP`: directional message passing
+(Gasteiger *et al.* 2020). Messages live on directed edges and are updated
+from the distances and angles of neighboring edges through Bessel bases;
+DimeNet++ swaps the bilinear interaction for a cheaper Hadamard form.
+No e3nn. Matches `gasteigerjo/dimenet <https://github.com/gasteigerjo/dimenet>`_.
+
+.. code-block:: yaml
+
+   model:
+     name: dimenet++             # or dimenet
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 4           # 6 for dimenet
+     n_rbf: 6
+     n_spherical: 7
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Also ``n_bilinear`` (dimenet), ``n_triplet_features`` /
+``n_basis_features`` / ``n_output_features`` (dimenet++), ``p``,
+``trainable_rbf``. The reference code's key spellings are translated.
+
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN`: the SE(3)-equivariant
@@ -188,6 +213,39 @@ Also ``fields`` / ``channels`` (explicit block widths), ``strides``,
 ``energy_scale``. The steerable model is exactly invariant under the
 rotations of the grid onto itself and invariant to the bandlimit under all
 others; mirror images are not constrained.
+
+Spherical CNN
+=============
+:class:`~xnn.cnn.models.spherical.SphericalCNN` (``s2cnn``): the
+rotation-equivariant network of Cohen *et al.* (ICLR 2018) over spherical
+signals, a clean-room build of the paper. Each atom carries one potential
+channel per species sampled on a sphere around it
+(:class:`~xnn.cnn.featurizers.spherical.SphericalGrid`); ResNet blocks of
+:math:`S^2` and :math:`SO(3)` correlations, computed by generalized FFTs,
+map it to :math:`SO(3)` feature maps whose invariant integral is read out
+to per-atom energies. No e3nn. Matches `jonas-koehler/s2cnn
+<https://github.com/jonas-koehler/s2cnn>`_.
+
+.. code-block:: yaml
+
+   model:
+     name: s2cnn
+     cutoff: 10.0                # neighbor radius of the potential sums
+     species: [1, 6, 7, 8, 16]
+     radius: 0.48                # sphere radius (A)
+     bandwidth: 10               # 2b x 2b samples per sphere
+     n_features: 160             # channels of the last block
+     n_interactions: 5           # ResNet blocks (Table 3 of the paper)
+     atomic_energies: {1: -13.6, 6: -1029.9, 7: -1485.3, 8: -2042.8, 16: -10831.3}
+
+Also ``features`` / ``bandwidths`` (explicit per block), ``exponent`` (1,
+the paper's potential; 2 in the reference data script), ``set_readout``
+(the paper's DeepSet readout, e.g. ``[150, 100, 50]``), ``normalization``
+("batch"), ``activation`` ("relu"), ``n_alpha`` / ``n_beta`` / ``n_gamma``
+/ ``max_beta`` (filter support), ``cutoff_fn``, ``energy_shift`` /
+``energy_scale``. The energy is exactly invariant under rotations about the
+polar axis that map the coarsest grid onto itself and invariant to the
+discretization error under all others.
 
 ANI
 ===

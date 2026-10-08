@@ -37,11 +37,22 @@ identical weights involves:
 - **SchNet** (Schütt *et al.* 2017): a clean-room build, verified against an
   independent implementation of the paper's equations to about 1e-15. No
   schnetpack code is used or compared against.
+- **DimeNet and DimeNet++** (`gasteigerjo/dimenet
+  <https://github.com/gasteigerjo/dimenet>`_, TensorFlow): about 1e-13
+  relative in energies and forces under transplanted weights in float64;
+  the published DimeNet++ QM9 model reproduces to float32 round-off.
 - **SE(3) steerable CNN** (Weiler *et al.* 2018): a clean-room build from
   the paper; the steerable kernel basis is formed from Clebsch-Gordan
   coefficients and checked against a numerical solution of the paper's
   constraint. The energy is exactly invariant under the rotations of the
   grid onto itself and invariant to the bandlimit under every other one.
+- **Spherical CNN** (`jonas-koehler/s2cnn
+  <https://github.com/jonas-koehler/s2cnn>`_): a clean-room build from the
+  paper; the Wigner d-matrices, the :math:`S^2` / :math:`SO(3)` transforms,
+  the integral, the rotation operator and the correlation layers (with
+  transplanted filters) match the reference to float32 and float64
+  round-off, the correlations match their direct evaluation for point
+  filters, and the layers are exactly equivariant on bandlimited signals.
 - **BAMBOO** (`bytedance/bamboo <https://github.com/bytedance/bamboo>`_):
   about 1e-15 layer by layer. xnn returns the conservative force, equal to
   upstream's ``forces + qeq_force``.

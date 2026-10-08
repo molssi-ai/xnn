@@ -33,7 +33,7 @@ Invariant per-atom descriptors for the HDNNP and ANI models:
    aev = AEV(species=[1, 6, 8])
    descriptor = aev(graph)      # (N, aev.output_dim), rotation invariant
 
-Voxel featurizer (``xnn.cnn.featurizers``)
+Grid featurizers (``xnn.cnn.featurizers``)
 ===========================================
 - :class:`~xnn.cnn.featurizers.voxel.VoxelGrid`: one cubic grid per atom
   (side ``2 * cutoff``, ``grid_size`` voxels per axis) with a density
@@ -48,9 +48,18 @@ Voxel featurizer (``xnn.cnn.featurizers``)
    vox = VoxelGrid(species=[1, 6, 8], cutoff=4.0, grid_size=17)
    grids = vox(graph)           # (N, 3, 17, 17, 17) density fields
 
-Equivariant featurizers (``xnn.gnn.featurizers``)
-==================================================
-Edge attributes for the GNN models:
+- :class:`~xnn.cnn.featurizers.spherical.SphericalGrid`: one sphere per
+  atom (radius ``radius``, Driscoll-Healy grid of bandwidth ``bandwidth``)
+  with a channel per species holding the potential of the neighbors of that
+  species, the molecular representation of the spherical CNN paper;
+  differentiable in the positions.
+
+.. code-block:: python
+
+   from xnn.cnn.featurizers import SphericalGrid
+
+   sph = SphericalGrid(species=[1, 6, 7, 8, 16], cutoff=10.0, radius=0.48, bandwidth=10)
+   signals = sph(graph)         # (N, 5, 20, 20) spherical signals
 
 Equivariant edge features (``xnn.gnn.featurizers``)
 ===================================================
@@ -61,7 +70,11 @@ Equivariant edge features (``xnn.gnn.featurizers``)
   Cartesian monomials of CACE, spanning the same space without e3nn.
 - :class:`~xnn.gnn.featurizers.radial.BesselRBF` and
   :class:`~xnn.gnn.featurizers.cutoff.PolynomialCutoff`: the trainable
-  Bessel basis and polynomial envelope of NequIP and MACE.
+  Bessel basis and polynomial envelope of NequIP, MACE and DimeNet.
+- :class:`~xnn.gnn.featurizers.spherical_bessel.SphericalBesselBasis`: the
+  2D spherical Fourier-Bessel basis of DimeNet, ``n_spherical`` degrees
+  times ``n_radial`` Bessel roots over a distance and an angle; plain
+  PyTorch, no scipy.
 
 .. code-block:: python
 
@@ -71,19 +84,6 @@ Equivariant edge features (``xnn.gnn.featurizers``)
 
    unit = graph.edge_vectors()
    angular = CartesianAngularBasis(l_max=3)(unit / unit.norm(dim=-1, keepdim=True))   # (E, 20)
-
-Voxel grids (``xnn.cnn.featurizers``)
-=====================================
-:class:`~xnn.cnn.featurizers.voxel.VoxelGrid`: per-atom density grids of
-the neighbors, one channel per species, on a cube of side ``2 * cutoff``
-with ``grid_size`` voxels per axis; the input of the SE(3) steerable CNN and
-the 3D CNN.
-
-.. code-block:: python
-
-   from xnn.cnn.featurizers import VoxelGrid
-
-   grids = VoxelGrid(species=[1, 6, 8], cutoff=4.0, grid_size=17)(graph)   # (N, 3, 17, 17, 17)
 
 Transformer pieces (``xnn.transformer``)
 ========================================

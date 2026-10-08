@@ -1,0 +1,19 @@
+# Spherical CNN potential (Cohen et al., ICLR 2018, Sec. 5.4): one potential
+# channel per species on a sphere of radius 0.48 A around each atom, sampled
+# at bandwidth 10, five ResNet blocks of S^2 / SO(3) correlations with the
+# channels and bandwidths of Table 3 (20/10, 40/8, 60/6, 80/4, 160/2), batch
+# normalization and ReLU, the integral over SO(3) and the atom-wise readout.
+name: s2cnn
+cutoff: 10.0            # neighbor radius of the potential sums
+n_features: 160         # channels of the last block (readout width)
+n_interactions: 5       # ResNet blocks
+extra:
+  species: [1, 6, 7, 8, 16]
+  radius: 0.48
+  bandwidth: 10
+  # features: [20, 40, 60, 80, 160]
+  # bandwidths: [10, 8, 6, 4, 2]
+  # exponent: 1                   # the reference data script uses 2
+  # set_readout: [150, 100, 50]   # the paper's DeepSet readout (phi hidden, latent, psi hidden)
+  # normalization: batch
+  # activation: relu

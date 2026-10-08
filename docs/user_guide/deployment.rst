@@ -112,7 +112,7 @@ checkpoint.
 Which model deploys how
 =======================
 - **ASE and MDI**: every model.
-- **TorchScript / LAMMPS**: SchNet, NequIP, MACE, Allegro and AIMNet2, with
+- **TorchScript / LAMMPS**: SchNet, DimeNet, NequIP, MACE, Allegro and AIMNet2, with
   or without a D3 / D4 term. CACE, PhysNet and BAMBOO deploy through ASE
   and MDI, like their reference codes. The classical force fields do too;
   use their customary timesteps (about 0.1 fs for ReaxFF, 0.5 to 1 fs for

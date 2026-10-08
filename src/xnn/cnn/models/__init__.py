@@ -15,3 +15,16 @@ from .steerable import (SteerableCNN, SteerableConv3d, SteerableBatchNorm, Gated
 __all__ += ["SteerableCNN", "SteerableConv3d", "SteerableBatchNorm", "GatedBlock",
             "steerable_kernel_basis", "angular_kernel_basis", "n_basis_kernels",
             "rotate_fields", "shell_bandlimits", "BANDLIMITS"]
+
+# the spherical CNN (S^2 / SO(3) correlations by generalized FFTs; no e3nn)
+from .spherical import (SphericalCNN, SphericalResBlock, S2Convolution, SO3Convolution,
+                        S2Transform, SO3Transform, so3_integrate, so3_rotate, s2_rotate,
+                        wigner_d, wigner_D, quadrature_weights, s2_near_identity_grid,
+                        s2_equatorial_grid, so3_near_identity_grid, so3_equatorial_grid,
+                        s2_grid_points, euler_to_matrix, matrix_to_euler)
+
+__all__ += ["SphericalCNN", "SphericalResBlock", "S2Convolution", "SO3Convolution",
+            "S2Transform", "SO3Transform", "so3_integrate", "so3_rotate", "s2_rotate",
+            "wigner_d", "wigner_D", "quadrature_weights", "s2_near_identity_grid",
+            "s2_equatorial_grid", "so3_near_identity_grid", "so3_equatorial_grid",
+            "s2_grid_points", "euler_to_matrix", "matrix_to_euler"]

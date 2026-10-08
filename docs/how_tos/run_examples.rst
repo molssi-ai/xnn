@@ -27,11 +27,13 @@ What is where
 - ``examples/gnn/<model>``: for MACE, NequIP, Allegro and CACE a train/test
   notebook and an argon NPT density notebook, each against the reference
   code; MACE and AIMNet2 add foundation-model and fine-tuning notebooks;
-  SchNet trains on rMD17, then runs NVE dynamics; LES shows long-range
-  binding curves.
+  SchNet trains on rMD17, then runs NVE dynamics; DimeNet checks its paper and
+  trains on rMD17 against SchNet; LES shows long-range binding curves.
 - ``examples/cnn/se3cnn``: the Tetris experiment of the SE(3) steerable CNN
   paper, then steerable against conventional 3D CNN potentials on rMD17
   under rotations.
+- ``examples/cnn/s2cnn``: the QM7 atomization-energy experiment of the
+  spherical CNN paper.
 - ``examples/dnn``: ANI (rMD17 and the four published ANI datasets) and
   PhysNet (against the original).
 - ``examples/hybrid``, ``examples/ffnn``: BAMBOO charges and electrostatics;

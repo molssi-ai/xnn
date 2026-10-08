@@ -21,7 +21,7 @@ What the tests check
   forces against finite differences, size extensivity, batching, config
   key translation, and TorchScript parity with the eager model where the
   model exports.
-- **Faithful implementations** (MACE, NequIP, Allegro, CACE, AIMNet2,
+- **Faithful implementations** (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
   PhysNet, ANI, BAMBOO, LES, D3, D4): parity with the upstream code under
   transplanted weights, to about 1e-15 (``test_mace`` also covers the
   foundation-checkpoint conversion in process, without downloads).
