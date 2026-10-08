@@ -102,6 +102,19 @@ evaluated on rotated structures.
    The Tetris experiment: rotation equivariance of 3D steerable CNNs <nb/cnn/se3cnn/tetris_equivariance>
    Steerable against conventional 3D CNN potentials on rMD17 under rotations <nb/cnn/se3cnn/se3cnn_rmd17_rotation>
 
+Spherical CNN (cnn)
+===================
+
+The QM7 experiment of the spherical CNN paper (Cohen *et al.*, ICLR 2018):
+atomization energies from the potentials of the atoms sampled on spheres,
+with the Table 3 network and the DeepSet readout, and the rotation
+invariance of the energy.
+
+.. example-toctree::
+   :caption: Spherical CNN (cnn)
+
+   Spherical CNN on QM7: atomization energies from spherical signals <nb/cnn/s2cnn/s2cnn_qm7>
+
 NequIP, MACE, Allegro, CACE, AIMNet2 (gnn)
 ==========================================
 
@@ -232,6 +245,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
 
    SchNet, block by block: verifying the `xnn` implementation against the manuscripts <nb/fidelity_checks/schnet_verification>
    3D steerable CNN, block by block: the kernel basis, equivariance and the reference implementation <nb/fidelity_checks/se3cnn_verification>
+   Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/dimenet_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>

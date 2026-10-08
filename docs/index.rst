@@ -136,7 +136,7 @@ Models at a glance
    * - Dense neural networks (``dnn``)
      - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP
    * - Convolutional neural networks (``cnn``)
-     - SE(3) steerable CNN, 3D CNN
+     - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
      - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6
    * - Hybrid neural networks (``hybrid``)

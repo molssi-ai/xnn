@@ -14,7 +14,8 @@ matching what you need:
   AIMNet2, their featurizers and fast paths (NequIP, MACE and Allegro need
   ``e3nn``)
 - :mod:`xnn.cnn`: the SE(3) steerable CNN and the conventional 3D CNN over
-  voxelized environments, and the voxel featurizer
+  voxelized environments, the spherical CNN over spherical signals, and
+  their featurizers
 - :mod:`xnn.dnn`: HDNNP, ANI, PhysNet and the symmetry-function / AEV
   featurizers
 - :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING and the ``.frc`` force-field reader
