@@ -118,13 +118,11 @@ def lu_solve_refined(lu: Tensor, pivots: Tensor, full: Tensor, rhs: Tensor,
     """``full^-1 @ rhs`` from the LU factor of ``full``, with ``rounds`` rounds
     of iterative refinement.
 
-    A float32 factor alone leaves up to ~1e-2 e in the raw EEQ solution of a
-    few thousand atoms and, through the adjoint, ~1e-3 eV/A in the forces.
-    Each round (residual of the current solution, in float64 when the factor
+    A float32 factor alone leaves the charges and, through the adjoint, the
+    forces well short of the float32 matrix's own accuracy. Each round (residual of the current solution, in float64 when the factor
     is float32, solved with the same factor and added back) recovers about
     four digits; one round brings the solution to the accuracy of the float32
-    matrix itself for a well-conditioned system, two for the Ewald-split
-    operator of the large regime. ``rounds=0`` is the plain LAPACK solution.
+    matrix itself. ``rounds=0`` is the plain LAPACK solution.
     Scriptable; when ``full`` and ``rhs`` carry gradients, autograd runs
     through the factor as well, which costs O(N^3) in the backward (see
     :func:`lu_solve_implicit` for the O(N^2) form).
@@ -319,8 +317,7 @@ class EEQSystem:
                                     torch.cat([ones.t(), zero], dim=1)], dim=0)
             self._lu = torch.linalg.lu_factor(self._full)
         rhs = torch.cat([b_top, b_bot.reshape(1)]).unsqueeze(1)
-        rounds = 2 if rhs.dtype == torch.float32 else 1
-        sol = lu_solve_refined(self._lu[0], self._lu[1], self._full, rhs, rounds).squeeze(1)
+        sol = lu_solve_refined(self._lu[0], self._lu[1], self._full, rhs, 1).squeeze(1)
         return sol[:n], sol[n]
 
     def _solve_cg(self, b_top: Tensor, b_bot: Tensor) -> tuple[Tensor, Tensor]:

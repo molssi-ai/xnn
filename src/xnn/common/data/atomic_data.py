@@ -79,6 +79,13 @@ class AtomicGraph:
         in ``forces`` and excluded from the loss). ``None`` means all do.
     stress_mask : Tensor, optional
         The same for ``stress``.
+    fragment_charges : Tensor, optional
+        Net charge, in e, of the fragment each atom belongs to, shape ``(N,)``
+        (for the fragment constraints of the LES charge solve); ``None`` when
+        unlabeled.
+    fragment_charges_mask : Tensor, optional
+        Which structures carry ``fragment_charges`` when a batch mixes labeled
+        and unlabeled ones, shape ``(B,)``; ``None`` means all of them.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
         Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF,
@@ -152,6 +159,9 @@ class AtomicGraph:
     # unlabelled ones; None = all of them
     forces_mask: Optional[Tensor] = None   # (B,) bool
     stress_mask: Optional[Tensor] = None   # (B,) bool
+    # the fragment charge of every atom (LES charge solve); None = unlabeled
+    fragment_charges: Optional[Tensor] = None        # (N,) e
+    fragment_charges_mask: Optional[Tensor] = None   # (B,) bool; None = all labeled
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     spin_multiplicity: Optional[Tensor] = None   # (B,) 2S+1; None = closed shell
@@ -243,6 +253,8 @@ class AtomicGraph:
             stress=rows(self.stress, keep),
             forces_mask=rows(self.forces_mask, keep),
             stress_mask=rows(self.stress_mask, keep),
+            fragment_charges=rows(self.fragment_charges, node_keep),
+            fragment_charges_mask=rows(self.fragment_charges_mask, keep),
             total_charge=rows(self.total_charge, keep),
             spin_multiplicity=rows(self.spin_multiplicity, keep),
             weight=rows(self.weight, keep),

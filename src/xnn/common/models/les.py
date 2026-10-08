@@ -46,6 +46,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from .charge_solve import (bonded_fragments, charge_energy, coulomb_matrix, covalent_radii,
+                           fragment_targets, ion_charge_table, solve_charges)
 from .dispersion import BOHR, HARTREE
 from .ops import cell_volume, scatter_sum
 
@@ -61,11 +63,9 @@ FAST_BLOCK_ENTRIES = 5 * 10 ** 7
 #: A30 and V100 in both precisions it breaks even between 1500 and 3000 atoms and
 #: wins 2-9x from 5000 atoms on (with 10-30x less memory)
 AUTO_POLICY = AutoPolicy(default_min_edges=3000, default_min_edges_float64=3000)
-#: latent charge of one elementary charge: the LES kernels carry no Coulomb
-#: constant and no 2 pi (two charges interact as ``q1 q2 / (2 pi r)``), so
-#: ``q = Q * sqrt(2 pi e^2/(4 pi eps0))`` with the Coulomb constant in eV
-#: Angstrom (``HARTREE * BOHR``); 9.5118 per e. The reference code quotes
-#: sqrt(90.0474); e/(2 eps0) is 90.4744 eV Angstrom, a transposed digit there.
+#: latent charge of one elementary charge: two latent charges interact as
+#: ``q1 q2 / (2 pi r)``, so ``q = Q * sqrt(2 pi k_e)`` with the Coulomb
+#: constant ``k_e = HARTREE * BOHR`` in eV Angstrom; 9.5118 per e
 LATENT_CHARGE_PER_E = math.sqrt(2.0 * math.pi * HARTREE * BOHR)
 
 
@@ -409,6 +409,39 @@ class LatentEwald(InteratomicPotential):
         ``"uniform"`` (default): the same shift for every atom;
         ``"learned"``: ``w_i = softplus(linear(features_i))``, a learned
         per-atom capacity for the residual.
+    charge_solve : bool, optional
+        Global charge solve for channel ``charge_channel``
+        (:mod:`~xnn.common.models.charge_solve`): the head's output of that
+        channel is an electronegativity ``chi_i`` and the charges minimise
+        ``chi.q + 1/2 sum J q^2 + E_lr(q)`` with ``sum q = total_charge``
+        (in latent units), so every charge responds to every other one
+        through the Ewald kernel. Adds ``chi.q + 1/2 J q^2`` to the energy
+        (``E_lr`` is the usual one). Off by default. With the coupling it
+        contains, ``constrain_charge`` is its coupling-free limit.
+    hardness : str, optional
+        Where the hardness ``J_i > 0`` of the charge solve comes from:
+        ``"element"`` (default), one learned value per element, or
+        ``"features"``, ``softplus(linear(features_i))``.
+    hardness_init : float, optional
+        Initial hardness in eV per e^2 (converted to latent units), by
+        default 10.0, about the atomic values of charge equilibration.
+    fragments : bool, optional
+        One constraint row per fragment instead of one per structure, so no
+        charge flows between separate molecules (plain charge equilibration
+        is metallic at long range). Fragments are the covalently connected
+        components (:func:`~xnn.common.models.charge_solve.bonded_fragments`),
+        with the ions of ``ion_charges`` always on their own; each fragment's
+        charge comes from the structure's ``fragment_charges`` label (the
+        charge of the fragment each atom belongs to) when present, else from
+        ``ion_charges`` (neutral otherwise), and must add up to
+        ``total_charge``. Off by default.
+    bond_factor : float, optional
+        Bond criterion: distance below ``bond_factor`` times the sum of the
+        covalent radii, by default 1.2.
+    ion_charges : dict, optional
+        Formal charges by element symbol or atomic number, by default
+        :data:`~xnn.common.models.charge_solve.ION_CHARGES` (the alkali,
+        alkaline-earth and halide ions).
     dl, sigma, exponent, remove_self_interaction
         Passed to :class:`EwaldSummation`. Note that ``dl`` acts on periodic
         structures only and ``exponent = 6`` is periodic-only as well (the
@@ -441,7 +474,10 @@ class LatentEwald(InteratomicPotential):
                  dl: float = 2.0, sigma: float = 1.0,
                  exponent: int = 1, remove_self_interaction: bool = False,
                  constrain_charge: bool = False, charge_channel: int = 0,
-                 charge_weights: str = "uniform"):
+                 charge_weights: str = "uniform", charge_solve: bool = False,
+                 hardness: str = "element", hardness_init: float = 10.0,
+                 fragments: bool = False, bond_factor: float = 1.2,
+                 ion_charges: Optional[dict] = None):
         super().__init__()
         feature_dim = getattr(model, "node_feature_dim", None)
         if feature_dim is None:
@@ -471,6 +507,27 @@ class LatentEwald(InteratomicPotential):
         self.charge_channel = int(charge_channel)
         self.charge_weight = (nn.Linear(feature_dim, 1)
                               if constrain_charge and charge_weights == "learned" else None)
+        if hardness not in ("element", "features"):
+            raise ValueError(f"hardness must be 'element' or 'features', got {hardness!r}")
+        if charge_solve and exponent != 1:
+            raise ValueError("the charge solve needs the Coulomb kernel (exponent=1)")
+        self.charge_solve = bool(charge_solve)
+        self.hardness_mode = hardness
+        # J = softplus(raw), raw initialised so that J starts at hardness_init
+        raw0 = math.log(math.expm1(float(hardness_init) / LATENT_CHARGE_PER_E ** 2))
+        self.hardness_table = self.hardness_net = None
+        if charge_solve and hardness == "element":
+            self.hardness_table = nn.Embedding(119, 1)
+            nn.init.constant_(self.hardness_table.weight, raw0)
+        elif charge_solve:
+            self.hardness_net = nn.Linear(feature_dim, 1)
+            nn.init.zeros_(self.hardness_net.weight)
+            nn.init.constant_(self.hardness_net.bias, raw0)
+        self.fragments = bool(fragments) and bool(charge_solve)
+        self.bond_factor = float(bond_factor)
+        if self.fragments:
+            self.register_buffer("covalent_radii", covalent_radii(), persistent=False)
+            self.register_buffer("ion_charges", ion_charge_table(ion_charges), persistent=False)
         self.ewald = EwaldSummation(dl=dl, sigma=sigma, exponent=exponent,
                                     remove_self_interaction=remove_self_interaction)
         self.use_fast = "auto"
@@ -531,12 +588,17 @@ class LatentEwald(InteratomicPotential):
         q = self.q_net(features)
         if self.q_linear is not None:
             q = q + self.q_linear(features)
+        # with the charge solve, the head's charge channel is the electronegativity
+        chi = q[:, self.charge_channel] if self.charge_solve else None
         if self.constrain_charge:
             q = self.constrain(q, features, data.batch, data.num_graphs, data.total_charge)
         # the Ewald sum computes in the model's dtype (a float64 geometry is cast)
         cell = data.cell.to(q.dtype) if data.cell is not None else None
-        energy_lr = self.ewald(q, data.pos.to(q.dtype), data.batch, data.num_graphs,
-                               cell, data.pbc)
+        pos = data.pos.to(q.dtype)
+        if chi is not None:
+            q, node_charge_energy, mu, hardness, frag = self.solve_charges(
+                chi, q, features, data, pos, cell)
+        energy_lr = self.ewald(q, pos, data.batch, data.num_graphs, cell, data.pbc)
         n_atoms = torch.bincount(data.batch, minlength=data.num_graphs)
         out["energy_sr"] = out["energy"]
         out["energy_lr"] = energy_lr
@@ -544,7 +606,75 @@ class LatentEwald(InteratomicPotential):
         out["energy"] = out["energy"] + energy_lr
         out["node_energy"] = out["node_energy"] + (
             energy_lr / n_atoms.to(energy_lr.dtype))[data.batch]
+        if chi is not None:
+            energy_charge = scatter_sum(node_charge_energy, data.batch, data.num_graphs)
+            out["energy_charge"] = energy_charge
+            out["hardness"] = hardness
+            out["chemical_potential"] = mu
+            if frag is not None:
+                out["fragments"] = frag
+            out["energy"] = out["energy"] + energy_charge
+            out["node_energy"] = out["node_energy"] + node_charge_energy
         return out
+
+    def hardness_of(self, features: Tensor, atomic_numbers: Tensor) -> Tensor:
+        """The hardness ``J_i > 0`` of every atom, ``(N,)``, in latent units."""
+        if self.hardness_table is not None:
+            raw = self.hardness_table(atomic_numbers).squeeze(1)
+        else:
+            raw = self.hardness_net(features).squeeze(1)
+        return F.softplus(raw)
+
+    def solve_charges(self, chi: Tensor, q: Tensor, features: Tensor, data: AtomicGraph,
+                      pos: Tensor, cell: Optional[Tensor]):
+        """Replace channel ``charge_channel`` of ``q`` by the solved charges.
+
+        One augmented solve per structure (:func:`~xnn.common.models.charge_solve.solve_charges`
+        with the Coulomb matrix of its own kernel: the direct sum for a
+        cluster, the reciprocal sum for a cell), with one constraint row per
+        structure or, with ``fragments``, per fragment.
+
+        Returns
+        -------
+        (Tensor, Tensor, Tensor, Tensor, Tensor or None)
+            The charges ``(N, n_channels)``, the per-atom energy
+            ``chi_i q_i + 1/2 J_i q_i^2`` ``(N,)``, the chemical potentials
+            (one per constraint row), the hardness ``(N,)`` and the fragment
+            index of every atom ``(N,)`` (``None`` without fragments).
+        """
+        batch, num_graphs, z = data.batch, data.num_graphs, data.atomic_numbers
+        hardness = self.hardness_of(features, z)
+        frag_all = None
+        if self.fragments:
+            frag_all = bonded_fragments(z, data.edge_index, data.edge_vectors().to(pos.dtype),
+                                        self.covalent_radii.to(pos.dtype),
+                                        self.ion_charges.to(pos.dtype), self.bond_factor)
+        solved = torch.zeros_like(chi)
+        mus = []
+        for i in range(num_graphs):
+            idx = (batch == i).nonzero().squeeze(1)
+            periodic = (cell is not None
+                        and bool(cell[i].diagonal().abs().sum() > 1e-6)
+                        and (data.pbc is None or bool(data.pbc[i].any())))
+            gamma = coulomb_matrix(self.ewald, pos[idx], cell[i] if periodic else None)
+            total = data.total_charge[i].to(chi.dtype) if data.total_charge is not None else None
+            if frag_all is None:
+                frag_i = None
+                target = total * LATENT_CHARGE_PER_E if total is not None else chi.new_zeros(())
+            else:
+                frag_i = torch.unique(frag_all[idx], return_inverse=True)[1]
+                labeled = (data.fragment_charges is not None
+                           and (data.fragment_charges_mask is None
+                                or bool(data.fragment_charges_mask[i])))
+                label = data.fragment_charges[idx].to(chi.dtype) if labeled else None
+                target = fragment_targets(frag_i, z[idx], self.ion_charges.to(chi.dtype),
+                                          label, total) * LATENT_CHARGE_PER_E
+            q_i, mu_i = solve_charges(chi[idx], hardness[idx], gamma, target, frag_i)
+            solved = solved.index_copy(0, idx, q_i)
+            mus.append(mu_i)
+        q = q.clone()
+        q[:, self.charge_channel] = solved
+        return q, charge_energy(chi, hardness, solved), torch.cat(mus), hardness, frag_all
 
     def constrain(self, q: Tensor, features: Tensor, batch: Tensor, num_graphs: int,
                   total_charge: Optional[Tensor]) -> Tensor:

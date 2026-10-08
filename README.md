@@ -138,16 +138,17 @@ the MolSSI Driver Interface.
 
 | Family | Models |
 |---|---|
-| Generic add-ons (`common`) | LES long-range electrostatics; DFT-D3 (zero, BJ, mzero, op damping) and DFT-D4 dispersion |
-| Graph neural networks (`gnn`) | SchNet, NequIP, MACE, Allegro, CACE, AIMNet2 |
+| Generic add-ons (`common`) | LES long-range electrostatics (optionally charge-constrained or charge-equilibrated); DFT-D3 (zero, BJ, mzero, op damping) and DFT-D4 dispersion |
+| Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, NequIP, MACE, Allegro, CACE, AIMNet2 |
 | Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP* |
 | Convolutional neural networks (`cnn`) | 3D steerable CNN (SE(3)-equivariant), conventional 3D CNN, spherical CNN |
-| Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING |
+| Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6 |
 | Hybrid neural networks (`hybrid`) | BAMBOO |
 
 \* under development. Each model is checked against its reference code or paper
-(`examples/fidelity_checks/`). SchNet, NequIP, MACE and Allegro also export to
-TorchScript / LAMMPS; the others deploy through ASE.
+(`examples/fidelity_checks/`). SchNet, DimeNet, NequIP, MACE, Allegro and AIMNet2
+also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
+engine.
 
 ## Examples and tests
 

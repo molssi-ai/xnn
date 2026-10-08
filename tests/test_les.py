@@ -431,9 +431,7 @@ def _charged(seed, n, charge, periodic=False):
 
 
 def test_latent_charge_unit_is_the_derived_coulomb_constant():
-    """Two opposite elementary charges 20 A apart, in the molecular path,
-    interact with -14.3996/20 eV: the latent unit is sqrt(2 pi k_e), 9.5118
-    per e (the reference's 90.0474 is a transposed 90.4744)."""
+    """Two opposite elementary charges 20 A apart interact with -14.3996/20 eV."""
     assert LATENT_CHARGE_PER_E == pytest.approx(math.sqrt(2 * math.pi * 14.399645), rel=1e-7)
     ewald = EwaldSummation(sigma=1.0, remove_self_interaction=True)
     q = torch.tensor([[1.0], [-1.0]]) * LATENT_CHARGE_PER_E
@@ -445,9 +443,7 @@ def test_latent_charge_unit_is_the_derived_coulomb_constant():
 @pytest.mark.parametrize("weights", ["uniform", "learned"])
 @pytest.mark.parametrize("periodic", [False, True])
 def test_charge_constraint_pins_every_structure(weights, periodic):
-    """In a batch of a charged and a neutral structure, channel 1 sums to
-    Q * LATENT_CHARGE_PER_E and the other channels to zero, structure by
-    structure; off, the charges are the reference head's."""
+    """Per-structure sums in a batch; option off leaves the head's charges."""
     model = _schnet_les(constrain_charge=True, charge_channel=1, charge_weights=weights)
     batch = collate([_charged(1, 7, -1.0, periodic), _charged(2, 5, 0.0, periodic)])
     out = model(batch)
@@ -471,8 +467,7 @@ def test_charge_constraint_pins_every_structure(weights, periodic):
 
 
 def test_charge_constraint_without_labels_is_neutral_and_forces_are_consistent():
-    """No total_charge in the batch means neutral; and the shift is part of
-    the differentiable graph, so the forces are the energy gradient."""
+    """No label means neutral; the forces are the energy gradient."""
     model = _schnet_les(constrain_charge=True)
     s = {"pos": np.random.default_rng(4).uniform(0, 5, (6, 3)), "atomic_numbers": [1, 8] * 3}
     g = structure_to_graph(s, 4.5)
@@ -504,8 +499,7 @@ def test_charge_constraint_options_are_validated_and_reach_the_config_hook():
 
 
 def test_trainer_warns_when_the_constraint_sees_no_charge_labels(tmp_path):
-    """Constraint on + a training set without any charge label: one warning
-    at start; a labeled set (even all zero) or the constraint off: none."""
+    """One warning when no training structure carries a charge label."""
     import warnings
     from xnn.common.data import AtomicDataset
     from xnn.common.train import Trainer

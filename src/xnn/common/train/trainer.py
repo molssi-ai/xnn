@@ -74,17 +74,23 @@ def _check_charge_labels(base, train_set) -> None:
     fitted wrong, silently; this makes it visible once, at start.
     """
     from ..models.les import LatentEwald
-    if not any(isinstance(m, LatentEwald) and m.constrain_charge for m in base.modules()):
-        return
+    les = [m for m in base.modules() if isinstance(m, LatentEwald)]
     structures = getattr(train_set, "structures", None)
-    if not structures or any(s.get("total_charge", s.get("charge")) is not None
-                             for s in structures):
+    if not les or not structures:
         return
-    warnings.warn(
-        "the model constrains its latent charges to each structure's total_charge, "
-        "but no training structure carries a 'total_charge' (or 'charge') label: all "
-        f"{len(structures)} are treated as neutral. Label charged structures, or turn "
-        "constrain_charge off.", stacklevel=3)
+    if (any(m.constrain_charge or m.charge_solve for m in les)
+            and not any(s.get("total_charge", s.get("charge")) is not None for s in structures)):
+        warnings.warn(
+            "the model ties its latent charges to each structure's total_charge, "
+            "but no training structure carries a 'total_charge' (or 'charge') label: all "
+            f"{len(structures)} are treated as neutral. Label charged structures, or turn "
+            "constrain_charge / charge_solve off.", stacklevel=3)
+    if (any(m.fragments for m in les)
+            and not any(s.get("fragment_charges") is not None for s in structures)):
+        warnings.warn(
+            "the charge solve constrains every fragment, but no training structure carries "
+            "a 'fragment_charges' label: fragment charges come from the ion_charges table "
+            "alone (monatomic ions), every other fragment is neutral.", stacklevel=3)
 
 
 def _structures(dataset, what: str) -> list[dict]:

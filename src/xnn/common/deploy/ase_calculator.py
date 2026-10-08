@@ -204,6 +204,8 @@ class XNNCalculator(Calculator):
             if key in atoms.info:
                 struct["spin_multiplicity"] = float(atoms.info[key])
                 break
+        if "fragment_charges" in atoms.arrays:
+            struct["fragment_charges"] = np.asarray(atoms.arrays["fragment_charges"], dtype=float)
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
         graph.compute_dtype = self.dtype
         out = self.model(graph)

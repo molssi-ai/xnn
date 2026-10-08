@@ -387,9 +387,29 @@ long-range energy.
    model:
      name: mace                  # any model
      long_range: {n_channels: 4, sigma: 1.0, dl: 2.0}
+     # long_range: {n_channels: 4, constrain_charge: true}   # charges sum to total_charge
+     # long_range: {n_channels: 4, charge_solve: true}       # global charge equilibration
 
 Molecules use the exact real-space sum (``dl`` then has no effect).
 Outputs gain ``energy_sr``, ``energy_lr`` and ``latent_charges``.
+
+Two options tie the charges to the structure's ``total_charge`` (its
+``charge`` label; missing means neutral). ``constrain_charge`` shifts each
+structure's charges so one channel sums to the net charge and the others to
+zero (``charge_weights: learned`` lets the model choose where the shift
+goes). ``charge_solve`` goes further: that channel's head output becomes an
+electronegativity, a learned hardness per element (``hardness: features``
+for a per-atom one) is added, and the charges minimise
+``chi.q + 1/2 J q^2 + E_lr`` under the same constraint, so every charge
+responds to every other one through the Ewald kernel; the energy gains
+``energy_charge``. Charged structures must be molecules (a cell's ``k = 0``
+term is dropped). With ``fragments: true`` each molecule or ion is
+constrained on its own (plain charge equilibration lets charge flow between
+distant fragments): fragments are the covalently bonded groups, ions in
+``ion_charges`` (alkali, alkaline-earth and halide ions by default) always
+stand alone, and a fragment's charge comes from the per-atom
+``fragment_charges`` label of the structure file when present, else from
+that table.
 
 Dispersion (DFT-D4, DFT-D3)
 ---------------------------
