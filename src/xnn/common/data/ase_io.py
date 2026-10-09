@@ -69,7 +69,10 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
     dict
         Structure dict with keys ``"pos"``, ``"atomic_numbers"``, ``"cell"``
         (``None`` for non-periodic frames), ``"pbc"``, and optionally
-        ``"energy"``, ``"forces"``, ``"stress"``, ``"total_charge"`` (from
+        ``"energy"``, ``"forces"``, ``"stress"``, ``"dipole"`` (from
+        ``atoms.info["dipole"]`` or ``atoms.info["dipole_moment"]``),
+        ``"polarizability"`` (from ``atoms.info["polarizability"]``),
+        ``"total_charge"`` (from
         ``atoms.info["total_charge"]`` or ``atoms.info["charge"]``),
         ``"fragment_charges"`` (from ``atoms.arrays["fragment_charges"]``, the
         net charge of each atom's fragment) and ``"spin_multiplicity"`` (from
@@ -100,6 +103,12 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         d["stress"] = atoms.info[stress_key]
     if "stress" in d:
         d["stress"] = _full_stress(d["stress"])
+    for key in ("dipole", "dipole_moment"):
+        if key in atoms.info:
+            d["dipole"] = np.asarray(atoms.info[key], dtype=float).reshape(3)
+            break
+    if "polarizability" in atoms.info:
+        d["polarizability"] = np.asarray(atoms.info["polarizability"], dtype=float).reshape(3, 3)
     for key in ("total_charge", "charge"):
         if key in atoms.info:
             d["total_charge"] = float(atoms.info[key])

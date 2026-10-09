@@ -1,14 +1,16 @@
-"""Graph-network models: SchNet, DimeNet and DimeNet++ (plain PyTorch) and the
-E(3)-equivariant NequIP / MACE / Allegro / CACE / AIMNet2 (e3nn)."""
+"""Graph-network models: SchNet, DimeNet, DimeNet++ and PaiNN (plain PyTorch)
+and the E(3)-equivariant NequIP / MACE / Allegro / CACE / AIMNet2 (e3nn)."""
 import warnings
 
 from .schnet import SchNet
 from .dimenet import DimeNet, DimeNetPP, directed_triplets
+from .painn import PaiNN, GatedEquivariantBlock
 
-__all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets"]
+__all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "PaiNN",
+           "GatedEquivariantBlock"]
 
-# the equivariant models need e3nn; without it SchNet and DimeNet alone are
-# registered. Catch Exception, not just ImportError: e3nn does real work at
+# the equivariant models need e3nn; without it SchNet, DimeNet and PaiNN alone
+# are registered. Catch Exception, not just ImportError: e3nn does real work at
 # import time (it loads its Wigner constants with torch.load) and can fail in
 # other ways
 try:

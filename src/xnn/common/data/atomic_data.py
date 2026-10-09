@@ -79,6 +79,15 @@ class AtomicGraph:
         in ``forces`` and excluded from the loss). ``None`` means all do.
     stress_mask : Tensor, optional
         The same for ``stress``.
+    dipole : Tensor, optional
+        Target dipole moment per structure, of shape ``(B, 3)`` (e Angstrom
+        in the xnn units). Present during training of the models with a
+        dipole head (PaiNN, PhysNet, AIMNet2).
+    polarizability : Tensor, optional
+        Target polarizability tensor per structure, of shape ``(B, 3, 3)``
+        (Angstrom^3). Present during training of PaiNN's polarizability head.
+    dipole_mask, polarizability_mask : Tensor, optional
+        The same as ``forces_mask`` for ``dipole`` / ``polarizability``.
     fragment_charges : Tensor, optional
         Net charge, in e, of the fragment each atom belongs to, shape ``(N,)``
         (for the fragment constraints of the LES charge solve); ``None`` when
@@ -131,6 +140,12 @@ class AtomicGraph:
         Target stress ``(B, 3, 3)``.
     forces_mask, stress_mask : Tensor or None
         Bool ``(B,)``: the structures that carry force / stress labels.
+    dipole : Tensor or None
+        Target dipole moment ``(B, 3)``.
+    polarizability : Tensor or None
+        Target polarizability tensor ``(B, 3, 3)``.
+    dipole_mask, polarizability_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry dipole / polarizability labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
     spin_multiplicity : Tensor or None
@@ -159,6 +174,12 @@ class AtomicGraph:
     # unlabelled ones; None = all of them
     forces_mask: Optional[Tensor] = None   # (B,) bool
     stress_mask: Optional[Tensor] = None   # (B,) bool
+    # tensorial labels of molecules: the dipole moment (e A) and the
+    # polarizability tensor (A^3), with the same masks as forces / stress
+    dipole: Optional[Tensor] = None            # (B, 3)
+    polarizability: Optional[Tensor] = None    # (B, 3, 3)
+    dipole_mask: Optional[Tensor] = None           # (B,) bool
+    polarizability_mask: Optional[Tensor] = None   # (B,) bool
     # the fragment charge of every atom (LES charge solve); None = unlabeled
     fragment_charges: Optional[Tensor] = None        # (N,) e
     fragment_charges_mask: Optional[Tensor] = None   # (B,) bool; None = all labeled
@@ -253,6 +274,10 @@ class AtomicGraph:
             stress=rows(self.stress, keep),
             forces_mask=rows(self.forces_mask, keep),
             stress_mask=rows(self.stress_mask, keep),
+            dipole=rows(self.dipole, keep),
+            polarizability=rows(self.polarizability, keep),
+            dipole_mask=rows(self.dipole_mask, keep),
+            polarizability_mask=rows(self.polarizability_mask, keep),
             fragment_charges=rows(self.fragment_charges, node_keep),
             fragment_charges_mask=rows(self.fragment_charges_mask, keep),
             total_charge=rows(self.total_charge, keep),

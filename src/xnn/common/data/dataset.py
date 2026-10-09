@@ -32,7 +32,9 @@ def structure_to_graph(
         Structure data. Required keys: ``pos`` ``(N, 3)`` and
         ``atomic_numbers`` ``(N,)``. Optional keys: ``cell`` ``(3, 3)``,
         ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)``,
-        ``stress`` ``(3, 3)``, ``total_charge`` (scalar net charge; the
+        ``stress`` ``(3, 3)``, ``dipole`` ``(3,)`` (the molecular dipole
+        moment; ``dipole_moment`` is a synonym), ``polarizability``
+        ``(3, 3)``, ``total_charge`` (scalar net charge; the
         key ``charge`` is accepted as a synonym), ``fragment_charges``
         ``(N,)`` (the net charge of the fragment each atom belongs to, for the
         LES charge solve), ``spin_multiplicity``
@@ -88,6 +90,8 @@ def structure_to_graph(
     n = pos.shape[0]
     charge = s.get("total_charge", s.get("charge"))
     mult = s.get("spin_multiplicity", s.get("multiplicity"))
+    dipole = s.get("dipole", s.get("dipole_moment"))
+    alpha = s.get("polarizability")
     return AtomicGraph(
         pos=pos,
         atomic_numbers=z,
@@ -100,6 +104,8 @@ def structure_to_graph(
         energy=t([s["energy"]]).reshape(1) if s.get("energy") is not None else None,
         forces=t(s["forces"]) if s.get("forces") is not None else None,
         stress=t(s["stress"]).reshape(1, 3, 3) if s.get("stress") is not None else None,
+        dipole=t(dipole).reshape(1, 3) if dipole is not None else None,
+        polarizability=t(alpha).reshape(1, 3, 3) if alpha is not None else None,
         fragment_charges=(t(s["fragment_charges"]).reshape(n)
                           if s.get("fragment_charges") is not None else None),
         total_charge=(t([charge]).reshape(1) if charge is not None else None),
@@ -241,9 +247,10 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
       keeps ``cell`` / ``pbc`` and a molecular structure gets a zero cell and no
       periodic flag (its edges carry no image shift, so every edge keeps its
       length, and its stress is zero);
-    * structures with and without force or stress labels: the missing ones are
-      zeros, and ``forces_mask`` / ``stress_mask`` (per structure) mark the
-      labelled ones for the loss and the metrics;
+    * structures with and without force, stress, dipole or polarizability
+      labels: the missing ones are zeros, and ``forces_mask`` /
+      ``stress_mask`` / ``dipole_mask`` / ``polarizability_mask`` (per
+      structure) mark the labelled ones for the loss and the metrics;
     * structures with and without ``total_charge`` (missing = neutral),
       ``spin_multiplicity`` (missing = 1), ``weight`` (missing = 1) or
       ``head`` (missing = 0, the first head).
@@ -265,6 +272,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     edge_index, cell_shifts = [], []
     cells, pbcs = [], []
     energies, forces, stresses, charges, mults, weights = [], [], [], [], [], []
+    dipoles, alphas, d_masks, p_masks = [], [], [], []
     heads = []
     frag_charges, fc_masks = [], []
     f_masks, s_masks = [], []
@@ -274,6 +282,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_e = all(g.energy is not None for g in graphs)
     has_f = any(g.forces is not None for g in graphs)
     has_s = any(g.stress is not None for g in graphs)
+    has_d = any(g.dipole is not None for g in graphs)
+    has_p = any(g.polarizability is not None for g in graphs)
     has_q = any(g.total_charge is not None for g in graphs)
     has_fc = any(g.fragment_charges is not None for g in graphs)
     has_m = any(g.spin_multiplicity is not None for g in graphs)
@@ -315,6 +325,14 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
             stresses.append(g.stress if g.stress is not None
                             else torch.zeros((b, 3, 3), dtype=dtype, device=device))
             s_masks.append(label_mask(g, g.stress, g.stress_mask))
+        if has_d:
+            dipoles.append(g.dipole if g.dipole is not None
+                           else torch.zeros((b, 3), dtype=dtype, device=device))
+            d_masks.append(label_mask(g, g.dipole, g.dipole_mask))
+        if has_p:
+            alphas.append(g.polarizability if g.polarizability is not None
+                          else torch.zeros((b, 3, 3), dtype=dtype, device=device))
+            p_masks.append(label_mask(g, g.polarizability, g.polarizability_mask))
         if has_q:
             charges.append(g.total_charge if g.total_charge is not None
                            else torch.zeros(b, dtype=dtype, device=device))
@@ -334,6 +352,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
 
     f_mask = torch.cat(f_masks, 0) if has_f else None
     s_mask = torch.cat(s_masks, 0) if has_s else None
+    d_mask = torch.cat(d_masks, 0) if has_d else None
+    p_mask = torch.cat(p_masks, 0) if has_p else None
     fc_mask = torch.cat(fc_masks, 0) if has_fc else None
     return AtomicGraph(
         pos=torch.cat(pos, 0),
@@ -350,6 +370,10 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         # a mask only where the batch mixes labelled and unlabelled structures
         forces_mask=None if f_mask is None or bool(f_mask.all()) else f_mask,
         stress_mask=None if s_mask is None or bool(s_mask.all()) else s_mask,
+        dipole=torch.cat(dipoles, 0) if has_d else None,
+        polarizability=torch.cat(alphas, 0) if has_p else None,
+        dipole_mask=None if d_mask is None or bool(d_mask.all()) else d_mask,
+        polarizability_mask=None if p_mask is None or bool(p_mask.all()) else p_mask,
         fragment_charges=torch.cat(frag_charges, 0) if has_fc else None,
         fragment_charges_mask=None if fc_mask is None or bool(fc_mask.all()) else fc_mask,
         total_charge=torch.cat(charges, 0) if has_q else None,

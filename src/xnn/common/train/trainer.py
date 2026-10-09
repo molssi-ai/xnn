@@ -28,6 +28,7 @@ per-element references from the training data (see
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import warnings
 
@@ -101,6 +102,44 @@ def _structures(dataset, what: str) -> list[dict]:
         return list(dataset)
     raise TypeError(f"{what} must be an AtomicDataset (or a list of structure dicts) for "
                     f"multi-head training, got {type(dataset).__name__}")
+
+
+class _EMA:
+    """Exponential moving average of a module's parameters, accumulated in float64.
+
+    ``module`` is a deep copy that holds the averaged weights in the model's own
+    dtype and is what validation, testing and checkpoints use. The running
+    average itself lives in float64 shadow tensors: an update adds
+    ``(1 - decay) * (p - avg)`` to the average, and for a parameter that is
+    large compared with its per-step change (a per-element reference energy
+    of hundreds of eV moved by Adam steps of 1e-3) that increment is below
+    float32 resolution. A float32 average would then stay frozen at its first
+    value while the training copy keeps moving, and the served model would
+    carry a constant energy offset. The first update copies the parameters,
+    as ``torch.optim.swa_utils.AveragedModel`` does.
+
+    Parameters
+    ----------
+    module : torch.nn.Module
+        The training model; its parameters are averaged in registration order.
+    decay : float
+        EMA decay in ``(0, 1)``; ``avg = decay * avg + (1 - decay) * p``.
+    """
+
+    def __init__(self, module: torch.nn.Module, decay: float):
+        self.module = copy.deepcopy(module)
+        self.decay = float(decay)
+        self.n_averaged = 0
+        self._shadow = [p.detach().to(torch.float64).clone() for p in self.module.parameters()]
+
+    @torch.no_grad()
+    def update_parameters(self, model: torch.nn.Module) -> None:
+        """Fold the current parameters of ``model`` into the average."""
+        d = self.decay if self.n_averaged > 0 else 0.0
+        for shadow, avg, cur in zip(self._shadow, self.module.parameters(), model.parameters()):
+            shadow.mul_(d).add_(cur.detach().to(torch.float64), alpha=1.0 - d)
+            avg.copy_(shadow.to(avg.dtype))
+        self.n_averaged += 1
 
 
 class Trainer:
@@ -179,7 +218,7 @@ class Trainer:
         bare :class:`ForceStressOutput`.
     heads : list of str or None
         The head names of a multi-head model, ``None`` otherwise.
-    ema : torch.optim.swa_utils.AveragedModel or None
+    ema : _EMA or None
         The exponential moving average of the weights when
         ``cfg.optim.ema_decay > 0``; :attr:`eval_module` is what validation,
         testing and the checkpoints use.
@@ -308,16 +347,17 @@ class Trainer:
         self._params = [p for p in self.model.parameters() if p.requires_grad]
         if not self._params:
             raise ValueError("no trainable parameters: every parameter is frozen")
-        optimizer = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}[o.optimizer.lower()]
-        self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay)
+        name = o.optimizer.lower()
+        optimizer = {"adam": torch.optim.Adam, "amsgrad": torch.optim.Adam,
+                     "adamw": torch.optim.AdamW}[name]
+        self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay,
+                             amsgrad=(name == "amsgrad"))
         self.sched = self._make_scheduler(o.scheduler)
         self.ema = None
         if o.ema_decay > 0:
-            from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
             if not 0.0 < o.ema_decay < 1.0:
                 raise ValueError(f"optim.ema_decay must lie in (0, 1), got {o.ema_decay}")
-            self.ema = AveragedModel(self.module, multi_avg_fn=get_ema_multi_avg_fn(o.ema_decay),
-                                     use_buffers=False)
+            self.ema = _EMA(self.module, o.ema_decay)
         os.makedirs(cfg.output_dir, exist_ok=True)
 
     def _init_distributed(self, dev: torch.device) -> torch.device:
@@ -529,7 +569,8 @@ class Trainer:
         dict of str to float
             The scalar loss logs for this batch, as returned by
             :func:`weighted_loss` (e.g. ``"loss"`` plus any of
-            ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``, per head
+            ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``,
+            ``"dipole_mse"``, ``"polarizability_mse"``, per head
             for a multi-head batch).
         """
         data = data.to(self.device)
@@ -541,6 +582,8 @@ class Trainer:
         pred = model(data)
         loss, logs = weighted_loss(
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
+            dipole_weight=o.dipole_weight,
+            polarizability_weight=o.polarizability_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,
