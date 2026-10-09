@@ -213,3 +213,23 @@ def test_dipole_and_polarizability_terms():
     assert logs["polarizability_mse"] == pytest.approx(float((w * p_err).sum() / w.sum()), rel=1e-6)
     assert float(loss) == pytest.approx(plain["loss"] + 2.0 * logs["dipole_mse"]
                                         + 0.5 * logs["polarizability_mse"], rel=1e-6)
+
+
+def test_charge_term_is_a_weighted_per_atom_mean():
+    """The partial-charge term averages over atoms, each weighted by its structure."""
+    structs = _structs([1.0, 3.0])
+    rng = np.random.default_rng(4)
+    for s in structs:
+        s["charges"] = rng.normal(scale=0.3, size=len(s["atomic_numbers"]))
+    ds = AtomicDataset(structs, 5.0)
+    b = collate([ds[0], ds[1]])
+    assert b.charges.shape == (9,) and b.charges_mask is None
+    pred = _pred(b)
+    pred["charges"] = b.charges + torch.randn(9, generator=torch.Generator().manual_seed(5))
+    _, plain = weighted_loss(pred, b, 1.0, 1.0, 0.0)
+    assert "charge_mse" not in plain
+    loss, logs = weighted_loss(pred, b, 1.0, 1.0, 0.0, charge_weight=4.0)
+    w_atom = b.weight[b.batch]
+    err = (pred["charges"] - b.charges) ** 2
+    assert logs["charge_mse"] == pytest.approx(float((w_atom * err).sum() / w_atom.sum()), rel=1e-12)
+    assert float(loss) == pytest.approx(plain["loss"] + 4.0 * logs["charge_mse"], rel=1e-12)
