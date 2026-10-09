@@ -193,6 +193,112 @@ def coulomb_matrix(ewald, pos: Tensor, cell: Optional[Tensor] = None) -> Tensor:
     return gamma
 
 
+def gaussian_coulomb_matrix(pos: Tensor, sigma: Tensor, cell: Optional[Tensor] = None,
+                            accuracy: float = 1e-10, background: bool = True) -> Tensor:
+    """``A`` with ``E = 1/2 q^T A q`` the Coulomb energy of Gaussian charges, one structure.
+
+    Charge ``i`` is a normalized Gaussian of standard deviation ``sigma_i``
+    (``0``: a point charge). Two of them interact through
+    ``erf(r / (sqrt(2) gamma_ij)) / r`` with ``gamma_ij = sqrt(sigma_i^2 +
+    sigma_j^2)``, and each with itself through ``1 / (2 sigma_i sqrt(pi))``, so
+    the diagonal is ``1 / (sigma_i sqrt(pi))`` (zero for a point charge). This is
+    the electrostatic matrix of charge equilibration with Gaussian charges
+    (Ko *et al.*, *Nat. Commun.* 12, 398, 2021, eq. 3 and 6 without the
+    hardness; the EEQ of D4 with radius ``sqrt(2) sigma``).
+
+    For a periodic cell the lattice sum is split the Ewald way at ``alpha``:
+    ``[erf(r / (sqrt(2) gamma_ij)) - erf(alpha r)] / r`` over the images within
+    the real-space cutoff, ``4 pi / V sum_k exp(-k^2 / 4 alpha^2) / k^2
+    cos(k . (r_i - r_j))`` over ``k != 0``, ``-2 alpha / sqrt(pi)`` on the
+    diagonal and, with ``background``, ``-pi / (V alpha^2)`` in every element
+    (the neutralizing background of a charged cell). Both tails are cut where
+    they fall below ``accuracy``. Dense and differentiable in ``pos``, ``sigma``
+    and ``cell``; memory ``O(N^2)`` times the number of real-space images.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Positions ``(N, 3)``.
+    sigma : Tensor
+        Gaussian widths ``(N,)`` in the length unit of ``pos``.
+    cell : Tensor or None
+        Row-vector cell ``(3, 3)`` of a periodic structure (periodic along all
+        three axes); ``None`` for a molecule.
+    accuracy : float, optional
+        Relative truncation of the Ewald tails, by default ``1e-10``.
+    background : bool, optional
+        Include the neutralizing background of a charged cell, by default
+        ``True`` (no effect on a neutral one).
+
+    Returns
+    -------
+    Tensor
+        ``(N, N)`` symmetric, in ``e^2`` per length unit (multiply by the
+        Coulomb constant for an energy).
+    """
+    n = pos.shape[0]
+    sig2 = sigma * sigma
+    gamma2 = sig2[:, None] + sig2[None, :]
+    point = gamma2 <= 0
+    inv_width = torch.where(point, torch.zeros_like(gamma2),
+                            torch.rsqrt(2.0 * torch.where(point, torch.ones_like(gamma2), gamma2)))
+    self_term = torch.where(sigma > 0, 1.0 / (math.sqrt(math.pi) * torch.where(
+        sigma > 0, sigma, torch.ones_like(sigma))), torch.zeros_like(sigma))
+    eye = torch.eye(n, dtype=torch.bool, device=pos.device)
+
+    def kernel(r: Tensor, iw: Tensor, alpha: float) -> Tensor:
+        # erf(r iw) / r with iw = 0 meaning the bare 1 / r, minus erf(alpha r) / r
+        screen = torch.where(iw > 0, torch.special.erf(r * iw), torch.ones_like(r))
+        if alpha > 0:
+            screen = screen - torch.special.erf(alpha * r)
+        return screen / r
+
+    if cell is None:
+        d = pos[:, None, :] - pos[None, :, :]
+        r2 = (d * d).sum(-1)
+        r = torch.sqrt(torch.where(eye, torch.ones_like(r2), r2))
+        off = torch.where(eye, torch.zeros_like(r), kernel(r, inv_width, 0.0))
+        return off + torch.diag(self_term)
+
+    from .electrostatics import reciprocal_lattice
+    volume = cell_volume(cell)
+    root = math.sqrt(-math.log(accuracy))
+    # balance of the real-space and reciprocal work for N atoms in volume V
+    alpha = math.sqrt(math.pi) * (n / float(volume.detach()) ** 2) ** (1.0 / 6.0)
+    widest = float(torch.sqrt(gamma2.detach().max() * 2.0)) if bool((~point).any()) else 0.0
+    r_cut = max(root / alpha, root * widest)
+    k_cut = 2.0 * alpha * root
+
+    # pair vectors folded into the cell, then every image within r_cut
+    inv_cell = torch.linalg.inv(cell)
+    d = pos[None, :, :] - pos[:, None, :]                       # r_j - r_i
+    frac_shift = torch.round(d.detach() @ inv_cell.detach())
+    d = d - frac_shift @ cell
+    spacing = volume.detach() / torch.linalg.norm(torch.linalg.cross(
+        cell.detach()[[1, 2, 0]], cell.detach()[[2, 0, 1]]), dim=1)
+    bounds = [int(math.ceil(r_cut / float(s))) + 1 for s in spacing]
+    ranges = [torch.arange(-b, b + 1, device=pos.device) for b in bounds]
+    shifts = torch.cartesian_prod(*ranges).to(pos.dtype) @ cell  # (T, 3)
+    vec = d[:, :, None, :] + shifts[None, None, :, :]            # (N, N, T, 3)
+    rr2 = (vec * vec).sum(-1)
+    own = rr2.detach() < 1e-20                                   # an atom with itself
+    keep = ~own & (rr2.detach() <= r_cut * r_cut)
+    rr = torch.sqrt(torch.where(keep, rr2, torch.ones_like(rr2)))
+    real = torch.where(keep, kernel(rr, inv_width[:, :, None].expand_as(rr), alpha),
+                       torch.zeros_like(rr)).sum(-1)
+
+    _, kvec, k2 = reciprocal_lattice(cell, k_cut)
+    weight = 4.0 * math.pi / volume * torch.exp(-k2 / (4.0 * alpha * alpha)) / k2
+    phase = pos @ kvec.t()
+    c, s = torch.cos(phase), torch.sin(phase)
+    recip = (c * weight) @ c.t() + (s * weight) @ s.t()
+
+    amat = real + recip + torch.diag(self_term - 2.0 * alpha / math.sqrt(math.pi))
+    if background:
+        amat = amat - math.pi / (alpha * alpha) / volume
+    return amat
+
+
 def solve_charges(chi: Tensor, hardness: Tensor, gamma: Tensor, target: Tensor,
                   fragments: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
     """The constrained minimum of ``chi.q + 1/2 sum J q^2 + 1/2 q^T gamma q``.

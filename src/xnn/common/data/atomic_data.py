@@ -88,6 +88,11 @@ class AtomicGraph:
         (Angstrom^3). Present during training of PaiNN's polarizability head.
     dipole_mask, polarizability_mask : Tensor, optional
         The same as ``forces_mask`` for ``dipole`` / ``polarizability``.
+    charges : Tensor, optional
+        Target partial charge of every atom, of shape ``(N,)`` (e). Present
+        during training of the charge networks of the 3G and 4G HDNNPs.
+    charges_mask : Tensor, optional
+        The same as ``forces_mask`` for ``charges``.
     fragment_charges : Tensor, optional
         Net charge, in e, of the fragment each atom belongs to, shape ``(N,)``
         (for the fragment constraints of the LES charge solve); ``None`` when
@@ -146,6 +151,10 @@ class AtomicGraph:
         Target polarizability tensor ``(B, 3, 3)``.
     dipole_mask, polarizability_mask : Tensor or None
         Bool ``(B,)``: the structures that carry dipole / polarizability labels.
+    charges : Tensor or None
+        Target partial charges ``(N,)``.
+    charges_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry partial-charge labels.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
     spin_multiplicity : Tensor or None
@@ -180,6 +189,9 @@ class AtomicGraph:
     polarizability: Optional[Tensor] = None    # (B, 3, 3)
     dipole_mask: Optional[Tensor] = None           # (B,) bool
     polarizability_mask: Optional[Tensor] = None   # (B,) bool
+    # reference partial charges of the atoms (e), with the same mask convention
+    charges: Optional[Tensor] = None           # (N,)
+    charges_mask: Optional[Tensor] = None      # (B,) bool
     # the fragment charge of every atom (LES charge solve); None = unlabeled
     fragment_charges: Optional[Tensor] = None        # (N,) e
     fragment_charges_mask: Optional[Tensor] = None   # (B,) bool; None = all labeled
@@ -278,6 +290,8 @@ class AtomicGraph:
             polarizability=rows(self.polarizability, keep),
             dipole_mask=rows(self.dipole_mask, keep),
             polarizability_mask=rows(self.polarizability_mask, keep),
+            charges=rows(self.charges, node_keep),
+            charges_mask=rows(self.charges_mask, keep),
             fragment_charges=rows(self.fragment_charges, node_keep),
             fragment_charges_mask=rows(self.fragment_charges_mask, keep),
             total_charge=rows(self.total_charge, keep),

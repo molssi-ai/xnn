@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
-from ..common.elements import CHEMICAL_SYMBOLS, atomic_number
+from xnn.common.data.elements import CHEMICAL_SYMBOLS, atomic_number
 
 # kJ/mol -> kcal/mol (thermochemical calorie).
 KCAL_PER_KJ = 1.0 / 4.184

@@ -13,7 +13,7 @@ Organized by model family, with everything shared factored into ``common``:
         cli         -- the `xnn` command
     gnn/     graph networks: SchNet, and NequIP / MACE / Allegro / CACE / AIMNet2 (need e3nn)
     cnn/     volumetric 3D CNNs over voxelized environments (CNN3D, 3D steerable CNN)
-    dnn/     descriptor + per-element networks (HDNNP / ANI / PhysNet)
+    dnn/     dense neural networks (HDNNP / ANI / PhysNet)
     ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS)
     transformer/ shared graph-transformer building blocks (attention, radial basis)
     hybrid/  GNN + transformer potentials with a physics energy split (BAMBOO)

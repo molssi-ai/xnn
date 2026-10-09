@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 
-from ..common.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z  # noqa: F401  (re-exported)
+from xnn.common.data.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z  # noqa: F401  (re-exported)
 
 
 # Layout of the standard `ffield` text library (column -> parameter name).

@@ -27,72 +27,100 @@ from xnn.common.models.ops import make_activation
 class _ElementNetworks(nn.Module):
     """One atomic MLP per element; dispatches atoms by species.
 
-    Holds a separate MLP (mapping a descriptor to a scalar energy) for each
-    chemical species, and routes each atom's descriptor to the network for its
-    element.
+    Holds a separate MLP (mapping a descriptor to a scalar) for each chemical
+    species, and routes each atom's descriptor to the network for its element.
 
     Parameters
     ----------
     species : sequence of int
         Atomic numbers to build a per-element network for.
-    input_dim : int
-        Dimension of the input per-atom descriptor (the featurizer output).
+    input_dim : int or dict[int, int]
+        Width of the per-atom descriptor, or a ``{Z: width}`` dict when the
+        elements have descriptors of different lengths (the HDNNP); an element
+        reads the first ``width`` columns of the (zero-padded) descriptor.
     hidden : sequence of int or dict[int, sequence of int], optional
         Hidden-layer widths of each atomic MLP. A single sequence is shared by
         every element; a ``{Z: widths}`` dict gives each element its own
         architecture (as ANI-1x does). Defaults to ``(64, 64)``.
-    activation : str or torch.nn.Module, optional
-        Hidden-layer activation, by default ``"silu"``. See
+    activation : str, torch.nn.Module, sequence or dict, optional
+        Activation of the hidden layers, by default ``"silu"``, with a linear
+        output. A sequence gives one activation per layer *including* the
+        output layer (``len(hidden) + 1`` entries, e.g. ``["tanh", "tanh",
+        "linear"]``); a ``{Z: ...}`` dict sets either form per element. See
         :func:`~xnn.common.models.ops.make_activation`.
     bias : bool, optional
         Whether the linear layers carry a bias, by default ``True``.
+    extra_inputs : int, optional
+        Number of per-atom inputs appended after the descriptor columns (the
+        atomic charge of the 4G-HDNNP), by default 0.
 
     Attributes
     ----------
     species : list[int]
         The elements handled.
+    input_dims : dict[int, int]
+        Descriptor columns read by every element.
     nets : torch.nn.ModuleDict
         Per-element MLPs keyed by ``str(atomic_number)``.
     """
 
-    def __init__(self, species: Sequence[int], input_dim: int,
+    def __init__(self, species: Sequence[int], input_dim: Union[int, dict],
                  hidden: Union[Sequence[int], dict] = (64, 64),
-                 activation: Union[str, nn.Module] = "silu", bias: bool = True):
+                 activation: Union[str, nn.Module, Sequence, dict] = "silu",
+                 bias: bool = True, extra_inputs: int = 0):
         super().__init__()
         self.species = list(species)
+        self.input_dims = {z: int(input_dim[z]) if isinstance(input_dim, dict) else int(input_dim)
+                           for z in self.species}
+        self.extra_inputs = int(extra_inputs)
         self.nets = nn.ModuleDict()
         for z in self.species:
-            widths = hidden[z] if isinstance(hidden, dict) else hidden
-            layers, d = [], input_dim
-            for h in widths:
-                layers += [nn.Linear(d, h, bias=bias), make_activation(activation)]
+            widths = list(hidden[z] if isinstance(hidden, dict) else hidden)
+            acts = activation[z] if isinstance(activation, dict) else activation
+            if isinstance(acts, (str, nn.Module)):
+                acts = [acts] * len(widths) + [None]
+            acts = list(acts)
+            if len(acts) != len(widths) + 1:
+                raise ValueError(f"element {z}: {len(acts)} activations for {len(widths)} hidden "
+                                 f"layers and the output layer (need {len(widths) + 1})")
+            layers, d = [], self.input_dims[z] + self.extra_inputs
+            for h, act in zip(widths + [1], acts):
+                layers.append(nn.Linear(d, h, bias=bias))
+                if act is not None and not (isinstance(act, str) and act.lower() == "linear"
+                                            and h == 1):
+                    layers.append(make_activation(act))
                 d = h
-            layers += [nn.Linear(d, 1, bias=bias)]
             self.nets[str(z)] = nn.Sequential(*layers)
 
-    def forward(self, desc: Tensor, atomic_numbers: Tensor) -> Tensor:
-        """Map per-atom descriptors to per-atom energies via element networks.
+    def forward(self, desc: Tensor, atomic_numbers: Tensor,
+                extra: Optional[Tensor] = None) -> Tensor:
+        """Map per-atom descriptors to per-atom outputs via element networks.
 
         Parameters
         ----------
         desc : Tensor
-            Per-atom descriptors, shape ``(N, input_dim)``.
+            Per-atom descriptors, shape ``(N, D)``.
         atomic_numbers : Tensor
             Per-atom atomic numbers, shape ``(N,)``, used to select each atom's
             element network.
+        extra : Tensor, optional
+            The ``(N, extra_inputs)`` inputs appended to the descriptor.
 
         Returns
         -------
         Tensor
-            Per-atom energy, shape ``(N,)``.
+            Per-atom output, shape ``(N,)``.
         """
-        node_energy = torch.zeros(desc.shape[0], device=desc.device, dtype=desc.dtype)
+        out = torch.zeros(desc.shape[0], device=desc.device, dtype=desc.dtype)
         for z in self.species:
             mask = atomic_numbers == z
             if mask.any():
-                node_energy = node_energy.clone()
-                node_energy[mask] = self.nets[str(z)](desc[mask]).squeeze(-1)
-        return node_energy
+                x = desc[mask][:, :self.input_dims[z]]
+                if self.extra_inputs:
+                    x = torch.cat([x, extra[mask].reshape(-1, self.extra_inputs).to(x.dtype)], dim=-1)
+                out = out.clone()
+                out[mask] = self.nets[str(z)](x).squeeze(-1)
+        return out
 
 
 class DescriptorPotential(InteratomicPotential):
@@ -108,19 +136,25 @@ class DescriptorPotential(InteratomicPotential):
     featurizer : Featurizer
         Invariant featurizer mapping an :class:`AtomicGraph` to a per-atom
         descriptor of shape ``(N, featurizer.output_dim)``. Its ``cutoff`` sets
-        the model's neighbour-list cutoff.
+        the model's neighbour-list cutoff. A featurizer with an ``n_features``
+        ``{Z: width}`` dict (the atom-centered symmetry functions) gives every
+        element a network on its own leading columns.
     species : sequence of int
         Atomic numbers to build per-element networks for.
     hidden : sequence of int or dict[int, sequence of int], optional
         Hidden-layer widths of each per-element MLP (shared sequence or per-Z
         dict), by default ``(64, 64)``.
-    activation : str or torch.nn.Module, optional
-        Hidden-layer activation, by default ``"silu"``.
+    activation : str, torch.nn.Module, sequence or dict, optional
+        Hidden-layer activation, by default ``"silu"``, or the per-layer list
+        of :class:`_ElementNetworks`.
     bias : bool, optional
         Whether the linear layers carry a bias, by default ``True``.
     atomic_energies : sequence of float or None, optional
         Per-species self atomic energy added to each atom's contribution
         (aligned with ``species``). ``None`` (default) adds nothing.
+    extra_inputs : int, optional
+        Per-atom inputs appended to the descriptor of the element networks,
+        by default 0.
 
     Attributes
     ----------
@@ -140,15 +174,16 @@ class DescriptorPotential(InteratomicPotential):
 
     def __init__(self, featurizer: Featurizer, species: Sequence[int],
                  hidden: Union[Sequence[int], dict] = (64, 64),
-                 activation: Union[str, nn.Module] = "silu", bias: bool = True,
-                 atomic_energies: Optional[Sequence[float]] = None):
+                 activation: Union[str, nn.Module, Sequence, dict] = "silu", bias: bool = True,
+                 atomic_energies: Optional[Sequence[float]] = None, extra_inputs: int = 0):
         super().__init__()
         self.featurizer = featurizer
         self.cutoff = featurizer.cutoff
         self.node_feature_dim = featurizer.output_dim  # for e.g. LES
         self.species = list(species)
+        dims = getattr(featurizer, "n_features", None) or featurizer.output_dim
         self.element_nets = _ElementNetworks(
-            species, featurizer.output_dim, hidden, activation, bias)
+            species, dims, hidden, activation, bias, extra_inputs)
 
         # Per-species self energies, indexed directly by atomic number Z so the
         # forward pass can gather them without a Python dict lookup.

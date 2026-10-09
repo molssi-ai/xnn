@@ -171,7 +171,7 @@ class DreidingForceField(nn.Module):
         self.type_names = list(lib.atom_types)
         self._type_index = {n: i for i, n in enumerate(self.type_names)}
         self.hybrids = [lib.hybrid(n) for n in self.type_names]
-        from ..common.elements import SYMBOL_TO_Z
+        from xnn.common.data.elements import SYMBOL_TO_Z
         elements = [lib.element(n) for n in self.type_names]
         self.register_buffer("type_z", torch.tensor(
             [SYMBOL_TO_Z.get(e, 0) for e in elements], dtype=torch.long))

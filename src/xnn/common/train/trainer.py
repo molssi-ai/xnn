@@ -570,7 +570,7 @@ class Trainer:
             The scalar loss logs for this batch, as returned by
             :func:`weighted_loss` (e.g. ``"loss"`` plus any of
             ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``,
-            ``"dipole_mse"``, ``"polarizability_mse"``, per head
+            ``"dipole_mse"``, ``"polarizability_mse"``, ``"charge_mse"``, per head
             for a multi-head batch).
         """
         data = data.to(self.device)
@@ -584,6 +584,7 @@ class Trainer:
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
             dipole_weight=o.dipole_weight,
             polarizability_weight=o.polarizability_weight,
+            charge_weight=o.charge_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,

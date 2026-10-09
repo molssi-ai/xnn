@@ -74,7 +74,8 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         ``"polarizability"`` (from ``atoms.info["polarizability"]``),
         ``"total_charge"`` (from
         ``atoms.info["total_charge"]`` or ``atoms.info["charge"]``),
-        ``"fragment_charges"`` (from ``atoms.arrays["fragment_charges"]``, the
+        ``"charges"`` (from ``atoms.arrays["charges"]``, reference partial
+        charges), ``"fragment_charges"`` (from ``atoms.arrays["fragment_charges"]``, the
         net charge of each atom's fragment) and ``"spin_multiplicity"`` (from
         ``atoms.info["spin_multiplicity"]`` or ``atoms.info["multiplicity"]``).
     """
@@ -117,6 +118,8 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         if key in atoms.info:
             d["spin_multiplicity"] = float(atoms.info[key])
             break
+    if "charges" in atoms.arrays:
+        d["charges"] = np.asarray(atoms.arrays["charges"], dtype=float)
     if "fragment_charges" in atoms.arrays:
         d["fragment_charges"] = np.asarray(atoms.arrays["fragment_charges"], dtype=float)
     return d

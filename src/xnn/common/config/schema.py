@@ -183,6 +183,10 @@ class OptimConfig:
         ``0.0``.
     polarizability_weight : float
         Weight of the polarizability-tensor term (PaiNN). Defaults to ``0.0``.
+    charge_weight : float
+        Weight of the per-atom partial-charge term, for models with a
+        ``charges`` output (the 3G / 4G HDNNP charge networks, PhysNet,
+        AIMNet2) on data with ``charges`` labels. Defaults to ``0.0``.
     scheduler : str
         Learning-rate scheduler (``none`` / ``cosine`` / ``plateau``). MACE uses
         ``ReduceLROnPlateau``. Defaults to ``"plateau"``.
@@ -236,6 +240,7 @@ class OptimConfig:
     stress_weight: float = 0.0         # > 0 enables stress training (periodic)
     dipole_weight: float = 0.0         # > 0 trains a dipole head on dipole labels
     polarizability_weight: float = 0.0  # > 0 trains a polarizability head (PaiNN)
+    charge_weight: float = 0.0         # > 0 trains the predicted partial charges on charges labels
     scheduler: str = "plateau"         # none / cosine / plateau (MACE: ReduceLROnPlateau)
     huber_delta: float = 0.0           # > 0 clips the loss tails; 0 = squared error
     huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta

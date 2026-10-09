@@ -156,6 +156,19 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "sae": "atomic_energies",
         "network_dims": "hidden",
     },
+    # RuNNer input.nn spellings of the HDNNP options
+    "hdnnp": {
+        "nnp_generation": "generation",
+        "elements": "species",
+        "atom_energy": "atomic_energies",
+        "fixed_gausswidth": "gaussian_widths",
+        "default_nodes": "hidden",
+        "default_nodes_short": "hidden",
+        "default_activation_nn": "activation",
+        "default_activation_nn_short": "activation",
+        "default_nodes_charge": "charge_hidden",
+        "default_nodes_chi": "charge_hidden",
+    },
     # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
     "bamboo": {
         "rcut": "cutoff",

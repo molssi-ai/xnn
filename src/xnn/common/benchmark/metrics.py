@@ -184,7 +184,8 @@ def collect_predictions(model, loader, device, targets: list[str],
         Device to evaluate on.
     targets : list of str
         Which quantities to collect; a subset of ``"energy"``, ``"forces"``,
-        ``"stress"``, ``"dipole"`` and ``"polarizability"``. A target is
+        ``"stress"``, ``"dipole"``, ``"polarizability"`` and ``"charges"``
+        (per-atom partial charges). A target is
         skipped for a batch that lacks the reference value or the
         corresponding prediction.
     atomic_energies : torch.Tensor or None, optional
@@ -249,6 +250,14 @@ def collect_predictions(model, loader, device, targets: list[str],
                     t_pred, t_ref = t_pred[mask], t_ref[mask]
                 preds[key].append(t_pred.reshape(-1).cpu())
                 refs[key].append(t_ref.reshape(-1).cpu())
+        if "charges" in targets and data.charges is not None and "charges" in out:
+            q_pred, q_ref = out["charges"].detach(), data.charges.detach()
+            mask = getattr(data, "charges_mask", None)
+            if mask is not None:
+                atoms = mask[data.batch]
+                q_pred, q_ref = q_pred[atoms], q_ref[atoms]
+            preds["charges"].append(q_pred.reshape(-1).cpu())
+            refs["charges"].append(q_ref.reshape(-1).cpu())
 
     out_pairs: dict[str, tuple[Tensor, Tensor]] = {}
     for t in targets:
