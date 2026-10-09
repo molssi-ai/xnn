@@ -28,7 +28,8 @@ What is where
   notebook and an argon NPT density notebook, each against the reference
   code; MACE and AIMNet2 add foundation-model and fine-tuning notebooks;
   SchNet trains on rMD17, then runs NVE dynamics; DimeNet checks its paper and
-  trains on rMD17 against SchNet; LES shows long-range binding curves.
+  trains on rMD17 against SchNet; PaiNN checks its paper, reproduces its MD17
+  tables, the ferrocene rotation profiles and the ethanol IR and Raman spectra; LES shows long-range binding curves.
 - ``examples/cnn/se3cnn``: the Tetris experiment of the SE(3) steerable CNN
   paper, then steerable against conventional 3D CNN potentials on rMD17
   under rotations.

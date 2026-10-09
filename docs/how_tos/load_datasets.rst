@@ -12,7 +12,7 @@ runnable version of this page.
 
    from xnn.common.data import load_dataset, list_datasets
 
-   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'lode_dimers', 'qm7', 'rmd17']
+   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'ethanol_response', 'lode_dimers', 'qm7', 'rmd17']
 
    splits = load_dataset("rmd17", molecule="aspirin")                 # {"train": [...], "test": [...]}
    train = load_dataset("rmd17", molecule="aspirin", split="train")   # one list of structures
@@ -35,6 +35,9 @@ Each dataset takes its own keyword arguments (full list in :ref:`data`):
 
    # QM7: 7165 molecules with atomization energies, test fold 1 of the stratified five
    load_dataset("qm7", split="train", fold=1)
+
+   # ethanol with dipoles and polarizabilities: seeded 8000 / 1000 / 1000 split
+   load_dataset("ethanol_response", split="train")
 
    # ANI-1: 20 M conformations in one archive; pick heavy-atom subsets and cap the size
    load_dataset("ani1", heavy_atoms=[2, 3, 4], max_molecules=60, max_conformations=60)

@@ -53,6 +53,8 @@ defaults, as YAML:
      energy_weight: 1.0         # loss weights; nonzero enables the head
      force_weight: 10.0
      stress_weight: 0.0
+     dipole_weight: 0.0         # dipole / polarizability labels (PaiNN; PhysNet, AIMNet2 dipoles)
+     polarizability_weight: 0.0
      huber_delta: 0.0           # > 0 clips the loss tails; per-term huber_delta_energy / _forces / _stress
      scheduler: plateau         # none / cosine / plateau
      clip_grad: 0.0             # max gradient norm per step; 0 = off
@@ -96,4 +98,4 @@ Bundled configs
      train.yaml          training config with a Hydra-style defaults list
      benchmark.yaml      benchmark config
      data/default.yaml
-     model/{mace,nequip,allegro,cace,aimnet2,schnet,dimenet,dimenet_pp,se3cnn,cnn3d,physnet,hdnnp,ani,bamboo,reaxff,opls,dreiding}.yaml
+     model/{mace,nequip,allegro,cace,aimnet2,schnet,dimenet,dimenet_pp,painn,se3cnn,cnn3d,physnet,hdnnp,ani,bamboo,reaxff,opls,dreiding}.yaml

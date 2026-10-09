@@ -41,6 +41,12 @@ identical weights involves:
   <https://github.com/gasteigerjo/dimenet>`_, TensorFlow): about 1e-13
   relative in energies and forces under transplanted weights in float64;
   the published DimeNet++ QM9 model reproduces to float32 round-off.
+- **PaiNN** (Schütt *et al.* 2021; reference implementation in
+  `schnetpack <https://github.com/atomistic-machine-learning/schnetpack>`_):
+  a build from the paper, verified against an independent implementation
+  of its equations and against ``schnetpack`` under transplanted weights:
+  energies, forces, latent charges, dipoles and polarizabilities agree to
+  float64 and float32 round-off.
 - **SE(3) steerable CNN** (Weiler *et al.* 2018): a clean-room build from
   the paper; the steerable kernel basis is formed from Clebsch-Gordan
   coefficients and checked against a numerical solution of the paper's
