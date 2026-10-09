@@ -25,6 +25,11 @@ Invariant per-atom descriptors for the HDNNP and ANI models:
   and :class:`~xnn.dnn.featurizers.symmetry_functions.AngularSymmetryFunctions`:
   Behler-Parrinello G2 and angular symmetry functions.
 - :class:`~xnn.dnn.featurizers.aev.AEV`: the ANI atomic environment vector.
+- :class:`~xnn.dnn.featurizers.acsf.AtomCenteredSymmetryFunctions`: the
+  HDNNP descriptor, a list of radial (types 1, 2) and angular (types 3, 8, 9)
+  functions per element, each with its own cutoff function (cosine,
+  hyperbolic tangent, polynomial, hard), with RuNNer's conventions and
+  feature scaling.
 
 .. code-block:: python
 

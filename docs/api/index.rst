@@ -16,8 +16,8 @@ matching what you need:
 - :mod:`xnn.cnn`: the SE(3) steerable CNN and the conventional 3D CNN over
   voxelized environments, the spherical CNN over spherical signals, and
   their featurizers
-- :mod:`xnn.dnn`: HDNNP, ANI, PhysNet and the symmetry-function / AEV
-  featurizers
+- :mod:`xnn.dnn`: HDNNP (generations 1 to 4), ANI, PhysNet, the
+  symmetry-function / AEV featurizers and the RuNNer model files
 - :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING and the ``.frc`` force-field reader
 - :mod:`xnn.transformer`: edge attention and the exponential-normal basis
 - :mod:`xnn.hybrid`: BAMBOO

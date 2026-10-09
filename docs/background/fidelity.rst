@@ -34,6 +34,13 @@ identical weights involves:
 - **ANI** (`aiqm/torchani <https://github.com/aiqm/torchani>`_): the AEV to
   about 1e-16; the pretrained ANI-1x, ANI-1ccx and ANI-2x ensembles to about
   1e-8 Ha.
+- **HDNNP** (`RuNNer <https://gitlab.com/runner-suite/runner2>`_ 2.0.5,
+  compiled and run as an external program): RuNNer model directories load
+  unchanged; energies, forces and charges agree to about 1e-16 relative for
+  molecules in every generation (2G, 3G with point or Gaussian charges and
+  screening, 4G with element or network hardnesses and charged structures)
+  and to the Ewald truncation (about 1e-12) in periodic cells, also for the
+  published 4G Au2/MgO model. 1G follows the review's definition.
 - **SchNet** (Schütt *et al.* 2017): a clean-room build, verified against an
   independent implementation of the paper's equations to about 1e-15. No
   schnetpack code is used or compared against.

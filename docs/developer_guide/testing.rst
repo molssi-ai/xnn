@@ -22,8 +22,9 @@ What the tests check
   key translation, and TorchScript parity with the eager model where the
   model exports.
 - **Faithful implementations** (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
-  PaiNN, PhysNet, ANI, BAMBOO, LES, D3, D4): parity with the upstream code under
-  transplanted weights, to about 1e-15 (``test_mace`` also covers the
+  PaiNN, PhysNet, ANI, HDNNP, BAMBOO, LES, D3, D4): parity with the upstream code under
+  transplanted weights, to about 1e-15 (HDNNP against the RuNNer executable
+  when ``XNN_RUNNER`` points to it) (``test_mace`` also covers the
   foundation-checkpoint conversion in process, without downloads).
 - **Clean-room implementations** (SchNet, the SE(3) steerable CNN,
   ReaxFF, OPLS, DREIDING): parity

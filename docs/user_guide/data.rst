@@ -20,6 +20,7 @@ a dataclass holding one structure or a batch:
    graph.cell, graph.pbc  # (B, 3, 3), (B, 3); None for molecules
    graph.energy, graph.forces, graph.stress        # targets, optional
    graph.dipole, graph.polarizability              # (B, 3), (B, 3, 3) targets, optional
+   graph.charges                                   # (N,) partial-charge targets, optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
    graph.weight, graph.head                        # (B,) loss weight and readout head, optional
 
@@ -45,6 +46,7 @@ The input format is a plain dictionary per structure:
        "stress": ...,             # (3, 3) target
        "dipole": ...,             # (3,) target, e Angstrom; optional
        "polarizability": ...,     # (3, 3) target, Angstrom^3; optional
+       "charges": ...,            # (N,) partial charges, e; optional (HDNNP 3G / 4G)
        "total_charge": 0.0,       # or "charge"; optional
        "spin_multiplicity": 1,    # optional
        "weight": 1.0,             # per-structure loss weight, optional
@@ -64,8 +66,8 @@ concatenates graphs into one batched graph, which the trainer uses as its
    ds = AtomicDataset(structures, cutoff=5.0)
    batch = collate([ds[0], ds[1], ds[2]])     # one AtomicGraph holding 3 structures
 
-A batch may mix molecules and cells, and structures with and without force
-or stress labels: the missing labels are masked out of the loss. Energy
+A batch may mix molecules and cells, and structures with and without force,
+stress, dipole or charge labels: the missing labels are masked out of the loss. Energy
 labels are all or nothing.
 
 Files
@@ -83,7 +85,18 @@ a full matrix:
 
 Positions need not be wrapped into the cell. The converters
 :func:`~xnn.common.data.ase_io.load_structures` and
-:func:`~xnn.common.data.ase_io.atoms_to_structure` are public as well.
+:func:`~xnn.common.data.ase_io.atoms_to_structure` are public as well;
+per-atom ``charges`` are read from ``atoms.arrays["charges"]``.
+
+RuNNer ``input.data`` files (bohr, hartree) read into structure dictionaries
+in Angstrom and eV, with reference charges and the total charge:
+
+.. code-block:: python
+
+   from xnn.common.data.runner_io import read_runner_data, write_runner_data
+
+   structures = read_runner_data("input.data")
+   write_runner_data(structures, "copy.data")
 
 Neighbor lists
 ==============

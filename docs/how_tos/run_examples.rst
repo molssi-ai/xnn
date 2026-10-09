@@ -35,8 +35,10 @@ What is where
   under rotations.
 - ``examples/cnn/s2cnn``: the QM7 atomization-energy experiment of the
   spherical CNN paper.
-- ``examples/dnn``: ANI (rMD17 and the four published ANI datasets) and
-  PhysNet (against the original).
+- ``examples/dnn``: ANI (rMD17 and the four published ANI datasets),
+  PhysNet (against the original) and the HDNNP generations (paper checks,
+  1G against 2G on rMD17, and the 2G / 3G / 4G benchmarks of the
+  fourth-generation paper).
 - ``examples/hybrid``, ``examples/ffnn``: BAMBOO charges and electrostatics;
   ReaxFF, OPLS and DREIDING training, refits and conformational energetics.
 - ``examples/common``: DFT-D3 and DFT-D4 paper reproductions, benchmarks and

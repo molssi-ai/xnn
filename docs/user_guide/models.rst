@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'nnp1g', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -320,9 +320,39 @@ Embeds elements directly (no species list); returns ``charges`` and
 
 HDNNP
 =====
-:class:`~xnn.dnn.models.hdnnp.HDNNP`: the Behler-Parrinello potential,
-radial symmetry functions and one MLP per element. Under development.
-Options: ``species``, ``cutoff``, ``etas``, ``rs``, ``hidden``.
+High-dimensional neural network potentials in the four generations of
+Behler's classification (*Chem. Rev.* 121, 10037, 2021), matching the RuNNer
+code:
+
+- **1G** :class:`~xnn.dnn.models.hdnnp.NNP1G` (``nnp1g``): one network maps
+  the interatomic distances of a fixed system to its energy; optionally
+  symmetrized over permutations of like atoms.
+- **2G** :class:`~xnn.dnn.models.hdnnp.HDNNP` (``hdnnp``): a sum of atomic
+  energies from one network per element on atom-centered symmetry functions
+  (Behler and Parrinello 2007).
+- **3G** (``generation: 3``): a second set of element networks predicts
+  charges, shifted to the total charge, whose (Gaussian or point-charge)
+  electrostatic energy is added (Artrith *et al.* 2011, Morawietz *et al.*
+  2012), optionally screened inside a cutoff.
+- **4G** (``generation: 4``): the networks predict electronegativities, a
+  charge equilibration over the whole structure gives the charges (non-local
+  charge transfer, total charge), and each charge is an extra input of the
+  short-range networks (Ko *et al.* 2021).
+
+Returns ``energy_short`` and, for 3G and 4G, ``charges``, ``energy_elec``
+and ``dipole`` (molecules); train the charges with ``charge_weight`` on
+``charges`` labels. Options: ``generation``, ``species``, ``cutoffs``,
+``symmetry_functions``, ``scaling``, ``hidden``, ``activation``,
+``atomic_energies``, ``gaussian_widths``, ``screening``, ``hardness``
+(``element`` or ``network``), ``charge_neuron``, ``runner``; see
+``configs/model/hdnnp.yaml``.
+
+.. code-block:: python
+
+   from xnn.dnn.common.runner import load_runner_model
+
+   model = load_runner_model("runner_model/")   # input.nn, weights, scaling files
+   model.fit_scaling(train_graphs)              # or fit the symmetry-function scaling
 
 BAMBOO
 ======

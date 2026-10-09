@@ -28,8 +28,9 @@ xnn is organized by model family, with everything shared in ``common``:
        featurizers/   voxel grids and spherical signals of the atomic environment
        models/        steerable (SE(3) CNN), cnn3d, spherical (S^2 / SO(3) correlations)
      dnn/
-       featurizers/   symmetry functions, AEV
-       models/        hdnnp, ani, physnet
+       common/        RuNNer model files (input.nn, weights, scaling)
+       featurizers/   atom-centered symmetry functions, AEV
+       models/        hdnnp (1G to 4G), ani, physnet
      ffnn/
        common/        .frc force-field reader, SMARTS atom typing
        data/          the shipped .frc files
