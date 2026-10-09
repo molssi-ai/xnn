@@ -69,6 +69,34 @@ AUTO_POLICY = AutoPolicy(default_min_edges=3000, default_min_edges_float64=3000)
 LATENT_CHARGE_PER_E = math.sqrt(2.0 * math.pi * HARTREE * BOHR)
 
 
+def intra_structure_pairs(batch: Tensor, num_graphs: int) -> Tuple[Tensor, Tensor]:
+    """Every ordered pair ``(i, j)``, ``i != j``, of atoms in the same structure.
+
+    Parameters
+    ----------
+    batch : Tensor
+        Structure index of each atom ``(N,)``, in any order.
+    num_graphs : int
+        Number of structures.
+
+    Returns
+    -------
+    tuple of Tensor
+        Atom indices ``i`` and ``j``, each ``(sum_b n_b (n_b - 1),)``.
+    """
+    order = torch.argsort(batch, stable=True)
+    counts = torch.bincount(batch, minlength=num_graphs)
+    start = torch.cumsum(counts, 0) - counts
+    graph = batch[order]
+    per_atom = counts[graph]                       # size of each sorted atom's structure
+    i = torch.repeat_interleave(torch.arange(batch.numel(), device=batch.device), per_atom)
+    first = torch.cumsum(per_atom, 0) - per_atom   # first pair of each sorted atom
+    local = torch.arange(i.numel(), device=batch.device) - torch.repeat_interleave(first, per_atom)
+    j = start[graph[i]] + local
+    keep = i != j
+    return order[i[keep]], order[j[keep]]
+
+
 class EwaldSummation(nn.Module, FastPathModule):
     """Ewald energy of a (latent) per-atom variable ``q`` (paper eqs 3-5).
 
@@ -316,6 +344,78 @@ class EwaldSummation(nn.Module, FastPathModule):
             energy = energy + self._self_energy(q)
         return energy
 
+    def realspace_batch(self, pos: Tensor, q: Tensor, batch: Tensor, num_graphs: int) -> Tensor:
+        """:meth:`realspace` of every structure of a molecular batch at once.
+
+        The same sum over the pairs of each structure, taken over all of them
+        in one pass instead of a structure at a time: a training batch of
+        molecules then costs a few kernels instead of a loop with a host
+        synchronization per structure. The ``i == j`` terms, which vanish
+        identically in :meth:`realspace` (``erf(0) = 0``), are left out.
+
+        Parameters
+        ----------
+        pos : Tensor
+            Positions ``(N, 3)``.
+        q : Tensor
+            Hidden variable ``(N, n_channels)``.
+        batch : Tensor
+            Structure index of each atom ``(N,)``, in any order.
+        num_graphs : int
+            Number of structures ``B`` (those without atoms get zero).
+
+        Returns
+        -------
+        Tensor
+            Energies ``(B,)``.
+        """
+        if self.exponent != 1:
+            raise ValueError("realspace fallback supports exponent=1 only")
+        i, j = intra_structure_pairs(batch, num_graphs)
+        dist = torch.linalg.norm(pos[i] - pos[j], dim=-1)
+        screen = torch.special.erf(dist / (self.sigma * math.sqrt(2.0)))
+        pair = (q[i] * q[j]).sum(-1) * screen / (dist + 1e-6)
+        energy = scatter_sum(pair, batch[i], num_graphs) / (4.0 * math.pi)
+        if not self.remove_self_interaction:
+            gaussian_norm = self.sigma * (2.0 * math.pi) ** 1.5
+            energy = energy + scatter_sum(q.square().sum(-1), batch, num_graphs) / gaussian_norm
+        return energy
+
+    def realspace_single(self, pos: Tensor, q: Tensor) -> Tensor:
+        """:meth:`realspace` of one structure, with finite second derivatives.
+
+        The same pair sum as :meth:`realspace`, contracted as ``q^T K q`` per
+        channel instead of through an ``(N, N, n_channels)`` coupling tensor.
+        The ``i == j`` distances, whose terms vanish in :meth:`realspace`, are
+        replaced before the square root, whose second derivative is not finite
+        at zero. :meth:`forward` takes it for a batch of one molecule
+        (molecular dynamics, optimization), where the pair lists of
+        :meth:`realspace_batch` would cost more memory.
+
+        Parameters
+        ----------
+        pos : Tensor
+            Positions ``(N, 3)``.
+        q : Tensor
+            Hidden variable ``(N, n_channels)``.
+
+        Returns
+        -------
+        Tensor
+            The energy, a scalar.
+        """
+        if self.exponent != 1:
+            raise ValueError("realspace fallback supports exponent=1 only")
+        diag = torch.eye(pos.shape[0], dtype=torch.bool, device=pos.device)
+        d2 = (pos[:, None, :] - pos[None, :, :]).square().sum(-1)
+        dist = d2.masked_fill(diag, 1.0).sqrt()
+        kernel = torch.special.erf(dist / (self.sigma * math.sqrt(2.0))) / (dist + 1e-6)
+        kernel = kernel.masked_fill(diag, 0.0)
+        energy = (q * (kernel @ q)).sum() / (4.0 * math.pi)
+        if not self.remove_self_interaction:
+            energy = energy + self._self_energy(q)
+        return energy
+
     @torch.jit.ignore
     def forward(self, q: Tensor, pos: Tensor, batch: Tensor, num_graphs: int,
                 cell: Tensor | None, pbc: Tensor | None = None) -> Tensor:
@@ -344,18 +444,24 @@ class EwaldSummation(nn.Module, FastPathModule):
         """
         if q.dim() == 1:
             q = q.unsqueeze(1)
-        out = q.new_zeros(num_graphs)
-        for i in range(num_graphs):
+        if cell is None:
+            if num_graphs == 1:
+                return self.realspace_single(pos, q).reshape(1)
+            return self.realspace_batch(pos, q, batch, num_graphs)
+        periodic = cell.diagonal(dim1=-2, dim2=-1).abs().sum(-1) > 1e-6
+        if pbc is not None:
+            periodic = periodic & pbc.any(-1)
+        if num_graphs == 1 and not bool(periodic[0]):
+            return self.realspace_single(pos, q).reshape(1)
+        # the molecular structures all at once, the periodic ones one by one
+        molecular = ~periodic[batch]
+        out = self.realspace_batch(pos[molecular], q[molecular], batch[molecular], num_graphs)
+        for i in periodic.nonzero().flatten().tolist():
             mask = batch == i
-            periodic = (cell is not None
-                        and bool(cell[i].diagonal().abs().sum() > 1e-6)
-                        and (pbc is None or bool(pbc[i].any())))
-            if periodic:
-                use_fast = self.fast_active and int(mask.sum()) >= self.fast_min_atoms
-                reciprocal = self.reciprocal_fast if use_fast else self.reciprocal
-                out[i] = reciprocal(pos[mask], q[mask], cell[i])
-            else:
-                out[i] = self.realspace(pos[mask], q[mask])
+            use_fast = self.fast_active and int(mask.sum()) >= self.fast_min_atoms
+            reciprocal = self.reciprocal_fast if use_fast else self.reciprocal
+            out = out.index_put((torch.tensor([i], device=out.device),),
+                                reciprocal(pos[mask], q[mask], cell[i]).reshape(1))
         return out
 
 

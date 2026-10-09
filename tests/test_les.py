@@ -528,3 +528,103 @@ def test_trainer_warns_when_the_constraint_sees_no_charge_labels(tmp_path):
         warnings.simplefilter("error", UserWarning)
         trainer(True, True)
         trainer(False, False)
+
+
+def _roundoff(ew, pos, q):
+    """eps times the sum of the magnitudes of the terms in ``ew.realspace(pos, q)``: how far two
+    summation orders of the same terms can drift apart."""
+    d = torch.linalg.norm(pos[:, None] - pos[None], dim=-1)
+    kernel = torch.special.erf(d / (ew.sigma * math.sqrt(2.0))) / (d + 1e-6)
+    s = ((q[:, None] * q[None]).abs() * kernel[..., None]).sum() / (4.0 * math.pi)
+    if not ew.remove_self_interaction:
+        s = s + q.square().sum() / (ew.sigma * (2.0 * math.pi) ** 1.5)
+    return torch.finfo(pos.dtype).eps * s.detach()
+
+
+@pytest.mark.parametrize("remove_self", [False, True])
+@pytest.mark.parametrize("channels", [1, 4])
+def test_molecular_batch_matches_one_structure_at_a_time(remove_self, channels):
+    """The batched molecular sum equals ``realspace`` structure by structure, in any atom order."""
+    gen = torch.Generator().manual_seed(7)
+    sizes = [1, 5, 12, 3, 30]
+    batch = torch.cat([torch.full((n,), b) for b, n in enumerate(sizes)])
+    perm = torch.randperm(batch.numel(), generator=gen)          # atoms not grouped by structure
+    batch = batch[perm]
+    pos = (torch.rand(batch.numel(), 3, generator=gen) * 6.0).requires_grad_()
+    q = torch.randn(batch.numel(), channels, generator=gen)
+    ew = EwaldSummation(sigma=1.0, remove_self_interaction=remove_self)
+    batched = ew(q, pos, batch, len(sizes), None)
+    single = torch.stack([ew.realspace(pos[batch == b], q[batch == b])
+                          for b in range(len(sizes))])
+    bound = torch.stack([_roundoff(ew, pos[batch == b], q[batch == b])
+                         for b in range(len(sizes))])
+    assert ((batched - single).abs() <= 4 * bound).all()
+    g1, = torch.autograd.grad(batched.sum(), pos, create_graph=True)
+    g2, = torch.autograd.grad(single.sum(), pos, create_graph=True)
+    eps = torch.finfo(pos.dtype).eps
+    assert (g1 - g2).abs().max() <= 8 * eps * g2.abs().max()
+    # second derivatives (force training): finite here, while the per-structure sum's double
+    # backward is NaN through its zero diagonal distances; checked against central
+    # differences of the per-structure first derivatives
+    h1, = torch.autograd.grad((g1 ** 2).sum(), pos)
+    assert torch.isfinite(h1).all()
+
+    def g_squared(p):
+        e = torch.stack([ew.realspace(p[batch == b], q[batch == b]) for b in range(len(sizes))])
+        g, = torch.autograd.grad(e.sum(), p)
+        return (g ** 2).sum()
+
+    h_fd = torch.zeros_like(h1)
+    step = 1e-5
+    for k in range(pos.numel()):
+        dp = torch.zeros(pos.numel())
+        dp[k] = step
+        dp = dp.reshape(pos.shape)
+        plus = g_squared((pos.detach() + dp).requires_grad_())
+        minus = g_squared((pos.detach() - dp).requires_grad_())
+        h_fd.view(-1)[k] = (plus - minus) / (2 * step)
+    assert torch.allclose(h1, h_fd, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("remove_self", [False, True])
+@pytest.mark.parametrize("cell", [None, "zero"])
+def test_single_molecule_matches_realspace(remove_self, cell):
+    """A batch of one molecule takes the dense sum: ``realspace`` values, finite Hessians."""
+    gen = torch.Generator().manual_seed(5)
+    pos = (torch.rand(25, 3, generator=gen) * 6.0).requires_grad_()
+    q = torch.randn(25, 4, generator=gen)
+    batch = torch.zeros(25, dtype=torch.long)
+    ew = EwaldSummation(sigma=1.0, remove_self_interaction=remove_self)
+    cells = None if cell is None else torch.zeros(1, 3, 3)
+    pbc = None if cell is None else torch.zeros(1, 3, dtype=torch.bool)
+    single = ew(q, pos, batch, 1, cells, pbc)
+    reference = ew.realspace(pos, q)
+    assert (single - reference).abs() <= 4 * _roundoff(ew, pos, q)
+    g1, = torch.autograd.grad(single.sum(), pos, create_graph=True)
+    g2, = torch.autograd.grad(reference, pos)
+    eps = torch.finfo(pos.dtype).eps
+    assert (g1 - g2).abs().max() <= 8 * eps * g2.abs().max()
+    h1, = torch.autograd.grad((g1 ** 2).sum(), pos)
+    gb, = torch.autograd.grad(ew.realspace_batch(pos, q, batch, 1).sum(), pos, create_graph=True)
+    h2, = torch.autograd.grad((gb ** 2).sum(), pos)
+    assert torch.isfinite(h1).all()
+    assert (h1 - h2).abs().max() <= 64 * eps * h2.abs().max()
+
+
+def test_mixed_batch_takes_each_structure_its_own_way():
+    """Molecular structures in a mixed batch get the direct sum, periodic ones the reciprocal sum."""
+    gen = torch.Generator().manual_seed(11)
+    sizes = [4, 6, 5]
+    batch = torch.cat([torch.full((n,), b) for b, n in enumerate(sizes)])
+    pos = torch.rand(batch.numel(), 3, generator=gen) * 5.0
+    q = torch.randn(batch.numel(), 2, generator=gen)
+    cell = torch.zeros(3, 3, 3)
+    cell[1] = torch.eye(3) * 7.0                                   # only structure 1 is periodic
+    pbc = torch.tensor([[False] * 3, [True] * 3, [False] * 3])
+    ew = EwaldSummation(sigma=1.0, dl=1.9)
+    out = ew(q, pos, batch, 3, cell, pbc)
+    m = [batch == b for b in range(3)]
+    for b in (0, 2):
+        diff = (out[b] - ew.realspace(pos[m[b]], q[m[b]])).abs()
+        assert diff <= 4 * _roundoff(ew, pos[m[b]], q[m[b]])
+    assert torch.equal(out[1], ew.reciprocal(pos[m[1]], q[m[1]], cell[1]))
