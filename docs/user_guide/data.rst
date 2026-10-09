@@ -19,6 +19,7 @@ a dataclass holding one structure or a batch:
    graph.n_atoms          # (B,)
    graph.cell, graph.pbc  # (B, 3, 3), (B, 3); None for molecules
    graph.energy, graph.forces, graph.stress        # targets, optional
+   graph.dipole, graph.polarizability              # (B, 3), (B, 3, 3) targets, optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
    graph.weight, graph.head                        # (B,) loss weight and readout head, optional
 
@@ -42,6 +43,8 @@ The input format is a plain dictionary per structure:
        "energy": ...,             # scalar target
        "forces": ...,             # (N, 3) target
        "stress": ...,             # (3, 3) target
+       "dipole": ...,             # (3,) target, e Angstrom; optional
+       "polarizability": ...,     # (3, 3) target, Angstrom^3; optional
        "total_charge": 0.0,       # or "charge"; optional
        "spin_multiplicity": 1,    # optional
        "weight": 1.0,             # per-structure loss weight, optional
@@ -113,6 +116,10 @@ Standard benchmark datasets download, convert and cache in one call:
 - ``rmd17``: revised MD17, ten molecules with PBE energies and forces.
 - ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
   stratified five-fold split (needs scipy).
+- ``ethanol_response``: 10,000 ethanol conformations at PBE0/def2-TZVP with
+  energies, forces, dipole moments and polarizability tensors, the data of
+  the PaiNN spectra (needs ase). Options ``n_train`` / ``n_val`` / ``n_test``
+  (8000 / 1000 / 1000), ``seed``, ``units``, ``shielding``.
   Options ``molecule``, ``fold`` (1 to 5), ``split``, ``units`` (``eV`` or
   ``kcal/mol``), ``n_train`` / ``n_test``.
 - ``ani1``: the ANI-1 set, 20 M conformations of H/C/N/O molecules in one

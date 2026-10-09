@@ -22,7 +22,7 @@ xnn is organized by model family, with everything shared in ``common``:
        cli/           the xnn command
      gnn/
        featurizers/   spherical harmonics, Cartesian monomials, Bessel, spherical Bessel, polynomial cutoff
-       models/        schnet, dimenet, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
+       models/        schnet, dimenet, painn, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
        fast/          cuEquivariance fast paths
      cnn/
        featurizers/   voxel grids and spherical signals of the atomic environment

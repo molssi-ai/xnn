@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -182,6 +182,33 @@ No e3nn. Matches `gasteigerjo/dimenet <https://github.com/gasteigerjo/dimenet>`_
 Also ``n_bilinear`` (dimenet), ``n_triplet_features`` /
 ``n_basis_features`` / ``n_output_features`` (dimenet++), ``p``,
 ``trainable_rbf``. The reference code's key spellings are translated.
+
+PaiNN
+=====
+:class:`~xnn.gnn.models.painn.PaiNN`: equivariant message passing with
+scalar and vector features (Schütt *et al.* 2021). Optional heads predict
+dipole moments from latent charges and atomic dipoles and polarizability
+tensors from a rank-1 decomposition; train them with ``dipole_weight`` /
+``polarizability_weight`` on data with ``dipole`` / ``polarizability``
+labels. No e3nn. Matches the reference implementation (``schnetpack``).
+
+.. code-block:: yaml
+
+   model:
+     name: painn
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 3
+     n_rbf: 20                   # sin(n pi r / r_cut) / r with a cosine cutoff
+     dipole: true                # outputs dipole and latent charges
+     polarizability: true
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Also ``radial_basis`` (``bessel`` / ``gaussian``), ``shared_filters``,
+``atomic_dipoles``, ``correct_charges``, ``n_output_blocks``, the ablations
+``scalar_product`` / ``vector_propagation`` / ``vector_features``, and
+``energy_shift`` / ``energy_scale``.
 
 SE(3) steerable CNN and 3D CNN
 ==============================

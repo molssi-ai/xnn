@@ -817,3 +817,51 @@ def test_bio_scan_missing_file(tmp_path):
     with pytest.raises(FileNotFoundError, match="bundled file"):
         load_dataset("lode_dimers", subset="bio_scan", split="all",
                      cache_dir=tmp_path, quiet=True)
+
+
+def test_ethanol_response_builder(monkeypatch, tmp_path):
+    """The ethanol response set: atomic units to eV / Angstrom, the tensorial
+    labels, and a seeded 8000/1000/1000-style split."""
+    ase_db = pytest.importorskip("ase.db")
+    import tarfile
+
+    from xnn.common.data.hub import ethanol_response
+    from xnn.common.data.hub.units import BOHR_TO_ANGSTROM, HARTREE_TO_EV
+    from ase import Atoms
+
+    src = tmp_path / "src"
+    src.mkdir()
+    rng = np.random.default_rng(0)
+    with ase_db.connect(str(src / "ethanol_vacuum.db")) as db:
+        for _ in range(10):
+            db.write(Atoms(numbers=[6, 6, 8, 1, 1, 1, 1, 1, 1], positions=rng.normal(size=(9, 3))),
+                     data={"energy": np.array([-154.9]), "forces": rng.normal(size=(9, 3)),
+                           "dipole_moment": rng.normal(size=3),
+                           "polarizability": rng.normal(size=(3, 3)),
+                           "shielding": rng.normal(size=(9, 3, 3))})
+    archive = src / "ethanol_vacuum.tgz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(src / "ethanol_vacuum.db", arcname="ethanol_vacuum.db")
+
+    def fake_download(url, dest, md5=None, quiet=False):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(archive.read_bytes())
+        return dest
+
+    monkeypatch.setattr(ethanol_response, "download_file", fake_download)
+    au = load_dataset("ethanol_response", split="all", units="au", cache_dir=tmp_path, quiet=True)
+    ev = load_dataset("ethanol_response", split="all", cache_dir=tmp_path, quiet=True)
+    assert len(ev) == 10 and "shielding" not in ev[0]
+    assert ev[0]["energy"] == pytest.approx(-154.9 * HARTREE_TO_EV)
+    assert np.allclose(ev[0]["pos"], au[0]["pos"] * BOHR_TO_ANGSTROM)
+    assert np.allclose(ev[0]["forces"], au[0]["forces"] * HARTREE_TO_EV / BOHR_TO_ANGSTROM)
+    assert np.allclose(ev[0]["dipole"], au[0]["dipole"] * BOHR_TO_ANGSTROM)
+    assert np.allclose(ev[0]["polarizability"], au[0]["polarizability"] * BOHR_TO_ANGSTROM ** 3)
+    splits = load_dataset("ethanol_response", n_train=6, n_val=2, n_test=2,
+                          cache_dir=tmp_path, quiet=True)
+    assert [len(splits[k]) for k in ("train", "val", "test")] == [6, 2, 2]
+    again = load_dataset("ethanol_response", split="test", n_train=6, n_val=2, n_test=2,
+                         cache_dir=tmp_path, quiet=True)
+    assert np.allclose(again[0]["pos"], splits["test"][0]["pos"])
+    with pytest.raises(ValueError):
+        load_dataset("ethanol_response", n_train=20, cache_dir=tmp_path, quiet=True)

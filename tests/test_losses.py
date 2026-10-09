@@ -185,3 +185,31 @@ def test_gradients_still_flow_through_both_paths():
     assert torch.isfinite(pred["energy"].grad).all()
     assert torch.isfinite(pred["forces"].grad).all()
     assert pred["forces"].grad.abs().sum() > 0
+
+
+def test_dipole_and_polarizability_terms():
+    """The tensorial terms are per-structure means over their components,
+    weighted like the energy, and absent unless requested and predicted."""
+    structs = _structs([1.0, 3.0])
+    rng = np.random.default_rng(2)
+    for s in structs:
+        s["dipole"] = rng.normal(size=3)
+        s["polarizability"] = rng.normal(size=(3, 3))
+    ds = AtomicDataset(structs, 5.0)
+    b = collate([ds[0], ds[1]])
+    assert b.dipole.shape == (2, 3) and b.polarizability.shape == (2, 3, 3)
+    pred = _pred(b)
+    g = torch.Generator().manual_seed(3)
+    pred["dipole"] = b.dipole + torch.randn(2, 3, generator=g)
+    pred["polarizability"] = b.polarizability + torch.randn(2, 3, 3, generator=g)
+    _, plain = weighted_loss(pred, b, 1.0, 1.0, 0.0)
+    assert "dipole_mse" not in plain and "polarizability_mse" not in plain
+    loss, logs = weighted_loss(pred, b, 1.0, 1.0, 0.0, dipole_weight=2.0,
+                               polarizability_weight=0.5)
+    w = b.weight
+    d_err = ((pred["dipole"] - b.dipole) ** 2).mean(-1)
+    p_err = ((pred["polarizability"] - b.polarizability) ** 2).reshape(2, -1).mean(-1)
+    assert logs["dipole_mse"] == pytest.approx(float((w * d_err).sum() / w.sum()), rel=1e-6)
+    assert logs["polarizability_mse"] == pytest.approx(float((w * p_err).sum() / w.sum()), rel=1e-6)
+    assert float(loss) == pytest.approx(plain["loss"] + 2.0 * logs["dipole_mse"]
+                                        + 0.5 * logs["polarizability_mse"], rel=1e-6)

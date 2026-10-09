@@ -104,6 +104,13 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "num_after_skip": "n_after_skip",
         "num_dense_output": "n_output_layers",
     },
+    # the PaiNN reference code's spellings (schnetpack); key names only
+    "painn": {
+        "n_atom_basis": "n_features",
+        "n_gaussians": "n_rbf",
+        "n_radial_basis": "n_rbf",
+        "atomref": "atomic_energies",
+    },
     # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
     # the xnn models are built from the paper, these are key names only
     "se3cnn": {
