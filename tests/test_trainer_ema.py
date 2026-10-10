@@ -51,7 +51,7 @@ def test_ema_first_update_copies_and_decays():
     with torch.no_grad():
         model.small.fill_(1.5)
     ema.update_parameters(model)
-    assert torch.allclose(ema.module.small, torch.tensor([0.5 * 0.9 + 1.5 * 0.1]))
+    assert torch.allclose(ema.module.small, torch.tensor([0.5 * 0.9 + 1.5 * 0.1], dtype=torch.float32))
 
 
 def test_amsgrad_is_a_valid_optimizer():

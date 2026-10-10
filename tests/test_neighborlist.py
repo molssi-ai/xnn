@@ -7,9 +7,18 @@ shift sign leaves cross-boundary edges with lengths far beyond the cutoff, which
 the smooth envelope then silently zeros -- i.e. all periodic neighbours dropped.
 """
 import numpy as np
+import pytest
 import torch
 
 from xnn.common.data import build_neighbor_list, structure_to_graph
+
+
+@pytest.fixture(autouse=True)
+def _f64():
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(old)
 
 
 def _rng_crystal(n=40, L=8.0, seed=0):
@@ -19,7 +28,6 @@ def _rng_crystal(n=40, L=8.0, seed=0):
 
 def test_periodic_edge_lengths_within_cutoff():
     """Every periodic edge's reconstructed length must be <= cutoff."""
-    torch.set_default_dtype(torch.float64)
     pos, cell = _rng_crystal()
     cutoff = 4.0
     g = structure_to_graph(
@@ -39,7 +47,6 @@ def test_matches_ase_neighbor_list():
     from ase import Atoms
     from ase.neighborlist import neighbor_list
 
-    torch.set_default_dtype(torch.float64)
     pos, cell = _rng_crystal(n=60, L=10.0, seed=3)
     cutoff = 5.0
     atoms = Atoms(numbers=[18] * len(pos), positions=pos, cell=cell, pbc=True)
@@ -59,7 +66,6 @@ def test_unwrapped_positions_match_ase():
     from ase import Atoms
     from ase.neighborlist import neighbor_list
 
-    torch.set_default_dtype(torch.float64)
     pos, cell = _rng_crystal(n=40, L=8.0, seed=5)
     rng = np.random.default_rng(7)
     pos = pos + rng.integers(-3, 4, (len(pos), 3)) @ cell   # whole-lattice displacements
@@ -82,7 +88,6 @@ def test_unwrapped_mixed_pbc_match_ase():
     from ase import Atoms
     from ase.neighborlist import neighbor_list
 
-    torch.set_default_dtype(torch.float64)
     pos, cell = _rng_crystal(n=30, L=7.0, seed=9)
     pbc = [True, False, True]
     rng = np.random.default_rng(13)
@@ -105,7 +110,6 @@ def test_unwrapped_mixed_pbc_match_ase():
 
 def test_molecular_shifts_are_zero():
     """Non-periodic systems have all-zero shifts and correct displacements."""
-    torch.set_default_dtype(torch.float64)
     rng = np.random.default_rng(1)
     pos = rng.uniform(0, 4, (8, 3))
     edge_index, shifts = build_neighbor_list(torch.tensor(pos), 3.0, None, None)

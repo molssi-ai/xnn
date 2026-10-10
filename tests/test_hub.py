@@ -15,6 +15,15 @@ from xnn.common.data import AtomicDataset, list_datasets, load_dataset
 from xnn.common.data.hub import (
     ani1x, ani2x, default_cache_dir, lode_dimers, rmd17)
 
+
+@pytest.fixture(autouse=True)
+def _f64():
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(old)
+
+
 # eV per kcal/mol, matching rmd17._KCAL_MOL_TO_EV.
 KCAL = 0.0433641153087705
 N_CONF, N_ATOMS = 40, 5
@@ -67,7 +76,6 @@ def test_default_cache_dir_is_repo_datasets():
 def test_load_splits_and_units(fake_rmd17, tmp_path):
     """Default load returns train/test splits, converted to eV."""
     z, coords, energies, forces, train_idx, test_idx = fake_rmd17
-    torch.set_default_dtype(torch.float64)
 
     splits = load_dataset("rmd17", molecule="aspirin", cache_dir=tmp_path, quiet=True)
     assert set(splits) == {"train", "test"}
@@ -107,7 +115,6 @@ def test_split_all(fake_rmd17, tmp_path):
 
 def test_cutoff_wraps_atomicdataset(fake_rmd17, tmp_path):
     """Passing cutoff yields AtomicDataset(s) with a valid neighbor graph."""
-    torch.set_default_dtype(torch.float64)
     splits = load_dataset("rmd17", molecule="toluene", cutoff=5.0,
                           cache_dir=tmp_path, quiet=True)
     assert isinstance(splits["train"], AtomicDataset)
@@ -159,7 +166,6 @@ def test_unknown_dataset_raises():
                     reason="set XNN_TEST_NETWORK=1 to download from figshare")
 def test_live_download(tmp_path):
     """End-to-end: really fetch a molecule + splits from figshare."""
-    torch.set_default_dtype(torch.float64)
     splits = load_dataset("rmd17", molecule="ethanol", fold=1,
                           n_train=5, n_test=5, cache_dir=tmp_path)
     assert len(splits["train"]) == 5 and len(splits["test"]) == 5
@@ -216,7 +222,6 @@ def test_lode_registered():
 
 def test_lode_default_load(fake_lode, tmp_path):
     """Default load returns all frames under an 'all' split, with targets."""
-    torch.set_default_dtype(torch.float64)
     out = load_dataset("lode_dimers", cache_dir=tmp_path, quiet=True)
     assert set(out) == {"all"}
     assert len(out["all"]) == 6
@@ -235,7 +240,6 @@ def test_lode_label_filter(fake_lode, tmp_path):
 
 def test_lode_alias_and_cutoff(fake_lode, tmp_path):
     """A subset alias resolves, and cutoff wraps an AtomicDataset."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("lode_dimers", subset="dimers", cutoff=6.0,
                       cache_dir=tmp_path, quiet=True)
     assert isinstance(ds["all"], AtomicDataset)
@@ -244,7 +248,6 @@ def test_lode_alias_and_cutoff(fake_lode, tmp_path):
 
 def test_lode_return_info(fake_lode, tmp_path):
     """return_info attaches each frame's info dict and survives cutoff wrapping."""
-    torch.set_default_dtype(torch.float64)
     d = load_dataset("lode_dimers", subset="bio", split="all",
                      return_info=True, cache_dir=tmp_path, quiet=True)
     assert d[0]["info"]["label"] == "CC"
@@ -271,7 +274,6 @@ def test_lode_invalid_args(fake_lode, tmp_path, kwargs, match):
                     reason="set XNN_TEST_NETWORK=1 to download from Materials Cloud")
 def test_lode_live_download(tmp_path):
     """End-to-end: really fetch the Xenon subset from Materials Cloud."""
-    torch.set_default_dtype(torch.float64)
     xe = load_dataset("lode_dimers", subset="xenon", split="all",
                       cache_dir=tmp_path)
     assert len(xe) > 0
@@ -319,7 +321,6 @@ def test_ani1_registered():
 
 def test_ani1_load_subset_and_units(fake_ani1):
     """Loading a heavy-atom subset returns Hartree->eV converted structures."""
-    torch.set_default_dtype(torch.float64)
     out = load_dataset("ani1", heavy_atoms=2, cache_dir=fake_ani1, quiet=True)
     assert set(out) == {"all"}
     assert len(out["all"]) == 2 * 4       # 2 molecules * per_mol conformations
@@ -353,7 +354,6 @@ def test_ani1_splits(fake_ani1):
 
 def test_ani1_cutoff_wraps_dataset(fake_ani1):
     """cutoff wraps an AtomicDataset; ANI-1 is force-free."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("ani1", heavy_atoms=2, cutoff=5.2,
                       cache_dir=fake_ani1, quiet=True)["all"]
     assert isinstance(ds, AtomicDataset)
@@ -461,7 +461,6 @@ def test_ani1x_caps_and_splits(fake_ani1x, tmp_path):
 
 def test_ani1x_cutoff_wraps_dataset_with_forces(fake_ani1x, tmp_path):
     """cutoff wraps an AtomicDataset; ANI-1x carries forces."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("ani1x", cutoff=5.2, cache_dir=tmp_path, quiet=True)["all"]
     assert isinstance(ds, AtomicDataset)
     g = ds[0]
@@ -525,7 +524,6 @@ def test_ani1ccx_caps_and_splits(fake_ani1x, tmp_path):
 
 def test_ani1ccx_cutoff_wraps_forcefree_dataset(fake_ani1x, tmp_path):
     """cutoff wraps an AtomicDataset; ANI-1ccx is energy-only."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("ani1ccx", cutoff=5.2, cache_dir=tmp_path,
                       quiet=True)["all"]
     assert isinstance(ds, AtomicDataset)
@@ -639,7 +637,6 @@ def test_ani2x_forces_false_and_splits(fake_ani2x, tmp_path):
 
 def test_ani2x_cutoff_wraps_dataset_with_forces(fake_ani2x, tmp_path):
     """cutoff wraps an AtomicDataset carrying forces."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("ani2x", cutoff=5.1, cache_dir=tmp_path, quiet=True)["all"]
     assert isinstance(ds, AtomicDataset)
     g = ds[0]
@@ -736,7 +733,6 @@ def test_argon_registered():
 
 def test_argon_default_load_drops_isolated(fake_argon):
     """Default load returns train/test with the IsolatedAtom frame removed."""
-    torch.set_default_dtype(torch.float64)
     out = load_dataset("argon_md", cache_dir=fake_argon, quiet=True)
     assert set(out) == {"train", "test"}
     assert len(out["train"]) == 2 and len(out["test"]) == 1  # E0 frame dropped
@@ -757,7 +753,6 @@ def test_argon_split_and_all(fake_argon):
 
 def test_argon_cutoff_wraps_dataset(fake_argon):
     """cutoff wraps a periodic AtomicDataset with energy + forces."""
-    torch.set_default_dtype(torch.float64)
     ds = load_dataset("argon_md", split="train", cutoff=6.0,
                       cache_dir=fake_argon, quiet=True)
     assert isinstance(ds, AtomicDataset)
@@ -798,7 +793,6 @@ def fake_bio_scan(tmp_path):
 
 def test_bio_scan_bundled(fake_bio_scan):
     """The bundled bio_scan subset loads offline with info + label filtering."""
-    torch.set_default_dtype(torch.float64)
     allc = load_dataset("lode_dimers", subset="bio_scan", split="all",
                         return_info=True, cache_dir=fake_bio_scan, quiet=True)
     assert len(allc) == 9
