@@ -135,7 +135,7 @@ DEFAULT_CUTOFF_EEQ = 16.0
 #: ``regime="auto"`` switches from the dense (bit-exact) EEQ path to the
 #: large-system operator above these atom counts (dense memory: about 7 kB
 #: per pair for a periodic cell, 64 B per pair for a molecule)
-AUTO_LARGE_PERIODIC = 1500
+AUTO_LARGE_PERIODIC = 500
 AUTO_LARGE_MOLECULAR = 6000
 REGIMES = ("auto", "dense", "large")
 
