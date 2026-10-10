@@ -1,0 +1,20 @@
+# SpookyNet, the paper architecture (Unke et al., Nat. Commun. 12, 7273, 2021):
+# F = 128 features, T = 6 interaction modules, K = 16 exponential Bernstein
+# radial functions, cutoff 10 bohr, FAVOR+ nonlocal attention, charge and spin
+# embeddings, ZBL repulsion, damped electrostatics and D4 dispersion.
+name: spookynet
+cutoff: 5.291772109044924
+n_features: 128
+n_interactions: 6
+n_rbf: 16
+extra:
+  # lr_cutoff: 10.0              # electrostatics/D4 cutoff; needed for periodic data
+  # ewald: true                  # Ewald-sum the electrostatics of periodic structures
+  # electrostatics: false        # without dipole or charge labels the paper drops
+  # d4_dispersion: false         #   both charge-dependent terms
+  # nonlocal_interactions: false # the local-only ablation (paper Fig. 5)
+  # charge_embedding: false      # the ablations of paper Fig. 4
+  # spin_embedding: false
+  # attention: exact             # exact softmax attention instead of FAVOR+
+  # species: [1, 6, 8]
+  # atomic_energies: average     # per-element energy biases from the training set
