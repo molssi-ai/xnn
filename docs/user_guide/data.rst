@@ -127,14 +127,14 @@ Standard benchmark datasets download, convert and cache in one call:
    train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)   # AtomicDataset
 
 - ``rmd17``: revised MD17, ten molecules with PBE energies and forces.
+  Options ``molecule``, ``fold`` (1 to 5), ``split``, ``units`` (``eV`` or
+  ``kcal/mol``), ``n_train`` / ``n_test``.
 - ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
   stratified five-fold split (needs scipy).
 - ``ethanol_response``: 10,000 ethanol conformations at PBE0/def2-TZVP with
   energies, forces, dipole moments and polarizability tensors, the data of
   the PaiNN spectra (needs ase). Options ``n_train`` / ``n_val`` / ``n_test``
   (8000 / 1000 / 1000), ``seed``, ``units``, ``shielding``.
-  Options ``molecule``, ``fold`` (1 to 5), ``split``, ``units`` (``eV`` or
-  ``kcal/mol``), ``n_train`` / ``n_test``.
 - ``ani1``: the ANI-1 set, 20 M conformations of H/C/N/O molecules in one
   4.8 GB archive. Options ``heavy_atoms`` (1 to 8), ``max_molecules``,
   ``max_conformations``, ``split``, ``units``.
@@ -146,6 +146,11 @@ Standard benchmark datasets download, convert and cache in one call:
 - ``ani2x``: the seven-element ANI-2x set (H/C/N/O/S/F/Cl) with energies
   and forces (3.7 GB). Options ``n_atoms``, ``forces``, ``max_groups``,
   ``max_conformations``, ``split``, ``units``.
+- ``hdnnp4g``: the four charge-transfer benchmarks of the 4G-HDNNP paper
+  with energies, forces and Hirshfeld charges, as one ``all`` split (needs
+  ase). Option ``system``: ``carbon_chain``, ``ag_clusters``,
+  ``nacl_clusters`` or ``au2_mgo`` (periodic). The molecular sets are
+  CC BY-NC 4.0.
 - ``argon_md``: periodic argon with energies, forces and stress, bundled
   with the repository; used by the argon example notebooks.
 - ``lode_dimers``: the LODE non-bonded sets (biomolecular dimers, monomers,

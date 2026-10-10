@@ -12,7 +12,7 @@ runnable version of this page.
 
    from xnn.common.data import load_dataset, list_datasets
 
-   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'ethanol_response', 'lode_dimers', 'qm7', 'rmd17']
+   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'ethanol_response', 'hdnnp4g', 'lode_dimers', 'qm7', 'rmd17']
 
    splits = load_dataset("rmd17", molecule="aspirin")                 # {"train": [...], "test": [...]}
    train = load_dataset("rmd17", molecule="aspirin", split="train")   # one list of structures
@@ -46,6 +46,9 @@ Each dataset takes its own keyword arguments (full list in :ref:`data`):
    load_dataset("ani1x", split="train")
    load_dataset("ani1ccx", max_molecules=50)
    load_dataset("ani2x", n_atoms=[3, 4], max_conformations=200)
+
+   # the 4G-HDNNP benchmarks with Hirshfeld charges: carbon_chain, ag_clusters, nacl_clusters, au2_mgo
+   load_dataset("hdnnp4g", system="ag_clusters", split="all")
 
    # Argon MD: periodic frames with stress, bundled with the repository
    load_dataset("argon_md", split="train", cutoff=6.0)
