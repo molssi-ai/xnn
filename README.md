@@ -143,10 +143,10 @@ the MolSSI Driver Interface.
 | Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4) |
 | Convolutional neural networks (`cnn`) | 3D steerable CNN (SE(3)-equivariant), conventional 3D CNN, spherical CNN |
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6 |
-| Hybrid neural networks (`hybrid`) | BAMBOO |
+| Hybrid neural networks (`hybrid`) | BAMBOO, SpookyNet |
 
 Each model is checked against its reference code or paper
-(`examples/fidelity_checks/`). SchNet, DimeNet, PaiNN, NequIP, MACE, Allegro and AIMNet2
+(`examples/fidelity_checks/`). SchNet, DimeNet, PaiNN, SpookyNet, NequIP, MACE, Allegro and AIMNet2
 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
