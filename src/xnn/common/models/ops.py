@@ -40,6 +40,43 @@ def shifted_softplus(x: Tensor) -> Tensor:
     return F.relu(x) + torch.log1p(torch.exp(-x.abs())) - math.log(2.0)
 
 
+def glorot_orthogonal_(weight: Tensor, scale: float = 2.0) -> Tensor:
+    """Initialize a weight matrix as a (semi-)orthogonal matrix with Glorot variance.
+
+    The rows (or columns) are orthonormal, then the whole matrix is rescaled
+    so that its elements have variance ``scale / (fan_in + fan_out)``: the
+    initialization of the dense layers of DimeNet and SpookyNet.
+
+    Parameters
+    ----------
+    weight : Tensor
+        A 2-D weight tensor, modified in place.
+    scale : float, optional
+        Variance numerator, by default 2.0 (Glorot).
+
+    Returns
+    -------
+    Tensor
+        ``weight``.
+    """
+    with torch.no_grad():
+        nn.init.orthogonal_(weight)
+        fan_out, fan_in = weight.shape
+        weight.mul_(math.sqrt(scale / ((fan_in + fan_out) * float(weight.var()))))
+    return weight
+
+
+def softplus_inverse(x):
+    """Return ``y`` such that ``softplus(y) = x`` (``x > 0``, float or array).
+
+    Evaluated as ``x + log(1 - exp(-x))`` (i.e. ``log(expm1(x))`` rearranged
+    so the exponential never overflows for large ``x``); used to initialize
+    parameters that a softplus keeps positive (PhysNet, SpookyNet).
+    """
+    import numpy as np
+    return x + np.log(-np.expm1(-x))
+
+
 class ShiftedSoftplus(nn.Module):
     """Module form of :func:`shifted_softplus`, for use inside ``nn.Sequential``."""
 

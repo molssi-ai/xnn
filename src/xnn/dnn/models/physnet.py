@@ -61,22 +61,13 @@ from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import scatter_sum, shifted_softplus
+from xnn.common.models.ops import scatter_sum, shifted_softplus, softplus_inverse
 from xnn.common.models.registry import register_model
 from xnn.common.finetune.lora import register_lora_target
 from ...common.models import d3
 
 MAX_Z = 95  # element-indexed tables cover Z = 0..94 (through Pu)
 KEHALF = 7.199822675975274  # ke/2 in eV*A/e^2; halved since edges come in pairs
-
-
-def softplus_inverse(x):
-    """Return ``y`` such that ``softplus(y) = x``.
-
-    Evaluated as ``x + log(1 - exp(-x))`` (i.e. ``log(expm1(x))`` rearranged
-    so the exponential never overflows for large ``x``).
-    """
-    return x + np.log(-np.expm1(-x))
 
 
 # PhysNet's activation ``log(exp(x) + 1) - log(2)`` is the shared exact

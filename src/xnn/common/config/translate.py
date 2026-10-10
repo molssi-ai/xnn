@@ -80,6 +80,15 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "n_radial_basis": "n_rbf",
         "atomref": "atomic_energies",
     },
+    # the SpookyNet reference code's spellings; key names only
+    "spookynet": {
+        "num_features": "n_features",
+        "num_modules": "n_interactions",
+        "num_basis_functions": "n_rbf",
+        "use_zbl_repulsion": "zbl_repulsion",
+        "use_electrostatics": "electrostatics",
+        "use_d4_dispersion": "d4_dispersion",
+    },
     # the DimeNet reference code's config spellings (gasteigerjo/dimenet); key
     # names only, the xnn models are built from the papers
     "dimenet": {
@@ -110,6 +119,15 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "n_gaussians": "n_rbf",
         "n_radial_basis": "n_rbf",
         "atomref": "atomic_energies",
+    },
+    # the SpookyNet reference code's spellings; key names only
+    "spookynet": {
+        "num_features": "n_features",
+        "num_modules": "n_interactions",
+        "num_basis_functions": "n_rbf",
+        "use_zbl_repulsion": "zbl_repulsion",
+        "use_electrostatics": "electrostatics",
+        "use_d4_dispersion": "d4_dispersion",
     },
     # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
     # the xnn models are built from the paper, these are key names only

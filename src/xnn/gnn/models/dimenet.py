@@ -97,37 +97,11 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import make_activation, scatter_sum
+from xnn.common.models.ops import glorot_orthogonal_, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 from ..featurizers import BesselRBF, PolynomialCutoff, SphericalBesselBasis
 
 _MAX_Z = 100
-
-
-def glorot_orthogonal_(weight: Tensor, scale: float = 2.0) -> Tensor:
-    """Initialize a weight matrix as a (semi-)orthogonal matrix with Glorot variance.
-
-    The rows (or columns) are orthonormal, then the whole matrix is rescaled
-    so that its elements have variance ``scale / (fan_in + fan_out)``: the
-    initialization of every dense layer in the DimeNet reference code.
-
-    Parameters
-    ----------
-    weight : Tensor
-        A 2-D weight tensor, modified in place.
-    scale : float, optional
-        Variance numerator, by default 2.0 (Glorot).
-
-    Returns
-    -------
-    Tensor
-        ``weight``.
-    """
-    with torch.no_grad():
-        nn.init.orthogonal_(weight)
-        fan_out, fan_in = weight.shape
-        weight.mul_(math.sqrt(scale / ((fan_in + fan_out) * float(weight.var()))))
-    return weight
 
 
 def _dense(n_in: int, n_out: int, bias: bool = True,

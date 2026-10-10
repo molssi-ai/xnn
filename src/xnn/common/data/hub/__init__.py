@@ -37,6 +37,7 @@ from . import argon_md  # noqa: F401
 from . import qm7  # noqa: F401
 from . import ethanol_response  # noqa: F401
 from . import hdnnp4g  # noqa: F401
+from . import spookynet_states  # noqa: F401
 
 __all__ = [
     "load_dataset",
