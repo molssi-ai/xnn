@@ -20,7 +20,7 @@ matching what you need:
   symmetry-function / AEV featurizers and the RuNNer model files
 - :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING and the ``.frc`` force-field reader
 - :mod:`xnn.transformer`: edge attention and the exponential-normal basis
-- :mod:`xnn.hybrid`: BAMBOO
+- :mod:`xnn.hybrid`: BAMBOO, SpookyNet
 
 .. autosummary::
    :toctree: generated

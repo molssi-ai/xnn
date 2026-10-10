@@ -116,6 +116,7 @@ spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
    Propagation of directional information: the substituted ferrocene rotation <nb/gnn/painn/painn_ferrocene>
    Infrared and Raman spectra of ethanol from classical and ring-polymer dynamics <nb/gnn/painn/painn_spectra>
 
+
 3D steerable CNN (cnn)
 ======================
 
@@ -216,6 +217,25 @@ BAMBOO (hybrid)
    BAMBOO charges, energy decomposition, and deployment <nb/hybrid/bamboo/bamboo_charge_analysis>
    BAMBOO on charged / polar molecular dimers: why the charge-equilibrium term matters <nb/hybrid/bamboo/bamboo_dimer_electrostatics>
 
+SpookyNet (hybrid)
+==================
+
+The SpookyNet paper (Unke *et al.*, Nat. Commun. 2021): the building blocks
+checked with untrained models and the published example model, the
+electronic-state surfaces of Ag3+ / Ag3- and singlet / triplet CH2 (Fig. 4),
+the dissociation of diatomics with and without nonlocal interactions
+(Fig. 5), the 4G-HDNNP charge-transfer benchmarks (Table 1) and MD17
+(Table 3).
+
+.. example-toctree::
+   :caption: SpookyNet (hybrid)
+
+   SpookyNet from the paper: electronic states, orbital-like interactions and nonlocality <nb/hybrid/spookynet/spookynet_paper_checks>
+   Electronic states: Ag3+ / Ag3- and singlet / triplet CH2 <nb/hybrid/spookynet/spookynet_electronic_states>
+   Nonlocal effects: dissociation of diatomic molecules <nb/hybrid/spookynet/spookynet_nonlocal>
+   Nonlocal charge transfer: the 4G-HDNNP benchmarks <nb/hybrid/spookynet/spookynet_charge_transfer>
+   SpookyNet on MD17 <nb/hybrid/spookynet/spookynet_md17>
+
 ReaxFF / ReaxFF-nn (ffnn)
 =========================
 
@@ -279,6 +299,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/dimenet_verification>
    PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/painn_verification>
+   SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/spookynet_verification>
    HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>

@@ -140,13 +140,13 @@ Models at a glance
    * - Classical force fields (``ffnn``)
      - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6
    * - Hybrid neural networks (``hybrid``)
-     - BAMBOO
+     - BAMBOO, SpookyNet
    * - Add-ons for any model (``common``)
      - LES long-range electrostatics, DFT-D3 and DFT-D4 dispersion
 
 Each model matches its reference code or paper to round-off
 (:ref:`fidelity`); the MACE and AIMNet2 foundation models load through the
-hub. Every model trains, evaluates and runs under ASE. SchNet, DimeNet, PaiNN,
+hub. Every model trains, evaluates and runs under ASE. SchNet, DimeNet, PaiNN, SpookyNet,
 NequIP, MACE, Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any
 checkpoint serves as an MDI engine (:ref:`deployment`).
 

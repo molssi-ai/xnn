@@ -40,6 +40,8 @@ What is where
   1G against 2G on rMD17, and the 2G / 3G / 4G benchmarks of the
   fourth-generation paper).
 - ``examples/hybrid``, ``examples/ffnn``: BAMBOO charges and electrostatics;
+  SpookyNet checks its paper and reproduces its electronic-state, nonlocal and
+  charge-transfer examples and MD17;
   ReaxFF, OPLS and DREIDING training, refits and conformational energetics.
 - ``examples/common``: DFT-D3 and DFT-D4 paper reproductions, benchmarks and
   a large-system study.

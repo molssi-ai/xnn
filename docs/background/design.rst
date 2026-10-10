@@ -39,7 +39,8 @@ xnn is organized by model family, with everything shared in ``common``:
        featurizers/   exponential-normal radial basis
        attention.py   edge multi-head attention
      hybrid/
-       models/        bamboo
+       featurizers/   exponential Bernstein radial basis
+       models/        bamboo, spookynet
 
 Four ideas hold it together.
 

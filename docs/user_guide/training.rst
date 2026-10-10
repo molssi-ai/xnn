@@ -61,7 +61,7 @@ the force term averages over atoms.
 
 Optimizer, clipping, weight averaging
 =====================================
-``optim.optimizer`` selects Adam or AdamW (decoupled weight decay),
+``optim.optimizer`` selects Adam, AMSGrad or AdamW (decoupled weight decay),
 ``optim.clip_grad`` clips the gradient norm, and ``optim.ema_decay`` keeps an
 exponential moving average of the weights that validation and the
 checkpoints use. ``optim.freeze`` and ``optim.train_only`` select trainable

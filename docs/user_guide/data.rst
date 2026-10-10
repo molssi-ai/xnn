@@ -151,6 +151,11 @@ Standard benchmark datasets download, convert and cache in one call:
   ase). Option ``system``: ``carbon_chain``, ``ag_clusters``,
   ``nacl_clusters`` or ``au2_mgo`` (periodic). The molecular sets are
   CC BY-NC 4.0.
+- ``spookynet_states``: the electronic-state sets of the SpookyNet paper,
+  2200 Ag3+ / Ag3- clusters or singlet / triplet CH2 molecules at GFN2-xTB
+  with total charges, spin multiplicities, energies, forces and dipoles.
+  Options ``system`` (``ag3`` or ``carbene``), ``n_train`` / ``n_val``
+  (1000 / 100, the rest is ``test``), ``seed``.
 - ``argon_md``: periodic argon with energies, forces and stress, bundled
   with the repository; used by the argon example notebooks.
 - ``lode_dimers``: the LODE non-bonded sets (biomolecular dimers, monomers,

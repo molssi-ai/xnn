@@ -16,6 +16,9 @@ Shared basis functions (``xnn.common.featurizers``)
   distances (SchNet), with an optional explicit width ``gamma``.
 - :class:`~xnn.common.featurizers.cutoff.CosineCutoff`: smooth cosine
   envelope.
+- :class:`~xnn.common.featurizers.cutoff.MollifierCutoff`: the bump-function
+  envelope ``exp(-r^2 / (r_c^2 - r^2))``, smooth to every order (AIMNet2,
+  SpookyNet).
 
 Descriptors (``xnn.dnn.featurizers``)
 =====================================
@@ -96,5 +99,11 @@ Transformer pieces (``xnn.transformer``)
 radial basis) and :class:`~xnn.transformer.attention.EdgeMultiheadAttention`
 are the building blocks of BAMBOO, kept separate for other attention-based
 models.
+
+Hybrid radial basis (``xnn.hybrid.featurizers``)
+================================================
+:class:`~xnn.hybrid.featurizers.radial.ExponentialBernsteinRBF`: the
+Bernstein polynomials of ``exp(-gamma r)`` with a learned decay, the radial
+basis of SpookyNet.
 
 Writing a featurizer is a small task; see :ref:`developer-guide-extending`.

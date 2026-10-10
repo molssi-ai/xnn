@@ -54,6 +54,15 @@ identical weights involves:
   of its equations and against ``schnetpack`` under transplanted weights:
   energies, forces, latent charges, dipoles and polarizabilities agree to
   float64 and float32 round-off.
+- **SpookyNet** (`OUnke/SpookyNet <https://github.com/OUnke/SpookyNet>`_):
+  a build from the paper, verified against an independent implementation of
+  its equations and against the reference code under transplanted weights:
+  energies, forces, charges and dipoles agree to float64 round-off (about
+  1e-14) for molecules in several charge and spin states, batches and
+  periodic cells, and the published example model reproduces to 1e-15. The
+  D4 term uses the dftd4 data of :mod:`~xnn.common.models.d4`; the reference
+  code ships float32-rounded covalent radii, which moves its dispersion
+  energies by about 1e-8 relative.
 - **SE(3) steerable CNN** (Weiler *et al.* 2018): a clean-room build from
   the paper; the steerable kernel basis is formed from Clebsch-Gordan
   coefficients and checked against a numerical solution of the paper's

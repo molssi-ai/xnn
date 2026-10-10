@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'nnp1g', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'nnp1g', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', 'spookynet', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -372,6 +372,36 @@ kcal/mol and Å; returns ``charges``, ``dipole``, ``energy_nn`` and
      num_heads: 16
      use_electrostatics: true
      use_dispersion: false       # optional D3(CSO)
+
+SpookyNet
+=========
+:class:`~xnn.hybrid.models.spookynet.SpookyNet`: message passing with
+electronic degrees of freedom and nonlocal effects (Unke *et al.* 2021).
+The total charge and the spin enter as embeddings, local interactions use
+s-, p- and d-orbital-like basis functions, and self-attention over all atoms
+of a structure carries nonlocal effects. A ZBL-like repulsion, damped
+electrostatics of the predicted charges and D4 dispersion are added to the
+energy. Returns ``charges`` and ``dipole`` as well. No e3nn. Matches the
+reference implementation (`OUnke/SpookyNet <https://github.com/OUnke/SpookyNet>`_),
+whose saved models load with ``SpookyNet.from_reference_checkpoint(path)``.
+
+.. code-block:: yaml
+
+   model:
+     name: spookynet
+     cutoff: 5.29                # 10 bohr
+     n_features: 128
+     n_interactions: 6
+     n_rbf: 16                   # exponential Bernstein polynomials
+     extra:
+       lr_cutoff: 10.0           # long-range cutoff; needed for periodic cells
+       electrostatics: false     # without dipole or charge labels
+       d4_dispersion: false
+
+The net charge and spin multiplicity come from the structure
+(``total_charge``, ``spin_multiplicity``). Also ``charge_embedding`` /
+``spin_embedding``, ``nonlocal_interactions``, ``attention`` (``favor`` /
+``exact``), ``zbl_repulsion``, ``ewald``, ``exp_weighting``, ``n_residual``.
 
 ReaxFF / ReaxFF-nn
 ==================

@@ -48,7 +48,7 @@ defaults, as YAML:
    optim:
      lr: 1.0e-3
      weight_decay: 0.0
-     optimizer: adam            # adam / adamw
+     optimizer: adam            # adam / amsgrad / adamw
      epochs: 100
      energy_weight: 1.0         # loss weights; nonzero enables the head
      force_weight: 10.0
@@ -99,4 +99,4 @@ Bundled configs
      train.yaml          training config with a Hydra-style defaults list
      benchmark.yaml      benchmark config
      data/default.yaml
-     model/{mace,nequip,allegro,cace,aimnet2,schnet,dimenet,dimenet_pp,painn,se3cnn,cnn3d,physnet,hdnnp,ani,bamboo,reaxff,opls,dreiding}.yaml
+     model/{mace,nequip,allegro,cace,aimnet2,schnet,dimenet,dimenet_pp,painn,spookynet,se3cnn,cnn3d,physnet,hdnnp,ani,bamboo,reaxff,opls,dreiding}.yaml
