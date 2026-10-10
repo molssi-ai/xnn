@@ -1,11 +1,4 @@
-"""The trainer's weight EMA must follow large-valued parameters.
-
-An EMA step adds ``(1 - decay) * (p - avg)`` to the average. For a parameter that is large
-compared with its per-step change (a per-element reference energy of hundreds of eV moved by
-Adam steps of 1e-3) that increment is below float32 resolution, so a float32 average would
-never move while the training copy drifts: the served model then carries a constant energy
-offset. The trainer keeps the average in float64 whatever the model's dtype.
-"""
+"""Unit tests of the trainer's float64 weight EMA and the optimizer choices."""
 import torch
 from torch import nn
 

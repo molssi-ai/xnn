@@ -27,7 +27,7 @@ from xnn.common.models import (ForceStressOutput, available_models, build_model,
 from xnn.common.models.d3 import D3Dispersion  # noqa: E402
 from xnn.common.models.electrostatics import COULOMB_CONSTANT, all_pairs  # noqa: E402
 from xnn.common.models.hub import registry  # noqa: E402
-from xnn.gnn.featurizers import MollifierCutoff  # noqa: E402
+from xnn.common.featurizers import MollifierCutoff  # noqa: E402
 from xnn.gnn.models import aimnet2_foundation as foundation  # noqa: E402
 from xnn.gnn.models.aimnet2 import AIMNet2, ShellConvolution  # noqa: E402
 
