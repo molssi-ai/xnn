@@ -496,6 +496,39 @@ def test_runner_data_round_trip(tmp_path):
     assert s["charges"].tolist() == [0.25, -0.25] and s["forces"][0].tolist() == [0.1, 0.2, 0.3]
 
 
+def test_hdnnp4g_dataset_reader(tmp_path):
+    """The hdnnp4g hub reads energies, forces, cells and Hirshfeld charges from extended XYZ."""
+    from ase import Atoms
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import write
+
+    from xnn.common.data import load_dataset
+    from xnn.common.data.hub.hdnnp4g import _read_extxyz
+
+    c = _cell(seed=4)
+    atoms = Atoms(numbers=c["atomic_numbers"], positions=c["pos"], cell=c["cell"], pbc=True)
+    q = np.linspace(-0.5, 0.5, len(atoms))
+    atoms.set_initial_charges(q)
+    f = np.arange(3 * len(atoms), dtype=float).reshape(-1, 3)
+    atoms.calc = SinglePointCalculator(atoms, energy=-7.25, forces=f)
+    write(tmp_path / "frames.xyz", [atoms, atoms], format="extxyz")
+    back = _read_extxyz(tmp_path / "frames.xyz")
+    assert len(back) == 2 and back[0]["total_charge"] == 0.0 and back[0]["energy"] == -7.25
+    np.testing.assert_allclose(back[0]["charges"], q, atol=1e-12)
+    np.testing.assert_allclose(back[0]["forces"], f, atol=1e-12)
+    np.testing.assert_allclose(back[0]["cell"], c["cell"], atol=1e-12)
+    mol = Atoms("NaCl", positions=[[0, 0, 0], [2.4, 0, 0]])
+    mol.arrays["charge"] = np.array([0.9, 0.1])
+    mol.calc = SinglePointCalculator(mol, energy=-1.0, forces=np.zeros((2, 3)))
+    write(tmp_path / "mol.xyz", mol, format="extxyz")
+    m = _read_extxyz(tmp_path / "mol.xyz")[0]
+    assert m["total_charge"] == 1.0 and m["charges"].tolist() == [0.9, 0.1]
+    with pytest.raises(ValueError):
+        load_dataset("hdnnp4g", system="water", cache_dir=tmp_path)
+    with pytest.raises(ValueError):
+        load_dataset("hdnnp4g", split="train", cache_dir=tmp_path)
+
+
 def test_runner_feature_order():
     """Type, cutoff radius and kind, parameters, then elements (fluorine sorts last)."""
     cos, tanh = {"kind": "cosine", "r_cut": 8.0}, {"kind": "tanh", "r_cut": 8.0}
