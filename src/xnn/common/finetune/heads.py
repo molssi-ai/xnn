@@ -39,7 +39,7 @@ from ..models.base import InteratomicPotential
 
 # output keys that are per structure even when a batch has as many structures
 # as atoms (every other key with one row per atom is taken as per atom)
-_STRUCTURE_KEYS = frozenset({"energy", "stress", "dipole", "energy_nn", "energy_elec",
+_STRUCTURE_KEYS = frozenset({"energy", "stress", "dipole", "polarizability", "energy_nn", "energy_elec",
                              "energy_2body", "energy_3body", "energy_dispersion",
                              "energy_long_range", "energy_short_range"})
 

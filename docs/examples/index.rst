@@ -46,6 +46,20 @@ with its model preset.
    The ANI-1ccx dataset: coupled-cluster labels and transfer learning with the `ani-1ccx` preset <nb/dnn/ani/ani1ccx_dataset>
    The ANI-2x dataset: seven elements (S, F, Cl) and the `ani-2x` preset <nb/dnn/ani/ani2x_dataset>
 
+HDNNP (dnn)
+===========
+
+The four generations of high-dimensional neural network potentials: their
+defining properties on untrained models, first and second generation on
+rMD17, and the 2G / 3G / 4G comparison of the fourth-generation paper.
+
+.. example-toctree::
+   :caption: HDNNP (dnn)
+
+   The four generations of HDNNPs: symmetry functions, locality, non-local charge transfer <nb/dnn/hdnnp/hdnnp_paper_checks>
+   First- and second-generation potentials on rMD17 ethanol <nb/dnn/hdnnp/hdnnp_rmd17_train>
+   2G, 3G and 4G HDNNPs on the benchmarks of the fourth-generation paper <nb/dnn/hdnnp/hdnnp_4g_benchmarks>
+
 PhysNet (dnn)
 =============
 
@@ -84,6 +98,23 @@ SchNet trained on 1000 structures, with the learned 2D filters.
 
    DimeNet from the paper: bases, smoothness, directionality, and the DimeNet++ speed-up <nb/gnn/dimenet/dimenet_paper_checks>
    DimeNet and DimeNet++ on rMD17 ethanol: energies and forces from 1000 structures <nb/gnn/dimenet/dimenet_rmd17_train>
+
+PaiNN (gnn)
+===========
+
+The equivariant message passing paper (Schütt *et al.*, ICML 2021): the
+architecture and its claims checked with untrained models, the MD17
+experiments and ablations of Tables III and IV, the rotational profile of
+substituted ferrocene at short cutoffs (Fig. 4), and the infrared and Raman
+spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
+
+.. example-toctree::
+   :caption: PaiNN (gnn)
+
+   PaiNN from the paper: equivariant messages, directional information and tensorial outputs <nb/gnn/painn/painn_paper_checks>
+   PaiNN on MD17: energies and forces from 1000 structures, and the ablations <nb/gnn/painn/painn_md17>
+   Propagation of directional information: the substituted ferrocene rotation <nb/gnn/painn/painn_ferrocene>
+   Infrared and Raman spectra of ethanol from classical and ring-polymer dynamics <nb/gnn/painn/painn_spectra>
 
 3D steerable CNN (cnn)
 ======================
@@ -247,6 +278,8 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    3D steerable CNN, block by block: the kernel basis, equivariance and the reference implementation <nb/fidelity_checks/se3cnn_verification>
    Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/dimenet_verification>
+   PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/painn_verification>
+   HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>
    NequIP, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/nequip_verification>

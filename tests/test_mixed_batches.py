@@ -112,6 +112,29 @@ def test_partial_labels_get_masks_and_fillers():
     # a fully labelled batch carries no masks
     full = collate([structure_to_graph(_structure(6, s, True), 4.0) for s in range(3)])
     assert full.forces_mask is None and full.stress_mask is None
+    # tensorial labels of some structures: fillers, masks and the loss on the labelled ones
+    one = {**_structure(6, 0, False), "dipole": [0.1, 0.2, 0.3],
+           "polarizability": np.eye(3) * 2.0}
+    mixed = collate([structure_to_graph(one, 4.0), structure_to_graph(_structure(5, 1, False), 4.0)])
+    assert mixed.dipole_mask.tolist() == [True, False]
+    assert mixed.polarizability_mask.tolist() == [True, False]
+    assert torch.equal(mixed.dipole[1], torch.zeros(3))
+    pred = {"energy": mixed.energy, "forces": mixed.forces,
+            "dipole": torch.ones(2, 3), "polarizability": torch.ones(2, 3, 3)}
+    _, logs = weighted_loss(pred, mixed, 1.0, 0.0, 0.0, dipole_weight=1.0, polarizability_weight=1.0)
+    assert logs["dipole_mse"] == pytest.approx(float(((1 - mixed.dipole[0]) ** 2).mean()), rel=1e-12)
+    assert logs["polarizability_mse"] == pytest.approx(float(((1 - mixed.polarizability[0]) ** 2).mean()), rel=1e-12)
+    sub = mixed.subset(torch.tensor([True, False]))
+    assert sub.dipole.shape == (1, 3) and sub.dipole_mask.tolist() == [True]
+    # per-atom charge labels of some structures: zero fillers, a mask, the labelled atoms only
+    q = {**_structure(4, 0, False), "charges": [0.4, -0.4, 0.2, -0.2]}
+    qb = collate([structure_to_graph(_structure(3, 1, False), 4.0), structure_to_graph(q, 4.0)])
+    assert qb.charges_mask.tolist() == [False, True]
+    assert torch.equal(qb.charges[:3], torch.zeros(3))
+    pred = {"energy": qb.energy, "charges": torch.zeros(7)}
+    _, logs = weighted_loss(pred, qb, 1.0, 0.0, 0.0, charge_weight=1.0)
+    assert logs["charge_mse"] == pytest.approx(0.1, rel=1e-12)
+    assert qb.subset(torch.tensor([False, True])).charges.tolist() == [0.4, -0.4, 0.2, -0.2]
 
 
 def test_loss_uses_only_the_labelled_structures():

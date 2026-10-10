@@ -28,14 +28,17 @@ What is where
   notebook and an argon NPT density notebook, each against the reference
   code; MACE and AIMNet2 add foundation-model and fine-tuning notebooks;
   SchNet trains on rMD17, then runs NVE dynamics; DimeNet checks its paper and
-  trains on rMD17 against SchNet; LES shows long-range binding curves.
+  trains on rMD17 against SchNet; PaiNN checks its paper, reproduces its MD17
+  tables, the ferrocene rotation profiles and the ethanol IR and Raman spectra; LES shows long-range binding curves.
 - ``examples/cnn/se3cnn``: the Tetris experiment of the SE(3) steerable CNN
   paper, then steerable against conventional 3D CNN potentials on rMD17
   under rotations.
 - ``examples/cnn/s2cnn``: the QM7 atomization-energy experiment of the
   spherical CNN paper.
-- ``examples/dnn``: ANI (rMD17 and the four published ANI datasets) and
-  PhysNet (against the original).
+- ``examples/dnn``: ANI (rMD17 and the four published ANI datasets),
+  PhysNet (against the original) and the HDNNP generations (paper checks,
+  1G against 2G on rMD17, and the 2G / 3G / 4G benchmarks of the
+  fourth-generation paper).
 - ``examples/hybrid``, ``examples/ffnn``: BAMBOO charges and electrostatics;
   ReaxFF, OPLS and DREIDING training, refits and conformational energetics.
 - ``examples/common``: DFT-D3 and DFT-D4 paper reproductions, benchmarks and

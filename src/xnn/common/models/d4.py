@@ -135,7 +135,7 @@ DEFAULT_CUTOFF_EEQ = 16.0
 #: ``regime="auto"`` switches from the dense (bit-exact) EEQ path to the
 #: large-system operator above these atom counts (dense memory: about 7 kB
 #: per pair for a periodic cell, 64 B per pair for a molecule)
-AUTO_LARGE_PERIODIC = 1500
+AUTO_LARGE_PERIODIC = 500
 AUTO_LARGE_MOLECULAR = 6000
 REGIMES = ("auto", "dense", "large")
 
@@ -686,9 +686,7 @@ class DFTD4(nn.Module, FastPathModule):
         rhs = torch.cat([x, total_charge.reshape(1).to(pos.dtype)]).unsqueeze(1)
         if pos.dtype == torch.float32:
             # one LU factor of the detached matrix, one float64-residual
-            # refinement round, and the derivatives through the residual:
-            # O(N^2) backward, charges and forces at the float32 matrix's own
-            # accuracy (~2e-6 e, ~2e-7 eV/A at a few thousand atoms)
+            # refinement round, derivatives through the residual (O(N^2) backward)
             lu, pivots = torch.linalg.lu_factor(full.detach())
             sol = lu_solve_implicit(lu, pivots, full, rhs, 1)
         else:

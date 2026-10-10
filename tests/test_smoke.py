@@ -23,7 +23,7 @@ def _structs(periodic):
 
 
 def test_registry():
-    for m in ["schnet", "hdnnp", "ani", "nequip", "mace", "allegro"]:
+    for m in ["schnet", "painn", "dimenet", "hdnnp", "ani", "nequip", "mace", "allegro"]:
         assert m in available_models()
 
 

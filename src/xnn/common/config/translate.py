@@ -104,6 +104,13 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "num_after_skip": "n_after_skip",
         "num_dense_output": "n_output_layers",
     },
+    # the PaiNN reference code's spellings (schnetpack); key names only
+    "painn": {
+        "n_atom_basis": "n_features",
+        "n_gaussians": "n_rbf",
+        "n_radial_basis": "n_rbf",
+        "atomref": "atomic_energies",
+    },
     # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
     # the xnn models are built from the paper, these are key names only
     "se3cnn": {
@@ -148,6 +155,19 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "self_energies": "atomic_energies",
         "sae": "atomic_energies",
         "network_dims": "hidden",
+    },
+    # RuNNer input.nn spellings of the HDNNP options
+    "hdnnp": {
+        "nnp_generation": "generation",
+        "elements": "species",
+        "atom_energy": "atomic_energies",
+        "fixed_gausswidth": "gaussian_widths",
+        "default_nodes": "hidden",
+        "default_nodes_short": "hidden",
+        "default_activation_nn": "activation",
+        "default_activation_nn_short": "activation",
+        "default_nodes_charge": "charge_hidden",
+        "default_nodes_chi": "charge_hidden",
     },
     # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
     "bamboo": {

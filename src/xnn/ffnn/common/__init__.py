@@ -7,7 +7,7 @@
   registry of parameter files shipped with xnn.
 * :mod:`~xnn.ffnn.common.typing` -- atom typing from the SMARTS templates a
   force field carries (RDKit).
-* :mod:`~xnn.ffnn.common.elements` -- the element symbol table.
+* the element symbol table, re-exported from :mod:`xnn.common.data.elements`.
 
 The model-specific bridges that turn a resolved force field into the
 parameter tables a model consumes live next to the models
@@ -18,7 +18,7 @@ from .frc import (ForceField, FrcFile, Section, Row, read_frc, write_frc,
                   builtin_data_dir, register_section_schema, convert_units)
 from .typing import (assign_atom_types, to_rdkit, perceive_bonds,
                      perceive_bond_orders, AtomTypingError)
-from .elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z, atomic_number
+from xnn.common.data.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z, atomic_number
 
 __all__ = [
     "ForceField", "FrcFile", "Section", "Row", "read_frc", "write_frc",

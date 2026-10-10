@@ -1,6 +1,30 @@
+# High-dimensional neural network potential (Behler-Parrinello), generations 1-4.
+# Units are those of the data (xnn: Angstrom, eV, e).
 name: hdnnp
-cutoff: 6.0
-species: [1, 6, 8]
-etas: [0.05, 0.5, 2.0, 8.0]
-rs: [0.0]
-hidden: [64, 64]
+cutoff: 6.0                 # neighbor list; must reach the largest cutoff function
+n_features: 0               # unused (dense networks on symmetry functions)
+n_interactions: 0
+n_rbf: 0
+extra:
+  generation: 2             # 1 (one network for a fixed system, see nnp1g) | 2 | 3 | 4
+  species: [1, 6, 8]        # H, C, O
+  # atom-centered symmetry functions; a generic radial + angular set when omitted
+  # cutoffs:
+  #   - {kind: cosine, r_cut: 6.0}          # cosine | tanh | tanh_approx | polynomial | hard
+  # symmetry_functions:
+  #   - {element: H, type: 2, neighbors: [O], eta: 0.5, rs: 0.0, cutoff: 0}
+  #   - {element: O, type: 3, neighbors: [H, H], eta: 0.01, lambda: -1, zeta: 4, cutoff: 0}
+  scaling: none             # none | scale | center | center_scale | range (fit with fit_scaling)
+  hidden: [15, 15]          # per-element network widths (or {Z: [...]})
+  activation: tanh          # or one per layer incl. the output, e.g. [tanh, tanh, linear]
+  atomic_energies: null     # free-atom energies added per atom ({symbol: eV})
+  # 3G / 4G
+  # gaussian_widths: null   # Gaussian charge widths in A ({symbol: A}; 0 = point charges)
+  # screening: {kind: cosine, r_inner: 1.7, r_cut: 6.0}  # electrostatics screened inside r_cut
+  # charge_symmetry_functions: null       # own descriptor of the charge / electronegativity nets
+  # charge_hidden: null
+  # 4G
+  # hardness: element       # element (constant J per element, the paper) | network
+  # hardness_init: 10.0     # eV / e^2
+  # charge_neuron: true     # the charge as the last input of the short-range networks
+  # runner: path/to/model   # load a RuNNer model directory instead (input.nn + weights)

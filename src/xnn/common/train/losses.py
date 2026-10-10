@@ -1,4 +1,4 @@
-"""Weighted energy / force / stress loss."""
+"""Weighted energy / force / stress (and dipole / polarizability / charge) loss."""
 from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence
@@ -90,8 +90,11 @@ def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
 
 def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
            energy_weight: float, force_weight: float, stress_weight: float,
-           d_e: float, d_f: float, d_s: float) -> tuple[Tensor, dict[str, float]]:
-    """The weighted energy, force and stress terms over the structures weighted by ``w``.
+           d_e: float, d_f: float, d_s: float,
+           dipole_weight: float = 0.0, polarizability_weight: float = 0.0,
+           d_t: float = 0.0, charge_weight: float = 0.0) -> tuple[Tensor, dict[str, float]]:
+    """The weighted energy, force, stress, dipole, polarizability and charge
+    terms over the structures weighted by ``w``.
 
     Parameters
     ----------
@@ -132,12 +135,37 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             s_loss = _mean(_residual_sq(pred["stress"] - data.stress, d_s), w_s)
             loss = loss + stress_weight * s_loss
             logs["stress_mse"] = float(s_loss.detach())
+
+    # the tensorial labels of molecules (PaiNN, PhysNet, AIMNet2 dipoles):
+    # per-structure means over the 3 (dipole) or 9 (polarizability) components
+    for key, weight in (("dipole", dipole_weight), ("polarizability", polarizability_weight)):
+        target = getattr(data, key, None)
+        if target is None or weight <= 0 or key not in pred:
+            continue
+        w_t = _masked(w, getattr(data, key + "_mask", None), pred[key])
+        if w_t is None or bool(w_t.any()):
+            t_loss = _mean(_residual_sq(pred[key] - target, d_t), w_t)
+            loss = loss + weight * t_loss
+            logs[key + "_mse"] = float(t_loss.detach())
+
+    # per-atom partial charges (the charge networks of the 3G / 4G HDNNPs),
+    # averaged over the atoms of the labelled structures like the forces
+    if data.charges is not None and charge_weight > 0 and "charges" in pred:
+        w_q = _masked(w, getattr(data, "charges_mask", None), pred["charges"])
+        if w_q is None or bool(w_q.any()):
+            w_atom = None if w_q is None else w_q[data.batch]
+            q_loss = _mean(_residual_sq(pred["charges"] - data.charges, d_t), w_atom)
+            loss = loss + charge_weight * q_loss
+            logs["charge_mse"] = float(q_loss.detach())
     return loss, logs
 
 
 def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   energy_weight: float, force_weight: float,
                   stress_weight: float, *,
+                  dipole_weight: float = 0.0,
+                  polarizability_weight: float = 0.0,
+                  charge_weight: float = 0.0,
                   huber_delta: float = 0.0,
                   huber_delta_energy: Optional[float] = None,
                   huber_delta_forces: Optional[float] = None,
@@ -158,6 +186,17 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     - Forces: per-atom force error, averaged over every atom and Cartesian
       component in the batch.
     - Stress: error between predicted and target stress tensors.
+    - Dipole and polarizability (``dipole_weight`` /
+      ``polarizability_weight`` > 0): the mean squared error over the three
+      (nine) components of the predicted and target ``dipole``
+      (``polarizability``) of each structure, the tensorial targets of PaiNN
+      (and the dipoles of PhysNet and AIMNet2). These terms take the global
+      ``huber_delta`` and are not weighted per head.
+    - Charges (``charge_weight`` > 0): the squared error of the predicted
+      ``charges`` of every atom against ``data.charges``, averaged over the
+      atoms like the force term (the charge networks of the 3G and 4G
+      HDNNPs, and any model with a ``"charges"`` output). It takes the global
+      ``huber_delta`` and is not weighted per head.
 
     **Per-structure weighting.** When ``data.weight`` is set (shape ``(B,)``),
     every term becomes a weighted mean instead of a plain one: structure ``b``
@@ -212,6 +251,13 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         Weight applied to the stress term. The term is skipped when this is
         not positive, ``data.stress`` is ``None``, or ``pred`` lacks
         ``"stress"``.
+    dipole_weight, polarizability_weight : float, optional
+        Weights of the dipole and polarizability terms, skipped the same way
+        (``data.dipole`` / ``data.polarizability`` and the ``"dipole"`` /
+        ``"polarizability"`` predictions). Default ``0.0``.
+    charge_weight : float, optional
+        Weight of the partial-charge term, skipped the same way
+        (``data.charges`` and the ``"charges"`` prediction). Default ``0.0``.
     huber_delta : float, optional
         Default crossover from quadratic to linear for every term. ``0.0``
         (the default) means plain squared error throughout.
@@ -230,7 +276,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         A pair ``(loss, logs)`` where ``loss`` is the scalar weighted total
         loss (a 0-dim tensor carrying gradients) and ``logs`` maps ``"loss"``
         to the detached total plus, for each included term, its detached value
-        under ``"energy_mse"``, ``"force_mse"`` and/or ``"stress_mse"`` (with a
+        under ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``,
+        ``"dipole_mse"``, ``"polarizability_mse"`` and/or ``"charge_mse"`` (with a
         ``"<head>/"`` prefix per head in a multi-head batch). Those keys keep
         their names when Huber tails are on, where they hold the Huber value
         rather than a mean square.
@@ -243,7 +290,9 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     heads = [] if data.head is None else [int(h) for h in torch.unique(data.head).tolist()]
     if len(heads) <= 1:
         w_e, w_f, w_s = (head_weights or {}).get(heads[0], weights) if heads else weights
-        loss, logs = _terms(pred, data, data.weight, w_e, w_f, w_s, d_e, d_f, d_s)
+        loss, logs = _terms(pred, data, data.weight, w_e, w_f, w_s, d_e, d_f, d_s,
+                            dipole_weight, polarizability_weight, huber_delta,
+                            charge_weight)
         logs["loss"] = float(loss.detach())
         return loss, logs
 
@@ -253,7 +302,9 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         mask = (data.head == h).to(pred["energy"].dtype)
         w = mask if data.weight is None else data.weight * mask
         w_e, w_f, w_s = (head_weights or {}).get(h, weights)
-        part, part_logs = _terms(pred, data, w, w_e, w_f, w_s, d_e, d_f, d_s)
+        part, part_logs = _terms(pred, data, w, w_e, w_f, w_s, d_e, d_f, d_s,
+                                 dipole_weight, polarizability_weight, huber_delta,
+                                 charge_weight)
         loss = loss + part
         name = head_names[h] if head_names is not None and h < len(head_names) else str(h)
         logs.update({f"{name}/{k}": v for k, v in part_logs.items()})

@@ -19,6 +19,8 @@ a dataclass holding one structure or a batch:
    graph.n_atoms          # (B,)
    graph.cell, graph.pbc  # (B, 3, 3), (B, 3); None for molecules
    graph.energy, graph.forces, graph.stress        # targets, optional
+   graph.dipole, graph.polarizability              # (B, 3), (B, 3, 3) targets, optional
+   graph.charges                                   # (N,) partial-charge targets, optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
    graph.weight, graph.head                        # (B,) loss weight and readout head, optional
 
@@ -42,6 +44,9 @@ The input format is a plain dictionary per structure:
        "energy": ...,             # scalar target
        "forces": ...,             # (N, 3) target
        "stress": ...,             # (3, 3) target
+       "dipole": ...,             # (3,) target, e Angstrom; optional
+       "polarizability": ...,     # (3, 3) target, Angstrom^3; optional
+       "charges": ...,            # (N,) partial charges, e; optional (HDNNP 3G / 4G)
        "total_charge": 0.0,       # or "charge"; optional
        "spin_multiplicity": 1,    # optional
        "weight": 1.0,             # per-structure loss weight, optional
@@ -61,8 +66,8 @@ concatenates graphs into one batched graph, which the trainer uses as its
    ds = AtomicDataset(structures, cutoff=5.0)
    batch = collate([ds[0], ds[1], ds[2]])     # one AtomicGraph holding 3 structures
 
-A batch may mix molecules and cells, and structures with and without force
-or stress labels: the missing labels are masked out of the loss. Energy
+A batch may mix molecules and cells, and structures with and without force,
+stress, dipole or charge labels: the missing labels are masked out of the loss. Energy
 labels are all or nothing.
 
 Files
@@ -80,7 +85,18 @@ a full matrix:
 
 Positions need not be wrapped into the cell. The converters
 :func:`~xnn.common.data.ase_io.load_structures` and
-:func:`~xnn.common.data.ase_io.atoms_to_structure` are public as well.
+:func:`~xnn.common.data.ase_io.atoms_to_structure` are public as well;
+per-atom ``charges`` are read from ``atoms.arrays["charges"]``.
+
+RuNNer ``input.data`` files (bohr, hartree) read into structure dictionaries
+in Angstrom and eV, with reference charges and the total charge:
+
+.. code-block:: python
+
+   from xnn.common.data.runner_io import read_runner_data, write_runner_data
+
+   structures = read_runner_data("input.data")
+   write_runner_data(structures, "copy.data")
 
 Neighbor lists
 ==============
@@ -111,10 +127,14 @@ Standard benchmark datasets download, convert and cache in one call:
    train = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)   # AtomicDataset
 
 - ``rmd17``: revised MD17, ten molecules with PBE energies and forces.
-- ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
-  stratified five-fold split (needs scipy).
   Options ``molecule``, ``fold`` (1 to 5), ``split``, ``units`` (``eV`` or
   ``kcal/mol``), ``n_train`` / ``n_test``.
+- ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
+  stratified five-fold split (needs scipy).
+- ``ethanol_response``: 10,000 ethanol conformations at PBE0/def2-TZVP with
+  energies, forces, dipole moments and polarizability tensors, the data of
+  the PaiNN spectra (needs ase). Options ``n_train`` / ``n_val`` / ``n_test``
+  (8000 / 1000 / 1000), ``seed``, ``units``, ``shielding``.
 - ``ani1``: the ANI-1 set, 20 M conformations of H/C/N/O molecules in one
   4.8 GB archive. Options ``heavy_atoms`` (1 to 8), ``max_molecules``,
   ``max_conformations``, ``split``, ``units``.
@@ -126,6 +146,11 @@ Standard benchmark datasets download, convert and cache in one call:
 - ``ani2x``: the seven-element ANI-2x set (H/C/N/O/S/F/Cl) with energies
   and forces (3.7 GB). Options ``n_atoms``, ``forces``, ``max_groups``,
   ``max_conformations``, ``split``, ``units``.
+- ``hdnnp4g``: the four charge-transfer benchmarks of the 4G-HDNNP paper
+  with energies, forces and Hirshfeld charges, as one ``all`` split (needs
+  ase). Option ``system``: ``carbon_chain``, ``ag_clusters``,
+  ``nacl_clusters`` or ``au2_mgo`` (periodic). The molecular sets are
+  CC BY-NC 4.0.
 - ``argon_md``: periodic argon with energies, forces and stress, bundled
   with the repository; used by the argon example notebooks.
 - ``lode_dimers``: the LODE non-bonded sets (biomolecular dimers, monomers,

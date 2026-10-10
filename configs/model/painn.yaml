@@ -1,0 +1,16 @@
+# PaiNN, the paper architecture (Schuett, Unke & Gastegger, ICML 2021):
+# F = 128 scalar and vector features, T = 3 message/update block pairs,
+# 20 Bessel radial functions sin(n pi r / r_cut) / r with a cosine cutoff at 5 A.
+name: painn
+cutoff: 5.0
+n_features: 128
+n_interactions: 3
+n_rbf: 20
+extra:
+  # dipole: true                # the dipole head of eq 13 (outputs dipole + latent charges)
+  # polarizability: true        # the polarizability head of eq 14
+  # radial_basis: gaussian      # the reference code's default basis (paper: bessel)
+  # scalar_product: false       # Table IV ablations
+  # vector_propagation: false
+  # species: [1, 6, 8]
+  # atomic_energies: average    # per-element reference energies from the training set

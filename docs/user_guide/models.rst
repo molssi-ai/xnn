@@ -14,7 +14,7 @@ directly with the same keys:
 
    from xnn.common.models import available_models, build_model, ForceStressOutput
 
-   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
+   available_models()          # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'dimenet', 'dimenet++', 'hdnnp', 'mace', 'nequip', 'nnp1g', 'painn', 'physnet', 'reaxff', 'schnet', 'se3cnn', ...]
    model = build_model(cfg.model)   # dispatches to <Model>.from_config(cfg.model)
 
    model = ForceStressOutput(build_model(cfg.model), compute_stress=True)
@@ -183,6 +183,33 @@ Also ``n_bilinear`` (dimenet), ``n_triplet_features`` /
 ``n_basis_features`` / ``n_output_features`` (dimenet++), ``p``,
 ``trainable_rbf``. The reference code's key spellings are translated.
 
+PaiNN
+=====
+:class:`~xnn.gnn.models.painn.PaiNN`: equivariant message passing with
+scalar and vector features (Schütt *et al.* 2021). Optional heads predict
+dipole moments from latent charges and atomic dipoles and polarizability
+tensors from a rank-1 decomposition; train them with ``dipole_weight`` /
+``polarizability_weight`` on data with ``dipole`` / ``polarizability``
+labels. No e3nn. Matches the reference implementation (``schnetpack``).
+
+.. code-block:: yaml
+
+   model:
+     name: painn
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 3
+     n_rbf: 20                   # sin(n pi r / r_cut) / r with a cosine cutoff
+     dipole: true                # outputs dipole and latent charges
+     polarizability: true
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Also ``radial_basis`` (``bessel`` / ``gaussian``), ``shared_filters``,
+``atomic_dipoles``, ``correct_charges``, ``n_output_blocks``, the ablations
+``scalar_product`` / ``vector_propagation`` / ``vector_features``, and
+``energy_shift`` / ``energy_scale``.
+
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN`: the SE(3)-equivariant
@@ -293,9 +320,39 @@ Embeds elements directly (no species list); returns ``charges`` and
 
 HDNNP
 =====
-:class:`~xnn.dnn.models.hdnnp.HDNNP`: the Behler-Parrinello potential,
-radial symmetry functions and one MLP per element. Under development.
-Options: ``species``, ``cutoff``, ``etas``, ``rs``, ``hidden``.
+High-dimensional neural network potentials in the four generations of
+Behler's classification (*Chem. Rev.* 121, 10037, 2021), matching the RuNNer
+code:
+
+- **1G** :class:`~xnn.dnn.models.hdnnp.NNP1G` (``nnp1g``): one network maps
+  the interatomic distances of a fixed system to its energy; optionally
+  symmetrized over permutations of like atoms.
+- **2G** :class:`~xnn.dnn.models.hdnnp.HDNNP` (``hdnnp``): a sum of atomic
+  energies from one network per element on atom-centered symmetry functions
+  (Behler and Parrinello 2007).
+- **3G** (``generation: 3``): a second set of element networks predicts
+  charges, shifted to the total charge, whose (Gaussian or point-charge)
+  electrostatic energy is added (Artrith *et al.* 2011, Morawietz *et al.*
+  2012), optionally screened inside a cutoff.
+- **4G** (``generation: 4``): the networks predict electronegativities, a
+  charge equilibration over the whole structure gives the charges (non-local
+  charge transfer, total charge), and each charge is an extra input of the
+  short-range networks (Ko *et al.* 2021).
+
+Returns ``energy_short`` and, for 3G and 4G, ``charges``, ``energy_elec``
+and ``dipole`` (molecules); train the charges with ``charge_weight`` on
+``charges`` labels. Options: ``generation``, ``species``, ``cutoffs``,
+``symmetry_functions``, ``scaling``, ``hidden``, ``activation``,
+``atomic_energies``, ``gaussian_widths``, ``screening``, ``hardness``
+(``element`` or ``network``), ``charge_neuron``, ``runner``; see
+``configs/model/hdnnp.yaml``.
+
+.. code-block:: python
+
+   from xnn.dnn.common.runner import load_runner_model
+
+   model = load_runner_model("runner_model/")   # input.nn, weights, scaling files
+   model.fit_scaling(train_graphs)              # or fit the symmetry-function scaling
 
 BAMBOO
 ======
@@ -387,9 +444,29 @@ long-range energy.
    model:
      name: mace                  # any model
      long_range: {n_channels: 4, sigma: 1.0, dl: 2.0}
+     # long_range: {n_channels: 4, constrain_charge: true}   # charges sum to total_charge
+     # long_range: {n_channels: 4, charge_solve: true}       # global charge equilibration
 
 Molecules use the exact real-space sum (``dl`` then has no effect).
 Outputs gain ``energy_sr``, ``energy_lr`` and ``latent_charges``.
+
+Two options tie the charges to the structure's ``total_charge`` (its
+``charge`` label; missing means neutral). ``constrain_charge`` shifts each
+structure's charges so one channel sums to the net charge and the others to
+zero (``charge_weights: learned`` lets the model choose where the shift
+goes). ``charge_solve`` goes further: that channel's head output becomes an
+electronegativity, a learned hardness per element (``hardness: features``
+for a per-atom one) is added, and the charges minimise
+``chi.q + 1/2 J q^2 + E_lr`` under the same constraint, so every charge
+responds to every other one through the Ewald kernel; the energy gains
+``energy_charge``. Charged structures must be molecules (a cell's ``k = 0``
+term is dropped). With ``fragments: true`` each molecule or ion is
+constrained on its own (plain charge equilibration lets charge flow between
+distant fragments): fragments are the covalently bonded groups, ions in
+``ion_charges`` (alkali, alkaline-earth and halide ions by default) always
+stand alone, and a fragment's charge comes from the per-atom
+``fragment_charges`` label of the structure file when present, else from
+that table.
 
 Dispersion (DFT-D4, DFT-D3)
 ---------------------------

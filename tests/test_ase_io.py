@@ -17,6 +17,14 @@ from ase.stress import voigt_6_to_full_3x3_stress
 from xnn.common.data import AtomicDataset, atoms_to_structure, load_structures
 
 
+@pytest.fixture(autouse=True)
+def _f64():
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(old)
+
+
 def _argon_frame(seed=0, L=8.0, n=16):
     rng = np.random.default_rng(seed)
     atoms = Atoms(numbers=[18] * n, positions=rng.uniform(0, L, (n, 3)),
@@ -29,7 +37,6 @@ def _argon_frame(seed=0, L=8.0, n=16):
 
 def test_extxyz_roundtrip_with_targets(tmp_path):
     """extxyz frames come back with energy, forces and (3,3) stress targets."""
-    torch.set_default_dtype(torch.float64)
     frames = [_argon_frame(s) for s in range(3)]
     path = tmp_path / "frames.extxyz"
     write(path, frames)
@@ -48,7 +55,6 @@ def test_extxyz_roundtrip_with_targets(tmp_path):
 
 def test_cif_geometry(tmp_path):
     """A CIF crystal loads with correct species, periodicity and edges."""
-    torch.set_default_dtype(torch.float64)
     atoms = Atoms("NaCl", scaled_positions=[[0, 0, 0], [0.5, 0.5, 0.5]],
                   cell=np.eye(3) * 5.64, pbc=True)
     path = tmp_path / "nacl.cif"
@@ -67,7 +73,6 @@ def test_cif_geometry(tmp_path):
 
 def test_molecular_xyz(tmp_path):
     """A plain (non-periodic) xyz molecule loads with cell=None."""
-    torch.set_default_dtype(torch.float64)
     water = Atoms("OH2", positions=[[0, 0, 0], [0.96, 0, 0], [-0.24, 0.93, 0]])
     path = tmp_path / "water.xyz"
     write(path, water)
@@ -82,7 +87,6 @@ def test_molecular_xyz(tmp_path):
 
 def test_from_atoms_single_and_list():
     """`from_atoms` accepts a single Atoms or a list, without touching disk."""
-    torch.set_default_dtype(torch.float64)
     frames = [_argon_frame(s) for s in range(2)]
     assert len(AtomicDataset.from_atoms(frames[0], cutoff=4.0)) == 1
     ds = AtomicDataset.from_atoms(frames, cutoff=4.0)
@@ -92,7 +96,6 @@ def test_from_atoms_single_and_list():
 
 def test_unwrapped_coordinates_give_same_graph(tmp_path):
     """Frames with atoms outside the cell need no wrap(): graphs match exactly."""
-    torch.set_default_dtype(torch.float64)
     atoms = _argon_frame(seed=4)
     unwrapped = atoms.copy()
     rng = np.random.default_rng(11)
@@ -107,7 +110,6 @@ def test_unwrapped_coordinates_give_same_graph(tmp_path):
 
 def test_custom_target_keys(tmp_path):
     """MACE-style REF_* keys are read via energy_key / forces_key / stress_key."""
-    torch.set_default_dtype(torch.float64)
     rng = np.random.default_rng(3)
     atoms = Atoms(numbers=[18] * 4, positions=rng.uniform(0, 5, (4, 3)),
                   cell=np.eye(3) * 5.0, pbc=True)
@@ -131,7 +133,6 @@ def test_custom_target_keys(tmp_path):
 
 def test_info_and_arrays_fallback():
     """Targets in atoms.info / atoms.arrays are picked up when no calculator."""
-    torch.set_default_dtype(torch.float64)
     rng = np.random.default_rng(2)
     atoms = Atoms(numbers=[18] * 4, positions=rng.uniform(0, 5, (4, 3)),
                   cell=np.eye(3) * 5.0, pbc=True)

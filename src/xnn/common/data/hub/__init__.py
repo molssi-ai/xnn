@@ -35,6 +35,8 @@ from . import ani1ccx  # noqa: F401
 from . import ani2x  # noqa: F401
 from . import argon_md  # noqa: F401
 from . import qm7  # noqa: F401
+from . import ethanol_response  # noqa: F401
+from . import hdnnp4g  # noqa: F401
 
 __all__ = [
     "load_dataset",

@@ -177,6 +177,16 @@ class OptimConfig:
     stress_weight : float
         Weight of the stress term; values ``> 0`` enable stress training for
         periodic systems. Defaults to ``0.0``.
+    dipole_weight : float
+        Weight of the dipole-moment term, for models with a dipole output
+        (PaiNN, PhysNet, AIMNet2) on data with ``dipole`` labels. Defaults to
+        ``0.0``.
+    polarizability_weight : float
+        Weight of the polarizability-tensor term (PaiNN). Defaults to ``0.0``.
+    charge_weight : float
+        Weight of the per-atom partial-charge term, for models with a
+        ``charges`` output (the 3G / 4G HDNNP charge networks, PhysNet,
+        AIMNet2) on data with ``charges`` labels. Defaults to ``0.0``.
     scheduler : str
         Learning-rate scheduler (``none`` / ``cosine`` / ``plateau``). MACE uses
         ``ReduceLROnPlateau``. Defaults to ``"plateau"``.
@@ -196,8 +206,11 @@ class OptimConfig:
     huber_delta_stress : float, optional
         Per-term override of ``huber_delta`` for the stress term.
     optimizer : str
-        ``"adam"`` (default; ``weight_decay`` is an L2 penalty) or ``"adamw"``
-        (decoupled weight decay, the fine-tuning protocols' choice).
+        ``"adam"`` (default; ``weight_decay`` is an L2 penalty), ``"amsgrad"``
+        (Adam with the AMSGrad maximum of the second moment, whose steps
+        shrink as training settles; the DimeNet papers' choice) or
+        ``"adamw"`` (decoupled weight decay, the fine-tuning protocols'
+        choice).
     clip_grad : float
         Maximum gradient norm per step (``torch.nn.utils.clip_grad_norm_``);
         ``0.0`` (default) disables clipping.
@@ -225,12 +238,15 @@ class OptimConfig:
     energy_weight: float = 1.0
     force_weight: float = 10.0
     stress_weight: float = 0.0         # > 0 enables stress training (periodic)
+    dipole_weight: float = 0.0         # > 0 trains a dipole head on dipole labels
+    polarizability_weight: float = 0.0  # > 0 trains a polarizability head (PaiNN)
+    charge_weight: float = 0.0         # > 0 trains the predicted partial charges on charges labels
     scheduler: str = "plateau"         # none / cosine / plateau (MACE: ReduceLROnPlateau)
     huber_delta: float = 0.0           # > 0 clips the loss tails; 0 = squared error
     huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta
     huber_delta_forces: Optional[float] = None
     huber_delta_stress: Optional[float] = None
-    optimizer: str = "adam"            # adam / adamw (decoupled weight decay)
+    optimizer: str = "adam"            # adam / amsgrad / adamw (decoupled weight decay)
     clip_grad: float = 0.0             # max gradient norm per step; 0 = no clipping
     ema_decay: float = 0.0             # > 0: exponential moving average of the weights for validation and checkpoints
     # per-head loss weights of a multi-head model, {head: {energy_weight, force_weight, stress_weight}}
@@ -359,7 +375,7 @@ class Config:
         if self.data.replay_filter not in REPLAY_FILTERS:
             raise ValueError(f"data.replay_filter must be one of {REPLAY_FILTERS}, "
                              f"got {self.data.replay_filter!r}")
-        if self.optim.optimizer.lower() not in ("adam", "adamw"):
-            raise ValueError(f"optim.optimizer must be adam or adamw, got {self.optim.optimizer!r}")
+        if self.optim.optimizer.lower() not in ("adam", "amsgrad", "adamw"):
+            raise ValueError(f"optim.optimizer must be adam, amsgrad or adamw, got {self.optim.optimizer!r}")
         self.subtracted_dispersion = normalize_subtracted_dispersion(
             self.subtracted_dispersion, self.model)

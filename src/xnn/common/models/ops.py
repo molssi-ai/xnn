@@ -54,6 +54,31 @@ class GaussianActivation(nn.Module):
         return torch.exp(-x * x)
 
 
+class Softplus(nn.Module):
+    """Softplus ``log(1 + e^x)`` evaluated exactly at every ``x``, as ``max(x, 0) + log1p(e^-|x|)``.
+
+    :class:`torch.nn.Softplus` switches to ``x`` above its threshold and drops
+    the ``log1p`` tail; this one keeps it (the softplus of the HDNNP networks).
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.relu(x) + torch.log1p(torch.exp(-x.abs()))
+
+
+class ScaledTanh(nn.Module):
+    """``1.59223 tanh(x)``, the scaled hyperbolic tangent of the RuNNer networks."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return 1.59223 * torch.tanh(x)
+
+
+class Square(nn.Module):
+    """``x^2``."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x * x
+
+
 def make_activation(activation) -> nn.Module:
     """Return a fresh activation module from a name or a module instance.
 
@@ -66,8 +91,10 @@ def make_activation(activation) -> nn.Module:
     activation : str or torch.nn.Module
         One of ``"silu"``, ``"celu"`` (ANI, alpha=0.1), ``"gaussian"``
         (original ANI-1), ``"tanh"``, ``"relu"``, ``"sigmoid"``, ``"ssp"``
-        (the exact shifted softplus of SchNet / PhysNet); or an ``nn.Module``
-        used as-is.
+        (the exact shifted softplus of SchNet / PhysNet), ``"softplus"``
+        (:class:`Softplus`), ``"scaled_tanh"`` (:class:`ScaledTanh`),
+        ``"square"`` or ``"linear"`` (the identity); or an ``nn.Module`` used
+        as-is.
 
     Returns
     -------
@@ -89,6 +116,10 @@ def make_activation(activation) -> nn.Module:
         "relu": nn.ReLU,
         "sigmoid": nn.Sigmoid,
         "ssp": ShiftedSoftplus,
+        "softplus": Softplus,
+        "scaled_tanh": ScaledTanh,
+        "square": Square,
+        "linear": nn.Identity,
     }
     key = str(activation).lower()
     if key not in factories:

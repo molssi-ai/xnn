@@ -260,9 +260,7 @@ def test_cli_eeq_reuse_flag(tmp_path, monkeypatch):
 # float32 LU accuracy, the ASE opt-in, and batches
 
 def test_float32_lu_forces_are_refined():
-    """The float32 factor alone leaves ~1e-3 eV/A in the forces (the adjoint
-    through the factor); with the iterative refinement the LU path is as
-    accurate as the float32 iterative one."""
+    """Float32 LU forces are as accurate as the iterative path's."""
     pos, z, cell = _water_box()
     ref = _run(D4Dispersion(regime="large", eeq_solver="lu", **PER), pos, z, cell)
     prev = torch.get_default_dtype()
@@ -282,10 +280,7 @@ def test_float32_lu_forces_are_refined():
 
 
 def test_lu_solve_implicit_derivatives_with_a_wrong_factor():
-    """The dense float32 solve differentiates through the residual of a fixed
-    factor. With a deliberately wrong factor (error e = |1 - R A| ~ 2e-2) the
-    value and the gradient must still be exact to O(e^4) and the Hessian to
-    O(e^2); a single correction would leave the Hessian out entirely."""
+    """Value, gradient and Hessian stay exact with a deliberately wrong factor."""
     torch.manual_seed(0)
     n = 40
     m = torch.randn(n, n)
@@ -315,9 +310,7 @@ def test_lu_solve_implicit_derivatives_with_a_wrong_factor():
 
 
 def test_float32_dense_charges_are_refined():
-    """The dense regime's solve is refined too: without it the float32 charges
-    of 375 atoms are off by 1-2e-5 e (forces 1-2e-6 eV/A) against float64,
-    with it by ~1e-6 e (forces ~1e-7 eV/A)."""
+    """Float32 dense charges and forces stay close to float64."""
     pos, z, cell = _water_box(5)
 
     def run(dtype, periodic):
@@ -339,8 +332,7 @@ def test_float32_dense_charges_are_refined():
 
 
 def test_float32_dense_force_training_gradients_match_float64():
-    """d(force loss)/d(theta) goes twice through the dense solve's graph; in
-    float32 it must match float64 to the refined accuracy (~1e-6 relative)."""
+    """Float32 force-training gradients match float64."""
     pos, z, cell = _water_box(4)
 
     def grads(dtype, periodic):
@@ -364,8 +356,7 @@ def test_float32_dense_force_training_gradients_match_float64():
 
 @pytest.mark.parametrize("periodic", [False, True])
 def test_float32_torchscript_export_keeps_the_refinement(periodic):
-    """A float32 export runs the refined dense solve: it matches eager float32
-    (same charges) and float64 to the refined accuracy."""
+    """A float32 export matches eager float32 and stays close to float64."""
     from xnn.common.deploy import TorchScriptPotential
     pos, z, cell = _water_box(3)
     cell_t = torch.tensor(cell, dtype=torch.float32) if periodic else None

@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-from ..common.elements import CHEMICAL_SYMBOLS
+from xnn.common.data.elements import CHEMICAL_SYMBOLS
 
 # Bond-additivity correction delta of eq 6, in Angstrom.
 DELTA = 0.01

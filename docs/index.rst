@@ -132,9 +132,9 @@ Models at a glance
    * - Family
      - Models
    * - Graph neural networks (``gnn``)
-     - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++
+     - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, PaiNN
    * - Dense neural networks (``dnn``)
-     - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP
+     - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4)
    * - Convolutional neural networks (``cnn``)
      - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
@@ -146,8 +146,8 @@ Models at a glance
 
 Each model matches its reference code or paper to round-off
 (:ref:`fidelity`); the MACE and AIMNet2 foundation models load through the
-hub. Every model trains, evaluates and runs under ASE. SchNet, DimeNet, NequIP,
-MACE, Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any
+hub. Every model trains, evaluates and runs under ASE. SchNet, DimeNet, PaiNN,
+NequIP, MACE, Allegro and AIMNet2 also export to TorchScript for LAMMPS, and any
 checkpoint serves as an MDI engine (:ref:`deployment`).
 
 xnn is developed by `The Molecular Sciences Software Institute (MolSSI)

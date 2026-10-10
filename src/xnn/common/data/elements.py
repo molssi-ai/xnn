@@ -1,7 +1,8 @@
-"""Element symbols and atomic numbers shared by the ``ffnn`` family.
+"""Element symbols and atomic numbers.
 
-Force-field files key species by symbol (``C``, ``Fe``), models by atomic
-number; this is the one table both directions go through.
+Files key species by symbol (``C``, ``Fe``: force-field files, the RuNNer
+data and model files), models by atomic number; this is the one table both
+directions go through.
 """
 from __future__ import annotations
 

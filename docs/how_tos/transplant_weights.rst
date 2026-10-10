@@ -23,7 +23,14 @@ ANI ensembles load through presets:
    aim = from_pretrained("aimnet2")
    ani = ANI.ani2x()
 
-See :ref:`howto-pretrained-models`.
+See :ref:`howto-pretrained-models`. A RuNNer model directory (``input.nn``
+with the weights and scaling files of a 2G, 3G or 4G HDNNP) loads directly:
+
+.. code-block:: python
+
+   from xnn.dnn.common.runner import load_runner_model
+
+   model = load_runner_model("runner_model/")
 
 The pattern for anything else
 =============================

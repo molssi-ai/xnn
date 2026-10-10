@@ -183,9 +183,11 @@ def collect_predictions(model, loader, device, targets: list[str],
     device : torch.device
         Device to evaluate on.
     targets : list of str
-        Which quantities to collect; a subset of ``"energy"``, ``"forces"``
-        and ``"stress"``. A target is skipped for a batch that lacks the
-        reference value or the corresponding prediction.
+        Which quantities to collect; a subset of ``"energy"``, ``"forces"``,
+        ``"stress"``, ``"dipole"``, ``"polarizability"`` and ``"charges"``
+        (per-atom partial charges). A target is
+        skipped for a batch that lacks the reference value or the
+        corresponding prediction.
     atomic_energies : torch.Tensor or None, optional
         A ``Z``-indexed lookup of per-element reference energies (as built by
         :func:`~xnn.common.benchmark.energy.build_e0_lookup`). When given,
@@ -239,6 +241,23 @@ def collect_predictions(model, loader, device, targets: list[str],
                 s_pred, s_ref = s_pred[mask], s_ref[mask]
             preds["stress"].append(s_pred.reshape(-1).cpu())
             refs["stress"].append(s_ref.reshape(-1).cpu())
+        for key in ("dipole", "polarizability"):
+            ref = getattr(data, key, None)
+            if key in targets and ref is not None and key in out:
+                t_pred, t_ref = out[key].detach(), ref.detach()
+                mask = getattr(data, key + "_mask", None)
+                if mask is not None:
+                    t_pred, t_ref = t_pred[mask], t_ref[mask]
+                preds[key].append(t_pred.reshape(-1).cpu())
+                refs[key].append(t_ref.reshape(-1).cpu())
+        if "charges" in targets and data.charges is not None and "charges" in out:
+            q_pred, q_ref = out["charges"].detach(), data.charges.detach()
+            mask = getattr(data, "charges_mask", None)
+            if mask is not None:
+                atoms = mask[data.batch]
+                q_pred, q_ref = q_pred[atoms], q_ref[atoms]
+            preds["charges"].append(q_pred.reshape(-1).cpu())
+            refs["charges"].append(q_ref.reshape(-1).cpu())
 
     out_pairs: dict[str, tuple[Tensor, Tensor]] = {}
     for t in targets:
