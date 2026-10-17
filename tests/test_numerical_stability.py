@@ -1,7 +1,8 @@
 """Numerical edge cases for derivatives and periodic geometry."""
+import numpy as np
 import pytest
 import torch
-from xnn.common.data import structure_to_graph
+from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import D4Dispersion, ForceStressOutput
 from xnn.common.models.ops import shifted_softplus, Softplus
 from xnn.dnn.featurizers import AtomCenteredSymmetryFunctions
@@ -60,10 +61,10 @@ def test_bonded_vectors_choose_nearest_triclinic_image():
     assert guess_bonds(pos.numpy(), [6, 6], cell.numpy()) == [(0, 1)]
 
 
-@pytest.mark.parametrize('skew', [0., 1.5, 10.5])
+@pytest.mark.parametrize('skew', [0., 1.5])
 @pytest.mark.parametrize('periodic', [[True, True, True], [True, False, True]])
 def test_minimum_image_matches_enumeration(skew, periodic):
-    """The nearest image search handles unreduced cells and partial periodicity."""
+    """The image search matches enumeration on reduced cells with partial periodicity."""
     cell = torch.tensor([[3., 0., 0.], [skew, 3., 0.], [0., 0., 3.]], dtype=torch.float64)
     vec = torch.tensor([[0.49, 0.49, 0.1], [3.2, -2.1, 0.4]], dtype=torch.float64) @ cell
     pbc = torch.tensor(periodic)
@@ -72,6 +73,54 @@ def test_minimum_image_matches_enumeration(skew, periodic):
                                     for p in periodic]).double()
     expected = torch.linalg.norm(vec[:, None] + shifts @ cell, dim=-1).min(dim=1).values
     torch.testing.assert_close(actual.norm(dim=-1), expected)
+
+
+def test_minimum_image_exact_on_reduced_cells():
+    """Every image of random vectors is found on random Minkowski-reduced cells."""
+    from ase.geometry import minkowski_reduce
+    rng = np.random.default_rng(0)
+    shifts = torch.cartesian_prod(*[torch.arange(-4, 5)] * 3).double()
+    for _ in range(5):
+        lengths = rng.uniform(8., 20., 3)
+        raw = np.diag(lengths)
+        raw[1, 0], raw[2, 0], raw[2, 1] = rng.uniform(-.5, .5, 3) * lengths[[0, 0, 1]]
+        cell = torch.tensor(np.array(minkowski_reduce(raw)[0]), dtype=torch.float64)
+        vec = torch.tensor(rng.normal(size=(500, 3)) * 12., dtype=torch.float64)
+        expected = torch.linalg.norm(vec[:, None] + shifts @ cell, dim=-1).min(dim=1).values
+        torch.testing.assert_close(minimum_image_vectors(vec, cell).norm(dim=-1), expected)
+
+
+@pytest.mark.parametrize('skew', [1.5, 10.5])
+def test_unreduced_cell_warns(skew):
+    """An unreduced cell warns from the image search, a reduced one does not; bond guessing is exact on both."""
+    import warnings
+    cell = torch.tensor([[3., 0., 0.], [skew, 3., 0.], [0., 0., 3.]], dtype=torch.float64)
+    vec = torch.tensor([[0.49, 0.49, 0.1]], dtype=torch.float64) @ cell
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        minimum_image_vectors(vec, cell)
+        bonds = guess_bonds(torch.stack([torch.zeros(3, dtype=torch.float64), vec[0]]).numpy(), [6, 6], cell.numpy())
+    assert sum('not reduced' in str(w.message) for w in caught) == (1 if skew > 1.5 else 0)
+    assert bonds == [(0, 1)]
+
+
+def test_pair_vectors_batched_structures():
+    """A batch mixing orthorhombic, triclinic and molecular structures matches the per-structure result."""
+    rng = np.random.default_rng(1)
+    cells = [torch.eye(3, dtype=torch.float64) * 7.,
+             torch.tensor([[6., 0., 0.], [2.5, 6., 0.], [-1., 2., 6.]], dtype=torch.float64), None]
+    graphs, vecs = [], []
+    for cell in cells:
+        pos = torch.tensor(rng.uniform(0., 6., (8, 3)), dtype=torch.float64)
+        s = {'pos': pos, 'atomic_numbers': [6] * 8}
+        if cell is not None:
+            s.update(cell=cell, pbc=[True] * 3)
+        graphs.append(structure_to_graph(s, 2.))
+        plain = pos[1:] - pos[:-1]
+        vecs.append(plain if cell is None else minimum_image_vectors(plain, cell))
+    batch = collate(graphs)
+    a = torch.cat([torch.arange(7) + 8 * i for i in range(3)])
+    torch.testing.assert_close(pair_vectors(batch, a, a + 1), torch.cat(vecs))
 
 
 def test_minimum_image_position_and_cell_gradients():
