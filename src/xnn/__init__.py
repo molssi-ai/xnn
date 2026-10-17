@@ -37,6 +37,6 @@ from . import cnn, dnn, ffnn, hybrid, sqmnn, transformer  # noqa: F401
 # is available (it warns otherwise, see gnn/models/__init__.py)
 from . import gnn  # noqa: F401
 
-__version__ = "0.14.3"
+__version__ = "0.14.4"
 __all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybrid", "sqmnn", "transformer",
            "__version__"]

@@ -617,6 +617,10 @@ class DFTD4(nn.Module, FastPathModule):
 
         # Wigner-Seitz images of every pair vector
         d = pos[None, :, :] - pos[:, None, :]                                  # (N, N, 3)
+        # The local image search assumes nearby fractional coordinates;
+        # unwrapped MD positions can differ by arbitrarily many cells.
+        image = torch.round(d.detach() @ torch.linalg.inv(cell.detach()))
+        d = d - image @ cell
         d_img = d[:, :, None, :] + t27[None, None, :, :]                       # (N, N, 27, 3)
         r2_img = (d_img * d_img).sum(-1)
         thr = 1.4901161193847656e-08                                            # sqrt(eps)

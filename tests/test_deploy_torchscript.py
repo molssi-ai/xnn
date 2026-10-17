@@ -234,6 +234,37 @@ def test_scripted_les_options_match_eager(options, periodic, charge, ion):
             assert torch.all(out["les_dipole"] == 0)
 
 
+@pytest.mark.parametrize("charge_solve", [False, True])
+def test_scripted_les_rotated_cell(charge_solve):
+    """A zero-diagonal rotated cell preserves periodic LES and export parity."""
+    model = _les_model(charge_solve=charge_solve)
+    pos, z = _water(2, seed=6)
+    pos = torch.tensor(pos)
+    z = torch.tensor(z)
+    cell = torch.eye(3) * 9.0
+    pbc = torch.ones(3, dtype=torch.bool)
+    rotation = torch.tensor([[0., 1., 0.], [0., 0., 1.], [1., 0., 0.]])
+    potential = TorchScriptPotential(model, CUTOFF).eval()
+    original = potential(pos, z, cell, pbc)
+    rotated_pos, rotated_cell = pos @ rotation.T, cell @ rotation.T
+    graph = structure_to_graph({"pos": rotated_pos, "atomic_numbers": z,
+                                "cell": rotated_cell, "pbc": pbc}, CUTOFF)
+    eager = ForceStressOutput(model, compute_stress=True)(graph)
+    for module in (potential, torch.jit.script(potential)):
+        out = module(rotated_pos, z, rotated_cell, pbc)
+        torch.testing.assert_close(out["energy"], original["energy"], atol=1e-9, rtol=1e-9)
+        torch.testing.assert_close(out["forces"], original["forces"] @ rotation.T,
+                                   atol=1e-9, rtol=1e-9)
+        torch.testing.assert_close(out["les_charges"], original["les_charges"],
+                                   atol=1e-9, rtol=1e-9)
+        torch.testing.assert_close(out["stress"], rotation @ original["stress"] @ rotation.T,
+                                   atol=1e-9, rtol=1e-9)
+        torch.testing.assert_close(out["energy"].sum(), eager["energy"].sum())
+        torch.testing.assert_close(out["forces"], eager["forces"])
+        torch.testing.assert_close(out["stress"], eager["stress"][0])
+        assert torch.all(out["les_dipole"] == 0)
+
+
 def test_scripted_fragments_refuse_a_wrong_total_charge():
     model = _les_model(charge_solve=True, fragments=True)
     pos, z = _water(2, seed=6)

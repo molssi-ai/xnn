@@ -109,7 +109,7 @@ def periodic_structures(cell: Optional[Tensor], pbc: Optional[Tensor], num_graph
     """
     if cell is None:
         return torch.zeros(num_graphs, dtype=torch.bool, device=device)
-    periodic = cell.diagonal(dim1=-2, dim2=-1).abs().sum(-1) > 1e-6
+    periodic = cell.abs().sum(dim=(-2, -1)) > 1e-6
     if pbc is not None:
         periodic = periodic & pbc.any(-1)
     return periodic
@@ -991,11 +991,10 @@ class LatentEwald(InteratomicPotential):
                                         self.ion_charges.to(pos.dtype), self.bond_factor)
         solved = torch.zeros_like(chi)
         mus = []
+        periodic_batch = periodic_structures(cell, data.pbc, num_graphs, pos.device)
         for i in range(num_graphs):
             idx = (batch == i).nonzero().squeeze(1)
-            periodic = (cell is not None
-                        and bool(cell[i].diagonal().abs().sum() > 1e-6)
-                        and (data.pbc is None or bool(data.pbc[i].any())))
+            periodic = bool(periodic_batch[i])
             gamma = (coulomb_matrix(self.ewald, pos[idx], cell[i] if periodic else None)
                      / self.dielectric.to(chi.dtype))
             total = data.total_charge[i].to(chi.dtype) if data.total_charge is not None else None

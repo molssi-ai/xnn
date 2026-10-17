@@ -327,12 +327,19 @@ class AtomCenteredSymmetryFunctions(Featurizer):
                 rsq = (r1 * r1 + r2 * r2)[:, None]
                 g3 = ang * torch.exp(-eta * (rsq + (r3 * r3)[:, None])) * f1 * f2 * f3
                 g9 = ang * torch.exp(-eta * rsq) * f1 * f2
-                theta = torch.rad2deg(torch.acos(cos.clamp(-1.0 + 1e-15, 1.0 - 1e-15)))[:, None]
-                ts = p[..., 7]
-                gt = (torch.exp(-eta * (theta - ts) ** 2) + torch.exp(-eta * (theta - (360.0 - ts)) ** 2)
-                      + torch.exp(-eta * (theta + ts) ** 2) + torch.exp(-eta * (theta - (360.0 + ts)) ** 2))
-                g8 = gt * f1 * f2 * f3
                 t = p[..., 0]
+                # Only type 8 needs acos: an unused endpoint derivative can
+                # still leak NaNs through where's zero gradient in float32.
+                angle = (t == 8.0) & ok
+                margin = max(1e-15, torch.finfo(dtype).eps)
+                theta = torch.rad2deg(torch.acos(
+                    cos[:, None].expand_as(t)[angle].clamp(-1.0 + margin, 1.0 - margin)))
+                ts, eta8 = p[..., 7][angle], eta[angle]
+                gt = (torch.exp(-eta8 * (theta - ts) ** 2)
+                      + torch.exp(-eta8 * (theta - (360.0 - ts)) ** 2)
+                      + torch.exp(-eta8 * (theta + ts) ** 2)
+                      + torch.exp(-eta8 * (theta - (360.0 + ts)) ** 2))
+                g8 = torch.zeros_like(g3).masked_scatter(angle, gt * f1[angle] * f2[angle] * f3[angle])
                 val = torch.where(t == 3.0, g3, torch.where(t == 9.0, g9, g8))
                 val = torch.where(ok, val, torch.zeros_like(val))
                 index = center[:, None] * self._dim + p[..., 2].long()

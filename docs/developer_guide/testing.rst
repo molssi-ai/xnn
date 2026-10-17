@@ -34,6 +34,11 @@ What the tests check
   batches and label masks, float64 geometry, the data and model hubs, ASE
   file I/O, the losses, the benchmark runner, the MDI engine, the fast
   paths against the reference, and ``torchrun`` DDP training.
+- **Numerical edge cases** (``test_numerical_stability``): first and second
+  activation derivatives, collinear angular descriptors in float32 and
+  float64, nearest images in skewed cells, and periodic invariance under
+  lattice translations and rotations. Deployment tests also check LES
+  charge solves and stress with rotated cells.
 
 Conventions for new code
 ========================

@@ -366,7 +366,7 @@ class _LatentEwaldHead(nn.Module):
             else:
                 q = q - (residual / float(n)).unsqueeze(0)
         periodic = (bool(pbc.any())
-                    and bool(cell.diagonal().abs().sum() > 1e-6))
+                    and bool(cell.abs().sum() > 1e-6))
         node_energy = torch.zeros(n, dtype=pos.dtype, device=pos.device)
         if self.charge_solve:
             chi = q[:, self.charge_channel]

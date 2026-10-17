@@ -11,7 +11,28 @@ import math
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
+
+
+def exact_softplus(x: Tensor) -> Tensor:
+    """Evaluate ``log(1 + exp(x))`` with stable values and derivatives.
+
+    The exponential's argument is nonpositive. Both branches are smooth
+    softplus expressions, including at zero, unlike a split using ``abs``
+    and ``relu`` whose individual derivatives vanish there.
+
+    Parameters
+    ----------
+    x : Tensor
+        Input values of any shape.
+
+    Returns
+    -------
+    Tensor
+        Softplus values with the same shape as ``x``.
+    """
+    positive = x > 0
+    exponent = torch.where(positive, -x, x)
+    return torch.where(positive, x, torch.zeros_like(x)) + torch.log1p(torch.exp(exponent))
 
 
 def shifted_softplus(x: Tensor) -> Tensor:
@@ -22,7 +43,7 @@ def shifted_softplus(x: Tensor) -> Tensor:
     what keeps the predicted potential-energy surface (and thus the autograd
     forces) smooth.
 
-    Evaluated as ``max(x, 0) + log1p(exp(-|x|)) - ln 2`` -- exact for all
+    Evaluated with :func:`exact_softplus` minus ``ln 2`` -- exact for all
     ``x``, unlike :func:`torch.nn.functional.softplus`, which switches to the
     identity above its threshold and drops the ``log1p(exp(-x))`` tail
     (~1e-9 at the default threshold of 20). TorchScript-compatible.
@@ -37,7 +58,7 @@ def shifted_softplus(x: Tensor) -> Tensor:
     torch.Tensor
         ``ln(0.5 e^x + 0.5)``, same shape as ``x``.
     """
-    return F.relu(x) + torch.log1p(torch.exp(-x.abs())) - math.log(2.0)
+    return exact_softplus(x) - math.log(2.0)
 
 
 def glorot_orthogonal_(weight: Tensor, scale: float = 2.0) -> Tensor:
@@ -92,14 +113,14 @@ class GaussianActivation(nn.Module):
 
 
 class Softplus(nn.Module):
-    """Softplus ``log(1 + e^x)`` evaluated exactly at every ``x``, as ``max(x, 0) + log1p(e^-|x|)``.
+    """Softplus ``log(1 + e^x)`` evaluated exactly at every ``x`` (module form of :func:`exact_softplus`).
 
     :class:`torch.nn.Softplus` switches to ``x`` above its threshold and drops
     the ``log1p`` tail; this one keeps it (the softplus of the HDNNP networks).
     """
 
     def forward(self, x: Tensor) -> Tensor:
-        return torch.relu(x) + torch.log1p(torch.exp(-x.abs()))
+        return exact_softplus(x)
 
 
 class ScaledTanh(nn.Module):
