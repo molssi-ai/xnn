@@ -38,33 +38,6 @@ COVALENT_RADII = {
 }
 
 
-def _min_image(vec, cell):
-    """Apply the minimum-image convention to displacement vectors.
-
-    Parameters
-    ----------
-    vec : numpy.ndarray
-        Displacement vectors of shape ``(..., 3)``.
-    cell : numpy.ndarray or None
-        Lattice vectors as rows, shape ``(3, 3)``, or ``None`` for a
-        non-periodic system.
-
-    Returns
-    -------
-    numpy.ndarray
-        Minimum-image displacement vectors.
-    """
-    import torch
-
-    from .geometry import minimum_image_vectors
-
-    if cell is None:
-        return vec
-    vectors = torch.as_tensor(vec)
-    lattice = torch.as_tensor(cell, dtype=vectors.dtype)
-    return minimum_image_vectors(vectors.reshape(-1, 3), lattice).numpy().reshape(vec.shape)
-
-
 def guess_bonds(positions, atomic_numbers, cell=None, scale: float = 1.2
                 ) -> list[tuple[int, int]]:
     """Guess covalent bonds from interatomic distances.
@@ -73,6 +46,13 @@ def guess_bonds(positions, atomic_numbers, cell=None, scale: float = 1.2
     ``scale * (r_cov_a + r_cov_b)`` with the Cordero covalent radii. This is
     the standard structure-to-topology heuristic; inspect the result for
     unusual geometries.
+
+    In a periodic cell every image within the bond cutoff is considered, for
+    any (also unreduced) cell: a pair can only be that close when each
+    fractional component of its displacement lies within ``cutoff / h_i`` of
+    a lattice plane (``h_i`` the spacing of the planes along axis ``i``), so
+    the distances of the few pairs passing that test are minimized over
+    their candidate images.
 
     Parameters
     ----------
@@ -96,18 +76,41 @@ def guess_bonds(positions, atomic_numbers, cell=None, scale: float = 1.2
     KeyError
         If an atomic number has no tabulated covalent radius.
     """
+    import itertools
+
     import numpy as np
     pos = np.asarray(positions, dtype=float)
     z = np.asarray(atomic_numbers, dtype=int)
-    cell = None if cell is None else np.asarray(cell, dtype=float)
     radii = np.array([COVALENT_RADII[int(zi)] for zi in z])
+    n = len(z)
+    if cell is not None:
+        cell = np.asarray(cell, dtype=float)
+        inv = np.linalg.inv(cell)
+        normals = np.cross(np.roll(cell, -1, axis=0), np.roll(cell, -2, axis=0))
+        spacing = abs(np.linalg.det(cell)) / np.linalg.norm(normals, axis=1)   # h_i
+        eps = scale * 2.0 * radii.max() / spacing                                # (3,)
+        reps = np.maximum(1, np.floor(eps + 0.5).astype(int))
+        offsets = np.array(list(itertools.product(*[range(-r, r + 1) for r in reps])), dtype=float)
     bonds = []
-    for i in range(len(z) - 1):
-        vec = _min_image(pos[i + 1:] - pos[i], cell)
-        d = np.sqrt((vec * vec).sum(axis=1))
-        rmax = scale * (radii[i] + radii[i + 1:])
-        for j in np.nonzero(d < rmax)[0]:
-            bonds.append((i, i + 1 + int(j)))
+    block = max(1, int(2e6 // max(n, 1)))        # rows per block: about 2e6 pairs
+    for i0 in range(0, n - 1, block):
+        i1 = min(n - 1, i0 + block)
+        vec = pos[None, :, :] - pos[i0:i1, None, :]                              # (b, n, 3)
+        rmax = scale * (radii[i0:i1, None] + radii[None, :])
+        upper = np.arange(n)[None, :] > np.arange(i0, i1)[:, None]
+        if cell is None:
+            d = np.sqrt((vec * vec).sum(-1))
+            rows, cols = np.nonzero((d < rmax) & upper)
+        else:
+            frac = vec @ inv
+            frac -= np.round(frac)
+            near = ((np.abs(frac) < eps) | (eps > 0.5)).all(-1) & upper
+            rows, cols = np.nonzero(near)
+            cand = (frac[rows, cols][:, None, :] + offsets) @ cell               # (P, K, 3)
+            d = np.sqrt((cand * cand).sum(-1)).min(-1)
+            keep = d < rmax[rows, cols]
+            rows, cols = rows[keep], cols[keep]
+        bonds.extend(zip((rows + i0).tolist(), cols.tolist()))
     return sorted(bonds)
 
 

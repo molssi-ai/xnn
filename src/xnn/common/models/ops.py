@@ -113,7 +113,7 @@ class GaussianActivation(nn.Module):
 
 
 class Softplus(nn.Module):
-    """Softplus ``log(1 + e^x)`` evaluated exactly at every ``x``, as ``max(x, 0) + log1p(e^-|x|)``.
+    """Softplus ``log(1 + e^x)`` evaluated exactly at every ``x`` (module form of :func:`exact_softplus`).
 
     :class:`torch.nn.Softplus` switches to ``x`` above its threshold and drops
     the ``log1p`` tail; this one keeps it (the softplus of the HDNNP networks).
