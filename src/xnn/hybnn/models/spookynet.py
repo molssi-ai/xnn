@@ -9,14 +9,14 @@ An implementation of the SpookyNet potential of
 written from the paper's Methods section on the xnn abstractions
 (:func:`~xnn.common.models.ops.scatter_sum`,
 :class:`~xnn.common.featurizers.MollifierCutoff`,
-:class:`~xnn.hybrid.featurizers.ExponentialBernsteinRBF`, the D4 tables of
+:class:`~xnn.hybnn.featurizers.ExponentialBernsteinRBF`, the D4 tables of
 :mod:`~xnn.common.models.d4`, the Ewald sums of
 :mod:`~xnn.common.models.electrostatics`) and consistent with the behavior of
 the authors' reference code (github.com/OUnke/SpookyNet), without copying it.
 
 It belongs to the hybrid family: graph message passing combined with a
 transformer (self-attention) update and a physics-based split of the energy,
-like :class:`~xnn.hybrid.models.bamboo.BAMBOO`.
+like :class:`~xnn.hybnn.models.bamboo.BAMBOO`.
 
 Inputs. Besides atomic numbers and positions the model reads the total
 charge ``Q`` (``AtomicGraph.total_charge``, neutral when absent) and the
@@ -121,7 +121,7 @@ from xnn.common.models.electrostatics import (COULOMB_CONSTANT, all_pairs, coulo
 from xnn.common.models.ops import (exact_softplus as _exact_softplus, glorot_orthogonal_,
                                    scatter_sum, softplus_inverse, structure_sum)
 from xnn.common.models.registry import register_model
-from xnn.hybrid.featurizers import ExponentialBernsteinRBF
+from xnn.hybnn.featurizers import ExponentialBernsteinRBF
 
 #: Number of element rows (Z = 0 to 86): the electron-configuration descriptor
 #: and the reference models cover the elements up to Rn.

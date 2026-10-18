@@ -147,8 +147,8 @@ The ones that matter most for review:
   `xnn.common` or in the model's family package and reuse or extend it. Duplicate
   implementations of the same thing are not merged.
 - **Code lives with the family that uses it**: `gnn` (graph), `dnn` (dense), `cnn`
-  (convolutional), `ffnn` (force fields), `sqmnn` (semi-empirical), `hybrid`; code shared by
-  several families goes to `common`.
+  (convolutional), `ffnn` (force fields), `sqmnn` (semi-empirical), `trfnn` (transformers),
+  `hybnn` (hybrid); code shared by several families goes to `common`.
 - **One data object.** Models take an `AtomicGraph` and return `node_energy` and `energy`;
   forces and stress are added by `ForceStressOutput`, never inside a model.
 - **Canonical configuration keys.** Upstream spellings (MACE, NequIP, ...) are accepted through

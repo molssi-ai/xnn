@@ -1,4 +1,4 @@
-"""Graph-network family: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, and NequIP / MACE / Allegro / CACE / AIMNet2 (these need e3nn)."""
+"""Graph-network family: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, and NequIP / MACE / Allegro / CACE / AIMNet2 (these need e3nn)."""
 import torch
 
 # e3nn 0.4.4 (the version mace-torch pins) reads its constants with torch.load

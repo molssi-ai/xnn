@@ -208,6 +208,27 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "default_nodes_charge": "charge_hidden",
         "default_nodes_chi": "charge_hidden",
     },
+    # TorchMD-Net (torchmd/torchmd-net) yaml and constructor spellings of the
+    # equivariant transformer and TensorNet; key names only
+    "et": {
+        "embedding_dimension": "n_features",
+        "hidden_channels": "n_features",
+        "num_layers": "n_interactions",
+        "num_rbf": "n_rbf",
+        "cutoff_upper": "cutoff",
+        "rbf_type": "radial_basis",
+        "max_z": "n_elements",
+    },
+    "tensornet": {
+        "embedding_dimension": "n_features",
+        "hidden_channels": "n_features",
+        "num_layers": "n_interactions",
+        "num_rbf": "n_rbf",
+        "cutoff_upper": "cutoff",
+        "rbf_type": "radial_basis",
+        "max_z": "n_elements",
+        "equivariance_invariance_group": "equivariance_group",
+    },
     # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
     "bamboo": {
         "rcut": "cutoff",

@@ -24,7 +24,7 @@ import torch
 
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput
-from xnn.hybrid.models.spookynet import SpookyNet, electron_configurations
+from xnn.hybnn.models.spookynet import SpookyNet, electron_configurations
 
 REF_BOHR = 0.5291772105638411
 REF_HARTREE = 27.211386024367243

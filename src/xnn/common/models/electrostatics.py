@@ -32,7 +32,7 @@ term on each of its atoms, the reciprocal energy as ``q_i phi_i / 2``) so
 the callers' ``node_energy`` stays additive, and accumulates the pair and
 reciprocal sums in float64 whatever the dtype of the charges. Used by
 :class:`~xnn.gnn.models.aimnet2.AIMNet2`; the all-pairs enumeration also by
-:class:`~xnn.hybrid.models.bamboo.BAMBOO`, the reciprocal lattice also by the
+:class:`~xnn.hybnn.models.bamboo.BAMBOO`, the reciprocal lattice also by the
 periodic EEQ charges of D4 (:mod:`~xnn.common.models.eeq`).
 """
 import math
