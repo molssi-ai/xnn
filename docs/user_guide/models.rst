@@ -248,6 +248,31 @@ Other options, including ``radial_basis`` (bessel / gaussian),
 ``shared_filters``, ``atomic_dipoles`` and ``energy_shift`` /
 ``energy_scale``, are also available.
 
+TensorNet
+=========
+:class:`~xnn.gnn.models.tensornet.TensorNet` (`torchmd/torchmd-net
+<https://github.com/torchmd/torchmd-net>`_) is the Cartesian tensor network of
+`Simeon and De Fabritiis <https://arxiv.org/abs/2306.06482>`_, the model of
+TorchMD-Net 2.0. Here, every atom carries rank-2 tensors whose scalar, vector
+and traceless parts are mixed by matrix products. A ``total_charge`` of the
+structure enters the products.
+
+.. code-block:: yaml
+
+   model:
+     name: tensornet
+     cutoff: 4.5
+     n_features: 128
+     n_interactions: 2
+     n_rbf: 32
+     equivariance_group: O(3)    # SO(3) distinguishes enantiomers
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Other options, including ``radial_basis`` (expnorm / gaussian),
+``trainable_rbf``, ``activation`` and ``energy_shift`` / ``energy_scale``, are
+also available.
+
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN` is the rotation-equivariant
@@ -365,9 +390,37 @@ The 3G and 4G models also return ``charges``, ``energy_elec`` and ``dipole``.
 You can also train the charges with ``charge_weight`` on ``charges`` labels. The
 ``configs/model/hdnnp.yaml`` config file lists every available option.
 
+Equivariant Transformer (ET)
+============================
+:class:`~xnn.trfnn.models.et.EquivariantTransformer` (`torchmd/torchmd-net
+<https://github.com/torchmd/torchmd-net>`_) is the equivariant transformer of
+`Thölke and De Fabritiis <https://arxiv.org/abs/2202.02541>`_: scalar and vector
+features updated by a distance-filtered multi-head attention. The default
+``vector_cutoff`` applies the TorchMD-Net 2.0 fix that makes the energy
+continuous at the cutoff. Setting it to ``false`` corresponds to the original
+model.
+
+.. code-block:: yaml
+
+   model:
+     name: et
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 6
+     n_rbf: 32
+     num_heads: 8
+     vector_cutoff: true
+     species: [1, 6, 8]
+     atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
+
+Other options, including ``neighbor_embedding``, ``distance_influence`` (both /
+keys / values / none), ``attn_activation``, ``trainable_rbf`` and
+``energy_shift`` / ``energy_scale``, are also available. The attention weights
+of a structure are returned by ``model.attention_weights(graph)``.
+
 BAMBOO
 ======
-:class:`~xnn.hybrid.models.bamboo.BAMBOO` (`bytedance/bamboo
+:class:`~xnn.hybnn.models.bamboo.BAMBOO` (`bytedance/bamboo
 <https://github.com/bytedance/bamboo>`_) is the graph equivariant transformer
 of `Gong et al. <https://arxiv.org/abs/2404.07181>`_ with a charge-equilibrium
 electrostatic term. It works in kcal/mol and Angstrom and also returns
@@ -386,7 +439,7 @@ electrostatic term. It works in kcal/mol and Angstrom and also returns
 
 SpookyNet
 =========
-:class:`~xnn.hybrid.models.spookynet.SpookyNet` (`OUnke/SpookyNet
+:class:`~xnn.hybnn.models.spookynet.SpookyNet` (`OUnke/SpookyNet
 <https://github.com/OUnke/SpookyNet>`_) is the message passing network of `Unke
 et al. <https://doi.org/10.1038/s41467-021-27504-0>`_ with electronic degrees of
 freedom and nonlocal effects. The total charge and spin enter as embeddings, and

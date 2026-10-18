@@ -44,7 +44,11 @@ What is where?
       on the rMD17 data.
     - PaiNN checks its paper, reproduces its MD17 tables, the ferrocene rotation
       profiles and the ethanol IR and Raman spectra. 
+    - TensorNet checks its paper, trains on rMD17 aspirin, and compares its 0, 1
+      and 2 layer models with ET on a QM9 subset (TorchMD-Net 2.0 Table 1).
     - LES creates several long-range binding curves for dimers.
+- The ``examples/trfnn/et`` folder checks the ET paper (sizes, attention
+  weights, the cutoff fix of TorchMD-Net 2.0) and trains ET on rMD17 aspirin.
 - The ``examples/cnn/se3cnn`` folder provides the Tetris experiment of the SE(3)
   steerable CNN paper, then compares its performance against that of
   conventional 3D CNN potentials, trained on rMD17 under rotations.
@@ -58,12 +62,13 @@ What is where?
     - the HDNNP generations (paper experiment checks, comparing the performance of 1G
       against 2G on rMD17, and attempting to reproduce the 2G / 3G / 4G
       benchmarks of the fourth-generation paper).
-- The ``examples/hybrid``, and ``examples/ffnn`` folders focus on:
+- The ``examples/hybnn`` folder focuses on:
     - experiments involving BAMBOO charges and electrostatics,
     - reproducing experiments in the SpookyNet paper and reproducing its
       electronic-state, nonlocal and charge-transfer examples as well as MD17
-      dataset training, and
-    - ReaxFF, OPLS and DREIDING trainings, refits and conformational energetics.
+      dataset training.
+- The ``examples/ffnn`` folder involves ReaxFF, OPLS and DREIDING trainings,
+  refits and conformational energetics.
 - The ``examples/common`` folder involves examples focusing on the DFT-D3 and
   DFT-D4 paper experiment reproductions, benchmarks and a large-system studies.
 - The ``examples/benchmark``, and ``examples/deploy`` folders use one config

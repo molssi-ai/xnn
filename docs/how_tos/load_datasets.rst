@@ -16,7 +16,7 @@ notebook offers a runnable version of this page.
    from xnn.common.data import load_dataset, list_datasets
 
    # List the available datasets in the hub
-   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'lode_dimers', 'qm7', 'rmd17', 's22', 's66', ...]
+   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'lode_dimers', 'qm7', 'qm9', 'rmd17', ...]
 
    # Load a dataset by name and optional keyword arguments
    splits = load_dataset("rmd17", molecule="aspirin")                 # {"train": [...], "test": [...]}
@@ -42,6 +42,9 @@ the pre-processing (see the full list in :ref:`data`):
 
    # QM7: 7165 molecules with atomization energies, test fold 1 of the stratified five
    load_dataset("qm7", split="train", fold=1)
+
+   # QM9: 130,831 molecules, U0 in eV, the 110,000 / 10,000 / 10,831 split of seed 0
+   load_dataset("qm9", split="train", label="U0")
 
    # Ethanol with dipoles and polarizabilities: seeded 8000 / 1000 / 1000 split
    load_dataset("ethanol_response", split="train")
