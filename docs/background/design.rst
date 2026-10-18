@@ -11,10 +11,11 @@ xnn is organized by model family, with everything shared in ``common``:
    src/xnn/
      common/
        data/          AtomicGraph, neighbor lists, AtomicDataset, hub/ (load_dataset)
-       featurizers/   Featurizer base, GaussianRBF, CosineCutoff
+       featurizers/   Featurizer base, GaussianRBF, ExpNormalSmearing, CosineCutoff
        config/        Config schema, YAML / argparse / Hydra loaders, key translation
        models/        InteratomicPotential, registry, ForceStressOutput, les, d3, d4,
-                      hub/ (from_pretrained), dispersion_fast/ (Triton kernels)
+                      blocks (gated equivariant block), hub/ (from_pretrained),
+                      dispersion_fast/ (Triton kernels)
        finetune/      LoRA, multi-head replay, freezing, reference energies
        train/         Trainer, losses
        benchmark/     scoring pre-trained models
@@ -22,7 +23,8 @@ xnn is organized by model family, with everything shared in ``common``:
        cli/           the xnn command
      gnn/
        featurizers/   spherical harmonics, Cartesian monomials, Bessel, spherical Bessel, polynomial cutoff
-       models/        schnet, dimenet, painn, nequip, mace, allegro, cace, aimnet2 (+ foundation loaders)
+       models/        schnet, dimenet, gemnet, painn, tensornet, nequip, mace, allegro, cace,
+                      aimnet2 (+ foundation loaders)
        fast/          cuEquivariance fast paths
      cnn/
        featurizers/   voxel grids and spherical signals of the atomic environment
@@ -38,10 +40,10 @@ xnn is organized by model family, with everything shared in ``common``:
      sqmnn/
        common/        MOPAC EXTERNAL reader/writer, published values (downloaded), element data
        models/        nddo (SCF, integrals), pm3, pm6, pm6-org, pm7
-     transformer/
-       featurizers/   exponential-normal radial basis
+     trfnn/
+       models/        et (the TorchMD-Net equivariant transformer)
        attention.py   edge multi-head attention
-     hybrid/
+     hybnn/
        featurizers/   exponential Bernstein radial basis
        models/        bamboo, spookynet
 

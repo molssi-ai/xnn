@@ -71,6 +71,13 @@ Numerical agreement under identical weights involves:
   of its equations and against ``schnetpack`` under transplanted weights:
   energies, forces, latent charges, dipoles and polarizabilities agree to
   float64 and float32 round-off.
+- **ET and TensorNet** (`torchmd/torchmd-net
+  <https://github.com/torchmd/torchmd-net>`_): built from the papers, verified
+  against independent implementations of their equations and against the
+  reference code under transplanted weights: energies and forces agree to
+  float64 round-off (about 1e-14) for molecules, batches, charged structures and
+  both ET cutoff conventions and TensorNet groups, and to float32 round-off in
+  single precision.
 - **SpookyNet** (`OUnke/SpookyNet <https://github.com/OUnke/SpookyNet>`_): a
   build from the paper, verified against an independent implementation of its
   equations and against the reference code under transplanted weights: energies,

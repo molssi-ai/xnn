@@ -859,3 +859,94 @@ def test_ethanol_response_builder(monkeypatch, tmp_path):
     assert np.allclose(again[0]["pos"], splits["test"][0]["pos"])
     with pytest.raises(ValueError):
         load_dataset("ethanol_response", n_train=20, cache_dir=tmp_path, quiet=True)
+
+
+# QM9
+
+@pytest.fixture
+def fake_qm9(monkeypatch, tmp_path):
+    """Patch the QM9 downloader with a tiny xyz archive (8 molecules) and an
+    uncharacterized list naming two of them; returns the generating arrays."""
+    import tarfile
+    from xnn.common.data.hub import qm9
+
+    rng = np.random.default_rng(0)
+    symbols = {1: "H", 6: "C", 8: "O"}
+    mols = []
+    src = tmp_path / "src"
+    src.mkdir()
+    with tarfile.open(src / "dsgdb9nsd.xyz.tar.bz2", "w:bz2") as tar:
+        for k in range(8):
+            n = 3 + k % 3
+            z = rng.choice([1, 6, 8], size=n)
+            pos = rng.normal(size=(n, 3))
+            props = rng.normal(size=15)
+            mols.append((k + 1, z, pos, props))
+            lines = [f"{n}", "gdb " + str(k + 1) + " " + " ".join(f"{v:.10g}" for v in props)]
+            for zi, p in zip(z, pos):
+                coords = " ".join(f"{v:.10g}" for v in p).replace("e", "*^")
+                lines.append(f"{symbols[int(zi)]}\t{coords}\t-0.1")
+            lines += ["freq", "SMILES", "InChI"]
+            path = src / f"dsgdb9nsd_{k + 1:06d}.xyz"
+            path.write_text("\n".join(lines) + "\n")
+            tar.add(path, arcname=path.name)
+    unchar = "header\n" * 9 + "   3  gdb_3  x\n   6  gdb_6  y\n" + "\n"
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.name.endswith(".txt"):
+            dest.write_text(unchar)
+        else:
+            dest.write_bytes((src / "dsgdb9nsd.xyz.tar.bz2").read_bytes())
+        return dest
+
+    monkeypatch.setattr(qm9, "download_file", fake_download)
+    return mols
+
+
+def test_qm9_registered():
+    assert "qm9" in list_datasets()
+
+
+def test_qm9_parsing_units_and_exclusion(fake_qm9, tmp_path):
+    from xnn.common.data.hub.qm9 import PROPERTIES, atomic_energies
+    from xnn.common.data.hub.units import HARTREE_TO_EV
+
+    all_mols = load_dataset("qm9", split="all", cache_dir=tmp_path, quiet=True,
+                            return_info=True)
+    assert len(all_mols) == 6 and [m["info"]["index"] for m in all_mols] == [1, 2, 4, 5, 7, 8]
+    first = fake_qm9[0]
+    assert np.allclose(all_mols[0]["pos"], first[2], atol=1e-9)
+    assert list(all_mols[0]["atomic_numbers"]) == list(first[1])
+    assert all_mols[0]["energy"] == pytest.approx(first[3][PROPERTIES.index("U0")] * HARTREE_TO_EV)
+    assert all_mols[0]["info"]["mu"] == pytest.approx(first[3][3])           # not an energy
+    raw = load_dataset("qm9", split="all", units="hartree", cache_dir=tmp_path, quiet=True,
+                       label="gap")
+    assert raw[0]["energy"] == pytest.approx(first[3][PROPERTIES.index("gap")])
+    kept = load_dataset("qm9", split="all", exclude_uncharacterized=False,
+                        cache_dir=tmp_path, quiet=True)
+    assert len(kept) == 8
+    assert atomic_energies("U0")[1] == pytest.approx(-0.500273 * HARTREE_TO_EV)
+    assert atomic_energies("G", units="hartree")[9] == pytest.approx(-99.733544)
+
+
+def test_qm9_splits(fake_qm9, tmp_path):
+    splits = load_dataset("qm9", n_train=3, n_val=1, cache_dir=tmp_path, quiet=True)
+    assert [len(splits[k]) for k in ("train", "val", "test")] == [3, 1, 2]
+    again = load_dataset("qm9", split="test", n_train=3, n_val=1, cache_dir=tmp_path, quiet=True)
+    assert np.allclose(again[0]["pos"], splits["test"][0]["pos"])
+    other = load_dataset("qm9", split="train", n_train=3, n_val=1, seed=1, cache_dir=tmp_path,
+                         quiet=True)
+    assert len(other) == 3
+    capped = load_dataset("qm9", split="test", n_train=3, n_val=1, n_test=1, cache_dir=tmp_path,
+                          quiet=True)
+    assert len(capped) == 1
+    ds = load_dataset("qm9", split="train", n_train=3, n_val=1, cutoff=5.0, cache_dir=tmp_path,
+                      quiet=True)
+    assert isinstance(ds, AtomicDataset) and len(ds) == 3
+
+
+@pytest.mark.parametrize("kwargs", [{"units": "kcal"}, {"label": "energy"}, {"split": "dev"}])
+def test_qm9_invalid_args(fake_qm9, tmp_path, kwargs):
+    with pytest.raises(ValueError):
+        load_dataset("qm9", cache_dir=tmp_path, quiet=True, **kwargs)

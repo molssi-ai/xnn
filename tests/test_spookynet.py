@@ -21,8 +21,8 @@ from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.common.models.d4 import DFTD4
 from xnn.common.models.dispersion import BOHR, HARTREE
 from xnn.common.models.electrostatics import COULOMB_CONSTANT
-from xnn.hybrid.featurizers import ExponentialBernsteinRBF
-from xnn.hybrid.models.spookynet import (SpookyNet, electron_configurations,
+from xnn.hybnn.featurizers import ExponentialBernsteinRBF
+from xnn.hybnn.models.spookynet import (SpookyNet, electron_configurations,
                                       orthogonal_random_features, smooth_switch)
 
 CUTOFF = 4.0
@@ -339,7 +339,7 @@ def test_orthogonal_random_features():
 def test_favor_approximates_softmax_attention():
     """With many random features FAVOR+ approaches the exact attention of eq 19."""
     torch.manual_seed(0)
-    from xnn.hybrid.models.spookynet import _NonlocalInteraction
+    from xnn.hybnn.models.spookynet import _NonlocalInteraction
     g = torch.Generator().manual_seed(1)
     fav = _NonlocalInteraction(8, 1, 20000, g)
     ex = _NonlocalInteraction(8, 1, None)

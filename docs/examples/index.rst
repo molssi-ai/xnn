@@ -132,6 +132,22 @@ spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
    Propagation of directional information: the substituted ferrocene rotation <nb/gnn/painn/painn_ferrocene>
    Infrared and Raman spectra of ethanol from classical and ring-polymer dynamics <nb/gnn/painn/painn_spectra>
 
+TensorNet (gnn)
+===============
+
+The Cartesian tensor network of TorchMD-Net 2.0 (Simeon and De Fabritiis,
+NeurIPS 2023; Pelaez *et al.*, JCTC 2024): the irreducible decomposition, O(3)
+against SO(3) on enantiomers, the total-charge coupling, smoothness and the cost
+of 0 to 3 layers. Then TensorNet on rMD17 aspirin, and TensorNet against ET on a
+QM9 subset at a short budget.
+
+.. example-toctree::
+   :caption: TensorNet (gnn)
+
+   TensorNet from the paper: Cartesian tensors, O(3) and SO(3), charge coupling and layer depth <nb/gnn/tensornet/tensornet_paper_checks>
+   TensorNet on rMD17 aspirin: energies and forces from 950 structures <nb/gnn/tensornet/tensornet_rmd17_train>
+   TensorNet and ET on QM9 U0: the layer-depth trend of TorchMD-Net 2.0 at a short budget <nb/gnn/tensornet/tensornet_qm9_u0>
+
 
 3D steerable CNN (cnn)
 ======================
@@ -224,16 +240,30 @@ Reproductions of the two Grimme papers and a benchmark against
    DFT-D3 in xnn: reproducing examples of the two Grimme papers <nb/common/d3/d3_paper_examples>
    DFT-D3 in xnn vs the reference `simple-dftd3`: accuracy, speed, and deployment with an MLIP <nb/common/d3/d3_benchmark>
 
-BAMBOO (hybrid)
+ET (trfnn)
+================
+
+The equivariant transformer paper (Thölke and De Fabritiis, ICLR 2022): the
+sizes of Tables 4 and 6, the attention weights of section 3.1, equivariance, and
+the cutoff discontinuity that TorchMD-Net 2.0 removed. Then the MD17 protocol of
+Table 2 on rMD17 aspirin, with and without the fix.
+
+.. example-toctree::
+   :caption: ET (trfnn)
+
+   ET from the paper: sizes, attention, equivariance and the cutoff fix of TorchMD-Net 2.0 <nb/trfnn/et/et_paper_checks>
+   ET on rMD17 aspirin: the MD17 protocol of the paper at a short budget <nb/trfnn/et/et_md17_train>
+
+BAMBOO (hybnn)
 ===============
 
 .. example-toctree::
-   :caption: BAMBOO (hybrid)
+   :caption: BAMBOO (hybnn)
 
-   BAMBOO charges, energy decomposition, and deployment <nb/hybrid/bamboo/bamboo_charge_analysis>
-   BAMBOO on charged / polar molecular dimers: why the charge-equilibrium term matters <nb/hybrid/bamboo/bamboo_dimer_electrostatics>
+   BAMBOO charges, energy decomposition, and deployment <nb/hybnn/bamboo/bamboo_charge_analysis>
+   BAMBOO on charged / polar molecular dimers: why the charge-equilibrium term matters <nb/hybnn/bamboo/bamboo_dimer_electrostatics>
 
-SpookyNet (hybrid)
+SpookyNet (hybnn)
 ==================
 
 The SpookyNet paper (Unke *et al.*, Nat. Commun. 2021): the building blocks
@@ -244,13 +274,13 @@ the dissociation of diatomics with and without nonlocal interactions
 (Table 3).
 
 .. example-toctree::
-   :caption: SpookyNet (hybrid)
+   :caption: SpookyNet (hybnn)
 
-   SpookyNet from the paper: electronic states, orbital-like interactions and nonlocality <nb/hybrid/spookynet/spookynet_paper_checks>
-   Electronic states: Ag3+ / Ag3- and singlet / triplet CH2 <nb/hybrid/spookynet/spookynet_electronic_states>
-   Nonlocal effects: dissociation of diatomic molecules <nb/hybrid/spookynet/spookynet_nonlocal>
-   Nonlocal charge transfer: the 4G-HDNNP benchmarks <nb/hybrid/spookynet/spookynet_charge_transfer>
-   SpookyNet on MD17 <nb/hybrid/spookynet/spookynet_md17>
+   SpookyNet from the paper: electronic states, orbital-like interactions and nonlocality <nb/hybnn/spookynet/spookynet_paper_checks>
+   Electronic states: Ag3+ / Ag3- and singlet / triplet CH2 <nb/hybnn/spookynet/spookynet_electronic_states>
+   Nonlocal effects: dissociation of diatomic molecules <nb/hybnn/spookynet/spookynet_nonlocal>
+   Nonlocal charge transfer: the 4G-HDNNP benchmarks <nb/hybnn/spookynet/spookynet_charge_transfer>
+   SpookyNet on MD17 <nb/hybnn/spookynet/spookynet_md17>
 
 ReaxFF / ReaxFF-nn (ffnn)
 =========================
@@ -333,6 +363,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gemnet_verification>
    PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/painn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/spookynet_verification>
+   ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/torchmdnet_verification>
    HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>

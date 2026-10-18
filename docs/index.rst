@@ -12,7 +12,8 @@ molecules and materials.
 The *x* in **xnn** stands for the architecture family: graph neural networks
 (``gnn``), dense neural networks (``dnn``), convolutional neural networks on
 voxel grids (``cnn``), classical force field neural networks (``ffnn``),
-semiempirical quantum mechanics (``sqmnn``) and hybrid models (``hybrid``).
+semiempirical quantum mechanics (``sqmnn``), transformers (``trfnn``) and hybrid models
+(``hybnn``).
 Every model is implemented using the same PyTorch ``nn.Module`` interface. Thus,
 one data object, one trainer and one deployment path serve all model families.
 
@@ -138,7 +139,8 @@ Models at a glance
    * - Family
      - Models
    * - Graph neural networks (``gnn``)
-     - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, GemNet, PaiNN
+     - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, GemNet, PaiNN,
+       TensorNet
    * - Dense neural networks (``dnn``)
      - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4)
    * - Convolutional neural networks (``cnn``)
@@ -147,7 +149,9 @@ Models at a glance
      - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6
    * - Semi-empirical quantum mechanics (``sqmnn``)
      - PM3, PM6, PM6-ORG, PM7
-   * - Hybrid neural networks (``hybrid``)
+   * - Transformer neural networks (``trfnn``)
+     - ET (the TorchMD-Net equivariant transformer)
+   * - Hybrid neural networks (``hybnn``)
      - BAMBOO, SpookyNet
    * - Add-ons for any model (``common``)
      - LES long-range electrostatics, DFT-D3 and DFT-D4 dispersion
@@ -155,8 +159,8 @@ Models at a glance
 Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every model trains,
 evaluates and runs under ASE deployment interface. SchNet, DimeNet, GemNet,
-PaiNN, SpookyNet, NequIP, MACE, Allegro and AIMNet2 also export to TorchScript
-for LAMMPS, and any checkpoint can also serve as an MDI engine (:ref:`deployment`).
+PaiNN, TensorNet, ET, SpookyNet, NequIP, MACE, Allegro and AIMNet2 also export
+to TorchScript for LAMMPS, and any checkpoint can also serve as an MDI engine (:ref:`deployment`).
 
 xnn is developed by Mohammad Mostafanejad at `The Molecular Sciences Software
 Institute (MolSSI) <https://molssi.org>`_. Visit the `GitHub repository

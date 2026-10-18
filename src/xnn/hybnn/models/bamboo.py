@@ -20,9 +20,9 @@ GET), followed by a physics-based split of the atomic energy into three pieces
 Architecture (Supplementary A.1): the atom type ``Z`` is embedded to the scalar
 node feature ``x_i`` while the vector node feature ``V_i`` starts at zero. Each
 GET layer runs a multi-head QKV attention on the neighbour graph (the shared
-:class:`~xnn.transformer.attention.EdgeMultiheadAttention`), scales the
+:class:`~xnn.trfnn.attention.EdgeMultiheadAttention`), scales the
 neighbour values by a radial edge feature (from the
-:class:`~xnn.transformer.featurizers.ExpNormalSmearing` basis) and the
+:class:`~xnn.common.featurizers.ExpNormalSmearing` basis) and the
 attention weight, and mixes the scalar and vector channels through inner
 products so both stay rotation-equivariant. Two MLPs read the final scalar
 features into the per-atom energy and the partial charge.
@@ -54,9 +54,8 @@ from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.electrostatics import all_pairs
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
-from xnn.common.featurizers import CosineCutoff
-from xnn.transformer.attention import EdgeMultiheadAttention
-from xnn.transformer.featurizers import ExpNormalSmearing
+from xnn.trfnn.attention import EdgeMultiheadAttention
+from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing
 
 from .dispersion import D3CSODispersion
 
@@ -130,7 +129,7 @@ class GETLayer(nn.Module):
 
     A GET layer updates the scalar node feature ``x_i`` and, except in the
     last layer, the vector node feature ``V_i``. It first runs the shared
-    multi-head :class:`~xnn.transformer.attention.EdgeMultiheadAttention` to
+    multi-head :class:`~xnn.trfnn.attention.EdgeMultiheadAttention` to
     get a neighbour value ``v_j`` and attention weight ``a_ij`` per edge, then:
 
     * forms the **scalar message** ``m_i = sum_j a_ij (v_j * d_ij)`` where
@@ -308,7 +307,7 @@ class BAMBOO(InteratomicPotential):
     d3_references : str, optional
         D3 reference systems of the D3(CSO) term, ``"2010"`` (default,
         upstream's tables) or ``"2024"`` (current ``simple-dftd3``
-        references); see :class:`~xnn.hybrid.models.dispersion.D3CSODispersion`.
+        references); see :class:`~xnn.hybnn.models.dispersion.D3CSODispersion`.
     species : list of int, optional
         Supported atomic numbers, recorded for bookkeeping/config round-trips
         (the embedding is indexed by ``Z`` regardless). Default ``None``.

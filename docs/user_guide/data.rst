@@ -156,6 +156,13 @@ Currently, the following datasets are available:
 - ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
   stratified five-fold split (needs the scipy installed).
 
+- ``qm9``: the 133,885 QM9 molecules with 15 B3LYP properties, the 3054
+  uncharacterized ones excluded, in random 110,000 / 10,000 / rest splits.
+
+  - Available arguments: ``label`` (``U0`` by default), ``n_train`` / ``n_val`` / ``n_test``,
+    ``seed``, ``units`` (``eV`` or ``hartree``), ``exclude_uncharacterized``,
+    ``return_info``.
+
 - ``ethanol_response``: 10,000 ethanol conformations at PBE0/def2-TZVP with
   energies, forces, dipole moments and polarizability tensors. This is the data
   of the PaiNN spectra (needs ase installed).

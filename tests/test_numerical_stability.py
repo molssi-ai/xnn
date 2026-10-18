@@ -8,7 +8,7 @@ from xnn.common.models.ops import shifted_softplus, Softplus
 from xnn.dnn.featurizers import AtomCenteredSymmetryFunctions
 from xnn.ffnn.models.geometry import minimum_image_vectors, pair_vectors
 from xnn.ffnn.models.topology import guess_bonds
-from xnn.hybrid.models.spookynet import _exact_softplus
+from xnn.hybnn.models.spookynet import _exact_softplus
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])

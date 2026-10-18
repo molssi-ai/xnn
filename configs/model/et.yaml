@@ -1,0 +1,17 @@
+# ET, the TorchMD-Net equivariant transformer (Thoelke & De Fabritiis, ICLR 2022),
+# the MD17 / ANI-1 architecture of the paper (Table 4): F = 128 scalar and vector
+# features, 6 update layers with 8 attention heads, 32 exponential-normal radial
+# functions with a cosine cutoff at 5 A. The QM9 model uses 256 / 8 / 64.
+name: et
+cutoff: 5.0
+n_features: 128
+n_interactions: 6
+n_rbf: 32
+extra:
+  num_heads: 8
+  vector_cutoff: true           # the TorchMD-Net 2.0 fix (continuous at the cutoff); false = ICLR 2022
+  # neighbor_embedding: false   # the ablation of section 3.2
+  # distance_influence: both    # keys / values / none
+  # trainable_rbf: true
+  # species: [1, 6, 8]
+  # atomic_energies: average    # per-element reference energies from the training set

@@ -17,7 +17,7 @@ where ``envelope_e`` is a smooth radial cutoff that makes the attention vanish
 as a neighbour leaves the cutoff sphere. The caller decides how to combine the
 returned values and weights into messages (BAMBOO couples them with a radial
 edge feature and an equivariant edge vector -- see
-:class:`xnn.hybrid.models.bamboo.GETLayer`).
+:class:`xnn.hybnn.models.bamboo.GETLayer`).
 """
 from typing import Tuple
 

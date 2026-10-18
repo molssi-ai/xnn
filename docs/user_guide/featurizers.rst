@@ -20,6 +20,9 @@ implemented in the ``xnn.common.featurizers`` namespace:
 - :class:`~xnn.common.featurizers.radial.GaussianRBF` represents a Gaussian
   expansion of distances (e.g., in SchNet), with an optional explicit width
   ``gamma``.
+- :class:`~xnn.common.featurizers.radial.ExpNormalSmearing` is the
+  exponential-normal basis of the TorchMD-Net models (ET, and TensorNet) and
+  BAMBOO: Gaussians in exponential distance space under a cosine cutoff.
 - :class:`~xnn.common.featurizers.cutoff.CosineCutoff` represents a smooth
   cosine envelope function.
 - :class:`~xnn.common.featurizers.cutoff.MollifierCutoff` denotes a
@@ -141,20 +144,18 @@ namespace and are often used to create edge features for graph neural networks
 
 Transformer building blocks
 ===========================
-The transformer-based featurizers such as exponential-normal radial basis
-(:class:`~xnn.transformer.featurizers.ExpNormalSmearing`) and
-:class:`~xnn.transformer.attention.EdgeMultiheadAttention`, are originally used
-in models such as BAMBOO. However, xnn ships them under the
-``xnn.transformer.featurizers`` namespace to allow these featurizers to be
-employed in other attention-based models as well.
+:class:`~xnn.trfnn.attention.EdgeMultiheadAttention` is the multi-head
+QKV attention on graph edges that BAMBOO builds on. Tt is implemented in the
+``xnn.trfnn`` namespace so that other attention-based models can employ
+it as well.
 
 Hybrid radial basis featurizers
 ===============================
-The following featurizers are implemented in the ``xnn.hybrid.featurizers``
+The following featurizers are implemented in the ``xnn.hybnn.featurizers``
 namespace and are often used to create radial basis functions for hybrid models
 such as SpookyNet:
 
-- :class:`~xnn.hybrid.featurizers.radial.ExponentialBernsteinRBF` provides the
+- :class:`~xnn.hybnn.featurizers.radial.ExponentialBernsteinRBF` provides the
   Bernstein polynomials of ``exp(-gamma r)`` with a learned decay rate. These
   featurizers construct the radial basis of SpookyNet.
 

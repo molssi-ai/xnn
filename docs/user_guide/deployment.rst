@@ -102,5 +102,5 @@ it.
 Which model deploys how
 =======================
 - **ASE and MDI**: every model is supported, with or without a D3 / D4 term.
-- **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, SpookyNet,
-  NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.
+- **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET,
+  SpookyNet, NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.

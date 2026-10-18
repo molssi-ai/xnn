@@ -1,0 +1,13 @@
+# TensorNet (Simeon & De Fabritiis, NeurIPS 2023; TorchMD-Net 2.0): F = 128 rank-2
+# Cartesian tensor features, 2 interaction layers, 32 fixed exponential-normal radial
+# functions with a cosine cutoff at 4.5 A, O(3)-equivariant products.
+name: tensornet
+cutoff: 4.5
+n_features: 128
+n_interactions: 2
+n_rbf: 32
+extra:
+  equivariance_group: O(3)      # SO(3) distinguishes enantiomers
+  # trainable_rbf: true
+  # species: [1, 6, 8]
+  # atomic_energies: average    # per-element reference energies from the training set
