@@ -237,6 +237,18 @@ class OptimConfig:
     train_only : list of str
         Patterns of the only parameters to train; everything else is frozen
         (``["*readouts*", "*atom_ref*"]`` trains the readout alone).
+    prior_weight : float
+        Weight of a quadratic pull of every trainable parameter toward its
+        value at the start of the run, ``prior_weight * sum((p - p0)^2)`` in
+        the parameter's own units, added to the training loss and logged as
+        ``prior``. It keeps an ill-conditioned refit (a few dozen force-field
+        parameters against a short scan) from drifting along the directions
+        the data does not fix. Defaults to ``0.0``.
+    prior_weights : dict, optional
+        Per-parameter pulls: ``fnmatch`` patterns of parameter names mapped
+        to weights, e.g. ``{"*dihedral_v": 0.1, "*charge": 10.0}``. The
+        first pattern that matches a parameter sets its weight; the others
+        take ``prior_weight``.
     """
 
     lr: float = 1e-3
@@ -262,6 +274,8 @@ class OptimConfig:
     head_weights: Optional[dict[str, dict[str, float]]] = None
     freeze: list[str] = field(default_factory=list)       # parameter-name patterns to freeze
     train_only: list[str] = field(default_factory=list)   # patterns of the only parameters to train
+    prior_weight: float = 0.0          # > 0 pulls every trainable parameter toward its starting value
+    prior_weights: Optional[dict[str, float]] = None   # per-parameter-pattern pulls, {pattern: weight}
 
 
 @dataclass

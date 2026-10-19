@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import fnmatch
 import os
 import warnings
 
@@ -444,6 +445,7 @@ class Trainer:
             n_train, n_total = freeze_parameters(self.module, o.freeze, o.train_only)
             if self.is_main:
                 print(f"trainable parameters: {n_train} of {n_total}")
+        self._prior = self._prior_terms(o)
 
         if self.distributed:
             self.model = DistributedDataParallel(
@@ -716,6 +718,27 @@ class Trainer:
             extra["heads"] = heads_spec
         self.cfg.model.extra = extra
 
+    def _prior_terms(self, o) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
+        """The ``(parameter, starting value, weight)`` triples of the prior pull.
+
+        Every trainable parameter whose weight (``optim.prior_weights`` by
+        the first matching pattern, else ``optim.prior_weight``) is positive;
+        the starting values are copies taken here, after the reference
+        energies and the freezing are resolved.
+        """
+        patterns = list((o.prior_weights or {}).items())
+        if o.prior_weight <= 0 and not patterns:
+            return []
+        terms = []
+        for name, p in self.module.named_parameters():
+            if not p.requires_grad:
+                continue
+            w = next((float(v) for pat, v in patterns if fnmatch.fnmatch(name, pat)),
+                     float(o.prior_weight))
+            if w > 0:
+                terms.append((p, p.detach().clone(), w))
+        return terms
+
     def _make_scheduler(self, name: str):
         """Construct the learning-rate scheduler named in the config.
 
@@ -768,8 +791,10 @@ class Trainer:
             ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``,
             ``"dipole_mse"``, ``"polarizability_mse"``, ``"charge_mse"``, per head
             in a multi-head run, plus the error metrics such as
-            ``"forces_mae"``), and the ``counts`` of its terms that
-            :meth:`_dataset_metrics` accumulates.
+            ``"forces_mae"`` and, in training steps with ``optim.prior_weight``
+            or ``prior_weights`` set, the ``"prior"`` pull toward the starting
+            parameters, which the training loss includes), and the ``counts``
+            of its terms that :meth:`_dataset_metrics` accumulates.
         """
         data = data.to(self.device)
         o = self.cfg.optim
@@ -795,6 +820,12 @@ class Trainer:
         if self.tcfg.metrics:
             self._error_metrics(pred, data, logs, counts)
         if train:
+            if self._prior:
+                prior = sum(w * (p - p0).pow(2).sum() for p, p0, w in self._prior)
+                loss = loss + prior
+                logs["prior"] = float(prior.detach())
+                counts["prior"] = (1.0, 1.0)
+                logs["loss"] = float(loss.detach())
             if self.distributed:
                 # an output without labels in this batch (a dipole head on a
                 # batch without dipoles) still joins the graph with weight 0,
