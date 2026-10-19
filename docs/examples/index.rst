@@ -19,6 +19,7 @@ The data hub: ``load_dataset()``, splits, units, caching.
    :caption: Data
 
    Loading datasets with `xnn`: the data hub & `load_dataset()` <nb/data/load_dataset_tutorial>
+   GMTKN55 in one line: reaction energies, WTMAD-2 and pretrained models on the benchmark <nb/examples/common/data/gmtkn55_dataset>
 
 Models
 ======
@@ -364,6 +365,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/painn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/torchmdnet_verification>
+   GMTKN55 against the paper and the maintainers' repository: counts, averages, PBEh-3c and WTMAD-2 <nb/fidelity_checks/common/data/gmtkn55_verification>
    HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/physnet_verification>
