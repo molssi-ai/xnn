@@ -8,7 +8,7 @@ xnn offers a dataset hub which is a collection of popular benchamrk datasets in
 Machine Learning Interatomic Potential (MLIP) research. You can get a list of
 the available datasets with :func:`~xnn.common.data.list_datasets`. The
 ``load_dataset()`` downloads, verifies, converts and caches a benchmark dataset,
-listed above in one call. The ``examples/data/load_dataset_tutorial.ipynb``
+listed above in one call. The ``notebooks/examples/common/data/load_dataset_tutorial.ipynb``
 notebook offers a runnable version of this page.
 
 .. code-block:: python
@@ -75,6 +75,10 @@ the pre-processing (see the full list in :ref:`data`):
    # S22 / S66 noncovalent dimers: fragment labels and reference interaction energies
    dimers = load_dataset("s66", split="all")
    dimers[0]["fragment"], dimers[0]["interaction_energy"]       # per-atom 0 / 1, kcal/mol
+
+   # GMTKN55: 55 sets of reaction energies, barrier heights and noncovalent interactions
+   data = load_dataset("gmtkn55", subsets=["S66", "BH76"], closed_shell=True)
+   data["structures"][0]["total_charge"], data["reactions"][0]["reference"]   # species, kcal/mol
 
 Accessing the ANI sets requires installing the ``hub`` extra optional dependency
 (``h5py``). The ``split`` of the ANI sets (``train`` / ``val`` / ``test``) is

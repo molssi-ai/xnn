@@ -76,7 +76,7 @@ You can use the ``--dispersion d4`` flag to add a dispersion term to a plain
 model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. The :ref:`cli` guide
 lists every option available to you. 
 
-There are example notebooks in ``examples/deploy`` which illustrate how to drive
+There are example notebooks in ``notebooks/examples/common/deploy`` which illustrate how to drive
 the engine from Python and LAMMPS deployment interfaces.
 
 Dispersion removed from the labels

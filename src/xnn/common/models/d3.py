@@ -45,7 +45,7 @@ behavior of the reference code `simple-dftd3 <https://github.com/dftd3/simple-df
 the papers leave to the code are reproduced so that energies, gradients and
 virials match ``s-dftd3`` to floating-point precision for every damping
 function, molecular and periodic (``tests/test_d3.py`` and
-``examples/fidelity_checks/d3_verification.ipynb``): the exponential counting
+``notebooks/fidelity_checks/common/d3/d3_verification.ipynb``): the exponential counting
 function and its 40 bohr cutoff, the highest-CN fallback of the Gaussian
 weights, the 60 / 40 bohr pair / triple cutoffs with optional quintic
 switching windows, and the ``triple_scale`` bookkeeping of the ATM term.

@@ -2,7 +2,7 @@
 
 A small dataset of periodic **argon** configurations with reference energies,
 forces and stress, used by the example notebooks
-(``examples/*/*_argon_train_test.ipynb`` and ``*_argon_density_md.ipynb``). It is
+(``notebooks/examples/*/*/*_argon_train_test.ipynb`` and ``*_argon_density_md.ipynb``). It is
 stored in the MACE convention (extxyz with ``REF_energy`` / ``REF_forces`` /
 ``REF_stress`` and a leading ``config_type=IsolatedAtom`` reference frame) and
 ships **inside the repository** under ``datasets/argon_md/``, so it loads offline

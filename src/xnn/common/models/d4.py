@@ -56,7 +56,7 @@ observed behavior of the reference code `dftd4 <https://github.com/dftd4/dftd4>`
 that the paper leaves to the code are reproduced so that energies, forces,
 virials, charges, coordination numbers, C6 coefficients and polarizabilities
 match ``dftd4`` to floating-point precision (``tests/test_d4.py`` and
-``examples/fidelity_checks/d4_verification.ipynb``): the ``N^s`` bookkeeping
+``notebooks/fidelity_checks/common/d4/d4_verification.ipynb``): the ``N^s`` bookkeeping
 of eq 8 and its fallback to the highest-CN reference when every Gaussian
 weight underflows, the soft CN cap in the EEQ model (and its absence in the
 D4 CN), the effective nuclear charges of the reference systems, the ``q =

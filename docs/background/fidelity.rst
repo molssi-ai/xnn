@@ -6,7 +6,7 @@ Model Fidelity to Upstream Codes
 
 Each model reproduces its reference code and its paper results when available,
 and the code is verified block by block with transplanted weights from the
-original models when accessible (``tests/``, ``examples/fidelity_checks/``). The
+original models when accessible (``tests/``, ``notebooks/fidelity_checks/``). The
 reference packages are used only as external oracles and references for
 validating our implementation.
 
