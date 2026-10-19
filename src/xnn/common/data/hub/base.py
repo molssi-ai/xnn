@@ -141,9 +141,11 @@ def load_dataset(name: str, *, split: Optional[str] = None,
         ``{split_name: data}``; a name (e.g. ``"train"``) returns just that
         split. Available splits are dataset-specific.
     cutoff : float, optional
-        If given, each returned split is wrapped in an ``AtomicDataset`` built
-        with this neighbor-list cutoff (ready for a ``DataLoader``). If omitted,
-        raw lists of structure dicts are returned.
+        If given, each returned split of structure dicts is wrapped in an
+        ``AtomicDataset`` built with this neighbor-list cutoff (ready for a
+        ``DataLoader``); splits holding other records (such as the reactions
+        of a benchmark set) are returned as they are. If omitted, raw lists
+        are returned.
     cache_dir : str or pathlib.Path, optional
         Base cache directory. Defaults to
         :func:`~xnn.common.data.hub._download.default_cache_dir`.
@@ -171,6 +173,14 @@ def load_dataset(name: str, *, split: Optional[str] = None,
         return result
 
     from ..dataset import AtomicDataset
+
+    def wrap(items):
+        # only lists of structure dicts become datasets; a builder may also
+        # return label records (e.g. the reactions of a benchmark set)
+        if items and isinstance(items[0], dict) and "pos" in items[0]:
+            return AtomicDataset(items, cutoff)
+        return items
+
     if isinstance(result, dict):
-        return {k: AtomicDataset(v, cutoff) for k, v in result.items()}
-    return AtomicDataset(result, cutoff)
+        return {k: wrap(v) for k, v in result.items()}
+    return wrap(result)

@@ -48,11 +48,12 @@ Layout
 
 Example gallery
 ===============
-The notebooks under ``examples/`` are published one at a time.
+The notebooks under ``notebooks/`` are published one at a time.
 ``.gitignore`` ignores every notebook until it is un-ignored and committed.
 ``docs/examples/index.rst`` lists all of them with the ``example-toctree``
 directive: an entry whose notebook is in the checkout is built and linked,
 every other entry shows its title with a *coming soon* marker. Each entry is
-``Title <nb/path/to/notebook>``. To preview the published site from a tree
+``Title <nb/path/to/notebook>``, where ``nb/`` mirrors ``notebooks/`` (for
+example ``nb/examples/gnn/mace/mace_argon_train_test``). To preview the published site from a tree
 that holds every notebook, set ``examples_ready`` in ``conf.py`` or pass
 ``-D examples_ready=nb/a,nb/b`` to the build.

@@ -83,14 +83,18 @@ nb_merge_streams = True
 myst_enable_extensions = ["dollarmath", "amsmath", "html_image", "colon_fence"]
 
 # Sphinx only reads sources inside docs/, while the notebooks live in
-# examples/ at the repository root. Mirror them (plus the figures/ images some
+# notebooks/ at the repository root. Mirror them (plus the figures/ images some
 # markdown cells reference) into docs/examples/nb/ when the build starts; the
 # mirror is gitignored, and docs/examples/index.rst holds the gallery toctree.
 def _mirror_example_notebooks():
     import shutil
 
-    src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
+    src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "notebooks"))
     dst = os.path.join(os.path.dirname(__file__), "examples", "nb")
+    # A checkout without notebooks/ still builds; every gallery entry then
+    # reads "coming soon".
+    if not os.path.isdir(src):
+        return
 
     def ignore(directory, names):
         drop = set()
@@ -114,7 +118,7 @@ _mirror_example_notebooks()
 # The notebooks are kept out of the repository until reviewed (.gitignore), so
 # by default a page is published when its notebook is in the checkout: it is
 # built and linked, every other entry reads "coming soon". A list of paths
-# under docs/examples/ (without .ipynb, e.g. "nb/dnn/ani/ani_rmd17_train")
+# under docs/examples/ (without .ipynb, e.g. "nb/examples/dnn/ani/ani_rmd17_train")
 # overrides that, which previews the published gallery from a working tree
 # that still holds every notebook.
 examples_ready = None

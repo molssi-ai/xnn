@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from tqdm.auto import tqdm
 
@@ -141,7 +142,9 @@ def download_file(url: str, dest: Path, md5: Optional[str] = None,
     return dest
 
 
-def extract_archive(path: Path, dest_dir: Path) -> Path:
+def extract_archive(path: Path, dest_dir: Path,
+                    select: Optional[Callable[[str], bool]] = None,
+                    strip: int = 0) -> Path:
     """Extract a ``.zip`` or ``.tar(.gz/.bz2/.xz)`` archive.
 
     Parameters
@@ -150,6 +153,12 @@ def extract_archive(path: Path, dest_dir: Path) -> Path:
         Archive file to extract.
     dest_dir : pathlib.Path
         Directory to extract into; created if missing.
+    select : callable, optional
+        ``select(member_name) -> bool`` chooses which members to extract
+        (``None`` extracts everything). Directory entries are never written.
+    strip : int, optional
+        Number of leading path components to drop from every member (for
+        archives wrapped in a single top-level folder). Defaults to 0.
 
     Returns
     -------
@@ -166,18 +175,50 @@ def extract_archive(path: Path, dest_dir: Path) -> Path:
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    if select is None and strip == 0:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as z:
+                z.extractall(dest_dir)
+        elif tarfile.is_tarfile(path):
+            with tarfile.open(path) as t:
+                # the "data" filter refuses absolute paths, links out of
+                # dest_dir and device files (Python >= 3.12, backported to
+                # 3.8.17+/3.10.12+/3.11.4+)
+                if hasattr(tarfile, "data_filter"):
+                    t.extractall(dest_dir, filter="data")
+                else:
+                    t.extractall(dest_dir)
+        else:
+            raise ValueError(f"unrecognized archive format: {path}")
+        return dest_dir
+
+    root = dest_dir.resolve()
+
+    def target(name: str) -> Optional[Path]:
+        parts = [p for p in name.split("/") if p not in ("", ".")]
+        if ".." in parts or len(parts) <= strip or (select is not None and not select(name)):
+            return None
+        out = root.joinpath(*parts[strip:])
+        return out if out.resolve().is_relative_to(root) else None
+
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
-            z.extractall(dest_dir)
+            for info in z.infolist():
+                out = None if info.is_dir() else target(info.filename)
+                if out is None:
+                    continue
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
     elif tarfile.is_tarfile(path):
         with tarfile.open(path) as t:
-            # the "data" filter refuses absolute paths, links out of
-            # dest_dir and device files (Python >= 3.12, backported to
-            # 3.8.17+/3.10.12+/3.11.4+)
-            if hasattr(tarfile, "data_filter"):
-                t.extractall(dest_dir, filter="data")
-            else:
-                t.extractall(dest_dir)
+            for member in t:
+                out = target(member.name) if member.isfile() else None
+                if out is None:
+                    continue
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with t.extractfile(member) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
     else:
         raise ValueError(f"unrecognized archive format: {path}")
     return dest_dir

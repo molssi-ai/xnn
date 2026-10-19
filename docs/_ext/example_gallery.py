@@ -7,7 +7,7 @@ a hidden toctree). Every other entry is rendered as muted text with a
 so an unreviewed page is neither linked nor reachable.
 
 A page is published when its notebook is part of the checkout: the
-notebooks under ``examples/`` are kept out of the repository until they are
+notebooks under ``notebooks/`` are kept out of the repository until they are
 reviewed (see ``.gitignore``), and committing one publishes it. The
 ``examples_ready`` configuration value overrides that rule with an explicit
 list of pages (paths relative to ``docs/examples/`` without the ``.ipynb``
@@ -19,8 +19,8 @@ Usage in ``docs/examples/index.rst``::
     .. example-toctree::
        :caption: ANI (dnn)
 
-       Training ANI from scratch on rMD17 <nb/dnn/ani/ani_rmd17_train>
-       nb/dnn/ani/ani1_dataset
+       Training ANI from scratch on rMD17 <nb/examples/dnn/ani/ani_rmd17_train>
+       nb/examples/dnn/ani/ani1_dataset
 
 The title before ``<...>`` is what a pending entry shows (inline code spans
 and ``$math$`` are rendered); it is required when the notebook is not in the

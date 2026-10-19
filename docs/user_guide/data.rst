@@ -220,6 +220,18 @@ Currently, the following datasets are available:
   
   - Available arguments: ``reference`` (``original`` or, for S22, ``revised``).
 
+- ``gmtkn55``: the GMTKN55 database (Goerigk 2017), 55 sets of main-group
+  reaction energies, barrier heights and noncovalent interactions with
+  CCSD(T)-quality references in kcal/mol. Returns ``structures`` (species
+  with ``total_charge``, ``spin_multiplicity`` and the maintainers' PBEh-3c
+  energy) and ``reactions`` (species, stoichiometry, reference). The helpers
+  :func:`~xnn.common.data.hub.gmtkn55.reaction_energies` and
+  :func:`~xnn.common.data.hub.gmtkn55.wtmad2` score a model.
+
+  - Available arguments: ``version`` (``v2``, the maintainers' updated
+    references, or ``v1``, the paper's), ``subsets``, ``elements``,
+    ``max_abs_charge``, ``closed_shell``.
+
 Files are cached and MD5-verified under ``datasets/<name>/``. The directory can
 also be set by ``cache_dir`` argument or by setting the environment variables
 ``XNN_DATASETS`` or ``XNN_CACHE``. The ANI sets need the ``hub`` extra

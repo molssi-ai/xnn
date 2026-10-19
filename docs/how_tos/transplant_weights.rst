@@ -75,5 +75,5 @@ For any other upstream model:
    torch.testing.assert_close(model(batch)["energy"], reference_energy)
 
 The same mapping in reverse loads xnn-trained weights into the reference code.
-Each ``examples/fidelity_checks/<model>_verification`` notebook ends with the
-transplant for its model.
+Each ``notebooks/fidelity_checks/<family>/<model>/<model>_verification`` notebook
+ends with the transplant for its model.

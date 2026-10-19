@@ -6,7 +6,7 @@ tabulates their energy/force errors — a one-config, apples-to-apples compariso
 
 Benchmarking only *scores* pre-trained models; it does not train. The
 checkpoints used here are produced by the per-model training notebooks
-(`examples/<family>/<model>_argon_train_test.ipynb`). Run those first if a
+(`notebooks/examples/<family>/<model>/<model>_argon_train_test.ipynb`). Run those first if a
 checkpoint is missing.
 
 ## Run it
@@ -14,7 +14,7 @@ checkpoint is missing.
 From the **repository root** (paths in the config are relative to it):
 
 ```bash
-xnn benchmark --config examples/benchmark/argon_benchmark.yaml
+xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml
 ```
 
 or from Python:
@@ -22,11 +22,11 @@ or from Python:
 ```python
 from xnn.common.benchmark import from_yaml, run_benchmark
 
-rows = run_benchmark(from_yaml("examples/benchmark/argon_benchmark.yaml"))
+rows = run_benchmark(from_yaml("notebooks/examples/common/benchmark/argon_benchmark.yaml"))
 ```
 
 The table is printed and written to
-`examples/benchmark/runs/argon_benchmark/results.{csv,json,md}`.
+`notebooks/examples/common/benchmark/runs/argon_benchmark/results.{csv,json,md}`.
 
 ## What you get
 
@@ -64,7 +64,7 @@ Score every model data-parallel by starting the same command through
 the serial ones):
 
 ```bash
-torchrun --nproc-per-node 2 -m xnn benchmark --config examples/benchmark/argon_benchmark.yaml
+torchrun --nproc-per-node 2 -m xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml
 ```
 
 or give each model its own GPU with `--parallel` (one worker per GPU, logs in
@@ -72,7 +72,7 @@ or give each model its own GPU with `--parallel` (one worker per GPU, logs in
 `results.*` files:
 
 ```bash
-xnn benchmark --config examples/benchmark/argon_benchmark.yaml --parallel
+xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml --parallel
 ```
 
 On a cluster, `--shard slurm` inside a job array plus a final `--merge` does the
@@ -84,14 +84,14 @@ Override any config key on the command line with `--set`:
 
 ```bash
 # forces only
-xnn benchmark --config examples/benchmark/argon_benchmark.yaml \
+xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml \
     --set "metrics={'forces': ['mae','rmse']}"
 
 # report atomization energy (fit the per-atom Ar reference from the data)
-xnn benchmark --config examples/benchmark/argon_benchmark.yaml --set atomic_energies=average
+xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml --set atomic_energies=average
 
 # add MSE, keep MAE only for energy, and write only JSON
-xnn benchmark --config examples/benchmark/argon_benchmark.yaml \
+xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml \
     --set "metrics={'energy': ['mae'], 'forces': ['mae','mse','rmse']}" "output.formats=['json']"
 ```
 

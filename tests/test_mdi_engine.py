@@ -1,6 +1,6 @@
 """MDI engine: checkpoint loading (cutoff, dtype, route-B dispersion) and the
 total-charge plumbing. The MDI wire protocol itself needs a driver process and
-is exercised by the examples/deploy notebooks; here the engine is driven
+is exercised by the notebooks/examples/common/deploy notebooks; here the engine is driven
 through its Python state directly."""
 import logging
 import pathlib

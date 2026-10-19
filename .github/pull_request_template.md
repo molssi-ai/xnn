@@ -12,7 +12,7 @@
 - [ ] `pytest -q` passes; new code is tested (a bug fix adds a test that failed before the fix).
 - [ ] `sphinx-build -b html -W --keep-going docs docs/_build/html` passes.
 - [ ] Reuses existing helpers in `xnn.common` or the family package; no second implementation of an existing component.
-- [ ] No data files in `tests/` or `examples/`; examples build their inputs in code or load them through the hubs.
+- [ ] No data files in `tests/` or `notebooks/`; examples build their inputs in code or load them through the hubs.
 - [ ] `README.md` and the documentation are updated where behaviour, models or options change (including the model tables).
 - [ ] For a model: registration, invariance and equivariance, periodic stress, finite-difference forces, script parity if it exports, and parity with its reference.
 - [ ] No code copied from other projects; any reference implementation I consulted is not under a copyleft license; the sources and licenses of new data files are stated below.

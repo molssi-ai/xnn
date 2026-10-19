@@ -148,14 +148,14 @@ the MolSSI Driver Interface.
 | Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable) |
 
 Each model is checked against its reference code or paper
-(`examples/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, SpookyNet, NequIP, MACE, Allegro
+(`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, SpookyNet, NequIP, MACE, Allegro
 and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
 ## Examples and tests
 
-Executed notebooks for every model are under `examples/`
-(`pip install -e ".[examples]"`); `examples/quickstart.py` is a minimal script.
+Executed notebooks for every model are under `notebooks/examples/`
+(`pip install -e ".[examples]"`); `notebooks/examples/quickstart.py` is a minimal script.
 Run the tests with `pytest tests/`.
 
 ## Contributing

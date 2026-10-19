@@ -81,5 +81,5 @@ What to expect from fast implementations
   reference implementation. Therefore, an exported model runs anywhere
   TorchScript does.
 
-The ``examples/parity_checks/`` notebooks compare every fast paths with their
+The ``notebooks/parity_checks/`` notebooks compare every fast paths with their
 reference implementations on real systems.

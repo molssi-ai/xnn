@@ -1,7 +1,7 @@
 """End-to-end smoke example: build data, train, get forces, deploy to ASE.
 
 Runs on CPU in a few seconds with a toy dataset. Demonstrates that the full
-pipeline is wired together. Run:  python examples/quickstart.py
+pipeline is wired together. Run:  python notebooks/examples/quickstart.py
 """
 import numpy as np
 import torch

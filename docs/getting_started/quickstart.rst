@@ -10,7 +10,7 @@ code runs on CPU in seconds and uses a GPU when one is present:
 
 .. code-block:: bash
 
-   python examples/quickstart.py
+   python notebooks/examples/quickstart.py
 
 The rest of this page details what the ``quickstart`` script does in more
 detail. 

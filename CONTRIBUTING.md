@@ -166,7 +166,7 @@ Read `docs/developer_guide/extending.rst` first. A new model needs:
    published numbers;
 3. the tests listed under [Tests](#tests), including the parity test against the reference;
 4. its row in the model tables of `README.md` and the documentation;
-5. if it is user-facing, a short example under `examples/<family>/`.
+5. if it is user-facing, a short example under `notebooks/examples/<family>/<model>/`, and its fidelity check under `notebooks/fidelity_checks/<family>/<model>/`.
 
 ## Tests
 
