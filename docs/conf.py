@@ -91,6 +91,10 @@ def _mirror_example_notebooks():
 
     src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "notebooks"))
     dst = os.path.join(os.path.dirname(__file__), "examples", "nb")
+    # A checkout without notebooks/ still builds; every gallery entry then
+    # reads "coming soon".
+    if not os.path.isdir(src):
+        return
 
     def ignore(directory, names):
         drop = set()
