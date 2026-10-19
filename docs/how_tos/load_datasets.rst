@@ -8,7 +8,7 @@ xnn offers a dataset hub which is a collection of popular benchamrk datasets in
 Machine Learning Interatomic Potential (MLIP) research. You can get a list of
 the available datasets with :func:`~xnn.common.data.list_datasets`. The
 ``load_dataset()`` downloads, verifies, converts and caches a benchmark dataset,
-listed above in one call. The ``examples/data/load_dataset_tutorial.ipynb``
+listed above in one call. The ``notebooks/examples/common/data/load_dataset_tutorial.ipynb``
 notebook offers a runnable version of this page.
 
 .. code-block:: python

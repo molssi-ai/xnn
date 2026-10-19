@@ -9,7 +9,7 @@ xnn's ``from_pretrained()`` can load. A variety of fine-tuning methods are
 available: naive fine-tuning, layer freezing, LoRA and multi-head replay all of
 which can also be specified as config options.
 
-The ``examples/gnn/mace/mace_finetuning_strategies.ipynb`` notebook compares
+The ``notebooks/examples/gnn/mace/mace_finetuning_strategies.ipynb`` notebook compares
 these methods via fine-tuning a MACE-OFF23 foundation model. The classical force
 fields have no readout layer to be exposed to adapters. Therefore, they should
 be fine-tuned with the naive or freezing methods (see

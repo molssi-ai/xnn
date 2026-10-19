@@ -19,7 +19,7 @@ Specifically checked against the paper:
 An independent cross-check against LAMMPS's DREIDING styles (bond
 harmonic, angle cosine/squared, dihedral harmonic, improper umbrella, pair
 lj/cut / buck / hbond/dreiding/lj) lives in
-``examples/fidelity_checks/dreiding_verification.ipynb``; it needs LAMMPS
+``notebooks/fidelity_checks/ffnn/dreiding/dreiding_verification.ipynb``; it needs LAMMPS
 and is not part of this suite.
 """
 import json

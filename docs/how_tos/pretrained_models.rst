@@ -8,7 +8,7 @@ The ``from_pretrained()`` function loads the model artifacts: the original
 foundation models pre-trained by their main developer teams (e.g., MACE and
 AIMNet2), models trained with xnn, Zenodo uploads and local checkpoints, all can
 be loaded through the same function call and the same cache. The
-``examples/models/pretrained_models_tutorial.ipynb`` notebook provides a
+``notebooks/examples/common/models/pretrained_models_tutorial.ipynb`` notebook provides a
 runnable version of this page.
 
 .. note::

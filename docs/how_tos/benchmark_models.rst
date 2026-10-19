@@ -40,7 +40,7 @@ A typical benchmark config YAML file can have the following sections:
    device: auto
 
 The bundled ``configs/benchmark.yaml`` file offers a general commented example
-and ``examples/benchmark/`` provides specific cases where the benchmark task
+and ``notebooks/examples/common/benchmark/`` provides specific cases where the benchmark task
 scores NequIP, Allegro, MACE and PhysNet on the argon test set that is also
 available from the xnn's data hub and is shipped with the package. A
 ``checkpoint`` can be anything ``from_pretrained()`` accepts. Only checkpoints

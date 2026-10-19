@@ -76,7 +76,7 @@ docs = [
     "sphinx-togglebutton",    # collapsible long notebook outputs
     "myst-nb>=1.1",            # renders the executed example notebooks
 ]
-# Everything needed to build and run the example notebooks in examples/gnn/,
+# Everything needed to build and run the example notebooks in notebooks/examples/gnn/,
 # including the reference ACEsuit/mace and mir-group/nequip implementations the
 # notebooks are benchmarked against. The Allegro reference (mir-group/allegro
 # v0.3.0) is not on PyPI, and PyPI refuses metadata with direct URL

@@ -4,24 +4,23 @@
 Run the Example Notebooks
 *************************
 
-The example notebooks live under ``examples/`` folder and cover training,
-fine-tuning and deployment and verification of every xnn model. The notebooks
+The notebooks live under the ``notebooks/`` folder and cover training,
+fine-tuning, deployment and verification of every xnn model. The notebooks
 are committed with their outputs and rendered in :ref:`examples`, so you can
-read them there first. The details on this page is about running them on your
-own machine.
+read them there first. This page is about running them on your own machine.
 
 Launching the examples
 ======================
 You can run the notebooks in a Python environment with xnn and the ``examples``
 extra dependency installed. The following command installs the extra dependency
-and launches a Jupyter Lab server in the ``examples/`` folder. The notebooks
+and launches a Jupyter Lab server in the ``notebooks/`` folder. The notebooks
 will run in the environment where xnn is installed, so you can use your own
 Python environment or a virtual one.
 
 .. code-block:: bash
 
    pip install -e ".[examples]"
-   jupyter lab examples/
+   jupyter lab notebooks/
 
 Every training and MD notebook loads its data through the data hub
 (:ref:`howto-load-datasets`). The argon dataset is bundled and shipped with the
@@ -29,55 +28,72 @@ package. Other datasets are downloaded and cached on their first use.
 
 What is where?
 ==============
-- The ``examples/data`` and ``examples/models`` folders focus on the data hub
-  and the model hub tutorials.
-- The ``examples/gnn/<model>`` folders:
+The three folders under ``notebooks/`` follow the package layout, one
+``<family>/<model>/`` folder per model, so the notebooks of a model sit at
+matching paths:
+
+.. code-block:: text
+
+   notebooks/
+     examples/           training, MD, paper reproductions, tutorials
+       common/           data, models (hubs), deploy, benchmark, d3, d4, les
+       gnn/  dnn/  cnn/  ffnn/  hybnn/  sqmnn/  trfnn/
+     fidelity_checks/    each model against its reference code, block by block
+       common/  gnn/  dnn/  cnn/  ffnn/  hybnn/  sqmnn/  trfnn/
+     parity_checks/      the fast paths against the reference implementation
+       common/dispersion/  gnn/mace/
+
+For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
+``parity_checks/gnn/mace/``. In ``examples/``:
+
+- ``common/data`` and ``common/models`` hold the data hub and model hub
+  tutorials.
+- ``gnn/<model>``:
     - MACE, NequIP, Allegro and CACE offer a train/test notebook and an argon
       NPT density notebook, each compares the performance of the model against
-      the reference code. 
+      the reference code.
     - MACE and AIMNet2 add their foundation-models to the experiments and
       provide a fine-tuning notebook.
-    - SchNet trains on rMD17, then runs a NVE dynamics. 
+    - SchNet trains on rMD17, then runs a NVE dynamics.
     - DimeNet checks its performance against the tests in its original paper and
-      trains on rMD17 while comparing its results against those of SchNet. 
-    - GemNet attempts to reproduce some of the experiments in its original paper and trains GemNet-T, -Q and -dT
-      on the rMD17 data.
+      trains on rMD17 while comparing its results against those of SchNet.
+    - GemNet attempts to reproduce some of the experiments in its original paper
+      and trains GemNet-T, -Q and -dT on the rMD17 data.
     - PaiNN checks its paper, reproduces its MD17 tables, the ferrocene rotation
-      profiles and the ethanol IR and Raman spectra. 
+      profiles and the ethanol IR and Raman spectra.
     - TensorNet checks its paper, trains on rMD17 aspirin, and compares its 0, 1
       and 2 layer models with ET on a QM9 subset (TorchMD-Net 2.0 Table 1).
-    - LES creates several long-range binding curves for dimers.
-- The ``examples/trfnn/et`` folder checks the ET paper (sizes, attention
-  weights, the cutoff fix of TorchMD-Net 2.0) and trains ET on rMD17 aspirin.
-- The ``examples/cnn/se3cnn`` folder provides the Tetris experiment of the SE(3)
-  steerable CNN paper, then compares its performance against that of
-  conventional 3D CNN potentials, trained on rMD17 under rotations.
-- The ``examples/cnn/s2cnn`` folder focuses on the QM7 atomization-energy
-  experiment of the spherical CNN paper.
-- The ``examples/dnn`` folder contains:
+- ``trfnn/et`` checks the ET paper (sizes, attention weights, the cutoff fix of
+  TorchMD-Net 2.0) and trains ET on rMD17 aspirin.
+- ``cnn/se3cnn`` provides the Tetris experiment of the SE(3) steerable CNN
+  paper, then compares its performance against that of conventional 3D CNN
+  potentials, trained on rMD17 under rotations.
+- ``cnn/s2cnn`` focuses on the QM7 atomization-energy experiment of the
+  spherical CNN paper.
+- ``dnn`` contains:
     - the ANI experiments (training on rMD17 and the four published ANI
       datasets),
     - the PhysNet experiments and comparing the performance of the trained model
       against that in the original manuscript, and
-    - the HDNNP generations (paper experiment checks, comparing the performance of 1G
-      against 2G on rMD17, and attempting to reproduce the 2G / 3G / 4G
+    - the HDNNP generations (paper experiment checks, comparing the performance
+      of 1G against 2G on rMD17, and attempting to reproduce the 2G / 3G / 4G
       benchmarks of the fourth-generation paper).
-- The ``examples/hybnn`` folder focuses on:
+- ``hybnn`` focuses on:
     - experiments involving BAMBOO charges and electrostatics,
     - reproducing experiments in the SpookyNet paper and reproducing its
       electronic-state, nonlocal and charge-transfer examples as well as MD17
       dataset training.
-- The ``examples/ffnn`` folder involves ReaxFF, OPLS and DREIDING trainings,
-  refits and conformational energetics.
-- The ``examples/common`` folder involves examples focusing on the DFT-D3 and
-  DFT-D4 paper experiment reproductions, benchmarks and a large-system studies.
-- The ``examples/benchmark``, and ``examples/deploy`` folders use one config
-  file for scoring four models on the argon dataset. Here, a checkpoint served
-  as an MDI engine, driven from Python and from LAMMPS.
-- The ``examples/fidelity_checks``, and ``examples/parity_checks`` folders
-  provide one notebook per model and compare them against their upstream
-  counterparts, and use the fast paths against the reference implementation in
-  xnn.
+- ``ffnn`` involves ReaxFF, OPLS and DREIDING trainings, refits and
+  conformational energetics.
+- ``sqmnn/nddo`` reproduces the PM3, PM6, PM6-ORG and PM7 papers and refits the
+  NDDO parameters.
+- ``common/d3`` and ``common/d4`` hold the DFT-D3 and DFT-D4 paper experiment
+  reproductions, benchmarks and a large-system study.
+- ``common/les`` creates long-range binding curves for charged and polar
+  dimers.
+- ``common/benchmark`` scores four models on the argon dataset with one config
+  file, and ``common/deploy`` serves a checkpoint as an MDI engine, driven from
+  Python and from LAMMPS.
 
 Extra requirements
 ==================
@@ -91,7 +107,7 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
 
   to get the Allegro reference code installed.
 
-- The ``cace_verification`` and ``gnn/cace/*`` notebooks. You need to run:
+- The ``cace_verification`` and ``examples/gnn/cace/*`` notebooks. You need to run:
 
   .. code-block:: bash
 
@@ -108,19 +124,19 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
     pip install aimnet 
 
   in a separate environment (it needs torch 2.8 or newer).
-- The ``dnn/physnet/*`` and ``physnet_verification`` notebooks require an
+- The ``examples/dnn/physnet/*`` and ``physnet_verification`` notebooks require an
   environment with both TensorFlow and torch installed. The original PhysNet is
   cloned on demand.
 - The ``opls_verification`` notebooks uses the ``opls`` extra dependency
   (and OpenMM).
-- The ``common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
+- The ``examples/common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
   dependency. The paper examples also need the ``rdkit`` extra dependency. The
   large-scale experiment notebook requires the ``vesin`` extra dependency to be
   able to calculate the neighborlists efficiently and a GPU with tens of GBs of
   memory.
-- The ``common/d3/*`` and ``d3_verification`` notebooks use the ``d3`` extra
+- The ``examples/common/d3/*`` and ``d3_verification`` notebooks use the ``d3`` extra
   dependency.
-- The ``deploy/mdi_argon_md`` notebook uses the ``mdi`` extra dependency. The
+- The ``examples/common/deploy/mdi_argon_md`` notebook uses the ``mdi`` extra dependency. The
   ``mdi_argon_lammps`` notebook also needs a LAMMPS installation, built with the
   MDI package, found as ``lmp`` on ``PATH`` or through ``XNN_LMP`` environment
   variables.
