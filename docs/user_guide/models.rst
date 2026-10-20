@@ -527,6 +527,34 @@ Other options, including ``bond_style`` (harmonic / morse), ``angle_style`` and
 ``hbond``, are also available. Set resonance types, such as an amide
 ``C_R``-``N_R``, explicitly.
 
+AMBER (ff94)
+============
+:class:`~xnn.ffnn.models.amber.Amber` is the force field of `Cornell et al.
+<https://doi.org/10.1021/ja00124a002>`_, matching LAMMPS and the AMBER
+programs. Its charges belong to residue templates rather than to atom types:
+``from_atoms`` matches the residues of the parameter file (amino acids with
+their terminal forms, nucleotides, capping groups, water, ions) to assign
+types and RESP charges, places the impropers by the AMBER builder's rules,
+and types other organic molecules from SMARTS templates (give those their
+charges with ``charges=``).
+
+.. code-block:: python
+
+   from xnn.ffnn.models import Amber
+
+   model = Amber.from_atoms(atoms, "ff94", cutoff=10.0)          # a peptide, nucleic acid, water, ions
+   model = Amber.from_atoms(atoms, "ff94", charges=resp_charges)  # a small molecule with its own charges
+   model = Amber.from_atoms(atoms, "ff94", trainable=("dihedral_k", "charge"))
+
+``cutoff``, ``switch_width``, ``fudge_lj`` / ``fudge_qq`` (or the AMBER
+divisors ``scnb`` / ``scee`` in a config) are available as for OPLS. The
+trainable groups are the barrier heights (``dihedral_k``, ``improper_k``), the
+bond and angle constants, the van der Waals ``rstar`` / ``epsilon``, the
+per-atom ``charge`` (held to the system's total charge by
+``constrain_charge``) and ``atom_ref``; the periodicities and phases of the
+Fourier terms stay fixed. Later AMBER parameter sets of the same functional
+form are further ``.frc`` libraries for this one model.
+
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================
 :class:`~xnn.sqmnn.models.PM6` and its siblings are the NDDO semiempirical

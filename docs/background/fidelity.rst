@@ -124,6 +124,12 @@ Numerical agreement under identical weights involves:
 - **DREIDING** (Mayo *et al.* 1990): the LAMMPS DREIDING styles to about
   1e-10 kcal/mol, the paper's parameter tables entry by entry, and its
   Table XI barriers to about 0.01 kcal/mol.
+- **AMBER ff94** (Cornell *et al.* 1995): LAMMPS (harmonic, fourier, cvff and
+  lj/cut/coul/cut styles with the AMBER 1,4 factors) to about 1e-8 kcal/mol on
+  capped peptides, water and ions; the atom types, RESP charges and improper
+  ordering of ``tleap`` and the energy components of ``sander`` on
+  sequence-built peptides and nucleic acids; Table 14 and the residue charges
+  of the paper entry by entry; float32 within 1e-6 relative of float64.
 - **PM3, PM6, PM6-ORG, PM7** (Stewart 1989, 2007, 2013, 2023): MOPAC 23.2.5
   to about 1e-6 kcal/mol in heats of formation and 1e-7 in charges, open
   shells and transition metals included, and the PM6 and PM7 S22 interaction
