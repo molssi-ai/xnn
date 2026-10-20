@@ -480,7 +480,7 @@ smoothly, and any parameter group can be refit by gradient descent.
 The parameters come from a shipped ``.frc`` field by name, a ``.frc`` path or a
 ReaxFF-nn JSON library (see :ref:`howto-forcefield-files`). For classical
 fields, the default ``conventions: lammps`` reproduces LAMMPS ``pair_style
-reaxff``. Sp, a field refit in xnn runs unchanged in LAMMPS.
+reaxff``. So, a field refit in xnn runs unchanged in LAMMPS.
 
 OPLS / L-OPLS
 =============
@@ -498,6 +498,16 @@ parameter file, so no type names are needed.
 
 Other options such as ``switch_width`` and ``fudge_lj`` / ``fudge_qq`` can also
 be set.
+
+A refit keeps the molecule's total charge: the charges the model uses are the
+trainable per-type values projected onto that constraint (``constrain_charge``,
+on by default). Labels on another energy zero than the force field's, such as
+formation energies, are taken up by per-element reference energies: set
+``atomic_energies: estimated`` in the config (or call
+:func:`~xnn.common.finetune.reference.estimate_atomic_energies`) and add
+``atom_ref`` to ``trainable`` to let them move with the fit. A pull of the
+parameters toward their starting values, ``optim.prior_weight``, keeps a fit
+of many parameters against few data well posed (:ref:`training`).
 
 DREIDING / DREIDING-X6
 ======================

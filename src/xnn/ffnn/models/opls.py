@@ -44,6 +44,16 @@ Conventions and scope
 * Excluded (1,2 / 1,3 / 1,4) pairs are excluded in *every* periodic image,
   the standard molecular-mechanics convention; keep the cutoff below half
   the box length, as usual.
+* A refit keeps every bound molecule's total charge: :class:`OPLS` registers
+  its topology's type counts with the force field, whose :attr:`charges
+  <OPLSForceField.charges>` are the ``charge`` parameters projected onto
+  those linear constraints, so training ``charge`` moves the per-type values
+  but never a molecule's net charge.
+* Per-element reference energies (``atom_ref``, the convention of the neural
+  potentials) take up the zero of the labels, such as formation energies
+  against the force field's own zero; the trainer estimates them from the
+  data (``atomic_energies: estimated``) and ``trainable`` can include
+  ``atom_ref``.
 """
 from __future__ import annotations
 
@@ -75,6 +85,31 @@ DEG = math.pi / 180.0
 # Trainable parameter groups of the force field.
 _GROUPS = ("charge", "sigma", "epsilon", "bond_k", "bond_r0", "angle_k",
            "angle_theta0", "dihedral_v", "improper_v2")
+# rows of the per-element reference-energy table (indexed by atomic number)
+_MAX_Z = 100
+
+
+def _split_trainable(trainable: Union[Sequence[str], str]
+                     ) -> tuple[Union[Sequence[str], str], bool]:
+    """Separate the model-level ``atom_ref`` group from the force-field groups.
+
+    Parameters
+    ----------
+    trainable : sequence of str or str
+        The ``trainable`` argument of :class:`OPLS`.
+
+    Returns
+    -------
+    tuple of (sequence of str or str, bool)
+        The groups for :class:`OPLSForceField` and whether ``atom_ref`` is
+        trainable (``"all"`` includes it).
+    """
+    if isinstance(trainable, str):
+        if trainable.lower() == "all":
+            return "all", True
+        return ((), True) if trainable == "atom_ref" else (trainable, False)
+    groups = tuple(g for g in trainable if g != "atom_ref")
+    return groups, "atom_ref" in trainable
 
 
 def _as_library(source: Union[OPLSLibrary, str, Path]) -> OPLSLibrary:
@@ -137,6 +172,10 @@ class OPLSForceField(nn.Module):
         Row labels of the parameter tensors, in assembly order.
     fudge_lj, fudge_qq : float
         The library's 1,4 scaling factors.
+    charges : Tensor
+        The ``charge`` parameters projected onto the total-charge constraints
+        registered with :meth:`constrain_charges`; what the models evaluate
+        and :meth:`export_library` writes.
     """
 
     def __init__(self, library: Union[OPLSLibrary, str, Path],
@@ -215,6 +254,53 @@ class OPLSForceField(nn.Module):
             requires_grad="dihedral_v" in trainable_set)
         make("improper_v2", [float(lib.improper_types[k]["v2"]) * KCAL_TO_EV
                              for k in self.improper_keys])
+        # total-charge constraints (rows of type counts, their totals and the
+        # pseudo-inverse of the rows); derived from the bound topologies, so
+        # not part of the state dict
+        n_types = len(self.type_names)
+        self.register_buffer("charge_rows", torch.zeros(0, n_types, dtype=dtype),
+                             persistent=False)
+        self.register_buffer("charge_totals", torch.zeros(0, dtype=dtype),
+                             persistent=False)
+        self.register_buffer("charge_proj", torch.zeros(n_types, 0, dtype=dtype),
+                             persistent=False)
+
+    # charge constraints
+    def constrain_charges(self, counts: Tensor, total: float) -> None:
+        """Fix a molecule's total charge across refits of ``charge``.
+
+        Adds the linear constraint ``counts . charge == total``;
+        :attr:`charges` is then the ``charge`` parameter projected onto every
+        constraint registered so far, so the molecule keeps its net charge
+        whatever the optimizer does to the per-type values. :class:`OPLS`
+        registers its topology at construction; a force field shared by
+        several models accumulates one constraint per molecule.
+
+        Parameters
+        ----------
+        counts : Tensor
+            ``(T,)``, how many atoms of each type the molecule has.
+        total : float
+            The molecule's total charge in e.
+        """
+        row = counts.detach().to(self.charge_rows).reshape(1, -1)
+        self.charge_rows = torch.cat([self.charge_rows, row])
+        self.charge_totals = torch.cat(
+            [self.charge_totals, row.new_tensor([float(total)])])
+        self.charge_proj = torch.linalg.pinv(self.charge_rows)
+
+    @property
+    def charges(self) -> Tensor:
+        """Tensor : Per-type charges satisfying the registered constraints.
+
+        The minimum-norm correction ``A^+ (A q - b)`` is removed from the
+        ``charge`` parameter ``q``, with ``A`` the constraint rows and ``b``
+        their totals; without constraints this is ``q`` itself.
+        """
+        q = self.params["charge"]
+        if self.charge_rows.shape[0] == 0:
+            return q
+        return q - self.charge_proj @ (self.charge_rows @ q - self.charge_totals)
 
     # resolution (topology binding)
     def type_index(self, name: str) -> int:
@@ -362,6 +448,7 @@ class OPLSForceField(nn.Module):
             :func:`~xnn.ffnn.models.oplslib.read_opls`.
         """
         P = {k: v.detach().cpu() for k, v in self.params.items()}
+        P["charge"] = self.charges.detach().cpu()
         atom_types = {}
         for i, name in enumerate(self.type_names):
             atom_types[name] = {
@@ -425,7 +512,9 @@ class OPLS(InteratomicPotential):
         Override the library's 1,4 scaling factors (both 0.5 for OPLS).
     trainable : sequence of str or "all", optional
         Trainable parameter groups, forwarded to :class:`OPLSForceField`
-        (ignored when ``ffield`` is already an ``OPLSForceField``).
+        (ignored when ``ffield`` is already an ``OPLSForceField``), plus
+        ``"atom_ref"`` for this model's per-element reference energies;
+        ``"all"`` unfreezes everything.
     keep_intermediates : bool, optional
         If ``True``, stash the intermediate tensors of the last evaluation
         (bond lengths, angles, dihedral cosines, per-interaction energies)
@@ -436,15 +525,34 @@ class OPLS(InteratomicPotential):
         of the library (the SEAMM convention; centers without a pattern get
         none). Default ``True``. Explicitly listed impropers are always used
         as given.
+    constrain_charge : bool or float, optional
+        Keep the molecule's total charge fixed when ``charge`` is trained
+        (:meth:`OPLSForceField.constrain_charges`): ``True`` (default) holds
+        the sum of the library's charges over the topology, a number fixes
+        that value in e, ``False`` registers no constraint.
+    atomic_energies : mapping, optional
+        Per-element reference energies in eV, ``{Z or symbol: E0}``, loaded
+        into ``atom_ref`` (see
+        :func:`~xnn.common.finetune.reference.set_atomic_energies`). They
+        shift the energy by a constant per molecule, the offset between the
+        labels' zero and the force field's; by default all zero.
 
     Notes
     -----
     ``forward`` returns, besides the standard ``node_energy`` / ``energy`` /
-    ``node_features`` keys, the fixed partial ``charges`` ``(N,)`` and one
+    ``node_features`` keys, the partial ``charges`` ``(N,)`` and one
     per-structure tensor per term: ``e_bond``, ``e_angle``, ``e_torsion``,
-    ``e_improper``, ``e_lj``, ``e_coulomb``, ``e_lj14``, ``e_coulomb14``.
-    Every structure in a batch must have this topology's atom count and
-    element sequence (conformers of the bound system).
+    ``e_improper``, ``e_lj``, ``e_coulomb``, ``e_lj14``, ``e_coulomb14`` and
+    ``e_ref`` (the reference energies). Every structure in a batch must have
+    this topology's atom count and element sequence (conformers of the bound
+    system).
+
+    Attributes
+    ----------
+    atom_ref : torch.nn.Embedding
+        The per-element reference energies, row ``Z``.
+    species : list of int
+        The atomic numbers of the bound topology.
     """
 
     def __init__(self, ffield: Union[OPLSLibrary, OPLSForceField, str, Path],
@@ -455,10 +563,16 @@ class OPLS(InteratomicPotential):
                  fudge_qq: Optional[float] = None,
                  trainable: Union[Sequence[str], str] = (),
                  keep_intermediates: bool = False,
-                 auto_impropers: bool = True):
+                 auto_impropers: bool = True,
+                 constrain_charge: Union[bool, float] = True,
+                 atomic_energies=None):
         super().__init__()
+        groups, ref_trainable = _split_trainable(trainable)
         self.ff = ffield if isinstance(ffield, OPLSForceField) \
-            else OPLSForceField(ffield, trainable=trainable)
+            else OPLSForceField(ffield, trainable=groups)
+        self.atom_ref = nn.Embedding(_MAX_Z, 1)
+        nn.init.zeros_(self.atom_ref.weight)
+        self.atom_ref.weight.requires_grad_(ref_trainable)
         self.auto_impropers = bool(auto_impropers)
         self.cutoff = float(cutoff)
         self.switch_width = float(switch_width)
@@ -475,6 +589,16 @@ class OPLS(InteratomicPotential):
         self._bind_topology(
             topology if isinstance(topology, MolecularTopology)
             else read_topology(topology))
+        self.species = sorted({int(z) for z in self.top_z.tolist()})
+        if atomic_energies is not None:
+            from ...common.finetune.reference import set_atomic_energies
+            set_atomic_energies(self, atomic_energies)
+        if constrain_charge is not False:
+            q = self.ff.params["charge"].detach()
+            counts = torch.bincount(self.top_type, minlength=q.shape[0]).to(q)
+            total = float(counts @ q) if constrain_charge is True \
+                else float(constrain_charge)
+            self.ff.constrain_charges(counts, total)
 
     @classmethod
     def from_atoms(cls, structure, ffield: Union[OPLSLibrary, str, Path] = "oplsaa",
@@ -751,7 +875,7 @@ class OPLS(InteratomicPotential):
         vec = data.edge_vectors()
         r2 = (vec * vec).sum(1)
         r = torch.sqrt(r2 + TINY)
-        q = P["charge"][t]
+        q = self.ff.charges[t]
         sig_t, eps_t = P["sigma"][t], P["epsilon"][t]
 
         lj_e, coul_e = self._lj_coulomb(sig_t[src], sig_t[dst],
@@ -782,7 +906,7 @@ class OPLS(InteratomicPotential):
         lj14, coul14 = self._lj_coulomb(
             P["sigma"][p_t0], P["sigma"][p_t1],
             P["epsilon"][p_t0], P["epsilon"][p_t1],
-            P["charge"][p_t0], P["charge"][p_t1], pr, pr2)
+            q[pi[0]], q[pi[1]], pr, pr2)
         lj14 = self.fudge_lj * lj14
         coul14 = self.fudge_qq * coul14
         e_lj14_node = scatter_sum(0.5 * lj14, pi[0], N) \
@@ -790,9 +914,10 @@ class OPLS(InteratomicPotential):
         e_coul14_node = scatter_sum(0.5 * coul14, pi[0], N) \
             + scatter_sum(0.5 * coul14, pi[1], N)
 
+        e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
         node_energy = (e_bond_node + e_angle_node + e_tors_node
                        + e_impr_node + e_lj_node + e_coul_node
-                       + e_lj14_node + e_coul14_node)
+                       + e_lj14_node + e_coul14_node + e_ref_node)
         energy = self.aggregate_energy(node_energy, data)
 
         if self.keep_intermediates:
@@ -817,6 +942,7 @@ class OPLS(InteratomicPotential):
             "e_coulomb": self.aggregate_energy(e_coul_node, data),
             "e_lj14": self.aggregate_energy(e_lj14_node, data),
             "e_coulomb14": self.aggregate_energy(e_coul14_node, data),
+            "e_ref": self.aggregate_energy(e_ref_node, data),
         }
 
     # conveniences
@@ -845,8 +971,11 @@ class OPLS(InteratomicPotential):
         and either ``topology`` (path to a topology JSON file) or ``types``
         + ``bonds`` (+ optional ``impropers`` / ``improper_keys``) inline.
         Optional: ``switch_width``, ``fudge_lj``, ``fudge_qq``,
-        ``trainable``. Alternative spellings used by other MD packages are
-        translated by :mod:`xnn.common.config.translate`.
+        ``trainable``, ``constrain_charge`` (``true`` / ``false`` / a total
+        charge) and ``atomic_energies`` (``{Z or symbol: E0}``; the trainer
+        resolves the ``estimated`` marker before construction). Alternative
+        spellings used by other MD packages are translated by
+        :mod:`xnn.common.config.translate`.
 
         Parameters
         ----------
@@ -896,7 +1025,15 @@ class OPLS(InteratomicPotential):
             value = extra.get(key)
             return None if value is None else float(value)
 
+        constrain = extra.get("constrain_charge", True)
+        if isinstance(constrain, str):
+            constrain = {"true": True, "false": False}.get(
+                constrain.strip().lower(), constrain)
+            if isinstance(constrain, str):
+                constrain = float(constrain)
         return cls(library, topology, cutoff=float(cfg.cutoff),
                    switch_width=float(extra.get("switch_width") or 0.0),
                    fudge_lj=floaty("fudge_lj"), fudge_qq=floaty("fudge_qq"),
-                   trainable=listy(extra.get("trainable")) or ())
+                   trainable=listy(extra.get("trainable")) or (),
+                   constrain_charge=constrain,
+                   atomic_energies=extra.get("atomic_energies"))
