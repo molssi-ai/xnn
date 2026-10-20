@@ -15,7 +15,7 @@ Organized by model family, with everything shared factored into ``common``:
              NequIP / MACE / Allegro / CACE / AIMNet2 (need e3nn)
     cnn/     volumetric 3D CNNs over voxelized environments (CNN3D, 3D steerable CNN)
     dnn/     dense neural networks (HDNNP / ANI / PhysNet)
-    ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS)
+    ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS / DREIDING / AMBER)
     sqmnn/   semiempirical quantum chemistry (PM3 / PM6 / PM6-ORG / PM7)
     trfnn/   graph transformers (ET) and the shared edge attention
     hybnn/   GNN + transformer potentials with a physics energy split (BAMBOO, SpookyNet)
@@ -37,6 +37,6 @@ from . import cnn, dnn, ffnn, hybnn, sqmnn, trfnn  # noqa: F401
 # is available (it warns otherwise, see gnn/models/__init__.py)
 from . import gnn  # noqa: F401
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 __all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybnn", "sqmnn", "trfnn",
            "__version__"]

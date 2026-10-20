@@ -83,8 +83,8 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
     - reproducing experiments in the SpookyNet paper and reproducing its
       electronic-state, nonlocal and charge-transfer examples as well as MD17
       dataset training.
-- ``ffnn`` involves ReaxFF, OPLS and DREIDING trainings, refits and
-  conformational energetics.
+- ``ffnn`` involves ReaxFF, OPLS, DREIDING and AMBER trainings, refits,
+  conformational energetics and normal modes.
 - ``sqmnn/nddo`` reproduces the PM3, PM6, PM6-ORG and PM7 papers and refits the
   NDDO parameters.
 - ``common/d3`` and ``common/d4`` hold the DFT-D3 and DFT-D4 paper experiment
@@ -129,6 +129,11 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
   cloned on demand.
 - The ``opls_verification`` notebooks uses the ``opls`` extra dependency
   (and OpenMM).
+- The ``amber_verification`` notebook needs the LAMMPS Python module
+  (``import lammps``, with the MOLECULE and EXTRA-MOLECULE packages); its
+  comparison with the AMBER programs runs when ``tleap`` and ``sander`` are
+  on the path (or reachable through a wrapper script named by
+  ``XNN_AMBER_WRAPPER``) and is skipped otherwise.
 - The ``examples/common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
   dependency. The paper examples also need the ``rdkit`` extra dependency. The
   large-scale experiment notebook requires the ``vesin`` extra dependency to be

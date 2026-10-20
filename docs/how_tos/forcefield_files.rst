@@ -22,8 +22,8 @@ You can list the force-field files that are available in your xnn installation:
    from xnn.ffnn.common import list_forcefields
 
    sorted(list_forcefields())
-   # ['CL&P', 'dreiding', 'dreiding/X6', 'lopls', 'oplsaa', 'oplsaa+', 'oplsaa-1996',
-   #  'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
+   # ['CL&P', 'dreiding', 'dreiding/X6', 'ff94', 'lopls', 'oplsaa', 'oplsaa+',
+   #  'oplsaa-1996', 'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
 
 Among the force-field files shipped with xnn, ``oplsaa`` is the OPLS-AA
 distribution (``CL&P`` adds the ionic-liquid extension, ``oplsaa+`` is their
@@ -36,7 +36,13 @@ All force-field files are copied verbatim from `SEAMM
 original paper <https://doi.org/10.1021/ja9621760>`_), which ``#include``
 ``oplsaa.frc`` and override a few rows, and the electrolyte-water ReaxFF field
 of `Fedkin et al. (2019) <https://doi.org/10.1021/acs.jpca.8b10453>`_ as,
-``reaxff/CHOLiNaKCsFClI_Fedkin_2019``.
+``reaxff/CHOLiNaKCsFClI_Fedkin_2019``. ``ff94`` (``amber.frc``) is the AMBER
+force field of `Cornell et al. (1995) <https://doi.org/10.1021/ja00124a002>`_,
+converted from the public-domain AMBER parameter and residue files: its
+torsions use the multi-term ``torsion_fourier`` section, its impropers the
+``improper_fourier`` section (the key order carries meaning, the central atom
+third), and its residues are ``#fragments`` whose SMARTS carry atom maps in
+template order together with ``atom names``, ``atom types`` and ``charges``.
 
 Every model and reader takes the same **spec**: a variant name, a path to a
 ``.frc`` file, or ``"<path>.frc:<variant>"``.
@@ -52,7 +58,7 @@ parameters.
 .. code-block:: python
 
    from ase.build import molecule
-   from xnn.ffnn.models import OPLS, ReaxFF, Dreiding
+   from xnn.ffnn.models import OPLS, ReaxFF, Dreiding, Amber
 
    ethanol = molecule("CH3CH2OH")
    opls = OPLS.from_atoms(ethanol, "oplsaa", cutoff=12.0)
@@ -60,6 +66,10 @@ parameters.
 
    dre = Dreiding.from_atoms(ethanol, "dreiding", cutoff=12.0)
    dre.topology.bond_orders           # DREIDING's rules read these
+
+   amb = Amber.from_atoms(dipeptide, "ff94", cutoff=12.0)
+   amb.topology.residue_names         # ['ACE', 'ALA', 'NME']: residue templates typed it
+   amb.topology.charges               # and gave every atom its RESP charge
 
    reax = ReaxFF("CHO_cho_2008")      # ReaxFF needs no typing
 

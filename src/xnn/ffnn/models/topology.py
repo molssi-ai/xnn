@@ -147,6 +147,19 @@ class MolecularTopology:
     pairs14 : list[tuple[int, int]]
         1,4 pairs (dihedral end atoms, minus any that are also 1,2 or 1,3
         pairs in rings), ``i < j``; the force field scales these.
+    charges : list[float]
+        Per-atom partial charges in e, for force fields whose charges belong
+        to the structure (residue templates, AMBER) rather than to the atom
+        types; empty when none were assigned. OPLS and DREIDING ignore
+        these.
+    residues : list
+        Per atom, ``(residue index, position within the residue template)``
+        or ``None``; set by template typing and read by force fields whose
+        conventions depend on template order (the AMBER improper ordering).
+        Empty when unknown.
+    residue_names : list[str]
+        The template (residue) name of each residue index in ``residues``;
+        empty when unknown.
     """
 
     types: list[str]
@@ -158,6 +171,9 @@ class MolecularTopology:
     improper_keys: list[str] = field(default_factory=list)
     exclusions: list[tuple[int, int]] = field(default_factory=list)
     pairs14: list[tuple[int, int]] = field(default_factory=list)
+    charges: list[float] = field(default_factory=list)
+    residues: list = field(default_factory=list)
+    residue_names: list = field(default_factory=list)
 
     @property
     def n_atoms(self) -> int:
@@ -170,7 +186,10 @@ class MolecularTopology:
                    bonds: Sequence[Sequence[int]],
                    impropers: Sequence[Sequence[int]] = (),
                    improper_keys: Sequence[str] = (),
-                   bond_orders: Optional[Sequence[float]] = None
+                   bond_orders: Optional[Sequence[float]] = None,
+                   charges: Optional[Sequence[float]] = None,
+                   residues: Optional[Sequence] = None,
+                   residue_names: Optional[Sequence[str]] = None
                    ) -> "MolecularTopology":
         """Build a topology from atom types and a bond list.
 
@@ -195,6 +214,12 @@ class MolecularTopology:
         bond_orders : sequence of float, optional
             Bond order per entry of ``bonds`` (1, 1.5, 2, 3), in the *input*
             bond order; omitted means all single bonds.
+        charges : sequence of float, optional
+            Per-atom partial charges in e (see the class attributes).
+        residues : sequence, optional
+            Per-atom ``(residue index, template position)`` or ``None``.
+        residue_names : sequence of str, optional
+            Template name per residue index.
 
         Returns
         -------
@@ -206,12 +231,17 @@ class MolecularTopology:
         ValueError
             If a bond index is out of range, a bond is duplicated or joins an
             atom to itself, ``impropers`` and ``improper_keys`` disagree in
-            length, or ``bond_orders`` does not match ``bonds``.
+            length, or ``bond_orders``, ``charges`` or ``residues`` have the
+            wrong length.
         """
         n = len(types)
         if bond_orders is not None and len(bond_orders) != len(bonds):
             raise ValueError(f"got {len(bond_orders)} bond orders for "
                              f"{len(bonds)} bonds")
+        if charges is not None and len(charges) != n:
+            raise ValueError(f"got {len(charges)} charges for {n} atoms")
+        if residues is not None and len(residues) != n:
+            raise ValueError(f"got {len(residues)} residue entries for {n} atoms")
         norm_bonds: list[tuple[int, int]] = []
         order_of: dict[tuple[int, int], float] = {}
         seen = set()
@@ -283,7 +313,12 @@ class MolecularTopology:
                    dihedrals=dihedrals,
                    impropers=[tuple(int(x) for x in im) for im in impropers],
                    improper_keys=list(improper_keys),
-                   exclusions=sorted(excl), pairs14=sorted(pairs14))
+                   exclusions=sorted(excl), pairs14=sorted(pairs14),
+                   charges=[float(q) for q in charges] if charges is not None else [],
+                   residues=[None if r is None else (int(r[0]), int(r[1]))
+                             for r in residues] if residues is not None else [],
+                   residue_names=[str(x) for x in residue_names]
+                   if residue_names is not None else [])
 
     @classmethod
     def from_ase(cls, atoms, types: Optional[Sequence[str]] = None,
@@ -292,7 +327,10 @@ class MolecularTopology:
                  impropers: Sequence[Sequence[int]] = (),
                  improper_keys: Sequence[str] = (), *,
                  forcefield=None, charge: int = 0,
-                 bond_orders: Optional[Sequence[float]] = None
+                 bond_orders: Optional[Sequence[float]] = None,
+                 charges: Optional[Sequence[float]] = None,
+                 residues: Optional[Sequence] = None,
+                 residue_names: Optional[Sequence[str]] = None
                  ) -> "MolecularTopology":
         """Build a topology for an ASE ``Atoms`` object.
 
@@ -318,6 +356,10 @@ class MolecularTopology:
             read from a ``.frc`` file, or a spec such as ``"oplsaa"``).
         charge : int, optional
             Total charge, for bond-order perception.
+        bond_orders, charges, residues, residue_names : sequence, optional
+            Explicit values (see :meth:`from_bonds`); when typing from a
+            force field whose fragments carry charges, the charges and the
+            residue positions come from the templates unless given here.
 
         Returns
         -------
@@ -336,12 +378,20 @@ class MolecularTopology:
                                  "templates assign them")
             from ..common.typing import (assign_atom_types, perceive_bonds,
                                          perceive_bond_orders)
-            types, mol = assign_atom_types(atoms, forcefield, charge=charge,
-                                           bonds=bonds, return_mol=True)
+            types, details = assign_atom_types(atoms, forcefield, charge=charge,
+                                               bonds=bonds, return_details=True)
+            mol = details["mol"]
             if bonds is None:
                 bonds = perceive_bonds(mol)
                 if bond_orders is None:
                     bond_orders = perceive_bond_orders(mol)
+            if charges is None and any(q is not None for q in details["charges"]):
+                charges = [0.0 if q is None else q for q in details["charges"]]
+            if residues is None and any(r is not None for r in details["residues"]):
+                residues = details["residues"]
+                if residue_names is None:
+                    residue_names = residue_name_list(details["residues"],
+                                                      details["fragment_names"])
         if len(types) != len(atoms):
             raise ValueError(f"got {len(types)} types for {len(atoms)} atoms")
         if bonds is None:
@@ -351,7 +401,8 @@ class MolecularTopology:
                                 scale=scale)
         return cls.from_bonds(types, bonds, impropers=impropers,
                               improper_keys=improper_keys,
-                              bond_orders=bond_orders)
+                              bond_orders=bond_orders, charges=charges,
+                              residues=residues, residue_names=residue_names)
 
     def replicate(self, n_copies: int) -> "MolecularTopology":
         """Tile this topology into ``n_copies`` consecutive molecules.
@@ -379,9 +430,16 @@ class MolecularTopology:
         out = MolecularTopology(types=list(self.types) * n_copies,
                                 bonds=[], bond_orders=[], angles=[],
                                 dihedrals=[], impropers=[], improper_keys=[],
-                                exclusions=[], pairs14=[])
+                                exclusions=[], pairs14=[],
+                                charges=list(self.charges) * n_copies,
+                                residues=[],
+                                residue_names=list(self.residue_names) * n_copies)
+        n_res = 1 + max((r[0] for r in self.residues if r is not None),
+                        default=-1)
         for c in range(n_copies):
             off = c * n
+            out.residues += [None if r is None else (r[0] + c * n_res, r[1])
+                             for r in self.residues]
             out.bonds += shift(self.bonds, off)
             out.bond_orders += list(self.bond_orders)
             out.angles += shift(self.angles, off)
@@ -409,14 +467,22 @@ class MolecularTopology:
         }
         if self.bond_orders:
             data["bond_orders"] = list(self.bond_orders)
+        if self.charges:
+            data["charges"] = list(self.charges)
+        if self.residues:
+            data["residues"] = [None if r is None else list(r)
+                                for r in self.residues]
+        if self.residue_names:
+            data["residue_names"] = list(self.residue_names)
         Path(path).write_text(json.dumps(data, indent=2) + "\n")
 
 
 def read_topology(path: Union[str, Path]) -> MolecularTopology:
     """Read a topology JSON file written by :meth:`MolecularTopology.save`.
 
-    Only the independent information (types, bonds, impropers) is stored on
-    disk; the derived lists are rebuilt on load.
+    Only the independent information (types, bonds, impropers, and the
+    optional bond orders, charges and residue positions) is stored on disk;
+    the derived lists are rebuilt on load.
 
     Parameters
     ----------
@@ -432,4 +498,28 @@ def read_topology(path: Union[str, Path]) -> MolecularTopology:
     return MolecularTopology.from_bonds(
         data["types"], data["bonds"], impropers=data.get("impropers", ()),
         improper_keys=data.get("improper_keys", ()),
-        bond_orders=data.get("bond_orders"))
+        bond_orders=data.get("bond_orders"), charges=data.get("charges"),
+        residues=data.get("residues"), residue_names=data.get("residue_names"))
+
+
+def residue_name_list(residues: Sequence, fragment_names: Sequence) -> list:
+    """Template name per residue index from per-atom typing details.
+
+    Parameters
+    ----------
+    residues : sequence
+        Per atom, ``(residue index, position)`` or ``None``.
+    fragment_names : sequence
+        Per atom, the fragment name or ``None``.
+
+    Returns
+    -------
+    list of str
+        Name of residue ``0, 1, ...`` (``""`` for an index without a name).
+    """
+    names: dict[int, str] = {}
+    for r, name in zip(residues, fragment_names):
+        if r is not None and name is not None:
+            names.setdefault(int(r[0]), str(name))
+    n = 1 + max(names, default=-1)
+    return [names.get(i, "") for i in range(n)]

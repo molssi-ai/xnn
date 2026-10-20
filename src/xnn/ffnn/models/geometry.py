@@ -202,3 +202,39 @@ def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
     n2 = torch.cross(b2, b3, dim=1)
     denom = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)
     return (n1 * n2).sum(1) / denom
+
+
+def dihedral_cos_sin(data: AtomicGraph, idx: Tensor) -> tuple[Tensor, Tensor]:
+    """Cosine and sine of the signed dihedral angle over each atom quadruple.
+
+    The same plane-normal construction as :func:`dihedral_cos` (``phi = 0``
+    at *cis*), plus the sine from the triple product of the two normals
+    with the central bond, so terms with a phase (``cos(n phi - gamma)``,
+    the AMBER torsion) can be formed from ``cos phi`` and ``sin phi`` by
+    multiple-angle recurrences without ``arccos`` / ``atan2``.
+
+    Parameters
+    ----------
+    data : AtomicGraph
+        The batched graph.
+    idx : Tensor
+        Atom indices of shape ``(4, M)``.
+
+    Returns
+    -------
+    tuple of Tensor
+        ``(cos phi, sin phi)``, each of shape ``(M,)``; the sign of ``phi``
+        follows the IUPAC convention (positive for a clockwise rotation of
+        the far bond when looking along the central bond).
+    """
+    b1 = pair_vectors(data, idx[0], idx[1])
+    b2 = pair_vectors(data, idx[1], idx[2])
+    b3 = pair_vectors(data, idx[2], idx[3])
+    n1 = torch.cross(b1, b2, dim=1)
+    n2 = torch.cross(b2, b3, dim=1)
+    norm = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)
+    cos_phi = (n1 * n2).sum(1) / norm
+    b2_len = torch.sqrt((b2 * b2).sum(1) + TINY)
+    # (n1 x b2_hat) . n2 = -(n1 x n2) . b2_hat gives the IUPAC sign
+    sin_phi = -(torch.cross(n1, n2, dim=1) * b2).sum(1) / (norm * b2_len)
+    return cos_phi, sin_phi

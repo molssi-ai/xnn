@@ -36,7 +36,7 @@ xnn is organized by model family, with everything shared in ``common``:
      ffnn/
        common/        .frc force-field reader, SMARTS atom typing
        data/          the shipped .frc files
-       models/        reaxff, opls, dreiding, topology
+       models/        reaxff, opls, dreiding, amber, topology
      sqmnn/
        common/        MOPAC EXTERNAL reader/writer, published values (downloaded), element data
        models/        nddo (SCF, integrals), pm3, pm6, pm6-org, pm7

@@ -27,9 +27,10 @@ What the tests check
   when ``XNN_RUNNER`` points to it) (``test_mace`` also covers the
   foundation-checkpoint conversion in process, without downloads).
 - **Clean-room implementations** (SchNet, the SE(3) steerable CNN,
-  ReaxFF, OPLS, DREIDING): parity
+  ReaxFF, OPLS, DREIDING, AMBER): parity
   with an independent implementation of the papers' equations, hand-recomputed
-  terms, the published tables and, for OPLS, OpenMM.
+  terms, the published tables and, for OPLS, OpenMM (``test_amber`` also
+  checks float32 against float64 and the AMBER improper ordering).
 - **Pipeline**: neighbor lists against ASE and the vesin backend, mixed
   batches and label masks, float64 geometry, the data and model hubs, ASE
   file I/O, the losses, the benchmark runner, the MDI engine, the fast

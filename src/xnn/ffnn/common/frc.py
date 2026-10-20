@@ -397,6 +397,28 @@ SECTION_SCHEMA: dict[str, dict] = {
     "improper_opls": {"n_atoms": 4, "symmetry": "like_improper",
                       "type": "out-of-plane",
                       "constants": [("V2", "kcal/mol", float)]},
+    # Multi-term periodic torsions, E = sum_i K_i [1 + cos(n_i Phi - Phi0_i)]
+    # (the AMBER form); a row carries one to four (K, n, Phi0) triples
+    "torsion_fourier": {"n_atoms": 4, "symmetry": "like_torsion",
+                        "type": "torsion",
+                        "constants": [("K1", "kcal/mol", float), ("n1", "", int),
+                                      ("Phi0_1", "degree", float),
+                                      ("K2", "kcal/mol", float), ("n2", "", int),
+                                      ("Phi0_2", "degree", float),
+                                      ("K3", "kcal/mol", float), ("n3", "", int),
+                                      ("Phi0_3", "degree", float),
+                                      ("K4", "kcal/mol", float), ("n4", "", int),
+                                      ("Phi0_4", "degree", float)]},
+    # The same periodic form on an improper quadruple I-J-K-L with the central
+    # atom K third and L the distinguished outer atom, evaluated as the
+    # dihedral over the atoms in the order given (AMBER); the key is kept as
+    # written because the positions carry meaning
+    "improper_fourier": {"n_atoms": 4, "symmetry": "none",
+                         "type": "out-of-plane",
+                         "constants": [("K1", "kcal/mol", float), ("n1", "", int),
+                                       ("Phi0_1", "degree", float),
+                                       ("K2", "kcal/mol", float), ("n2", "", int),
+                                       ("Phi0_2", "degree", float)]},
     "wilson_out_of_plane": {"n_atoms": 4, "symmetry": "like_oop",
                             "type": "out-of-plane",
                             "constants": [("K", "kcal/mol/radian^2", float),

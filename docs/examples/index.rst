@@ -322,6 +322,20 @@ refit on benzene and tested for transfer to naphthalene and toluene.
    DREIDING conformational energetics: reproducing Tables XI and XII of the 1990 paper <nb/examples/ffnn/dreiding/dreiding_conformational_energetics>
    Retraining DREIDING: refitting the generators, and testing whether they transfer <nb/examples/ffnn/dreiding/dreiding_refit_aromatics>
 
+AMBER (ffnn)
+============
+
+Tables 3, 4 and 11 and the dipeptide maps of Figure 2 of the 1995 paper from
+relaxed scans, the normal modes of Tables 6 and 7 from the autograd Hessian,
+then the backbone torsions refit by gradient descent.
+
+.. example-toctree::
+   :caption: AMBER (ffnn)
+
+   AMBER ff94 conformational energetics: reproducing Tables 3, 4 and 11 and Figure 2 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_conformational_energetics>
+   AMBER ff94 normal modes: reproducing Tables 6 and 7 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_normal_modes>
+   Refitting the AMBER backbone torsions by gradient descent <nb/examples/ffnn/amber/amber_backbone_refit>
+
 Semiempirical methods (sqmnn)
 =============================
 
@@ -383,6 +397,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    BAMBOO fidelity check: `xnn` vs the original `bytedance/bamboo`, block by block <nb/fidelity_checks/hybnn/bamboo/bamboo_verification>
    OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/ffnn/opls/opls_verification>
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
+   AMBER (ff94): verifying the `xnn` implementation against LAMMPS, AmberTools and the 1995 paper <nb/fidelity_checks/ffnn/amber/amber_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
 
 Parity checks

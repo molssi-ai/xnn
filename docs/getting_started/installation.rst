@@ -43,7 +43,7 @@ xnn gives you the ability to install only what you need:
    pip install "xnns[ase]"          # ASE calculator, reading structure files
    pip install "xnns[vesin]"        # cell-list neighbor lists for large systems
    pip install "xnns[hub]"          # h5py, for the ANI datasets of the data hub
-   pip install "xnns[ffnn]"         # RDKit, for typing molecules with OPLS / DREIDING
+   pip install "xnns[ffnn]"         # RDKit, for typing molecules with OPLS / DREIDING / AMBER
    pip install "xnns[mdi]"          # pymdi, for the MDI engine (xnn mdi)
    pip install "xnns[hydra]"        # Hydra / OmegaConf config frontend
    pip install "xnns[tensorboard]"  # TensorBoard training logs
@@ -89,7 +89,7 @@ prints the xnn version and the list of available models.
 
    print(xnn.__version__)
    print(available_models())
-   # ['aimnet2', 'allegro', 'ani', 'bamboo', 'cace', 'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding',
+   # ['aimnet2', 'allegro', 'amber', 'ani', 'bamboo', 'cace', 'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding',
    #  'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
 
 The e3nn-based models (NequIP, MACE, Allegro, the SE(3) steerable CNN) only
