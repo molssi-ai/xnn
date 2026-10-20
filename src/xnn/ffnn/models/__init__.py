@@ -7,10 +7,15 @@ from .opls import OPLS, OPLSForceField
 from .dreidinglib import (DreidingLibrary, read_dreiding, torsion_rule,
                           hybridization, TORSION_RULES)
 from .dreiding import Dreiding, DreidingForceField
+from .amberlib import (AmberLibrary, read_amber, builtin_library as builtin_amber,
+                       place_impropers, match_improper)
+from .amber import Amber, AmberForceField
 
 __all__ = ["FFieldLibrary", "read_ffield", "template_library", "ReaxFF",
            "OPLSLibrary", "read_opls", "builtin_library", "fourier_to_rb",
            "rb_to_fourier", "MolecularTopology", "read_topology",
            "guess_bonds", "OPLS", "OPLSForceField", "DreidingLibrary",
            "read_dreiding", "torsion_rule", "hybridization", "TORSION_RULES",
-           "Dreiding", "DreidingForceField"]
+           "Dreiding", "DreidingForceField", "AmberLibrary", "read_amber",
+           "builtin_amber", "place_impropers", "match_improper", "Amber",
+           "AmberForceField"]

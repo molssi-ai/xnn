@@ -258,6 +258,19 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "fudgeLJ": "fudge_lj",
         "fudgeQQ": "fudge_qq",
     },
+    # AMBER spellings used by LEaP / sander / OpenMM-style inputs
+    "amber": {
+        "frc": "library",
+        "forcefield": "library",
+        "parm": "library",
+        "parameter_file": "library",
+        "ffield": "library",
+        "cut": "cutoff",
+        "rvdw": "cutoff",
+        "pair_cutoff": "cutoff",
+        "scale_14_vdw": "fudge_lj",
+        "scale_14_coulomb": "fudge_qq",
+    },
     # DREIDING spellings used by LAMMPS / Cerius2-style inputs
     "dreiding": {
         "forcefield": "ffield",

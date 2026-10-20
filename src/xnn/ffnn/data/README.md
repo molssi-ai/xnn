@@ -59,6 +59,7 @@ The scientific provenance of each parameter set is recorded in the
 
 | file | `#define` names | contents |
 |---|---|---|
+| `amber.frc` | `ff94` | the AMBER force field of Cornell *et al.*, *JACS* 117, 5179 (1995): `parm94.dat` (Table 14 of the paper; torsion barriers divided by their number of paths, impropers keyed in AMBER order) and the ff94 residue libraries (amino acids with N- and C-terminal forms, nucleotides, capping groups, TIP3P water, ions: atom names, atom types and RESP charges as `#fragments` with atom-mapped SMARTS generated from the library connectivity), converted from the public-domain AmberTools 23 files; the per-type SMARTS `#templates` for molecules outside the libraries were written here after Table 1 of the paper. The H-H constraint "bond" of the TIP3P template is not a bond and is dropped |
 | `lopls.frc` | `lopls` | L-OPLS, the long-hydrocarbon refit of Siu, Pluhackova & Boeckmann, *JCTC* 8, 1459 (2012), Table 2, layered over `oplsaa` via `#include` |
 | `oplsaa_1996.frc` | `oplsaa-1996` | `oplsaa` with the alkane torsions of the original 1996 paper (Supporting Information Table 7), which reproduce its Table 1 |
 | `reaxff/CHOLiNaKCsFClI_Fedkin_2019.frc` | `reaxff/CHOLiNaKCsFClI_Fedkin_2019` | Li/Na/K/Cs/F/Cl/I electrolytes in water, Fedkin *et al.*, *J. Phys. Chem. A* 123, 2125 (2019): section S4 of the Supporting Information converted with SEAMM, bond energies kept at the source's four decimals |

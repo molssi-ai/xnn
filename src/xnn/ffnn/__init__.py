@@ -7,7 +7,9 @@ reactive force field of van Duin et al. (2001), together with its
 machine-learned variant ReaxFF-nn (Guo et al. 2020, Xue et al. 2021). The
 second is OPLS, the fixed-topology all-atom/united-atom force field of
 Jorgensen et al. (1996), covering its variants (OPLS-AA, OPLS-UA, L-OPLS)
-through interchangeable parameter libraries.
+through interchangeable parameter libraries; DREIDING (Mayo et al. 1990)
+generates its valence terms from per-atom rules, and AMBER (Cornell et al.
+1995, ff94) assigns its RESP charges from residue templates.
 
 Parameter libraries for the whole family are read from the MolSSI/SEAMM
 ``.frc`` force-field format (:mod:`xnn.ffnn.common.frc`), which also
