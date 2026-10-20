@@ -815,3 +815,114 @@ def test_dataset_training_smoke():
     loss.backward()
     assert bool(torch.isfinite(loss))
     assert model.ff.params["dihedral_v"].grad is not None
+
+
+# refit tools: the total-charge constraint and the reference energies
+def _net_charge(model, pos, z):
+    """The summed per-atom charges of one evaluation."""
+    return float(model(_graph(pos, z, 20.0))["charges"].sum())
+
+
+def _train_charges(model, graph, steps=30):
+    """A few Adam steps on the charges against a shifted Coulomb energy."""
+    opt = torch.optim.Adam([model.ff.params["charge"]], lr=1e-2)
+    for _ in range(steps):
+        opt.zero_grad()
+        (model(graph)["e_coulomb"] + 1.0).pow(2).sum().backward()
+        opt.step()
+
+
+def test_charge_constraint_keeps_total_charge():
+    pos, z, types, bonds = _butane()
+    graph = _graph(pos, z, 20.0)
+    for constrain, total in ((True, 0.0), (0.5, 0.5)):
+        model, _, _ = _butane_model(trainable=("charge",),
+                                    constrain_charge=constrain)
+        assert abs(_net_charge(model, pos, z) - total) < 1e-12
+        _train_charges(model, graph)
+        assert abs(_net_charge(model, pos, z) - total) < 1e-12
+        lib = model.export_library()
+        assert abs(sum(lib.atom_types[t]["charge"] for t in types) - total) < 1e-12
+    free, _, _ = _butane_model(trainable=("charge",), constrain_charge=False)
+    _train_charges(free, graph)
+    assert abs(_net_charge(free, pos, z)) > 1e-6
+
+
+def test_charge_constraint_is_inert_on_a_fixed_field():
+    model, pos, z = _butane_model()
+    assert torch.allclose(model.ff.charges, model.ff.params["charge"],
+                          atol=1e-15, rtol=0.0)
+    assert model.ff.charge_rows.shape == (1, len(model.ff.type_names))
+    assert "ff.charge_rows" not in model.state_dict()
+
+
+def test_shared_forcefield_keeps_every_molecule_charge():
+    ff = OPLSForceField(builtin_library("oplsaa"), trainable=("charge",))
+    pos, z, types, bonds = _butane()
+    butane = OPLS(ff, MolecularTopology.from_bonds(types, bonds), cutoff=20.0)
+    eth_types = ["opls_80"] * 2 + ["opls_85"] * 6
+    eth_bonds = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 5), (1, 6), (1, 7)]
+    eth_pos = [[0, 0, 0], [1.53, 0, 0],
+               [-0.4, 1.0, 0], [-0.4, -0.5, 0.9], [-0.4, -0.5, -0.9],
+               [1.93, -1.0, 0], [1.93, 0.5, 0.9], [1.93, 0.5, -0.9]]
+    eth_z = [6, 6] + [1] * 6
+    # an ethane anion sharing types with neutral butane: both totals hold,
+    # from construction on and through training
+    ethane = OPLS(ff, MolecularTopology.from_bonds(eth_types, eth_bonds),
+                  cutoff=20.0, constrain_charge=-1.0)
+    assert ff.charge_rows.shape[0] == 2
+    graph = _graph(pos, z, 20.0)
+    for _ in range(2):
+        assert abs(_net_charge(butane, pos, z)) < 1e-12
+        assert abs(_net_charge(ethane, eth_pos, eth_z) + 1.0) < 1e-12
+        _train_charges(butane, graph)
+
+
+def test_reference_energies_absorb_a_label_offset():
+    from xnn.common.finetune.reference import (estimate_atomic_energies,
+                                               get_atomic_energies,
+                                               set_atomic_energies)
+    torch.manual_seed(0)
+    pos, z, types, bonds = _butane()
+    top = MolecularTopology.from_bonds(types, bonds)
+    model = OPLS("oplsaa", top, cutoff=20.0)
+    shift = -123.456
+    structures = []
+    for _ in range(5):
+        p = torch.as_tensor(pos) + 0.03 * torch.randn(len(pos), 3)
+        e = float(model(_graph(p, z, 20.0))["energy"]) + shift
+        structures.append({"pos": p, "atomic_numbers": torch.tensor(z),
+                           "energy": e})
+    e0 = estimate_atomic_energies(model, structures)
+    assert set(e0) == {1, 6}
+    assert abs(4 * e0[6] + 10 * e0[1] - shift) < 1e-8
+    set_atomic_energies(model, e0)
+    assert get_atomic_energies(model) == pytest.approx(e0)
+    for s in structures:
+        e = float(model(_graph(s["pos"], z, 20.0))["energy"])
+        assert abs(e - s["energy"]) < 1e-8
+    # the same table from the constructor, trainable on its own
+    again = OPLS("oplsaa", top, cutoff=20.0, trainable=("atom_ref",),
+                 atomic_energies={"C": e0[6], "H": e0[1]})
+    out = again(_graph(pos, z, 20.0))
+    assert abs(float(out["e_ref"]) - shift) < 1e-8
+    out["energy"].sum().backward()
+    assert float(again.atom_ref.weight.grad[6, 0]) == 4.0
+    assert not any(p.requires_grad for p in again.ff.params.values())
+    assert _butane_model(trainable="all")[0].atom_ref.weight.requires_grad
+
+
+def test_from_config_refit_options():
+    from xnn.common.config import from_dict
+    from xnn.common.models import build_model
+    pos, z, types, bonds = _butane()
+    cfg = from_dict({"model": {
+        "name": "opls", "cutoff": 12.0, "library": "oplsaa",
+        "types": types, "bonds": [list(b) for b in bonds],
+        "trainable": ["charge", "atom_ref"], "constrain_charge": "false",
+        "atomic_energies": {"C": -1.0, "H": -0.5}}})
+    model = build_model(cfg.model)
+    assert model.ff.charge_rows.shape[0] == 0
+    assert model.atom_ref.weight.requires_grad
+    assert model.ff.params["charge"].requires_grad
+    assert abs(float(model(_graph(pos, z, 12.0))["e_ref"]) + 9.0) < 1e-12

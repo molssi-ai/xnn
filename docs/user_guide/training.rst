@@ -127,9 +127,15 @@ The ``optim`` section holds the optimizer settings:
      clip_grad: 1.0                  # Max gradient norm; 0 turns it off
      ema_decay: 0.999                # Validate and save an average of the weights
      freeze: ["model.node_embedding*"]   # Parameter-name patterns to keep fixed
+     prior_weight: 0.0               # > 0 pulls the parameters toward their starting values
+     prior_weights: {"*charge": 10.0}    # The same per parameter-name pattern
 
-``model.pretrained``, ``model.lora`` and ``model.heads`` turn the same trainer
-into a fine-tuning run (see :ref:`howto-finetune`).
+``prior_weight`` adds ``prior_weight * sum((p - p0)^2)`` over the trainable
+parameters to the training loss (logged as ``prior``), in the parameters' own
+units; it is the regularization of a force-field refit whose data leave some
+parameter directions free. ``model.pretrained``, ``model.lora`` and
+``model.heads`` turn the same trainer into a fine-tuning run (see
+:ref:`howto-finetune`).
 
 Several GPUs or nodes
 =====================

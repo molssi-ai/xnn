@@ -68,6 +68,8 @@ training configuration in YAML format, with the default values for each section.
      head_weights: null         # Per-head loss weights of a multi-head model
      freeze: []                 # Parameter-name patterns to freeze
      train_only: []             # Patterns of the only parameters to train
+     prior_weight: 0.0          # > 0 pulls the trainable parameters toward their starting values
+     prior_weights: null        # The same per parameter-name pattern, {pattern: weight}
 
    trainer:
      loggers: [console]         # Any of console / csv / tensorboard
