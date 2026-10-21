@@ -83,11 +83,11 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
     - reproducing experiments in the SpookyNet paper and reproducing its
       electronic-state, nonlocal and charge-transfer examples as well as MD17
       dataset training.
-- ``ffnn`` involves ReaxFF, OPLS, DREIDING and AMBER trainings, refits,
+- ``ffnn`` involves ReaxFF, OPLS, DREIDING, AMBER and CHARMM trainings, refits,
   conformational energetics and normal modes.
 - ``sqmnn/nddo`` reproduces the PM3, PM6, PM6-ORG and PM7 papers and refits the
   NDDO parameters.
-- ``common/d3`` and ``common/d4`` hold the DFT-D3 and DFT-D4 paper experiment
+- ``common/d3`` and ``common/d4`` hold the D3 and D4 paper experiment
   reproductions, benchmarks and a large-system study.
 - ``common/les`` creates long-range binding curves for charged and polar
   dimers.
@@ -134,6 +134,11 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
   comparison with the AMBER programs runs when ``tleap`` and ``sander`` are
   on the path (or reachable through a wrapper script named by
   ``XNN_AMBER_WRAPPER``) and is skipped otherwise.
+- The ``charmm_verification`` notebook needs the LAMMPS Python module too;
+  its comparison with ``psfgen`` and NAMD runs when VMD (text mode) and NAMD
+  are reachable through the wrapper scripts named by ``XNN_VMD_WRAPPER`` and
+  ``XNN_NAMD_WRAPPER`` and the CHARMM files by ``XNN_CHARMM_TOPPAR``, and is
+  skipped otherwise. The ``charmm_backbone_energetics`` notebook uses scipy.
 - The ``examples/common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
   dependency. The paper examples also need the ``rdkit`` extra dependency. The
   large-scale experiment notebook requires the ``vesin`` extra dependency to be

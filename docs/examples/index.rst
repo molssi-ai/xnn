@@ -217,31 +217,31 @@ Long-range: Latent Ewald Summation (common)
 
    Why long-range matters: molecular-dimer binding curves (`xnn` LES vs a short-range model) <nb/examples/common/les/les_molecular_dimers>
 
-Dispersion: DFT-D4 (common)
-===========================
+Dispersion: D4 (common)
+=======================
 
 Reproductions of the D4 paper's examples, a benchmark against the reference
 ``dftd4`` with deployment through every channel, and the large-system regime
 pushed to the memory limit of one GPU.
 
 .. example-toctree::
-   :caption: Dispersion: DFT-D4 (common)
+   :caption: Dispersion: D4 (common)
 
-   DFT-D4 in xnn: reproducing examples of the D4 paper <nb/examples/common/d4/d4_paper_examples>
-   DFT-D4 in xnn vs the reference `dftd4`: accuracy, speed, and deployment with an MLIP <nb/examples/common/d4/d4_benchmark>
-   Large-scale DFT-D4: liquid ethanol from rMD17 conformers, up to the memory limit <nb/examples/common/d4/d4_large_scale_ethanol>
+   D4 in xnn: reproducing examples of the D4 paper <nb/examples/common/d4/d4_paper_examples>
+   D4 in xnn vs the reference `dftd4`: accuracy, speed, and deployment with an MLIP <nb/examples/common/d4/d4_benchmark>
+   Large-scale D4: liquid ethanol from rMD17 conformers, up to the memory limit <nb/examples/common/d4/d4_large_scale_ethanol>
 
-Dispersion: DFT-D3 (common)
-===========================
+Dispersion: D3 (common)
+=======================
 
 Reproductions of the two Grimme papers and a benchmark against
 ``simple-dftd3`` for every damping function.
 
 .. example-toctree::
-   :caption: Dispersion: DFT-D3 (common)
+   :caption: Dispersion: D3 (common)
 
-   DFT-D3 in xnn: reproducing examples of the two Grimme papers <nb/examples/common/d3/d3_paper_examples>
-   DFT-D3 in xnn vs the reference `simple-dftd3`: accuracy, speed, and deployment with an MLIP <nb/examples/common/d3/d3_benchmark>
+   D3 in xnn: reproducing examples of the two Grimme papers <nb/examples/common/d3/d3_paper_examples>
+   D3 in xnn vs the reference `simple-dftd3`: accuracy, speed, and deployment with an MLIP <nb/examples/common/d3/d3_benchmark>
 
 ET (trfnn)
 ================
@@ -336,6 +336,21 @@ then the backbone torsions refit by gradient descent.
    AMBER ff94 normal modes: reproducing Tables 6 and 7 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_normal_modes>
    Refitting the AMBER backbone torsions by gradient descent <nb/examples/ffnn/amber/amber_backbone_refit>
 
+CHARMM22 (ffnn)
+===============
+
+The backbone geometries, conformational energies, dipeptide map and NMA
+interaction energies of the 1998 paper, the normal modes of NMA and the
+alanine dipeptide from the autograd Hessian, then the backbone torsions
+refit by gradient descent.
+
+.. example-toctree::
+   :caption: CHARMM22 (ffnn)
+
+   CHARMM22 backbone energetics: reproducing Tables 1, 2, 7, 9, 10 and 11 and Figure 2 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_backbone_energetics>
+   CHARMM22 normal modes: reproducing Tables 3 and 8 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_normal_modes>
+   Refitting the CHARMM22 backbone torsions by gradient descent <nb/examples/ffnn/charmm/charmm_backbone_refit>
+
 Semiempirical methods (sqmnn)
 =============================
 
@@ -392,12 +407,13 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    Allegro, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/gnn/allegro/allegro_verification>
    CACE, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/gnn/cace/cace_verification>
    Latent Ewald Summation (LES), block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/common/les/les_verification>
-   DFT-D4 dispersion, block by block: reproducing the reference `dftd4` with `xnn` <nb/fidelity_checks/common/d4/d4_verification>
-   DFT-D3 dispersion, block by block: reproducing the reference `simple-dftd3` with `xnn` <nb/fidelity_checks/common/d3/d3_verification>
+   D4 dispersion, block by block: reproducing the reference `dftd4` with `xnn` <nb/fidelity_checks/common/d4/d4_verification>
+   D3 dispersion, block by block: reproducing the reference `simple-dftd3` with `xnn` <nb/fidelity_checks/common/d3/d3_verification>
    BAMBOO fidelity check: `xnn` vs the original `bytedance/bamboo`, block by block <nb/fidelity_checks/hybnn/bamboo/bamboo_verification>
    OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/ffnn/opls/opls_verification>
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
    AMBER (ff94): verifying the `xnn` implementation against LAMMPS, AmberTools and the 1995 paper <nb/fidelity_checks/ffnn/amber/amber_verification>
+   CHARMM22: verifying the `xnn` implementation against LAMMPS, NAMD/psfgen and the 1998 paper <nb/fidelity_checks/ffnn/charmm/charmm_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
 
 Parity checks
@@ -411,4 +427,4 @@ gradients and timings.
    :caption: Parity checks
 
    MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/gnn/mace/mace_cueq_parity>
-   Dispersion fast paths: parity with the reference (DFT-D3, DFT-D4) <nb/parity_checks/common/dispersion/dispersion_parity>
+   Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>

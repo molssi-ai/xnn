@@ -1,4 +1,4 @@
-"""Shared machinery of the dispersion add-ons (DFT-D3, DFT-D4).
+"""Shared machinery of the dispersion add-ons (D3, D4).
 
 The two Grimme dispersion models share most of their structure: a real-space
 cutoff with an optional quintic switching window, Gaussian coordination-number

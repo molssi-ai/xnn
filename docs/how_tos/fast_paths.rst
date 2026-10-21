@@ -12,8 +12,8 @@ and the path choice is made at runtime.
 
 Currently, the fast paths exist for the message phase and the symmetric
 contraction of MACE and NequIP (where we use `cuEquivariance
-<https://github.com/NVIDIA/cuEquivariance>`_), the three-body term of DFT-D3 and
-DFT-D4 and the large-system EEQ solve of D4 (where we use the Triton kernels,
+<https://github.com/NVIDIA/cuEquivariance>`_), the three-body term of D3 and
+D4 and the large-system EEQ solve of D4 (where we use the Triton kernels,
 shipped with CUDA builds of PyTorch), and the reciprocal sum of the LES
 long-range term (for which, we use plain PyTorch).
 

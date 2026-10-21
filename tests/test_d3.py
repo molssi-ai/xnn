@@ -1,4 +1,4 @@
-"""Tests for the DFT-D3 dispersion model (:mod:`xnn.common.models.d3`).
+"""Tests for the D3 dispersion model (:mod:`xnn.common.models.d3`).
 
 Covers the :class:`~xnn.common.models.d3.DFTD3` core (defaults of the two
 Grimme papers, exact invariances, the four damping functions against their

@@ -11,7 +11,7 @@ GNN abstractions. The total energy is (paper eq 1)
 with ``U_local`` the output of a message-passing network over a radial
 Gaussian basis, ``U_coul`` the Coulomb energy of the partial charges the
 network predicts (made exact in the net charge by *neural charge
-equilibration*, eq 6) and ``U_disp`` a DFT-D3(BJ) correction. Block by block:
+equilibration*, eq 6) and ``U_disp`` a D3(BJ) correction. Block by block:
 
 * **radial basis** (eq 2): ``g_ijs = exp(-eta (r_ij - r_s)^2) f_c(r_ij)``,
   ``n_rbf`` Gaussians on ``[rbf_start, cutoff)`` under a cosine cutoff

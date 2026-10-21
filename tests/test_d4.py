@@ -1,4 +1,4 @@
-"""Tests for the DFT-D4 dispersion model (:mod:`xnn.common.models.d4`).
+"""Tests for the D4 dispersion model (:mod:`xnn.common.models.d4`).
 
 Covers the physics of :class:`~xnn.common.models.d4.DFTD4` (exact invariances,
 charge conservation, the neutral three-body C6, sign and decay of the two
