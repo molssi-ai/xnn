@@ -7,6 +7,7 @@ against the papers' parameter tables, the density kernels against their closed
 forms, float32 against float64, and the Tinker / LAMMPS cross-checks live in
 ``notebooks/fidelity_checks/ffnn/{amoeba,hippo}/``.
 """
+import copy
 import json
 import math
 
@@ -30,8 +31,10 @@ from xnn.ffnn.models import (
     write_tinker_prm,
     write_tinker_xyz,
 )
+from xnn.ffnn.common.frc import SECTION_SCHEMA, flip_values, make_section
 from xnn.ffnn.models import amoeba as am
-from xnn.ffnn.models.amoebalib import KCAL_TO_EV, to_forcefield
+from xnn.ffnn.models import amoebalib
+from xnn.ffnn.models.amoebalib import KCAL_TO_EV, from_forcefield, to_forcefield
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
 DEG = math.pi / 180.0
@@ -450,8 +453,9 @@ def test_forces_match_finite_differences(cls):
         assert f[atom, axis] == pytest.approx(-(ep - em) / (2 * h), abs=2e-6)
 
 
-def test_batching_matches_individual_evaluation():
-    model = ForceStressOutput(_model(Hippo))
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_batching_matches_individual_evaluation(cls):
+    model = ForceStressOutput(_model(cls))
     graphs = [_graph(_perturbed(s)) for s in (7, 8, 9)]
     singles = [model(g) for g in graphs]
     batch = model(collate(graphs))
@@ -606,3 +610,272 @@ def test_from_config_and_key_translation(tmp_path):
 def test_masses_property():
     model = _model()
     assert float(model.masses[0]) == pytest.approx(15.995) and float(model.masses[1]) == pytest.approx(1.008)
+
+
+# the AMOEBA 2013 protein force field on capped peptides, as Tinker coordinate files whose
+# integer types are the library's type names: Ac-Ala-NMe with a water molecule, and Ac-Gly-NMe
+ALA_WATER_XYZ = """\
+    25  ala_water
+     1  C       2.4986439756     1.6881951726     0.7208539176   221     2    11    12    13
+     2  C       1.6457907339     0.7603942739    -0.0998015225   223     1     3     4
+     3  O       1.4760230855     0.9133188327    -1.3060790658   224     2
+     4  N       1.0378216183    -0.2385334618     0.6204984096     7     2     5    14
+     5  C       0.1283928162    -1.1995272646    -0.0088304986     8     4     6     7    15
+     6  C       0.1231556208    -2.5012789954     0.7835149821    13     5    16    17    18
+     7  C      -1.2991973636    -0.6137983382    -0.1356592477     9     5     8     9
+     8  O      -2.3011558272    -1.1866577893     0.2853169947    11     7
+     9  N      -1.3559675183     0.5788935075    -0.8298120372   227     7    10    19
+    10  C      -2.6107294489     1.1881324643    -1.1820779888   229     9    20    21    22
+    11  H       2.7604063108     1.2417529089     1.6843387634   222     1
+    12  H       1.9521301836     2.6188504366     0.8936045926   222     1
+    13  H       3.4246452587     1.8977850556     0.1784103897   222     1
+    14  H       0.9488317725    -0.1117781165     1.6211037764    10     4
+    15  H       0.4845660305    -1.4059486408    -1.0257975322    12     5
+    16  H      -0.2396762057    -2.3434982034     1.8055889828    14     6
+    17  H       1.1330031578    -2.9201985331     0.8503187559    14     6
+    18  H      -0.5244912100    -3.2468864641     0.3102572623    14     6
+    19  H      -0.5154727858     0.8611105512    -1.3355730496   228     9
+    20  H      -3.0239636176     0.6626703862    -2.0469841167   230    10
+    21  H      -3.3129107069     1.1221077766    -0.3467625144   230    10
+    22  H      -2.4298458802     2.2348944410    -1.4364292536   230    10
+    23  O       5.5000000000     0.5000000000     0.0000000000   247    24    25
+    24  H       6.4572000000     0.5000000000     0.0000000000   248    23
+    25  H       5.2600000000     1.4270000000     0.0000000000   248    23
+"""
+
+GLY_XYZ = """\
+    19  gly_dipeptide
+     1  C      -3.6199962035     0.0040293419    -0.3666062651   221     2    10    11    12
+     2  C      -2.2599464852    -0.1373316510    -0.9936618824   223     1     3     4
+     3  O      -2.1094421886    -0.3240098740    -2.1971281266   224     2
+     4  N      -1.2142552273    -0.0422555821    -0.1156596708     1     2     5    13
+     5  C       0.1572209936    -0.1819862693    -0.5576704015     2     4     6    14    15
+     6  C       1.1107050645     0.0088647028     0.6211932316     3     5     7     8
+     7  O       0.7120805733     0.1839941856     1.7714190805     5     6
+     8  N       2.4448777645    -0.0476392977     0.2755851697   227     6     9    16
+     9  C       3.4758519117     0.1946646265     1.2529569745   229     8    17    18    19
+    10  H      -4.1773160193    -0.9254952311    -0.5100136693   222     1
+    11  H      -4.1497690439     0.8313157500    -0.8465419911   222     1
+    12  H      -3.5538315184     0.2101932598     0.7052068045   222     1
+    13  H      -1.3673682740     0.0725523090     0.8821515300     4     4
+    14  H       0.2895933990    -1.1832326188    -0.9795739090     6     5
+    15  H       0.3584830432     0.5711472684    -1.3260579485     6     5
+    16  H       2.6965550541    -0.0160465726    -0.7047044357   228     8
+    17  H       4.4185313616    -0.2025384575     0.8697352523   230     9
+    18  H       3.2241005457    -0.2895111707     2.2003081538   230     9
+    19  H       3.5639252488     1.2732852809     1.4073306170   230     9
+"""
+
+
+def _protein(tmp_path, text):
+    path = tmp_path / "peptide.xyz"
+    path.write_text(text)
+    lib = builtin_amoeba("amoebapro13")
+    model, structure = Amoeba.from_tinker_xyz(path, lib, type_map={int(t): t for t in lib.atom_types},
+                                              cutoff=30.0, keep_intermediates=True)
+    return model, structure["pos"], structure["atomic_numbers"], lib
+
+
+def _finite_difference_forces(model, pos, z, samples, h=1e-4, tol=2e-6):
+    f = model(_graph(pos, z=z))["forces"].detach().numpy()
+    for atom, axis in samples:
+        p = pos.copy()
+        p[atom, axis] += h
+        ep = float(model(_graph(p, z=z))["energy"])
+        p[atom, axis] -= 2 * h
+        em = float(model(_graph(p, z=z))["energy"])
+        assert f[atom, axis] == pytest.approx(-(ep - em) / (2 * h), abs=tol), (atom, axis)
+
+
+def test_protein_dipeptide_valence_terms_and_file_round_trips(tmp_path):
+    model, pos, z, lib = _protein(tmp_path, ALA_WATER_XYZ)
+    counts = {k: int(getattr(model, k).shape[-1]) for k in
+              ("bond_index", "angle_index", "torsion_index", "opbend_index", "pitors_index", "tortor_index")}
+    assert counts == {"bond_index": 23, "angle_index": 37, "torsion_index": 41, "opbend_index": 12,
+                      "pitors_index": 2, "tortor_index": 0}
+    assert all(int(f) == am.FRAME_ZTHENX for f in model.frame_type[:22])
+    assert len(set(model.polarization_groups[:22])) == 6
+    fso = ForceStressOutput(model)
+    g = _graph(pos, z=z)
+    out = fso(g)
+    terms = {k: float(out[k]) * EV_TO_KCAL for k in out if k.startswith("e_")}
+    assert all(math.isfinite(v) for v in terms.values())
+    for k in ("e_bond", "e_angle", "e_strbnd", "e_opbend", "e_torsion", "e_pitors", "e_vdw", "e_multipole", "e_polar"):
+        assert abs(terms[k]) > 1e-4, k
+    assert terms["e_tortor"] == 0.0
+    _finite_difference_forces(fso, pos, z, ((4, 0), (7, 2), (22, 1)))
+    # the exported library resolves the peptide's valence terms through the canonical accessors
+    cls_of = [model.ff.class_of(t) for t in model.topology.types]
+    exported = model.export_library()
+    assert exported.torsion(cls_of[1], cls_of[3], cls_of[4], cls_of[6]) is not None
+    assert exported.pitors(cls_of[1], cls_of[3]) is not None
+    assert exported.opbend(cls_of[2], cls_of[1], cls_of[0], cls_of[3]) is not None
+    assert exported.strbnd(cls_of[3], cls_of[4], cls_of[6]) is not None
+    assert exported.tortor(*(cls_of[i] for i in (1, 3, 4, 6, 8))) is None
+    assert exported.bond_flux(cls_of[1], cls_of[3]) is None
+    assert exported.angle_flux(cls_of[3], cls_of[4], cls_of[6]) is None
+    assert exported.vdw_pair(cls_of[0], cls_of[1]) is None
+    e_ref = float(out["energy"])
+    path = exported.save_frc(tmp_path / "pro.frc", name="amoebapro13-export")
+    again = read_amoeba(f"{path}:amoebapro13-export")
+    assert float(Amoeba(again, model.topology, cutoff=30.0)(g)["energy"]) == pytest.approx(e_ref, abs=1e-9)
+    maps = write_tinker_prm(exported, tmp_path / "pro.prm")
+    back = read_amoeba(str(tmp_path / "pro.prm"))
+    assert back.pitors_types and back.opbend_types and back.angle_inplane_types
+    assert len(back.tortor_types) == len(exported.tortor_types)
+    renamed = MolecularTopology.from_bonds([str(maps["types"][t]) for t in model.topology.types], model.topology.bonds)
+    assert float(Amoeba(back, renamed, cutoff=30.0)(g)["energy"]) == pytest.approx(e_ref, abs=1e-5)
+
+
+def test_glycine_torsion_torsion_term(tmp_path):
+    model, pos, z, lib = _protein(tmp_path, GLY_XYZ)
+    assert int(model.tortor_index.shape[-1]) == 1
+    cls_of = [model.ff.class_of(t) for t in model.topology.types]
+    chain = [cls_of[i] for i in (1, 3, 4, 5, 7)]
+    assert lib.tortor(*chain) is not None and lib.tortor(*chain[::-1]) is not None
+    fso = ForceStressOutput(model)
+    out = fso(_graph(pos, z=z))
+    e_tt = float(out["e_tortor"]) * EV_TO_KCAL
+    assert math.isfinite(e_tt) and abs(e_tt) > 1e-3
+    _finite_difference_forces(fso, pos, z, ((3, 1), (4, 0), (5, 2)))
+    exported = model.export_library()
+    assert exported.tortor_types.keys() == lib.tortor_types.keys()
+    maps = write_tinker_prm(exported, tmp_path / "gly.prm")
+    back = read_tinker_prm(tmp_path / "gly.prm")
+    assert len(back.tortor_types) == len(lib.tortor_types)
+    renamed = MolecularTopology.from_bonds([str(maps["types"][t]) for t in model.topology.types], model.topology.bonds)
+    e_back = float(Amoeba(back, renamed, cutoff=30.0)(_graph(pos, z=z))["e_tortor"]) * EV_TO_KCAL
+    assert e_back == pytest.approx(e_tt, abs=1e-6)
+
+
+def test_torsion_torsion_spline_tables_and_bicubic_cells():
+    x = np.arange(-180.0, 181.0, 15.0)
+    y = x.copy()
+    X, Y = np.meshgrid(x, y, indexing="ij")
+
+    def fun(a, b):
+        return np.cos(np.radians(a)) * np.sin(np.radians(2 * b)) + 0.3 * np.cos(np.radians(3 * a - b))
+
+    F = fun(X, Y)
+    fx, fy, fxy = am.tortor_spline_tables(x, y, F)
+    assert fx.shape == F.shape and np.allclose(fx[0], fx[-1]) and np.allclose(fy[:, 0], fy[:, -1])
+    rad = math.pi / 180.0
+    dfdx = (-np.sin(np.radians(X)) * np.sin(np.radians(2 * Y)) - 0.9 * np.sin(np.radians(3 * X - Y))) * rad
+    dfdy = (2 * np.cos(np.radians(X)) * np.cos(np.radians(2 * Y)) + 0.3 * np.sin(np.radians(3 * X - Y))) * rad
+    assert np.abs(fx - dfdx).max() < 1e-2 * np.abs(dfdx).max()
+    assert np.abs(fy - dfdy).max() < 1e-2 * np.abs(dfdy).max()
+    i, j = 5, 7
+    corners = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)]
+    tables = [torch.tensor([[float(t[a, b]) for a, b in corners]]) for t in (F, fx, fy, fxy)]
+    x1, x2, y1, y2 = (torch.tensor([v]) for v in (x[i], x[i + 1], y[j], y[j + 1]))
+    at_knot = am.bicubic_interpolate(*tables, x1, y1, x1, x2, y1, y2)
+    assert float(at_knot) == pytest.approx(F[i, j], abs=1e-12)
+    xm, ym = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+    mid = am.bicubic_interpolate(*tables, xm, ym, x1, x2, y1, y2)
+    assert float(mid) == pytest.approx(fun(float(xm), float(ym)), abs=2e-2)
+
+
+def test_trainable_strings_class_lookup_and_kernel_helpers():
+    everything = Amoeba("amoeba-water-2003", _top(), cutoff=30.0, trainable="all")
+    assert all(p.requires_grad for p in everything.ff.params.values()) and everything.atom_ref.weight.requires_grad
+    vdw_only = Amoeba("amoeba-water-2003", _top(), cutoff=30.0, trainable="vdw")
+    assert vdw_only.ff.params["vdw_eps"].requires_grad and not vdw_only.ff.params["mpole_q"].requires_grad
+    assert not vdw_only.atom_ref.weight.requires_grad
+    ref_only = Amoeba("amoeba-water-2003", _top(), cutoff=30.0, trainable="atom_ref")
+    assert ref_only.atom_ref.weight.requires_grad and not any(p.requires_grad for p in ref_only.ff.params.values())
+    assert everything.ff.class_of("OW") == builtin_amoeba("amoeba-water-2003").cls("OW")
+    R = torch.tensor([1.5, 3.0])
+    one = torch.ones(2)
+    assert torch.allclose(am.coulomb_kernel().evaluate(R, one, one), 1.0 / R)
+    assert torch.allclose(am.coulomb_kernel().shift(1).evaluate(R, one, one), torch.ones(2))
+    with pytest.raises(ValueError):
+        Amoeba("amoeba-water-2003", _top(), cutoff=30.0, trainable=("no-such-group",))
+    with pytest.raises(ValueError):
+        Amoeba("amoeba-water-2003", _top(), cutoff=30.0, polarization="sometimes")
+
+
+def test_vdw_pair_rows_override_the_combination_rules():
+    base = float(_model()(_graph(DIMER1))["e_vdw"])
+    lib = copy.deepcopy(builtin_amoeba("amoeba-water-2003"))
+    lib.settings["radiusrule"] = "GEOMETRIC"
+    lib.settings["epsilonrule"] = "ARITHMETIC"
+    changed = float(Amoeba(lib, _top(), cutoff=30.0)(_graph(DIMER1))["e_vdw"])
+    assert abs(changed - base) > 1e-6
+    vdw = lib.vdw_types
+    for a, b in (("OW", "OW"), ("OW", "HW"), ("HW", "HW")):
+        ra, rb, ea, eb = vdw[a]["rmin"], vdw[b]["rmin"], vdw[a]["eps"], vdw[b]["eps"]
+        lib.vdw_pair_types["-".join(sorted((a, b)))] = {
+            "rmin": (ra ** 3 + rb ** 3) / (ra ** 2 + rb ** 2),
+            "eps": 4.0 * ea * eb / (math.sqrt(ea) + math.sqrt(eb)) ** 2}
+    model = Amoeba(lib, _top(), cutoff=30.0)
+    assert float(model(_graph(DIMER1))["e_vdw"]) == pytest.approx(base, abs=1e-9)
+    assert lib.vdw_pair("HW", "OW")["rmin"] == pytest.approx((3.405 ** 3 + 2.655 ** 3) / (3.405 ** 2 + 2.655 ** 2))
+    exported = model.export_library()
+    for key, row in lib.vdw_pair_types.items():
+        assert exported.vdw_pair_types[key]["rmin"] == pytest.approx(row["rmin"])
+        assert exported.vdw_pair_types[key]["eps"] == pytest.approx(row["eps"])
+
+
+def test_from_config_inline_strings_and_tinker_file(tmp_path):
+    from xnn.common.config.schema import ModelConfig
+    cfg = ModelConfig(name="amoeba", cutoff=30.0, extra={"library": "amoeba-water-2003", "types": str(TYPES),
+                                                         "bonds": str([list(b) for b in BONDS]),
+                                                         "trainable": "['vdw']"})
+    model = Amoeba.from_config(cfg)
+    assert model.topology.types == TYPES and model.ff.params["vdw_eps"].requires_grad
+    assert float(model(_graph(DIMER1))["energy"]) == pytest.approx(float(_model()(_graph(DIMER1))["energy"]))
+    path = tmp_path / "ala_water.xyz"
+    path.write_text(ALA_WATER_XYZ)
+    model2 = Amoeba.from_config(ModelConfig(name="amoeba", cutoff=30.0,
+                                            extra={"library": "amoebapro13", "tinker_xyz": str(path)}))
+    assert model2.topology.n_atoms == 25 and model2.topology.types[0] == "221"
+    with pytest.raises(ValueError):
+        Amoeba.from_config(ModelConfig(name="amoeba", cutoff=30.0, extra={"library": "amoeba-water-2003"}))
+
+
+def test_molecular_polarizability_is_batched_and_needs_induction():
+    mono = Amoeba("amoeba-water-2003", _top(1), cutoff=30.0)
+    g1 = _graph(_monomer(), z=Z_DIMER[:3])
+    g2 = _graph(_monomer(0.98, 105.0), z=Z_DIMER[:3])
+    both = mono.molecular_polarizability(collate([g1, g2]))
+    assert both.shape == (2, 3, 3)
+    assert torch.allclose(both[0], mono.molecular_polarizability(g1)[0], atol=1e-10)
+    assert torch.allclose(both[1], mono.molecular_polarizability(g2)[0], atol=1e-10)
+    assert float(torch.diagonal(both[0]).sum() / 3) == pytest.approx((1.672 + 1.225 + 1.328) / 3, abs=0.01)
+    with pytest.raises(RuntimeError):
+        Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, polarization="none").molecular_polarizability(g1)
+
+
+def test_flipped_keys_reorder_values_in_the_amoeba_sections():
+    sec = make_section("stretch_bend", "x", ["I", "J", "K"], ["K1", "K2"],
+                       [(("HW", "OW", "C"), {"K1": 1.0, "K2": 2.0})])
+    (row,) = sec.rows
+    assert tuple(row.key) == ("C", "OW", "HW") and row.values == {"K1": 2.0, "K2": 1.0}
+    sec = make_section("bond_charge_flux", "x", ["I", "J"], ["J"], [(("OW", "HW"), {"J": -0.027})])
+    assert tuple(sec.rows[0].key) == ("HW", "OW") and sec.rows[0].values["J"] == pytest.approx(0.027)
+    sec = make_section("angle_charge_flux", "x", ["I", "J", "K"], ["Jt1", "Jt2", "Jb1", "Jb2"],
+                       [(("HW", "OW", "C"), {"Jt1": 1.0, "Jt2": 2.0, "Jb1": 3.0, "Jb2": 4.0})])
+    assert sec.rows[0].values == {"Jt1": 2.0, "Jt2": 1.0, "Jb1": 4.0, "Jb2": 3.0}
+    assert flip_values(SECTION_SCHEMA["bond_charge_flux"], ["-0.1", 0.2]) == ["0.1", -0.2]
+
+
+def test_unsupported_sections_and_file_helpers(tmp_path):
+    ff = read_forcefield("amoeba-water-2003")
+    ff.sections["nonbond_pair"] = {}
+    with pytest.raises(ValueError):
+        from_forcefield(ff)
+    lenient = from_forcefield(ff, strict=False)
+    assert any("nonbond_pair" in note for note in lenient.notes)
+    assert lenient.scale("polar-intra", 4) == float(lenient.setting("polar-14-intra"))
+    numbers = {"OW": 1, "HW": 2}
+    write_tinker_xyz(tmp_path / "cell.xyz", DIMER1, TYPES, BONDS, numbers, symbols=["O", "H", "H"] * 2,
+                     cell=[20.0, 20.0, 20.0, 90.0, 90.0, 90.0])
+    data = read_tinker_xyz(tmp_path / "cell.xyz", type_map={1: "OW", 2: "HW"})
+    assert data["cell"] == [20.0, 20.0, 20.0, 90.0, 90.0, 90.0] and len(data["positions"]) == 6
+    model, structure = Amoeba.from_tinker_xyz(tmp_path / "cell.xyz", "amoeba-water-2003",
+                                              type_map={1: "OW", 2: "HW"}, cutoff=9.0)
+    assert np.allclose(structure["cell"], np.diag([20.0, 20.0, 20.0])) and model.topology.n_atoms == 6
+    assert amoebalib._looks_like_keyword(["bond", "1", "2"])
+    assert not amoebalib._looks_like_keyword(["The", "AMOEBA", "force", "field", "paper"])
+    assert amoebalib._is_float("1.5") and not amoebalib._is_float("x")
+    assert amoebalib._prm_number(1.23456789) == "   1.23457"

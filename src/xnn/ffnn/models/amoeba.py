@@ -1400,6 +1400,13 @@ class Amoeba(InteratomicPotential):
         def tile(v: Tensor) -> Tensor:
             return v.repeat(B)
 
+        # indices into the per-structure angle list (stretch-bend, Urey-Bradley) step by the
+        # number of angles, not the number of atoms
+        angle_starts = torch.arange(B, device=device) * int(self.angle_index.shape[1])
+
+        def expand_angles(idx: Tensor) -> Tensor:
+            return (idx.unsqueeze(1) + angle_starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
         out_terms: dict[str, Tensor] = {}
         zeros_n = torch.zeros(N, dtype=dtype, device=device)
 
@@ -1442,7 +1449,7 @@ class Amoeba(InteratomicPotential):
 
         # stretch-bend: (k1 dr_ab + k2 dr_cb) dtheta, with the plain angle
         if self.strbnd_angle.numel():
-            sbi = expand(self.strbnd_angle.unsqueeze(0))[0]
+            sbi = expand_angles(self.strbnd_angle.unsqueeze(0))[0]
             sbt = tile(self.strbnd_type)
             flip = tile(self.strbnd_flip)
             a_sel = ai[:, sbi]
@@ -1461,7 +1468,7 @@ class Amoeba(InteratomicPotential):
 
         # Urey-Bradley
         if self.urey_angle.numel():
-            ubi = expand(self.urey_angle.unsqueeze(0))[0]
+            ubi = expand_angles(self.urey_angle.unsqueeze(0))[0]
             ubt = tile(self.urey_type)
             a_sel = ai[:, ubi]
             rv = pair_vectors(data, a_sel[0], a_sel[2])

@@ -215,7 +215,7 @@ class AmoebaLibrary:
         ``"polar-intra"``, ``"direct"``, ``"mutual"``, ``"induce"``, ``"rep"``,
         ``"disp"``) for atoms separated by ``sep`` bonds (1,1 .. 1,5)."""
         if term == "polar-intra":
-            return float(self.setting(f"polar-{sep}{sep + 1}-intra" if sep < 10 else ""))
+            return float(self.setting(f"polar-1{sep}-intra"))
         return float(self.setting(f"{term}-1{sep}-scale"))
 
     # canonical accessors
