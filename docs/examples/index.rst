@@ -336,6 +336,21 @@ then the backbone torsions refit by gradient descent.
    AMBER ff94 normal modes: reproducing Tables 6 and 7 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_normal_modes>
    Refitting the AMBER backbone torsions by gradient descent <nb/examples/ffnn/amber/amber_backbone_refit>
 
+CHARMM22 (ffnn)
+===============
+
+The backbone geometries, conformational energies, dipeptide map and NMA
+interaction energies of the 1998 paper, the normal modes of NMA and the
+alanine dipeptide from the autograd Hessian, then the backbone torsions
+refit by gradient descent.
+
+.. example-toctree::
+   :caption: CHARMM22 (ffnn)
+
+   CHARMM22 backbone energetics: reproducing Tables 1, 2, 7, 9, 10 and 11 and Figure 2 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_backbone_energetics>
+   CHARMM22 normal modes: reproducing Tables 3 and 8 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_normal_modes>
+   Refitting the CHARMM22 backbone torsions by gradient descent <nb/examples/ffnn/charmm/charmm_backbone_refit>
+
 Semiempirical methods (sqmnn)
 =============================
 
@@ -398,6 +413,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/ffnn/opls/opls_verification>
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
    AMBER (ff94): verifying the `xnn` implementation against LAMMPS, AmberTools and the 1995 paper <nb/fidelity_checks/ffnn/amber/amber_verification>
+   CHARMM22: verifying the `xnn` implementation against LAMMPS, NAMD/psfgen and the 1998 paper <nb/fidelity_checks/ffnn/charmm/charmm_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
 
 Parity checks

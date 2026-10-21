@@ -130,6 +130,13 @@ Numerical agreement under identical weights involves:
   ordering of ``tleap`` and the energy components of ``sander`` on
   sequence-built peptides and nucleic acids; Table 14 and the residue charges
   of the paper entry by entry; float32 within 1e-6 relative of float64.
+- **CHARMM22** (MacKerell *et al.* 1998): LAMMPS (harmonic, charmm angle and
+  dihedral, harmonic improper and lj/charmm/coul/charmm styles with the
+  CHARMM 1,4 weights) to about 1e-8 kcal/mol on capped peptides, water and
+  ions; the atom types, charges and impropers of ``psfgen`` and the energy
+  components of NAMD on sequence-built, patched peptides; the parameter files
+  and the paper's quoted values entry by entry; float32 within 1e-6 relative
+  of float64.
 - **PM3, PM6, PM6-ORG, PM7** (Stewart 1989, 2007, 2013, 2023): MOPAC 23.2.5
   to about 1e-6 kcal/mol in heats of formation and 1e-7 in charges, open
   shells and transition metals included, and the PM6 and PM7 S22 interaction

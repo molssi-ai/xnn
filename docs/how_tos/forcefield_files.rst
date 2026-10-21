@@ -4,7 +4,7 @@
 Working with Force-field Files
 ******************************
 
-The classical force-fields such as ReaxFF, OPLS, DREIDING read their parameters
+The classical force fields such as ReaxFF, OPLS, DREIDING, AMBER and CHARMM read their parameters
 from the MolSSI/SEAMM ``.frc`` file format (see :mod:`xnn.ffnn.common.frc`),
 developed by MolSSI and used in `SEAMM force-field distribution
 <https://github.com/molssi-seamm/forcefield_step/tree/main/forcefield_step/data>`_.
@@ -22,8 +22,8 @@ You can list the force-field files that are available in your xnn installation:
    from xnn.ffnn.common import list_forcefields
 
    sorted(list_forcefields())
-   # ['CL&P', 'dreiding', 'dreiding/X6', 'ff94', 'lopls', 'oplsaa', 'oplsaa+',
-   #  'oplsaa-1996', 'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
+   # ['CL&P', 'charmm22', 'dreiding', 'dreiding/X6', 'ff94', 'lopls', 'oplsaa',
+   #  'oplsaa+', 'oplsaa-1996', 'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
 
 Among the force-field files shipped with xnn, ``oplsaa`` is the OPLS-AA
 distribution (``CL&P`` adds the ionic-liquid extension, ``oplsaa+`` is their
@@ -43,6 +43,15 @@ torsions use the multi-term ``torsion_fourier`` section, its impropers the
 ``improper_fourier`` section (the key order carries meaning, the central atom
 third), and its residues are ``#fragments`` whose SMARTS carry atom maps in
 template order together with ``atom names``, ``atom types`` and ``charges``.
+``charmm22`` (``charmm22.frc``) is the CHARMM22 protein force field of
+`MacKerell et al. (1998) <https://doi.org/10.1021/jp973084f>`_ with TIP3P
+water and ions, converted from the freely distributed CHARMM parameter and
+topology files (the CMAP block left out): it adds the ``urey_bradley``,
+``improper_harmonic`` (key as written, the central atom first, matched in
+either direction), ``nonbond_1-4(12-6)`` (the types with their own 1,4
+Lennard-Jones values) and ``nonbond_pair(12-6)`` (NBFIX overrides) sections,
+and its ``#fragments`` also carry each residue's ``impropers`` by atom name,
+with ``-`` / ``+`` prefixes for the atoms of the neighbouring residues.
 
 Every model and reader takes the same **spec**: a variant name, a path to a
 ``.frc`` file, or ``"<path>.frc:<variant>"``.
@@ -58,7 +67,7 @@ parameters.
 .. code-block:: python
 
    from ase.build import molecule
-   from xnn.ffnn.models import OPLS, ReaxFF, Dreiding, Amber
+   from xnn.ffnn.models import OPLS, ReaxFF, Dreiding, Amber, Charmm
 
    ethanol = molecule("CH3CH2OH")
    opls = OPLS.from_atoms(ethanol, "oplsaa", cutoff=12.0)
@@ -70,6 +79,9 @@ parameters.
    amb = Amber.from_atoms(dipeptide, "ff94", cutoff=12.0)
    amb.topology.residue_names         # ['ACE', 'ALA', 'NME']: residue templates typed it
    amb.topology.charges               # and gave every atom its RESP charge
+
+   chm = Charmm.from_atoms(dipeptide, "charmm22", cutoff=12.0)
+   chm.impropers                      # the residue templates' impropers, central atom first
 
    reax = ReaxFF("CHO_cho_2008")      # ReaxFF needs no typing
 

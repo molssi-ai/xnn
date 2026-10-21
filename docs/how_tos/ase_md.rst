@@ -56,6 +56,6 @@ Things to keep in mind
 - A model with a D4 term runs faster in MD with ``eeq_reuse=True``, which
   carries the charge solve from one step to the next.
 - Classical force fields need their customary timesteps: about 0.1 fs for
-  ReaxFF, 0.5 to 1 fs for OPLS, DREIDING and AMBER with explicit hydrogens.
+  ReaxFF, 0.5 to 1 fs for OPLS, DREIDING, AMBER and CHARMM with explicit hydrogens.
 - Models that predict charges (AIMNet2, PhysNet, BAMBOO, ReaxFF, OPLS,
-  DREIDING, AMBER) expose them as ``atoms.calc.results["charges"]``.
+  DREIDING, AMBER, CHARMM) expose them as ``atoms.calc.results["charges"]``.
