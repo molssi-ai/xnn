@@ -83,8 +83,9 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
     - reproducing experiments in the SpookyNet paper and reproducing its
       electronic-state, nonlocal and charge-transfer examples as well as MD17
       dataset training.
-- ``ffnn`` involves ReaxFF, OPLS, DREIDING, AMBER and CHARMM trainings, refits,
-  conformational energetics and normal modes.
+- ``ffnn`` involves ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA and HIPPO
+  trainings, refits, conformational energetics, water cluster energetics and
+  normal modes.
 - ``sqmnn/nddo`` reproduces the PM3, PM6, PM6-ORG and PM7 papers and refits the
   NDDO parameters.
 - ``common/d3`` and ``common/d4`` hold the D3 and D4 paper experiment
@@ -139,6 +140,12 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
   are reachable through the wrapper scripts named by ``XNN_VMD_WRAPPER`` and
   ``XNN_NAMD_WRAPPER`` and the CHARMM files by ``XNN_CHARMM_TOPPAR``, and is
   skipped otherwise. The ``charmm_backbone_energetics`` notebook uses scipy.
+- The ``amoeba_verification`` and ``hippo_verification`` notebooks compare
+  with Tinker when its ``analyze`` and ``testgrad`` programs are on the path,
+  and with the LAMMPS AMOEBA package when the ``lammps`` Python module (with
+  the AMOEBA package) is importable and ``XNN_TINKER2LMP`` names the
+  ``tinker2lmp.py`` converter of the LAMMPS distribution; each comparison is
+  skipped otherwise. The AMOEBA protein example uses RDKit.
 - The ``examples/common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
   dependency. The paper examples also need the ``rdkit`` extra dependency. The
   large-scale experiment notebook requires the ``vesin`` extra dependency to be

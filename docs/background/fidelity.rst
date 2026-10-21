@@ -51,9 +51,11 @@ Numerical agreement under identical weights involves:
   every generation (2G, 3G with point or Gaussian charges and screening, 4G with
   element or network hardnesses and charged structures) and to the Ewald
   truncation (about 1e-12) in periodic cells as well as for the published 4G
-  Au2/MgO model. Our implementation of 1G follows the `review's
-  <https://doi.org/10.1021/acs.chemrev.0c00868>`_ definition.
-- **SchNet** (Schütt *et al.* 2017): a clean-room build, verified against an
+  Au2/MgO model. Our implementation of 1G follows the definition of
+  `Behler, Chem. Rev. 121, 10037 (2021) <https://doi.org/10.1021/acs.chemrev.0c00868>`_.
+- **SchNet** (`Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
+  <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_):
+  a clean-room build, verified against an
   independent implementation of the paper's equations to about 1e-15. No
   schnetpack code is used or compared against as an oracle.
 - **DimeNet and DimeNet++** (`gasteigerjo/dimenet
@@ -65,7 +67,9 @@ Numerical agreement under identical weights involves:
   energies and forces under transplanted weights in float64, for GemNet-Q, -T,
   -dQ and -dT. The published GemNet-Q and GemNet-T weights are reproduced to
   float32 round-off.
-- **PaiNN** (Schütt *et al.* 2021; reference implementation in
+- **PaiNN** (`Schütt et al., Proc. Mach. Learn. Res. 139, 9377 (2021)
+  <https://proceedings.mlr.press/v139/schutt21a.html>`_; reference
+  implementation in
   `schnetpack <https://github.com/atomistic-machine-learning/schnetpack>`_):
   a build from the paper, verified against an independent implementation
   of its equations and against ``schnetpack`` under transplanted weights:
@@ -87,7 +91,10 @@ Numerical agreement under identical weights involves:
   the ``dftd4`` data of :mod:`~xnn.common.models.d4`. The reference code ships
   float32-rounded covalent radii, which moves its dispersion energies by about
   1e-8 relative.
-- **SE(3) steerable CNN** (Weiler *et al.* 2018): a clean-room build from the
+- **SE(3) steerable CNN** (`Weiler et al., Adv. Neural Inf. Process. Syst. 31
+  (2018)
+  <https://proceedings.neurips.cc/paper/2018/hash/488e4104520c6aab692863cc1dba45af-Abstract.html>`_):
+  a clean-room build from the
   paper. The steerable kernel basis is formed from Clebsch-Gordan coefficients
   and checked against a numerical solution of the paper's constraint. The energy
   is exactly invariant under the rotations of the grid onto itself and invariant
@@ -118,26 +125,52 @@ Numerical agreement under identical weights involves:
   moves its energies by about 1e-5 eV per bond. The authors' ReaxFF-nn code is
   AGPL-licensed. So, nothing derived from it is distributed and none of its
   code was copied. The shipped tests recompute every term from the papers.
-- **OPLS / L-OPLS** (Jorgensen *et al.* 1996): OpenMM to about 1e-7 kJ/mol,
+- **OPLS / L-OPLS** (`Jorgensen et al., J. Am. Chem. Soc. 118, 11225 (1996)
+  <https://doi.org/10.1021/ja9621760>`_): OpenMM to about 1e-7 kJ/mol,
   and Table 1 of the paper to 0.01 kcal/mol with the ``"oplsaa-1996"``
   library.
-- **DREIDING** (Mayo *et al.* 1990): the LAMMPS DREIDING styles to about
+- **DREIDING** (`Mayo et al., J. Phys. Chem. 94, 8897 (1990)
+  <https://doi.org/10.1021/j100389a010>`_): the LAMMPS DREIDING styles to about
   1e-10 kcal/mol, the paper's parameter tables entry by entry, and its
   Table XI barriers to about 0.01 kcal/mol.
-- **AMBER ff94** (Cornell *et al.* 1995): LAMMPS (harmonic, fourier, cvff and
+- **AMBER ff94** (`Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
+  <https://doi.org/10.1021/ja00124a002>`_): LAMMPS (harmonic, fourier, cvff and
   lj/cut/coul/cut styles with the AMBER 1,4 factors) to about 1e-8 kcal/mol on
   capped peptides, water and ions; the atom types, RESP charges and improper
   ordering of ``tleap`` and the energy components of ``sander`` on
   sequence-built peptides and nucleic acids; Table 14 and the residue charges
   of the paper entry by entry; float32 within 1e-6 relative of float64.
-- **CHARMM22** (MacKerell *et al.* 1998): LAMMPS (harmonic, charmm angle and
+- **CHARMM22** (`MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
+  <https://doi.org/10.1021/jp973084f>`_): LAMMPS (harmonic, charmm angle and
   dihedral, harmonic improper and lj/charmm/coul/charmm styles with the
   CHARMM 1,4 weights) to about 1e-9 kcal/mol on capped peptides, water and
   ions; the atom types, charges and impropers of ``psfgen`` and the energy
   components of NAMD on sequence-built, patched peptides; the parameter files
   and the paper's quoted values entry by entry; float32 within 1e-6 relative
   of float64.
-- **PM3, PM6, PM6-ORG, PM7** (Stewart 1989, 2007, 2013, 2023): MOPAC 23.2.5
+- **AMOEBA and HIPPO** (`Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
+  <https://doi.org/10.1021/jp027815+>`_;
+  `Ponder et al., J. Phys. Chem. B 114, 2549 (2010)
+  <https://doi.org/10.1021/jp910674d>`_; `Shi et al., J. Chem. Theory Comput. 9,
+  4046 (2013) <https://doi.org/10.1021/ct4003702>`_;
+  `Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
+  <https://doi.org/10.1021/acs.jctc.1c00628>`_): Tinker 8.11.3 term by term
+  (valence terms
+  including in-plane angles, stretch-bend, out-of-plane, pi-torsions and the
+  glycine torsion-torsion map, buffered 14-7, permanent multipoles, Thole and
+  density-damped induction, charge penetration, Pauli repulsion, dispersion,
+  charge transfer, charge flux) to about 1e-8 kcal/mol and 1e-7 kcal/mol/A on
+  water dimers, clusters, distorted monomers and capped dipeptides with
+  terminal residues; the LAMMPS AMOEBA package on the water systems; the
+  water monomer moments, dimer and cluster energies and vibrational
+  frequencies of the papers; float32 within 2e-5 relative of float64.
+- **PM3, PM6, PM6-ORG, PM7** (`Stewart, J. Comput. Chem. 10, 209 (1989)
+  <https://doi.org/10.1002/jcc.540100208>`_; `Stewart, J. Mol. Model. 13, 1173
+  (2007) <https://doi.org/10.1007/s00894-007-0233-4>`_;
+  `Stewart, J. Mol. Model. 19, 1 (2013)
+  <https://doi.org/10.1007/s00894-012-1667-x>`_; `Stewart and Stewart, J. Mol.
+  Model. 29, 284 (2023) <https://doi.org/10.1007/s00894-023-05695-1>`_): MOPAC
+  23.2.5
   to about 1e-6 kcal/mol in heats of formation and 1e-7 in charges, open
   shells and transition metals included, and the PM6 and PM7 S22 interaction
   energies of the PM7 paper (Table 5). Overlaps keep MOPAC's truncated

@@ -142,7 +142,8 @@ functions :func:`~xnn.common.finetune.select_replay` and
 
 Settings that work
 ==================
-From the fine-tuning study of `Tompa et al. <https://arxiv.org/abs/2606.12704>`_
+From the fine-tuning study of `Tompa et al., arXiv:2606.12704 (2026)
+<https://arxiv.org/abs/2606.12704>`_
 the following settings are recommended for fine-tuning MACE models:
 ``weight_decay: 0`` for every method; constant loss weights (energy 10, forces
 10); learning rates of 1e-3 (naive, freezing), 1e-2 (LoRA) and 1e-4 (multi-head

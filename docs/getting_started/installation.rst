@@ -89,7 +89,7 @@ prints the xnn version and the list of available models.
 
    print(xnn.__version__)
    print(available_models())
-   # ['aimnet2', 'allegro', 'amber', 'ani', 'bamboo', 'cace', 'charmm', 'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding',
+   # ['aimnet2', 'allegro', 'amber', 'amoeba', 'ani', 'bamboo', 'cace', 'charmm', 'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding',
    #  'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
 
 The e3nn-based models (NequIP, MACE, Allegro, the SE(3) steerable CNN) only

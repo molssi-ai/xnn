@@ -25,6 +25,10 @@ xnn offers several benefits out-of-the-box:
 - **Faithful implementations.** Each model reproduces its reference code or
   paper to float32 and float64 round-off errors, verified block by block
   (:ref:`fidelity`).
+- **Classical force fields and semiempirical methods, modernized.** ReaxFF,
+  OPLS, DREIDING, AMBER, CHARMM and PM3 / PM6 / PM7 use the same PyTorch
+  interface as the MLIPs, so they train (reparameterize), evaluate and deploy
+  the same way, on CPU or GPU.
 - **One pipeline.** Shared data object, config schema, trainer and
   deployment to ASE, LAMMPS and the MolSSI Driver Interface.
 - **Access pre-trained models and benchmark data in one line.** ``from_pretrained()`` loads
@@ -146,7 +150,7 @@ Models at a glance
    * - Convolutional neural networks (``cnn``)
      - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
-     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22
+     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO
    * - Semi-empirical quantum mechanics (``sqmnn``)
      - PM3, PM6, PM6-ORG, PM7
    * - Transformer neural networks (``trfnn``)
