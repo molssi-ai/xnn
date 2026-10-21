@@ -1,0 +1,219 @@
+!MolSSI forcefield 1
+
+#define hippo-water-2021
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  --------------
+2021.1         1  metadata                         hippo-water-2021
+2021.1         1  atom_types                       hippo-water-2021
+2021.1         1  equivalence                      hippo-water-2021
+2021.1         1  amoeba_bond                      hippo-water-2021
+2021.1         1  amoeba_angle                     hippo-water-2021
+2021.1         1  atomic_multipole                 hippo-water-2021
+2021.1         1  polarizability                   hippo-water-2021
+2021.1         1  charge_penetration               hippo-water-2021
+2021.1         1  charge_transfer                  hippo-water-2021
+2021.1         1  pauli_repulsion                  hippo-water-2021
+2021.1         1  damped_dispersion                hippo-water-2021
+2021.1         1  bond_charge_flux                 hippo-water-2021
+2021.1         1  angle_charge_flux                hippo-water-2021
+2021.1         1  templates                        hippo-water-2021
+#end
+
+#metadata hippo-water-2021
+
+!Version  Ref  Parameter        Value                              Description
+!-------  ---  ---------------  ---------------------------------  --------------------------------------------------------------
+ 2021.1   1    ff_form          hippo                              The functional form of the forcefield
+ 2021.1   1    charges          multipole                          Permanent atomic multipoles per atom type
+ 2021.1   1    forcefield       HIPPO-WATER-2021                   Name of the parameter set
+ 2021.1   1    bond-cubic       -2.55                              Cubic bond coefficient (1/A)
+ 2021.1   1    bond-quartic     3.793125                           Quartic bond coefficient (1/A^2)
+ 2021.1   1    angle-cubic      -0.014                             Cubic angle coefficient (1/degree)
+ 2021.1   1    angle-quartic    5.6e-05                            Quartic angle coefficient (1/degree^2)
+ 2021.1   1    angle-pentic     -7e-07                             Pentic angle coefficient (1/degree^3)
+ 2021.1   1    angle-sextic     2.2e-08                            Sextic angle coefficient (1/degree^4)
+ 2021.1   1    opbendtype       ALLINGER                           Out-of-plane angle definition (ALLINGER or W-D-C)
+ 2021.1   1    opbend-cubic     -0.014                             Cubic out-of-plane coefficient (1/degree)
+ 2021.1   1    opbend-quartic   5.6e-05                            Quartic out-of-plane coefficient (1/degree^2)
+ 2021.1   1    opbend-pentic    -7e-07                             Pentic out-of-plane coefficient (1/degree^3)
+ 2021.1   1    opbend-sextic    2.2e-08                            Sextic out-of-plane coefficient (1/degree^4)
+ 2021.1   1    torsionunit      0.5                                Factor the Tinker torsion amplitudes were multiplied by
+ 2021.1   1    pitorsunit       1.0                                Factor the Tinker pi-torsion amplitudes were multiplied by
+ 2021.1   1    tortorunit       1.0                                Factor the Tinker torsion-torsion grids were multiplied by
+ 2021.1   1    vdwtype          BUFFERED-14-7                      Van der Waals functional form
+ 2021.1   1    radiusrule       CUBIC-MEAN                         Combining rule of the minimum distance
+ 2021.1   1    radiustype       R-MIN                              Meaning of the size parameter
+ 2021.1   1    radiussize       DIAMETER                           Radius or diameter
+ 2021.1   1    epsilonrule      HHG                                Combining rule of the well depth
+ 2021.1   1    delta-halgren    0.07                               Buffering constant delta of the 14-7 form
+ 2021.1   1    gamma-halgren    0.12                               Buffering constant gamma of the 14-7 form
+ 2021.1   1    dielectric       1.0                                Dielectric constant
+ 2021.1   1    polarization     MUTUAL                             Induced dipole model (MUTUAL or DIRECT)
+ 2021.1   1    d-equals-p       true                               Use one set of induced dipoles for energy and gradient (HIPPO)
+ 2021.1   1    vdw-12-scale     0.0
+ 2021.1   1    vdw-13-scale     0.0
+ 2021.1   1    vdw-14-scale     1.0
+ 2021.1   1    vdw-15-scale     1.0
+ 2021.1   1    mpole-12-scale   0.0
+ 2021.1   1    mpole-13-scale   0.0
+ 2021.1   1    mpole-14-scale   0.4
+ 2021.1   1    mpole-15-scale   0.8
+ 2021.1   1    polar-12-scale   0.0
+ 2021.1   1    polar-13-scale   0.5
+ 2021.1   1    polar-14-scale   1.0
+ 2021.1   1    polar-15-scale   1.0
+ 2021.1   1    polar-12-intra   0.0
+ 2021.1   1    polar-13-intra   0.0
+ 2021.1   1    polar-14-intra   0.0
+ 2021.1   1    polar-15-intra   0.5
+ 2021.1   1    direct-11-scale  0.0
+ 2021.1   1    direct-12-scale  1.0
+ 2021.1   1    direct-13-scale  1.0
+ 2021.1   1    direct-14-scale  1.0
+ 2021.1   1    mutual-11-scale  1.0
+ 2021.1   1    mutual-12-scale  1.0
+ 2021.1   1    mutual-13-scale  1.0
+ 2021.1   1    mutual-14-scale  1.0
+ 2021.1   1    induce-12-scale  0.2
+ 2021.1   1    induce-13-scale  1.0
+ 2021.1   1    induce-14-scale  1.0
+ 2021.1   1    induce-15-scale  1.0
+ 2021.1   1    rep-12-scale     0.0
+ 2021.1   1    rep-13-scale     0.0
+ 2021.1   1    rep-14-scale     1.0
+ 2021.1   1    rep-15-scale     1.0
+ 2021.1   1    disp-12-scale    0.0
+ 2021.1   1    disp-13-scale    0.0
+ 2021.1   1    disp-14-scale    0.4
+ 2021.1   1    disp-15-scale    0.8
+ 2021.1   1    model            HIPPO water (Rackers et al. 2021)
+
+#atom_types hippo-water-2021
+
+!Version  Ref  Type  Mass    El  connections  Comment
+!-------  ---  ----  ------  --  -----------  -------
+ 2021.1   1    OW    15.999  O   2            water O
+ 2021.1   1    HW    1.008   H   1            water H
+
+#equivalence hippo-water-2021
+
+> The equivalent 'type' is the AMOEBA atom class carrying the valence and van der Waals parameters
+
+!Version  Ref  Type  NonB  Bond  Angle  Torsion  OOP
+!-------  ---  ----  ----  ----  -----  -------  ---
+ 2021.1   1    OW    OW    OW    OW     OW       OW
+ 2021.1   1    HW    HW    HW    HW     HW       HW
+
+#amoeba_bond hippo-water-2021
+
+> E = K2 dr^2 [1 + bond-cubic dr + bond-quartic dr^2], dr = R - R0
+
+!Version  Ref  I   J   R0      K2
+!-------  ---  --  --  ------  -------
+ 2021.1   1    HW  OW  0.9572  551.108
+
+#amoeba_angle hippo-water-2021
+
+> E = K2 dTheta^2 [1 + angle-cubic dTheta + ... + angle-sextic dTheta^4] (dTheta in degrees, K2 per radian^2)
+> Theta0_2 / Theta0_3 apply when the center carries 1 / 2 further hydrogens
+
+!Version  Ref  I   J   K   K2       Theta0_1  Theta0_2  Theta0_3
+!-------  ---  --  --  --  -------  --------  --------  --------
+ 2021.1   1    HW  OW  HW  47.8253  104.52
+
+#atomic_multipole hippo-water-2021
+
+> Local frame from the bonded (or 1-3) atoms of the given types: Z X = z-then-x, -Z -X = bisector,
+> Z -X -Y = z-bisect, -Z -X -Y = 3-fold, Z 0 = z-only, 0 = none; a fourth atom Y fixes the chirality
+> dipole in e bohr, traceless quadrupole in e bohr^2 (atomic units, as in the papers and the Tinker files)
+
+!Version  Ref  Type  Z    X    Y  Q          Dx        Dy   Dz         Qxx       Qxy  Qxz       Qyy        Qyz  Qzz
+!-------  ---  ----  ---  ---  -  ---------  --------  ---  ---------  --------  ---  --------  ---------  ---  ---------
+ 2021.1   1    OW    -HW  -HW  0  -0.374842  0.0       0.0  0.054116   0.680265  0.0  0.0       -0.611121  0.0  -0.069144
+ 2021.1   1    HW    OW   HW   0  0.187421   0.008106  0.0  -0.200116  0.066936  0.0  0.007338  0.043814   0.0  -0.11075
+
+#polarizability hippo-water-2021
+
+> thole = 0 selects charge-penetration damping; Group lists the atom types of the polarization group
+
+!Version  Ref  I   alpha     thole  Group
+!-------  ---  --  --------  -----  -----
+ 2021.1   1    OW  0.725918  0.0    HW
+ 2021.1   1    HW  0.359954  0.0    OW
+
+#charge_penetration hippo-water-2021
+
+!Version  Ref  I   Core  alpha
+!-------  ---  --  ----  -------
+ 2021.1   1    OW  6.0   4.28982
+ 2021.1   1    HW  1.0   5.21764
+
+#charge_transfer hippo-water-2021
+
+!Version  Ref  I   eps      alpha
+!-------  ---  --  -------  ------
+ 2021.1   1    OW  3.63984  0.0
+ 2021.1   1    HW  0.0      3.2776
+
+#pauli_repulsion hippo-water-2021
+
+!Version  Ref  I   K        alpha    valence
+!-------  ---  --  -------  -------  -------
+ 2021.1   1    OW  23.0592  4.41372  3.37829
+ 2021.1   1    HW  16.023   4.92152  0.63308
+
+#damped_dispersion hippo-water-2021
+
+!Version  Ref  I   C6       alpha
+!-------  ---  --  -------  -------
+ 2021.1   1    OW  16.1193  4.28982
+ 2021.1   1    HW  3.6813   5.21764
+
+#bond_charge_flux hippo-water-2021
+
+> dq_J = -dq_I = J (R - R0) moved from I to J
+
+!Version  Ref  I   J   J
+!-------  ---  --  --  --------
+ 2021.1   1    HW  OW  0.027265
+
+#angle_charge_flux hippo-water-2021
+
+> dq_I = Jt1 dTheta + Jb1 dr_JK, dq_K = Jt2 dTheta + Jb2 dr_IJ, dq_J = -(dq_I + dq_K)
+
+!Version  Ref  I   J   K   Jt1       Jt2       Jb1        Jb2
+!-------  ---  --  --  --  --------  --------  ---------  ---------
+ 2021.1   1    HW  OW  HW  0.102621  0.102621  -0.039303  -0.039303
+
+#templates hippo-water-2021
+
+{
+    "OW": {
+        "2021.1": {
+            "smarts": [
+                "[O:1]([#1])[#1]"
+            ],
+            "description": "water oxygen"
+        }
+    },
+    "HW": {
+        "2021.1": {
+            "smarts": [
+                "[#1:1][O][#1]"
+            ],
+            "description": "water hydrogen"
+        }
+    }
+}
+
+#reference 1
+@Author xnn
+J. A. Rackers, R. R. Silva, Z. Wang and J. W. Ponder, Polarizable Water Potential
+Derived from a Model Electron Density, J. Chem. Theory Comput. 17, 7056-7084 (2021):
+Table S1 of the Supporting Information (the 37 refined parameters), with the HIPPO
+functional form of eqs 1-24 and Appendices A-C. Charge penetration, dispersion and
+repulsion forms from J. A. Rackers et al., Phys. Chem. Chem. Phys. 19, 276 (2017),
+J. Chem. Phys. 149, 084115 (2018) and J. Chem. Phys. 150, 084104 (2019).
+
+#end

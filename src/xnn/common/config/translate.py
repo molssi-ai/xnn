@@ -288,6 +288,30 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "1-4scaling": "fudge_qq",
         "ccelec": "coulomb_constant",
     },
+    # AMOEBA / HIPPO spellings used by Tinker, OpenMM and LAMMPS-style inputs
+    "amoeba": {
+        "frc": "library",
+        "forcefield": "library",
+        "prm": "library",
+        "parameters": "library",
+        "parameter_file": "library",
+        "ffield": "library",
+        "xyz": "tinker_xyz",
+        "vdw_cutoff": "cutoff",
+        "mpole_cutoff": "cutoff",
+        "pair_cutoff": "cutoff",
+    },
+    "hippo": {
+        "frc": "library",
+        "forcefield": "library",
+        "prm": "library",
+        "parameters": "library",
+        "parameter_file": "library",
+        "ffield": "library",
+        "xyz": "tinker_xyz",
+        "mpole_cutoff": "cutoff",
+        "pair_cutoff": "cutoff",
+    },
     # DREIDING spellings used by LAMMPS / Cerius2-style inputs
     "dreiding": {
         "forcefield": "ffield",

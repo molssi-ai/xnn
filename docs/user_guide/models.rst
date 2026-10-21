@@ -30,8 +30,9 @@ the SE(3) steerable CNN require the ``gnn`` extra dependencies installed
 MACE
 ====
 The :class:`~xnn.gnn.models.mace.MACE` model (`ACEsuit/mace
-<https://github.com/ACEsuit/mace>`_) offers higher-order equivariant message
-passing framework of `Batatia et al. <https://doi.org/10.52202/068431-0830>`_
+<https://github.com/ACEsuit/mace>`_) offers the higher-order equivariant message
+passing framework of `Batatia et al., Adv. Neural Inf. Process. Syst. 35, 11423
+(2022) <https://doi.org/10.52202/068431-0830>`_.
 Every published MACE-MP, MACE-OFF, etc. checkpoint can be fetched through the
 xnn's model hub.
 
@@ -57,7 +58,7 @@ NequIP
 ======
 :class:`~xnn.gnn.models.nequip.NequIP` (`mir-group/nequip
 <https://github.com/mir-group/nequip>`_) is an E(3)-equivariant message passing
-model with gated nonlinearities (`Batzner et al.
+model with gated nonlinearities (`Batzner et al., Nat. Commun. 13, 2453 (2022)
 <https://doi.org/10.1038/s41467-022-29939-5>`_).
 
 .. code-block:: yaml
@@ -81,8 +82,8 @@ Allegro
 =======
 :class:`~xnn.gnn.models.allegro.Allegro` (`mir-group/allegro
 <https://github.com/mir-group/allegro>`_ v0.3.0) is a strictly local equivariant
-many-body potential without message passing (`Musaelian et al.
-<https://doi.org/10.1038/s41467-023-36329-y>`_).
+many-body potential without message passing (`Musaelian et al., Nat. Commun. 14,
+579 (2023) <https://doi.org/10.1038/s41467-023-36329-y>`_).
 
 .. code-block:: yaml
 
@@ -105,7 +106,8 @@ CACE
 ====
 :class:`~xnn.gnn.models.cace.CACE` (`BingqingCheng/cace
 <https://github.com/BingqingCheng/cace>`_) is the Cartesian atomic cluster
-expansion of `Cheng <https://doi.org/10.1038/s41524-024-01332-4>`_. It builds
+expansion of `Cheng, npj Comput. Mater. 10, 157 (2024)
+<https://doi.org/10.1038/s41524-024-01332-4>`_. It builds
 body-ordered invariants from Cartesian monomials, with optional message passing
 (it does not required e3nn).
 
@@ -128,7 +130,8 @@ AIMNet2
 =======
 :class:`~xnn.gnn.models.aimnet2.AIMNet2` (`isayevlab/aimnetcentral
 <https://github.com/isayevlab/aimnetcentral>`_) is the atoms-in-molecules
-network of `Anstine et al. <https://doi.org/10.1039/D4SC08572H>`_ for neutral,
+network of `Anstine et al., Chem. Sci. 16, 10228 (2025)
+<https://doi.org/10.1039/D4SC08572H>`_ for neutral,
 charged and open-shell molecules. It predicts partial charges that sum exactly
 to the net charge and adds their Coulomb energy. The six published families can
 be fetched through the model hub.
@@ -148,7 +151,7 @@ scratch, set ``n_features``, ``n_rbf``, ``n_interactions``, ``hidden``,
 SchNet
 ======
 :class:`~xnn.gnn.models.schnet.SchNet` is the continuous-filter convolutional
-network of `Schütt et al.
+network of `Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
 <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_,
 built from the paper with its architecture as the defaults.
 
@@ -172,8 +175,10 @@ DimeNet and DimeNet++
 :class:`~xnn.gnn.models.dimenet.DimeNet` and
 :class:`~xnn.gnn.models.dimenet.DimeNetPP` (`gasteigerjo/dimenet
 <https://github.com/gasteigerjo/dimenet>`_) are the directional message passing
-networks of Gasteiger et al. (`DimeNet <https://arxiv.org/abs/2003.03123>`_, and
-`DimeNet++ <https://arxiv.org/abs/2011.14115>`_). Messages live on directed
+networks of `Gasteiger et al., Int. Conf. Learn. Represent. (2020)
+<https://arxiv.org/abs/2003.03123>`_ and
+`Gasteiger et al., NeurIPS Workshop on Machine Learning for Molecules (2020)
+<https://arxiv.org/abs/2011.14115>`_. Messages live on directed
 edges and are updated from the distances and angles of neighboring edges.
 DimeNet++ replaces the bilinear interaction with a cheaper one.
 
@@ -197,7 +202,10 @@ GemNet
 ======
 :class:`~xnn.gnn.models.gemnet.GemNet` (`TUM-DAML/gemnet_pytorch
 <https://github.com/TUM-DAML/gemnet_pytorch>`_) is the geometric message
-passing network of `Gasteiger et al. <https://arxiv.org/abs/2106.08903>`_ Edge
+passing network of `Gasteiger et al., Adv. Neural Inf. Process. Syst. 34, 6790
+(2021)
+<https://proceedings.neurips.cc/paper/2021/hash/35cf8659cfcb13224cbd47863a34fc58-Abstract.html>`_.
+Edge
 embeddings are updated from neighboring edges (distances and angles) and, with
 ``quadruplets``, from edges two hops away (adding dihedral angles). The trainer
 fits its scaling factors on the training structures before the first epoch.
@@ -225,7 +233,8 @@ cannot be combined with LES or dispersion terms or exported to TorchScript.
 PaiNN
 =====
 :class:`~xnn.gnn.models.painn.PaiNN` is the equivariant message passing network
-of `Schütt et al. <https://arxiv.org/abs/2102.03150>`_ with scalar and vector
+of `Schütt et al., Proc. Mach. Learn. Res. 139, 9377 (2021)
+<https://proceedings.mlr.press/v139/schutt21a.html>`_ with scalar and vector
 features, matching ``schnetpack``. Optional heads predict dipole moments and
 polarizability tensors, trained with ``dipole_weight`` /
 ``polarizability_weight`` on data that has ``dipole`` / ``polarizability``
@@ -252,8 +261,11 @@ TensorNet
 =========
 :class:`~xnn.gnn.models.tensornet.TensorNet` (`torchmd/torchmd-net
 <https://github.com/torchmd/torchmd-net>`_) is the Cartesian tensor network of
-`Simeon and De Fabritiis <https://arxiv.org/abs/2306.06482>`_, the model of
-TorchMD-Net 2.0. Here, every atom carries rank-2 tensors whose scalar, vector
+`Simeon and De Fabritiis, Adv. Neural Inf. Process. Syst. 36, 37334 (2023)
+<https://doi.org/10.52202/075280-1623>`_, the model of
+TorchMD-Net 2.0 (`Pelaez et al., J. Chem. Theory Comput. 20, 4076 (2024)
+<https://doi.org/10.1021/acs.jctc.4c00253>`_). Here, every atom carries rank-2
+tensors whose scalar, vector
 and traceless parts are mixed by matrix products. A ``total_charge`` of the
 structure enters the products.
 
@@ -276,7 +288,9 @@ also available.
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN` is the rotation-equivariant
-convolutional network of `Weiler et al. <https://arxiv.org/abs/1807.02547>`_,
+convolutional network of `Weiler et al., Adv. Neural Inf. Process. Syst. 31
+(2018)
+<https://proceedings.neurips.cc/paper/2018/hash/488e4104520c6aab692863cc1dba45af-Abstract.html>`_,
 applied to a voxel grid around each atom (one density channel per species).
 :class:`~xnn.cnn.models.cnn3d.CNN3D` is the conventional 3D CNN baseline with the
 same grids and readout.
@@ -303,7 +317,8 @@ Spherical CNN
 =============
 :class:`~xnn.cnn.models.spherical.SphericalCNN` (`jonas-koehler/s2cnn
 <https://github.com/jonas-koehler/s2cnn>`_) is the rotation-equivariant network
-of `Cohen et al. <https://arxiv.org/abs/1801.10130>`_. Each atom sees its
+of `Cohen et al., Int. Conf. Learn. Represent. (2018)
+<https://arxiv.org/abs/1801.10130>`_. Each atom sees its
 neighbors as signals on a sphere around it, one channel per species, which
 spherical convolutions map to rotation-invariant per-atom energies.
 
@@ -327,7 +342,8 @@ ANI
 ===
 :class:`~xnn.dnn.models.ani.ANI` (`aiqm/torchani
 <https://github.com/aiqm/torchani>`_) is the per-element network over atomic
-environment vectors of `Smith et al. <https://doi.org/10.1039/C6SC05720A>`_.
+environment vectors of `Smith et al., Chem. Sci. 8, 3192 (2017)
+<https://doi.org/10.1039/C6SC05720A>`_.
 The published parameterizations are presets, and each has its training set in
 the data hub:
 
@@ -348,7 +364,8 @@ PhysNet
 =======
 :class:`~xnn.dnn.models.physnet.PhysNet` (`MMunibas/PhysNet
 <https://github.com/MMunibas/PhysNet>`_) is the message passing network of
-`Unke and Meuwly <https://doi.org/10.1021/acs.jctc.9b00181>`_ with explicit
+`Unke and Meuwly, J. Chem. Theory Comput. 15, 3678 (2019)
+<https://doi.org/10.1021/acs.jctc.9b00181>`_ with explicit
 electrostatics and D3 dispersion, translated from TensorFlow to PyTorch. It
 embeds elements directly, so it needs no species list, and also returns
 ``charges`` and ``dipole``.
@@ -367,7 +384,8 @@ embeds elements directly, so it needs no species list, and also returns
 HDNNP
 =====
 High-dimensional neural network potentials cover the four generations of
-`Behler's classification <https://doi.org/10.1021/acs.chemrev.0c00868>`_ and
+the classification of `Behler, Chem. Rev. 121, 10037 (2021)
+<https://doi.org/10.1021/acs.chemrev.0c00868>`_ and
 match the RuNNer code:
 
 - **1G** (``nnp1g``): one network maps the interatomic distances of a fixed
@@ -394,7 +412,8 @@ Equivariant Transformer (ET)
 ============================
 :class:`~xnn.trfnn.models.et.EquivariantTransformer` (`torchmd/torchmd-net
 <https://github.com/torchmd/torchmd-net>`_) is the equivariant transformer of
-`Thölke and De Fabritiis <https://arxiv.org/abs/2202.02541>`_: scalar and vector
+`Thölke and De Fabritiis, Int. Conf. Learn. Represent. (2022)
+<https://arxiv.org/abs/2202.02541>`_: scalar and vector
 features updated by a distance-filtered multi-head attention. The default
 ``vector_cutoff`` applies the TorchMD-Net 2.0 fix that makes the energy
 continuous at the cutoff. Setting it to ``false`` corresponds to the original
@@ -422,7 +441,8 @@ BAMBOO
 ======
 :class:`~xnn.hybnn.models.bamboo.BAMBOO` (`bytedance/bamboo
 <https://github.com/bytedance/bamboo>`_) is the graph equivariant transformer
-of `Gong et al. <https://arxiv.org/abs/2404.07181>`_ with a charge-equilibrium
+of `Gong et al., Nat. Mach. Intell. 7, 543 (2025)
+<https://doi.org/10.1038/s42256-025-01009-7>`_ with a charge-equilibrium
 electrostatic term. It works in kcal/mol and Angstrom and also returns
 ``charges``, ``dipole``, ``energy_nn`` and ``energy_elec``.
 
@@ -440,8 +460,9 @@ electrostatic term. It works in kcal/mol and Angstrom and also returns
 SpookyNet
 =========
 :class:`~xnn.hybnn.models.spookynet.SpookyNet` (`OUnke/SpookyNet
-<https://github.com/OUnke/SpookyNet>`_) is the message passing network of `Unke
-et al. <https://doi.org/10.1038/s41467-021-27504-0>`_ with electronic degrees of
+<https://github.com/OUnke/SpookyNet>`_) is the message passing network of
+`Unke et al., Nat. Commun. 12, 7273 (2021)
+<https://doi.org/10.1038/s41467-021-27504-0>`_ with electronic degrees of
 freedom and nonlocal effects. The total charge and spin enter as embeddings, and
 self-attention over all atoms carries nonlocal effects. The saved reference
 models can be loaded with ``SpookyNet.from_reference_checkpoint(path)``.
@@ -465,7 +486,8 @@ include ``charges`` and ``dipole``.
 ReaxFF / ReaxFF-nn
 ==================
 :class:`~xnn.ffnn.models.reaxff.ReaxFF` is the bond-order reactive force field
-of `van Duin et al. <https://doi.org/10.1021/jp004368u>`_ and its neural
+of `van Duin et al., J. Phys. Chem. A 105, 9396 (2001)
+<https://doi.org/10.1021/jp004368u>`_ and its neural
 variant. Bond orders are created from distances. Therefore, bonds break and form
 smoothly, and any parameter group can be refit by gradient descent.
 
@@ -485,7 +507,8 @@ reaxff``. So, a field refit in xnn runs unchanged in LAMMPS.
 OPLS / L-OPLS
 =============
 :class:`~xnn.ffnn.models.opls.OPLS` is the fixed-topology force field of
-`Jorgensen et al. <https://doi.org/10.1021/ja9621760>`_, matching OpenMM.
+`Jorgensen et al., J. Am. Chem. Soc. 118, 11225 (1996)
+<https://doi.org/10.1021/ja9621760>`_, matching OpenMM.
 ``from_atoms`` assigns the atom types from the SMARTS templates of the
 parameter file, so no type names are needed.
 
@@ -512,7 +535,8 @@ of many parameters against few data well posed (:ref:`training`).
 DREIDING / DREIDING-X6
 ======================
 :class:`~xnn.ffnn.models.dreiding.Dreiding` is the generic force field of
-`Mayo et al. <https://doi.org/10.1021/j100389a010>`_, matching the LAMMPS
+`Mayo et al., J. Phys. Chem. 94, 8897 (1990)
+<https://doi.org/10.1021/j100389a010>`_, matching the LAMMPS
 DREIDING styles. Its parameters are generated from per-atom rules, so it covers
 element combinations nobody tabulated, and those rules are what you train.
 
@@ -529,7 +553,8 @@ Other options, including ``bond_style`` (harmonic / morse), ``angle_style`` and
 
 AMBER (ff94)
 ============
-:class:`~xnn.ffnn.models.amber.Amber` is the force field of `Cornell et al.
+:class:`~xnn.ffnn.models.amber.Amber` is the force field of
+`Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
 <https://doi.org/10.1021/ja00124a002>`_, matching LAMMPS and the AMBER
 programs. Its charges belong to residue templates rather than to atom types:
 ``from_atoms`` matches the residues of the parameter file (amino acids with
@@ -558,7 +583,8 @@ form are further ``.frc`` libraries for this one model.
 CHARMM22
 ========
 :class:`~xnn.ffnn.models.charmm.Charmm` is the all-atom protein force field of
-`MacKerell et al. <https://doi.org/10.1021/jp973084f>`_, matching LAMMPS and
+`MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
+<https://doi.org/10.1021/jp973084f>`_, matching LAMMPS and
 NAMD. Besides the terms AMBER has it carries Urey-Bradley 1,3 terms, harmonic
 impropers, per-type Lennard-Jones parameters for 1,4 pairs and pair-specific
 overrides (NBFIX); 1,4 electrostatics are not scaled. ``from_atoms`` matches
@@ -607,11 +633,66 @@ correction of later CHARMM sets is not implemented, so ``charmm22`` is the
    the same). The fidelity notebook derives those weights from xnn's pair
    list and shows the error of the naive choice.
 
+AMOEBA and HIPPO
+================
+:class:`~xnn.ffnn.models.amoeba.Amoeba` is the polarizable atomic multipole
+force field of `Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
+<https://doi.org/10.1021/jp027815+>`_ and
+`Ponder et al., J. Phys. Chem. B 114, 2549 (2010)
+<https://doi.org/10.1021/jp910674d>`_ (the protein set of
+`Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
+<https://doi.org/10.1021/ct4003702>`_), matching Tinker and the LAMMPS
+AMOEBA package: anharmonic bonds and angles (in-plane at trigonal centers),
+stretch-bend and Urey-Bradley terms, Allinger out-of-plane bends, Fourier and
+pi-torsions, splined torsion-torsion maps, Halgren's buffered 14-7 van der
+Waals form with hydrogen sites displaced along their bonds, permanent
+multipoles through the quadrupole in local frames built from the bonded
+neighbours, and Thole-damped mutual induction with the group-based direct
+field and the connectivity-based 1,4 / 1,5 scaling of the AMOEBA papers.
+:class:`~xnn.ffnn.models.amoeba.Hippo` is the HIPPO force field of
+`Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
+<https://doi.org/10.1021/acs.jctc.1c00628>`_: the same valence terms and
+multipoles with density-based intermolecular terms (charge penetration,
+density-damped induction, multipolar Pauli repulsion, damped dispersion,
+charge transfer) and a charge flux that moves the monopoles with the bond and
+angle geometry. Forces, including the torques of the anisotropic terms, come
+from autograd because the frames are built from the positions inside the
+graph; the induced dipoles come from a differentiable dense solve.
+
+.. code-block:: python
+
+   from xnn.ffnn.models import Amoeba, Hippo
+
+   water = Amoeba.from_atoms(atoms, "amoeba-water-2003", cutoff=30.0)   # a water cluster
+   hippo = Hippo.from_atoms(atoms, "hippo-water-2021", cutoff=30.0)
+   peptide = Amoeba.from_atoms(atoms, "amoebapro13", cutoff=12.0)       # a peptide, water, ions
+   model, structure = Amoeba.from_tinker_xyz("ubiquitin.xyz", "amoebapro13")
+   model = Amoeba.from_atoms(atoms, "amoebapro13", trainable=("torsion", "vdw", "polarizability"))
+
+``cutoff`` truncates the nonbonded terms at the neighbor-list cutoff (no
+switching and no Ewald sum; enclose a cluster for gas-phase work), and
+``polarization`` selects mutual, direct or no induction. The trainable groups
+are the valence tables (``bond``, ``angle``, ``strbnd``, ``urey``, ``opbend``,
+``torsion``, ``pitors``, ``tortor``), the van der Waals ``vdw``, the
+multipoles (``charge``, ``dipole``, ``quadrupole``; trained quadrupoles stay
+traceless), ``polarizability`` and ``thole``, the HIPPO density parameters
+(``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``cflux``) and
+``atom_ref``. ``forward`` reports every term, the monopoles (charge flux
+included), the induced dipoles and the molecular dipole. Libraries are read
+from ``.frc`` files, from Tinker ``.prm`` files and written back to either;
+Tinker ``.xyz`` files (types and connectivity) build the topology directly.
+
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================
 :class:`~xnn.sqmnn.models.PM6` and its siblings are the NDDO semiempirical
-methods of `Stewart <https://doi.org/10.1007/s00894-007-0233-4>`_, matching
-MOPAC. With the published parameters (the default) they reproduce MOPAC, and
+methods of Stewart (PM3: `Stewart, J. Comput. Chem. 10, 209 (1989)
+<https://doi.org/10.1002/jcc.540100208>`_; PM6:
+`Stewart, J. Mol. Model. 13, 1173 (2007)
+<https://doi.org/10.1007/s00894-007-0233-4>`_; PM7: `Stewart, J. Mol. Model. 19,
+1 (2013) <https://doi.org/10.1007/s00894-012-1667-x>`_; PM6-ORG:
+`Stewart and Stewart, J. Mol. Model. 29, 284 (2023)
+<https://doi.org/10.1007/s00894-023-05695-1>`_), matching MOPAC. With the
+published parameters (the default) they reproduce MOPAC, and
 ``trainable`` makes parameter groups refittable with exact gradients through
 the self-consistent field.
 
@@ -637,7 +718,8 @@ carry them.
 Long-range electrostatics (LES)
 -------------------------------
 :class:`~xnn.common.models.les.LatentEwald` implements the latent Ewald
-summation of `Cheng <https://doi.org/10.1038/s41524-025-01577-7>`_. A small
+summation of `Cheng, npj Comput. Mater. 11, 80 (2025)
+<https://doi.org/10.1038/s41524-025-01577-7>`_. A small
 network maps each atom's features to latent charges, and an Ewald sum over them
 adds the long-range energy.
 
@@ -671,9 +753,12 @@ instead.
 Dispersion (D4, D3)
 -------------------
 :class:`~xnn.common.models.d4.D4Dispersion` and
-:class:`~xnn.common.models.d3.D3Dispersion` add the D4 (`Caldeweyher et al.
-<https://doi.org/10.1063/1.5090222>`_) and D3 (`Grimme et al.
-<https://doi.org/10.1063/1.3382344>`_) dispersion corrections, matching
+:class:`~xnn.common.models.d3.D3Dispersion` add the D4 (`Caldeweyher et al., J.
+Chem. Phys. 150, 154122 (2019) <https://doi.org/10.1063/1.5090222>`_) and D3
+(`Grimme et al., J. Chem. Phys. 132, 154104 (2010)
+<https://doi.org/10.1063/1.3382344>`_; BJ damping:
+`Grimme et al., J. Comput. Chem. 32, 1456 (2011)
+<https://doi.org/10.1002/jcc.21759>`_) dispersion corrections, matching
 ``dftd4`` and ``simple-dftd3``. Both also work as standalone models (``d4`` and
 ``d3``).
 

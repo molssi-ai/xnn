@@ -191,16 +191,19 @@ Currently, the following datasets are available:
     ``split``, ``units``.
 
 - ``hdnnp4g``: the four charge-transfer benchmarks of the 4G-HDNNP paper
-  with energies, forces and Hirshfeld charges, as one ``all`` split (needs
-  ase).
+  (`Ko et al., Nat. Commun. 12, 398 (2021)
+  <https://doi.org/10.1038/s41467-020-20427-2>`_) with energies, forces and
+  Hirshfeld charges, as one ``all`` split (needs ase).
   
   - Available arguments: ``system``: ``carbon_chain``, ``ag_clusters``,
     ``nacl_clusters``, ``au2_mgo`` (periodic) or ``au2_mgo_minima`` (its four
     DFT-optimized structures). The molecular sets and the minima are CC BY-NC
     4.0.
 
-- ``spookynet_states``: the electronic-state sets of the SpookyNet paper,
-  2200 Ag3+ / Ag3- clusters or singlet / triplet CH2 molecules at GFN2-xTB
+- ``spookynet_states``: the electronic-state sets of the SpookyNet paper
+  (`Unke et al., Nat. Commun. 12, 7273 (2021)
+  <https://doi.org/10.1038/s41467-021-27504-0>`_), 2200 Ag3+ / Ag3- clusters or
+  singlet / triplet CH2 molecules at GFN2-xTB
   with total charges, spin multiplicities, energies, forces and dipoles.
   
   - Available arguments: ``system`` (``ag3`` or ``carbene``), ``n_train`` /
@@ -220,7 +223,9 @@ Currently, the following datasets are available:
   
   - Available arguments: ``reference`` (``original`` or, for S22, ``revised``).
 
-- ``gmtkn55``: the GMTKN55 database (Goerigk 2017), 55 sets of main-group
+- ``gmtkn55``: the GMTKN55 database (`Goerigk et al., Phys. Chem. Chem. Phys.
+  19, 32184 (2017) <https://doi.org/10.1039/C7CP04913G>`_), 55 sets of
+  main-group
   reaction energies, barrier heights and noncovalent interactions with
   CCSD(T)-quality references in kcal/mol. Returns ``structures`` (species
   with ``total_charge``, ``spin_multiplicity`` and the maintainers' PBEh-3c

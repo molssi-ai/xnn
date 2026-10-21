@@ -1,0 +1,14 @@
+name: amoeba
+cutoff: 12.0                    # nonbonded cutoff in A (plain truncation; enclose the whole cluster for gas-phase work)
+library: amoeba-water-2003      # parameter library: amoeba-water-2003, amoebapro13, a .frc path (file.frc:variant), a Tinker .prm, or a native JSON path
+topology: null                  # topology JSON written by MolecularTopology.save
+tinker_xyz: null                # or a Tinker .xyz file carrying the atom types and connectivity
+types: null                     # or per-atom type names of the library ...
+bonds: null                     # ... with the bond index pairs, e.g. [[0, 1], [0, 2]]
+polarization: mutual            # mutual (self-consistent induced dipoles), direct, or none
+trainable: []                   # parameter groups to refit, e.g. [vdw, torsion, polarizability, charge, dipole, quadrupole]; "all" for every group
+# AMOEBA: anharmonic bonds and angles, stretch-bend, out-of-plane bends, Fourier and
+# pi-torsions, torsion-torsion maps, buffered 14-7 van der Waals, permanent atomic
+# multipoles in local frames and Thole-damped mutual induction (Ren and Ponder 2003,
+# Ponder et al. 2010, Shi et al. 2013). Amoeba.from_atoms types a structure from the
+# library's templates and residue fragments.

@@ -54,7 +54,9 @@ HDNNP (dnn)
 
 The four generations of high-dimensional neural network potentials: their
 defining properties on untrained models, first and second generation on
-rMD17, and the 2G / 3G / 4G comparison of the fourth-generation paper.
+rMD17, and the 2G / 3G / 4G comparison of the fourth-generation paper
+(`Ko et al., Nat. Commun. 12, 398 (2021)
+<https://doi.org/10.1038/s41467-020-20427-2>`_).
 
 .. example-toctree::
    :caption: HDNNP (dnn)
@@ -77,8 +79,10 @@ Training and MD against the original TensorFlow PhysNet.
 SchNet (gnn)
 ============
 
-The paper architecture trained on rMD17 ethanol, then thermostat-free NVE
-dynamics to show energy conservation by construction.
+The architecture of `Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
+<https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_
+trained on rMD17 ethanol, then thermostat-free NVE dynamics to show energy
+conservation by construction.
 
 .. example-toctree::
    :caption: SchNet (gnn)
@@ -89,8 +93,11 @@ dynamics to show energy conservation by construction.
 DimeNet and DimeNet++ (gnn)
 ===========================
 
-The directional message passing papers (Gasteiger *et al.*, ICLR 2020 and
-NeurIPS-W 2020) checked with untrained models: the Bessel and spherical
+The directional message passing papers (`Gasteiger et al., Int. Conf. Learn.
+Represent. (2020) <https://arxiv.org/abs/2003.03123>`_
+and `Gasteiger et al., NeurIPS Workshop on Machine Learning for Molecules (2020)
+<https://arxiv.org/abs/2011.14115>`_) checked with untrained models: the Bessel
+and spherical
 Fourier-Bessel bases, the envelope, twice continuous differentiability across
 the cutoff, the distinguishability argument and the DimeNet++ speed-up. Then
 the MD17 experiment of the paper on rMD17 ethanol: DimeNet, DimeNet++ and
@@ -105,7 +112,9 @@ SchNet trained on 1000 structures, with the learned 2D filters.
 GemNet (gnn)
 ============
 
-The geometric message passing paper (Gasteiger *et al.*, NeurIPS 2021)
+The geometric message passing paper
+(`Gasteiger et al., Adv. Neural Inf. Process. Syst. 34, 6790 (2021)
+<https://proceedings.neurips.cc/paper/2021/hash/35cf8659cfcb13224cbd47863a34fc58-Abstract.html>`_)
 checked with untrained models: the three bases, triplets and quadruplets,
 what the dihedral angle adds, the variance scaling of Fig. 3, smoothness at
 both cutoffs, direct versus conservative forces and the cost of the variants.
@@ -121,8 +130,10 @@ conservation.
 PaiNN (gnn)
 ===========
 
-The equivariant message passing paper (Schütt *et al.*, ICML 2021): the
-architecture and its claims checked with untrained models, the MD17
+The equivariant message passing paper
+(`Schütt et al., Proc. Mach. Learn. Res. 139, 9377 (2021)
+<https://proceedings.mlr.press/v139/schutt21a.html>`_): the architecture and its
+claims checked with untrained models, the MD17
 experiments and ablations of Tables III and IV, the rotational profile of
 substituted ferrocene at short cutoffs (Fig. 4), and the infrared and Raman
 spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
@@ -138,8 +149,12 @@ spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
 TensorNet (gnn)
 ===============
 
-The Cartesian tensor network of TorchMD-Net 2.0 (Simeon and De Fabritiis,
-NeurIPS 2023; Pelaez *et al.*, JCTC 2024): the irreducible decomposition, O(3)
+The Cartesian tensor network of TorchMD-Net 2.0
+(`Simeon and De Fabritiis, Adv. Neural Inf. Process. Syst. 36, 37334 (2023)
+<https://doi.org/10.52202/075280-1623>`_;
+`Pelaez et al., J. Chem. Theory Comput. 20, 4076 (2024)
+<https://doi.org/10.1021/acs.jctc.4c00253>`_): the irreducible decomposition,
+O(3)
 against SO(3) on enantiomers, the total-charge coupling, smoothness and the cost
 of 0 to 3 layers. Then TensorNet on rMD17 aspirin, and TensorNet against ET on a
 QM9 subset at a short budget.
@@ -155,8 +170,10 @@ QM9 subset at a short budget.
 3D steerable CNN (cnn)
 ======================
 
-The Tetris experiment of the 3D steerable CNN paper (Weiler *et al.*,
-NeurIPS 2018): steerable and conventional kernels trained on the eight
+The Tetris experiment of the 3D steerable CNN paper
+(`Weiler et al., Adv. Neural Inf. Process. Syst. 31 (2018)
+<https://proceedings.neurips.cc/paper/2018/hash/488e4104520c6aab692863cc1dba45af-Abstract.html>`_):
+steerable and conventional kernels trained on the eight
 pieces in one orientation and tested under random rotations, with the
 paper's low-pass ablation, the kernel-basis figure and the equivariance of
 the internal fields. Then the same comparison for interatomic potentials:
@@ -172,8 +189,10 @@ evaluated on rotated structures.
 Spherical CNN (cnn)
 ===================
 
-The QM7 experiment of the spherical CNN paper (Cohen *et al.*, ICLR 2018):
-atomization energies from the potentials of the atoms sampled on spheres,
+The QM7 experiment of the spherical CNN paper
+(`Cohen et al., Int. Conf. Learn. Represent. (2018)
+<https://arxiv.org/abs/1801.10130>`_): atomization energies from the potentials
+of the atoms sampled on spheres,
 with the Table 3 network and the DeepSet readout, and the rotation
 invariance of the energy.
 
@@ -220,7 +239,9 @@ Long-range: Latent Ewald Summation (common)
 Dispersion: D4 (common)
 =======================
 
-Reproductions of the D4 paper's examples, a benchmark against the reference
+Reproductions of the examples of the D4 paper
+(`Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019)
+<https://doi.org/10.1063/1.5090222>`_), a benchmark against the reference
 ``dftd4`` with deployment through every channel, and the large-system regime
 pushed to the memory limit of one GPU.
 
@@ -234,8 +255,11 @@ pushed to the memory limit of one GPU.
 Dispersion: D3 (common)
 =======================
 
-Reproductions of the two Grimme papers and a benchmark against
-``simple-dftd3`` for every damping function.
+Reproductions of the two Grimme papers (`Grimme et al., J. Chem. Phys. 132,
+154104 (2010) <https://doi.org/10.1063/1.3382344>`_;
+`Grimme et al., J. Comput. Chem. 32, 1456 (2011)
+<https://doi.org/10.1002/jcc.21759>`_) and a benchmark against ``simple-dftd3``
+for every damping function.
 
 .. example-toctree::
    :caption: Dispersion: D3 (common)
@@ -246,9 +270,12 @@ Reproductions of the two Grimme papers and a benchmark against
 ET (trfnn)
 ================
 
-The equivariant transformer paper (Thölke and De Fabritiis, ICLR 2022): the
-sizes of Tables 4 and 6, the attention weights of section 3.1, equivariance, and
-the cutoff discontinuity that TorchMD-Net 2.0 removed. Then the MD17 protocol of
+The equivariant transformer paper
+(`Thölke and De Fabritiis, Int. Conf. Learn. Represent. (2022)
+<https://arxiv.org/abs/2202.02541>`_): the sizes of Tables 4 and 6, the
+attention weights of section 3.1, equivariance, and the cutoff discontinuity
+that TorchMD-Net 2.0 (`Pelaez et al., J. Chem. Theory Comput. 20, 4076 (2024)
+<https://doi.org/10.1021/acs.jctc.4c00253>`_) removed. Then the MD17 protocol of
 Table 2 on rMD17 aspirin, with and without the fix.
 
 .. example-toctree::
@@ -269,7 +296,8 @@ BAMBOO (hybnn)
 SpookyNet (hybnn)
 ==================
 
-The SpookyNet paper (Unke *et al.*, Nat. Commun. 2021): the building blocks
+The SpookyNet paper (`Unke et al., Nat. Commun. 12, 7273 (2021)
+<https://doi.org/10.1038/s41467-021-27504-0>`_): the building blocks
 checked with untrained models and the published example model, the
 electronic-state surfaces of Ag3+ / Ag3- and singlet / triplet CH2 (Fig. 4),
 the dissociation of diatomics with and without nonlocal interactions
@@ -301,8 +329,12 @@ scan.
 OPLS / L-OPLS (ffnn)
 ====================
 
-Table 1 of the 1996 paper from relaxed dihedral scans, then the L-OPLS
-hexane torsion re-derived by gradient descent to the published coefficients.
+Table 1 of the OPLS-AA paper (`Jorgensen et al., J. Am. Chem. Soc. 118, 11225
+(1996) <https://doi.org/10.1021/ja9621760>`_)
+from relaxed dihedral scans, then the L-OPLS hexane torsion
+(`Siu et al., J. Chem. Theory Comput. 8, 1459 (2012)
+<https://doi.org/10.1021/ct200908r>`_) re-derived by gradient descent to
+the published coefficients.
 
 .. example-toctree::
    :caption: OPLS / L-OPLS (ffnn)
@@ -313,7 +345,9 @@ hexane torsion re-derived by gradient descent to the published coefficients.
 DREIDING (ffnn)
 ===============
 
-Tables XI and XII of the 1990 paper from relaxed scans, then the generators
+Tables XI and XII of the DREIDING paper (`Mayo et al., J. Phys. Chem. 94, 8897
+(1990) <https://doi.org/10.1021/j100389a010>`_)
+from relaxed scans, then the generators
 refit on benzene and tested for transfer to naphthalene and toluene.
 
 .. example-toctree::
@@ -325,8 +359,10 @@ refit on benzene and tested for transfer to naphthalene and toluene.
 AMBER (ffnn)
 ============
 
-Tables 3, 4 and 11 and the dipeptide maps of Figure 2 of the 1995 paper from
-relaxed scans, the normal modes of Tables 6 and 7 from the autograd Hessian,
+Tables 3, 4 and 11 and the dipeptide maps of Figure 2 of the ff94 paper
+(`Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
+<https://doi.org/10.1021/ja00124a002>`_) from relaxed scans, the normal modes of
+Tables 6 and 7 from the autograd Hessian,
 then the backbone torsions refit by gradient descent.
 
 .. example-toctree::
@@ -340,7 +376,9 @@ CHARMM22 (ffnn)
 ===============
 
 The backbone geometries, conformational energies, dipeptide map and NMA
-interaction energies of the 1998 paper, the normal modes of NMA and the
+interaction energies of the CHARMM22 paper
+(`MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
+<https://doi.org/10.1021/jp973084f>`_), the normal modes of NMA and the
 alanine dipeptide from the autograd Hessian, then the backbone torsions
 refit by gradient descent.
 
@@ -351,10 +389,38 @@ refit by gradient descent.
    CHARMM22 normal modes: reproducing Tables 3 and 8 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_normal_modes>
    Refitting the CHARMM22 backbone torsions by gradient descent <nb/examples/ffnn/charmm/charmm_backbone_refit>
 
+AMOEBA and HIPPO (ffnn)
+=======================
+
+The water dimer and cluster energetics of the AMOEBA and HIPPO water papers
+(`Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
+<https://doi.org/10.1021/jp027815+>`_;
+`Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
+<https://doi.org/10.1021/acs.jctc.1c00628>`_; the ten Smith dimers with their
+energy decomposition, the cyclic clusters), the monomer moments, an AMOEBA
+water model refit to HIPPO reference data by gradient descent, and the AMOEBA
+protein force field (`Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
+<https://doi.org/10.1021/ct4003702>`_) on capped
+peptides with the alanine dipeptide map.
+
+.. example-toctree::
+   :caption: AMOEBA and HIPPO (ffnn)
+
+   AMOEBA water: reproducing the dimer and cluster results of Ren and Ponder (2003) <nb/examples/ffnn/amoeba/amoeba_water_clusters>
+   HIPPO water: the Smith dimers and their SAPT decomposition from Rackers et al. (2021) <nb/examples/ffnn/hippo/hippo_water_dimers>
+   Refitting the AMOEBA water model to HIPPO reference data <nb/examples/ffnn/amoeba/amoeba_water_refit>
+   AMOEBA protein force field: typing peptides and the alanine dipeptide map of Shi et al. (2013) <nb/examples/ffnn/amoeba/amoeba_protein_backbone>
+
 Semiempirical methods (sqmnn)
 =============================
 
-The tables of the PM3, PM6, PM7 and PM6-ORG papers reproduced with the published
+The tables of the PM3, PM6, PM7 and PM6-ORG papers (`Stewart, J. Comput. Chem.
+10, 209 (1989) <https://doi.org/10.1002/jcc.540100208>`_;
+`Stewart, J. Mol. Model. 13, 1173 (2007)
+<https://doi.org/10.1007/s00894-007-0233-4>`_; `Stewart, J. Mol. Model. 19, 1
+(2013) <https://doi.org/10.1007/s00894-012-1667-x>`_;
+`Stewart and Stewart, J. Mol. Model. 29, 284 (2023)
+<https://doi.org/10.1007/s00894-023-05695-1>`_) reproduced with the published
 parameters: heats of formation, dipoles and ionization potentials, the modified
 core-core terms, and the S22 / S66 interaction energies; then the parameters refit
 by gradient descent and written back for MOPAC.
@@ -414,6 +480,8 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
    AMBER (ff94): verifying the `xnn` implementation against LAMMPS, AmberTools and the 1995 paper <nb/fidelity_checks/ffnn/amber/amber_verification>
    CHARMM22: verifying the `xnn` implementation against LAMMPS, NAMD/psfgen and the 1998 paper <nb/fidelity_checks/ffnn/charmm/charmm_verification>
+   AMOEBA: verifying the `xnn` implementation against Tinker, LAMMPS and the papers <nb/fidelity_checks/ffnn/amoeba/amoeba_verification>
+   HIPPO: verifying the `xnn` implementation against Tinker, LAMMPS and the 2021 paper <nb/fidelity_checks/ffnn/hippo/hippo_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
 
 Parity checks

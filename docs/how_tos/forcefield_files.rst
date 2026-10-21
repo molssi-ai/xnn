@@ -4,7 +4,7 @@
 Working with Force-field Files
 ******************************
 
-The classical force fields such as ReaxFF, OPLS, DREIDING, AMBER and CHARMM read their parameters
+The classical force fields such as ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA and HIPPO read their parameters
 from the MolSSI/SEAMM ``.frc`` file format (see :mod:`xnn.ffnn.common.frc`),
 developed by MolSSI and used in `SEAMM force-field distribution
 <https://github.com/molssi-seamm/forcefield_step/tree/main/forcefield_step/data>`_.
@@ -31,20 +31,25 @@ union), ``dreiding`` and ``dreiding/X6`` provide the two DREIDING nonbond forms,
 and a dozen published ReaxFF force-field variants live under ``reaxff/`` folder.
 All force-field files are copied verbatim from `SEAMM
 <https://github.com/molssi-seamm/forcefield_step/tree/main/forcefield_step/data>`_
-(BSD-3-Clause). xnn adds ``lopls`` (`Siu et al. (2012)
-<https://doi.org/10.1021/ct200908r>`_) and ``oplsaa-1996`` (the torsions of `the
-original paper <https://doi.org/10.1021/ja9621760>`_), which ``#include``
+(BSD-3-Clause). xnn adds ``lopls`` (`Siu et al., J. Chem. Theory Comput. 8, 1459
+(2012) <https://doi.org/10.1021/ct200908r>`_) and
+``oplsaa-1996`` (the torsions of the original paper,
+`Jorgensen et al., J. Am. Chem. Soc. 118, 11225 (1996)
+<https://doi.org/10.1021/ja9621760>`_), which ``#include``
 ``oplsaa.frc`` and override a few rows, and the electrolyte-water ReaxFF field
-of `Fedkin et al. (2019) <https://doi.org/10.1021/acs.jpca.8b10453>`_ as,
+of `Fedkin et al., J. Phys. Chem. A 123, 2125 (2019)
+<https://doi.org/10.1021/acs.jpca.8b10453>`_ as
 ``reaxff/CHOLiNaKCsFClI_Fedkin_2019``. ``ff94`` (``amber.frc``) is the AMBER
-force field of `Cornell et al. (1995) <https://doi.org/10.1021/ja00124a002>`_,
+force field of `Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
+<https://doi.org/10.1021/ja00124a002>`_,
 converted from the public-domain AMBER parameter and residue files: its
 torsions use the multi-term ``torsion_fourier`` section, its impropers the
 ``improper_fourier`` section (the key order carries meaning, the central atom
 third), and its residues are ``#fragments`` whose SMARTS carry atom maps in
 template order together with ``atom names``, ``atom types`` and ``charges``.
 ``charmm22`` (``charmm22.frc``) is the CHARMM22 protein force field of
-`MacKerell et al. (1998) <https://doi.org/10.1021/jp973084f>`_ with TIP3P
+`MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
+<https://doi.org/10.1021/jp973084f>`_ with TIP3P
 water and ions, converted from the freely distributed CHARMM parameter and
 topology files (the CMAP block left out): it adds the ``urey_bradley``,
 ``improper_harmonic`` (key as written, the central atom first, matched in
@@ -52,6 +57,31 @@ either direction), ``nonbond_1-4(12-6)`` (the types with their own 1,4
 Lennard-Jones values) and ``nonbond_pair(12-6)`` (NBFIX overrides) sections,
 and its ``#fragments`` also carry each residue's ``impropers`` by atom name,
 with ``-`` / ``+`` prefixes for the atoms of the neighbouring residues.
+
+``amoeba-water-2003`` (``amoeba_water_2003.frc``, Table 1 of
+`Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
+<https://doi.org/10.1021/jp027815+>`_), ``hippo-water-2021``
+(``hippo_water_2021.frc``, Table S1 of
+`Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
+<https://doi.org/10.1021/acs.jctc.1c00628>`_) and ``amoebapro13``
+(``amoebapro13.frc``, the protein set of
+`Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
+<https://doi.org/10.1021/ct4003702>`_ converted from the MIT-licensed
+``amoeba2013.xml`` of OpenMM) are the polarizable multipole force fields:
+their valence tables use the ``amoeba_bond`` / ``amoeba_angle`` /
+``amoeba_angle_inplane`` / ``stretch_bend`` / ``urey_bradley`` /
+``amoeba_out_of_plane`` / ``torsion_fourier`` / ``pi_torsion`` sections and
+the JSON ``torsion_torsion`` grids, the nonbonded ones ``buffered_14-7`` (with
+pair overrides), ``atomic_multipole`` (keyed by the atom type and its three
+frame-defining types, dipoles in e bohr and quadrupoles in e bohr^2),
+``polarizability`` (with the polarization-group types), and for HIPPO
+``charge_penetration``, ``charge_transfer``, ``pauli_repulsion``,
+``damped_dispersion``, ``bond_charge_flux`` and ``angle_charge_flux``; the
+force-field definition (anharmonic coefficients, combining rules, scale
+factors) sits in ``#metadata`` and the atom classes in ``#equivalence``. The
+same libraries read from and write to Tinker ``.prm`` files
+(:func:`~xnn.ffnn.models.amoebalib.read_tinker_prm`,
+:func:`~xnn.ffnn.models.amoebalib.write_tinker_prm`).
 
 Every model and reader takes the same **spec**: a variant name, a path to a
 ``.frc`` file, or ``"<path>.frc:<variant>"``.
