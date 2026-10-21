@@ -555,6 +555,58 @@ per-atom ``charge`` (held to the system's total charge by
 Fourier terms stay fixed. Later AMBER parameter sets of the same functional
 form are further ``.frc`` libraries for this one model.
 
+CHARMM22
+========
+:class:`~xnn.ffnn.models.charmm.Charmm` is the all-atom protein force field of
+`MacKerell et al. <https://doi.org/10.1021/jp973084f>`_, matching LAMMPS and
+NAMD. Besides the terms AMBER has it carries Urey-Bradley 1,3 terms, harmonic
+impropers, per-type Lennard-Jones parameters for 1,4 pairs and pair-specific
+overrides (NBFIX); 1,4 electrostatics are not scaled. ``from_atoms`` matches
+the residue templates of the parameter file (amino acids with their terminal,
+capped and patched forms, TIP3P water, ions) to assign types, charges and the
+residues' impropers, and types small model compounds from SMARTS templates.
+
+.. code-block:: python
+
+   from xnn.ffnn.models import Charmm
+
+   model = Charmm.from_atoms(atoms, "charmm22", cutoff=12.0)   # a peptide, water, ions
+   model = Charmm.from_atoms(atoms, "charmm22", trainable=("dihedral_k", "ub_k", "charge"))
+
+``cutoff``, ``switch_width``, ``fudge_qq`` (CHARMM's ``e14fac``) and
+``coulomb_constant`` (332.0716 of the CHARMM program by default; NAMD and
+LAMMPS use 332.0636 and 332.06371) are available. The trainable groups are the
+force constants (``bond_k``, ``angle_k``, ``ub_k``, ``dihedral_k``,
+``improper_k``), the equilibrium values (``bond_r0``, ``angle_theta0``,
+``ub_s0``), the Lennard-Jones ``rstar`` / ``epsilon`` with their 1,4 and
+pair-override counterparts, the per-atom ``charge`` and ``atom_ref``;
+periodicities, phases and improper reference angles stay fixed. The CMAP
+correction of later CHARMM sets is not implemented, so ``charmm22`` is the
+1998 force field.
+
+.. note::
+
+   **1,4 interactions in rings of six atoms or fewer.** CHARMM ties its 1,4
+   pairs to the dihedrals: every dihedral i-j-k-l implies a Lennard-Jones and
+   Coulomb pair between i and l. In a six-membered ring the para atoms are
+   1,4 both ways round, so two dihedrals reach the same pair; in a
+   five-membered ring a "1,4" pair is 1,3 the other way round, and in a
+   four-membered ring it is bonded. The CHARMM rule is that the shortest bond
+   path wins and that a pair counts once, whatever the number of dihedrals
+   (or Fourier terms) that reach it. xnn builds its 1,4 list that way from
+   the topology (:class:`~xnn.ffnn.models.topology.MolecularTopology`), as
+   CHARMM, NAMD, GROMACS and OpenMM do, so proline, the aromatic side chains
+   and small cyclic molecules are right by construction. The exception is
+   LAMMPS, where ``dihedral_style charmm`` evaluates the 1,4 pair *per
+   dihedral* with a weight the user supplies: a data file that writes the
+   weight 1 everywhere double counts the para pairs of six-membered rings
+   and adds 1,2 / 1,3 pairs across five- and four-membered rings. When
+   comparing with or exporting to LAMMPS, set the weight to 1/2 in
+   six-membered rings, 0 in four- and five-membered rings and on all but one
+   of the terms sharing a quadruple (``dihedral_style charmmfsw`` behaves
+   the same). The fidelity notebook derives those weights from xnn's pair
+   list and shows the error of the naive choice.
+
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================
 :class:`~xnn.sqmnn.models.PM6` and its siblings are the NDDO semiempirical
