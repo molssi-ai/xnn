@@ -329,6 +329,19 @@ SECTION_SCHEMA: dict[str, dict] = {
                       "form": "sigma-eps",
                       "constants": [("sigma", "Å", float),
                                     ("eps", "kcal/mol", float)]},
+    # Lennard-Jones parameters an atom type uses in its 1,4 interactions
+    # only (CHARMM); types without a row keep their nonbond(12-6) values
+    "nonbond_1-4(12-6)": {"n_atoms": 1, "symmetry": "none", "type": "pair 1-4",
+                          "form": "sigma-eps",
+                          "constants": [("sigma", "Å", float),
+                                        ("eps", "kcal/mol", float)]},
+    # Pair-specific Lennard-Jones overrides (the NBFIX of CHARMM): rmin is
+    # the minimum distance of the pair itself, the 1,4 columns are optional
+    "nonbond_pair(12-6)": {"n_atoms": 2, "symmetry": "like_bond", "type": "pair",
+                           "constants": [("rmin", "Å", float),
+                                         ("eps", "kcal/mol", float),
+                                         ("rmin14", "Å", float),
+                                         ("eps14", "kcal/mol", float)]},
     "nonbond(9-6)": {"n_atoms": 1, "symmetry": "none", "type": "pair",
                      "form": "rmin-eps",
                      "constants": [("rmin", "Å", float),
@@ -363,6 +376,13 @@ SECTION_SCHEMA: dict[str, dict] = {
                         "type": "angle",
                         "constants": [("Theta0", "degree", float),
                                       ("K2", "kcal/mol/radian^2", float)]},
+    # The Urey-Bradley 1,3 term of CHARMM, E = K2 (S - S0)^2 on the distance
+    # between the outer atoms of an angle; a separate interaction class so
+    # that angle lookups never return it
+    "urey_bradley": {"n_atoms": 3, "symmetry": "like_angle",
+                     "type": "urey-bradley",
+                     "constants": [("S0", "Å", float),
+                                   ("K2", "kcal/mol/Å^2", float)]},
     "quartic_angle": {"n_atoms": 3, "symmetry": "like_angle", "type": "angle",
                       "constants": [("Theta0", "degree", float),
                                     ("K2", "kcal/mol/radian^2", float),
@@ -401,14 +421,9 @@ SECTION_SCHEMA: dict[str, dict] = {
     # (the AMBER form); a row carries one to four (K, n, Phi0) triples
     "torsion_fourier": {"n_atoms": 4, "symmetry": "like_torsion",
                         "type": "torsion",
-                        "constants": [("K1", "kcal/mol", float), ("n1", "", int),
-                                      ("Phi0_1", "degree", float),
-                                      ("K2", "kcal/mol", float), ("n2", "", int),
-                                      ("Phi0_2", "degree", float),
-                                      ("K3", "kcal/mol", float), ("n3", "", int),
-                                      ("Phi0_3", "degree", float),
-                                      ("K4", "kcal/mol", float), ("n4", "", int),
-                                      ("Phi0_4", "degree", float)]},
+                        "constants": [c for m in range(1, 7) for c in
+                                      ((f"K{m}", "kcal/mol", float), (f"n{m}", "", int),
+                                       (f"Phi0_{m}", "degree", float))]},
     # The same periodic form on an improper quadruple I-J-K-L with the central
     # atom K third and L the distinguished outer atom, evaluated as the
     # dihedral over the atoms in the order given (AMBER); the key is kept as
@@ -419,6 +434,14 @@ SECTION_SCHEMA: dict[str, dict] = {
                                        ("Phi0_1", "degree", float),
                                        ("K2", "kcal/mol", float), ("n2", "", int),
                                        ("Phi0_2", "degree", float)]},
+    # The CHARMM improper, E = K2 (Chi - Chi0)^2 with Chi the dihedral angle
+    # over the four atoms in the order given (the central atom first in the
+    # CHARMM topology files); the key is kept as written, a parameter row
+    # matches a quadruple in either direction with X wildcards
+    "improper_harmonic": {"n_atoms": 4, "symmetry": "none",
+                          "type": "out-of-plane",
+                          "constants": [("K2", "kcal/mol/radian^2", float),
+                                        ("Chi0", "degree", float)]},
     "wilson_out_of_plane": {"n_atoms": 4, "symmetry": "like_oop",
                             "type": "out-of-plane",
                             "constants": [("K", "kcal/mol/radian^2", float),

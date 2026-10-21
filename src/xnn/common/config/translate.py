@@ -271,6 +271,23 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "scale_14_vdw": "fudge_lj",
         "scale_14_coulomb": "fudge_qq",
     },
+    # CHARMM spellings used by the CHARMM program, NAMD and OpenMM-style inputs
+    "charmm": {
+        "frc": "library",
+        "forcefield": "library",
+        "prm": "library",
+        "parameters": "library",
+        "parameter_file": "library",
+        "ffield": "library",
+        "cutnb": "cutoff",
+        "ctofnb": "cutoff",
+        "rvdw": "cutoff",
+        "pair_cutoff": "cutoff",
+        "e14fac": "fudge_qq",
+        "scale_14_coulomb": "fudge_qq",
+        "1-4scaling": "fudge_qq",
+        "ccelec": "coulomb_constant",
+    },
     # DREIDING spellings used by LAMMPS / Cerius2-style inputs
     "dreiding": {
         "forcefield": "ffield",
