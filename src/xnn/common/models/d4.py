@@ -1,4 +1,4 @@
-"""DFT-D4 London dispersion: a charge-dependent correction for any xnn model.
+"""D4 London dispersion: a charge-dependent correction for any xnn model.
 
 Implements the D4 model of Caldeweyher *et al.*, *J. Chem. Phys.* **150**,
 154122 (2019) (doi:10.1063/1.5090222) in pure PyTorch, as an additive
@@ -1139,7 +1139,7 @@ class DFTD4(nn.Module, FastPathModule):
 
 @register_model("d4")
 class D4Dispersion(DispersionCorrection):
-    """DFT-D4 dispersion as an xnn potential, standalone or wrapped around a model.
+    """D4 dispersion as an xnn potential, standalone or wrapped around a model.
 
     Standalone (``model=None``) it is the pure D4 dispersion energy -- what
     ``dftd4`` computes -- and is registered as the model ``"d4"``. Given a

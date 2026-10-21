@@ -668,8 +668,8 @@ Molecules use the exact real-space sum. Models that predict their own charges
 (AIMNet2, PhysNet, SpookyNet, BAMBOO, HDNNP 3G/4G) use their own electrostatics
 instead.
 
-Dispersion (DFT-D4, DFT-D3)
----------------------------
+Dispersion (D4, D3)
+-------------------
 :class:`~xnn.common.models.d4.D4Dispersion` and
 :class:`~xnn.common.models.d3.D3Dispersion` add the D4 (`Caldeweyher et al.
 <https://doi.org/10.1063/1.5090222>`_) and D3 (`Grimme et al.

@@ -33,8 +33,8 @@ Add-on terms: LES long-range and D4 dispersion
 ----------------------------------------------
 Two wrappers can sit on top of a core model, in either order or together:
 :class:`~xnn.common.models.les.LatentEwald` (an Ewald energy over latent
-charges) and :class:`~xnn.common.models.dispersion.DispersionCorrection` (the DFT-D3 /
-DFT-D4 corrections; D4's EEQ charges couple every atom of the structure
+charges) and :class:`~xnn.common.models.dispersion.DispersionCorrection` (the D3 /
+D4 corrections; D4's EEQ charges couple every atom of the structure
 through a dense linear system). Both are **global**: they do not decompose into a
 local, per-domain neighbor list. A model exported with either must be driven
 with the whole system on one rank (``forward``, or ``forward_lammps`` with a

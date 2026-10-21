@@ -1,4 +1,4 @@
-"""Grimme DFT-D3 London dispersion: a geometry-dependent correction for any xnn model.
+"""Grimme D3 London dispersion: a geometry-dependent correction for any xnn model.
 
 Implements the D3 model of Grimme, Antony, Ehrlich & Krieg, *J. Chem. Phys.*
 **132**, 154104 (2010) with the damping functions of that paper (zero
@@ -842,7 +842,7 @@ _D3_KEYS = ("damping", "s6", "s8", "s9", "a1", "a2", "rs6", "rs8", "alp", "bet",
 
 @register_model("d3")
 class D3Dispersion(DispersionCorrection):
-    """DFT-D3 dispersion as an xnn potential, standalone or wrapped around a model.
+    """D3 dispersion as an xnn potential, standalone or wrapped around a model.
 
     See :class:`~xnn.common.models.dispersion.DispersionCorrection` for the
     wrapper semantics and :class:`DFTD3` for the options. Enable from a config

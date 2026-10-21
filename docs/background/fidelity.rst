@@ -104,7 +104,7 @@ Numerical agreement under identical weights involves:
   upstream's ``forces + qeq_force``.
 - **LES** (``cace.modules.EwaldPotential``): ``LatentEwald(CACE)`` reproduces
   CACE-LR to float32 round-off and each kernel to about 1e-16 in float64.
-- **DFT-D4 and DFT-D3** (`dftd4 <https://github.com/dftd4/dftd4>`_,
+- **D4 and D3** (`dftd4 <https://github.com/dftd4/dftd4>`_,
   `simple-dftd3 <https://github.com/dftd3/simple-dftd3>`_): energies to about
   1e-16 hartree, gradients and virials to about 1e-17, for every damping
   function. The matrix-free D4 regime differs by the reference's own Ewald

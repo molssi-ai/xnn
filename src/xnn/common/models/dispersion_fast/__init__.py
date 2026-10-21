@@ -1,4 +1,4 @@
-"""Fast paths of the dispersion terms (DFT-D3, DFT-D4).
+"""Fast paths of the dispersion terms (D3, D4).
 
 Profiled on periodic water boxes (5k-24k atoms, energy + forces + stress), the
 reference D4 spends its time in two places: the large-regime EEQ solve above

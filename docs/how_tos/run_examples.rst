@@ -87,7 +87,7 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
   conformational energetics and normal modes.
 - ``sqmnn/nddo`` reproduces the PM3, PM6, PM6-ORG and PM7 papers and refits the
   NDDO parameters.
-- ``common/d3`` and ``common/d4`` hold the DFT-D3 and DFT-D4 paper experiment
+- ``common/d3`` and ``common/d4`` hold the D3 and D4 paper experiment
   reproductions, benchmarks and a large-system study.
 - ``common/les`` creates long-range binding curves for charged and polar
   dimers.

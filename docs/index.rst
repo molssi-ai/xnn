@@ -34,7 +34,7 @@ xnn offers several benefits out-of-the-box:
 - **Fine-tuning, benchmarking and multi-GPU training** from a config file
   and the ``xnn`` command.
 - **Physics add-ons for any model.** Latent Ewald long-range electrostatics and
-  DFT-D3 / DFT-D4 dispersion can be added to any short-range model.
+  D3 / D4 dispersion can be added to any short-range model.
 - **Fast paths.** Fused GPU kernels for the expensive blocks, switched on
   per run without changing the model.
 
@@ -154,7 +154,7 @@ Models at a glance
    * - Hybrid neural networks (``hybnn``)
      - BAMBOO, SpookyNet
    * - Add-ons for any model (``common``)
-     - LES long-range electrostatics, DFT-D3 and DFT-D4 dispersion
+     - LES long-range electrostatics, D3 and D4 dispersion
 
 Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every model trains,
