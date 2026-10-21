@@ -1,0 +1,190 @@
+!MolSSI forcefield 1
+
+#define amoeba-water-2003
+
+!Version      Ref  Section                          Label
+!---------  -----  -------------------------------  --------------
+2003.1         1  metadata                         amoeba-water-2003
+2003.1         1  atom_types                       amoeba-water-2003
+2003.1         1  equivalence                      amoeba-water-2003
+2003.1         1  buffered_14-7                    amoeba-water-2003
+2003.1         1  amoeba_bond                      amoeba-water-2003
+2003.1         1  amoeba_angle                     amoeba-water-2003
+2003.1         1  urey_bradley                     amoeba-water-2003
+2003.1         1  atomic_multipole                 amoeba-water-2003
+2003.1         1  polarizability                   amoeba-water-2003
+2003.1         1  templates                        amoeba-water-2003
+#end
+
+#metadata amoeba-water-2003
+
+!Version  Ref  Parameter        Value                               Description
+!-------  ---  ---------------  ----------------------------------  --------------------------------------------------------------
+ 2003.1   1    ff_form          amoeba                              The functional form of the forcefield
+ 2003.1   1    charges          multipole                           Permanent atomic multipoles per atom type
+ 2003.1   1    forcefield       AMOEBA-WATER-2003                   Name of the parameter set
+ 2003.1   1    bond-cubic       -2.55                               Cubic bond coefficient (1/A)
+ 2003.1   1    bond-quartic     3.793125                            Quartic bond coefficient (1/A^2)
+ 2003.1   1    angle-cubic      -0.014                              Cubic angle coefficient (1/degree)
+ 2003.1   1    angle-quartic    5.6e-05                             Quartic angle coefficient (1/degree^2)
+ 2003.1   1    angle-pentic     -7e-07                              Pentic angle coefficient (1/degree^3)
+ 2003.1   1    angle-sextic     2.2e-08                             Sextic angle coefficient (1/degree^4)
+ 2003.1   1    opbendtype       ALLINGER                            Out-of-plane angle definition (ALLINGER or W-D-C)
+ 2003.1   1    opbend-cubic     -0.014                              Cubic out-of-plane coefficient (1/degree)
+ 2003.1   1    opbend-quartic   5.6e-05                             Quartic out-of-plane coefficient (1/degree^2)
+ 2003.1   1    opbend-pentic    -7e-07                              Pentic out-of-plane coefficient (1/degree^3)
+ 2003.1   1    opbend-sextic    2.2e-08                             Sextic out-of-plane coefficient (1/degree^4)
+ 2003.1   1    torsionunit      0.5                                 Factor the Tinker torsion amplitudes were multiplied by
+ 2003.1   1    pitorsunit       1.0                                 Factor the Tinker pi-torsion amplitudes were multiplied by
+ 2003.1   1    tortorunit       1.0                                 Factor the Tinker torsion-torsion grids were multiplied by
+ 2003.1   1    vdwtype          BUFFERED-14-7                       Van der Waals functional form
+ 2003.1   1    radiusrule       CUBIC-MEAN                          Combining rule of the minimum distance
+ 2003.1   1    radiustype       R-MIN                               Meaning of the size parameter
+ 2003.1   1    radiussize       DIAMETER                            Radius or diameter
+ 2003.1   1    epsilonrule      HHG                                 Combining rule of the well depth
+ 2003.1   1    delta-halgren    0.07                                Buffering constant delta of the 14-7 form
+ 2003.1   1    gamma-halgren    0.12                                Buffering constant gamma of the 14-7 form
+ 2003.1   1    dielectric       1.0                                 Dielectric constant
+ 2003.1   1    polarization     MUTUAL                              Induced dipole model (MUTUAL or DIRECT)
+ 2003.1   1    d-equals-p       false                               Use one set of induced dipoles for energy and gradient (HIPPO)
+ 2003.1   1    vdw-12-scale     0.0
+ 2003.1   1    vdw-13-scale     0.0
+ 2003.1   1    vdw-14-scale     1.0
+ 2003.1   1    vdw-15-scale     1.0
+ 2003.1   1    mpole-12-scale   0.0
+ 2003.1   1    mpole-13-scale   0.0
+ 2003.1   1    mpole-14-scale   0.4
+ 2003.1   1    mpole-15-scale   0.8
+ 2003.1   1    polar-12-scale   0.0
+ 2003.1   1    polar-13-scale   0.0
+ 2003.1   1    polar-14-scale   1.0
+ 2003.1   1    polar-15-scale   1.0
+ 2003.1   1    polar-12-intra   0.0
+ 2003.1   1    polar-13-intra   0.0
+ 2003.1   1    polar-14-intra   0.5
+ 2003.1   1    polar-15-intra   1.0
+ 2003.1   1    direct-11-scale  0.0
+ 2003.1   1    direct-12-scale  1.0
+ 2003.1   1    direct-13-scale  1.0
+ 2003.1   1    direct-14-scale  1.0
+ 2003.1   1    mutual-11-scale  1.0
+ 2003.1   1    mutual-12-scale  1.0
+ 2003.1   1    mutual-13-scale  1.0
+ 2003.1   1    mutual-14-scale  1.0
+ 2003.1   1    induce-12-scale  1.0
+ 2003.1   1    induce-13-scale  1.0
+ 2003.1   1    induce-14-scale  1.0
+ 2003.1   1    induce-15-scale  1.0
+ 2003.1   1    rep-12-scale     0.0
+ 2003.1   1    rep-13-scale     0.0
+ 2003.1   1    rep-14-scale     1.0
+ 2003.1   1    rep-15-scale     1.0
+ 2003.1   1    disp-12-scale    0.0
+ 2003.1   1    disp-13-scale    0.0
+ 2003.1   1    disp-14-scale    1.0
+ 2003.1   1    disp-15-scale    1.0
+ 2003.1   1    model            AMOEBA water (Ren and Ponder 2003)
+
+#atom_types amoeba-water-2003
+
+!Version  Ref  Type  Mass    El  connections  Comment
+!-------  ---  ----  ------  --  -----------  -------
+ 2003.1   1    OW    15.995  O   2            water O
+ 2003.1   1    HW    1.008   H   1            water H
+
+#equivalence amoeba-water-2003
+
+> The equivalent 'type' is the AMOEBA atom class carrying the valence and van der Waals parameters
+
+!Version  Ref  Type  NonB  Bond  Angle  Torsion  OOP
+!-------  ---  ----  ----  ----  -----  -------  ---
+ 2003.1   1    OW    OW    OW    OW     OW       OW
+ 2003.1   1    HW    HW    HW    HW     HW       HW
+
+#buffered_14-7 amoeba-water-2003
+
+> E = eps(ij) [(1 + delta)/(rho + delta)]^7 [(1 + gamma)/(rho^7 + gamma) - 2], rho = r/rmin(ij)
+> rmin is the like-pair minimum distance; rmin(ij) and eps(ij) follow radiusrule and epsilonrule
+> the hydrogen site sits on its bond at reduction x the bond length from the heavy atom
+
+!Version  Ref  I   rmin   eps     reduction
+!-------  ---  --  -----  ------  ---------
+ 2003.1   1    OW  3.405  0.11    1.0
+ 2003.1   1    HW  2.655  0.0135  0.91
+
+#amoeba_bond amoeba-water-2003
+
+> E = K2 dr^2 [1 + bond-cubic dr + bond-quartic dr^2], dr = R - R0
+
+!Version  Ref  I   J   R0      K2
+!-------  ---  --  --  ------  -----
+ 2003.1   1    HW  OW  0.9572  529.6
+
+#amoeba_angle amoeba-water-2003
+
+> E = K2 dTheta^2 [1 + angle-cubic dTheta + ... + angle-sextic dTheta^4] (dTheta in degrees, K2 per radian^2)
+> Theta0_2 / Theta0_3 apply when the center carries 1 / 2 further hydrogens
+
+!Version  Ref  I   J   K   K2     Theta0_1  Theta0_2  Theta0_3
+!-------  ---  --  --  --  -----  --------  --------  --------
+ 2003.1   1    HW  OW  HW  34.05  108.5
+
+#urey_bradley amoeba-water-2003
+
+> E = K2 (S - S0)^2 on the I..K distance
+
+!Version  Ref  I   J   K   S0      K2
+!-------  ---  --  --  --  ------  -----
+ 2003.1   1    HW  OW  HW  1.5537  38.25
+
+#atomic_multipole amoeba-water-2003
+
+> Local frame from the bonded (or 1-3) atoms of the given types: Z X = z-then-x, -Z -X = bisector,
+> Z -X -Y = z-bisect, -Z -X -Y = 3-fold, Z 0 = z-only, 0 = none; a fourth atom Y fixes the chirality
+> dipole in e bohr, traceless quadrupole in e bohr^2 (atomic units, as in the papers and the Tinker files)
+
+!Version  Ref  Type  Z    X    Y  Q         Dx        Dy   Dz        Qxx       Qxy  Qxz       Qyy       Qyz  Qzz
+!-------  ---  ----  ---  ---  -  --------  --------  ---  --------  --------  ---  --------  --------  ---  -------
+ 2003.1   1    OW    -HW  -HW  0  -0.51966  0.0       0.0  0.14279   0.37928   0.0  0.0       -0.41809  0.0  0.03881
+ 2003.1   1    HW    OW   HW   0  0.25983   -0.03859  0.0  -0.05818  -0.03673  0.0  -0.00203  -0.10739  0.0  0.14412
+
+#polarizability amoeba-water-2003
+
+> thole = 0 selects charge-penetration damping; Group lists the atom types of the polarization group
+
+!Version  Ref  I   alpha  thole  Group
+!-------  ---  --  -----  -----  -----
+ 2003.1   1    OW  0.837  0.39   HW
+ 2003.1   1    HW  0.496  0.39   OW
+
+#templates amoeba-water-2003
+
+{
+    "OW": {
+        "2003.1": {
+            "smarts": [
+                "[O:1]([#1])[#1]"
+            ],
+            "description": "water oxygen"
+        }
+    },
+    "HW": {
+        "2003.1": {
+            "smarts": [
+                "[#1:1][O][#1]"
+            ],
+            "description": "water hydrogen"
+        }
+    }
+}
+
+#reference 1
+@Author xnn
+P. Ren and J. W. Ponder, Polarizable Atomic Multipole Water Model for Molecular
+Mechanics Simulation, J. Phys. Chem. B 107, 5933-5947 (2003): Table 1 (all values).
+Force-field definition (anharmonic coefficients, buffered 14-7 combining rules,
+Thole damping, scale factors) from eqs 1-13 of the paper and from J. W. Ponder et al.,
+J. Phys. Chem. B 114, 2549-2564 (2010), eqs 2-12. The Urey-Bradley distance is the
+Table 1 value (1.5537 A); the text quotes 1.5326 A.
+
+#end
