@@ -147,6 +147,10 @@ class MolecularTopology:
     pairs14 : list[tuple[int, int]]
         1,4 pairs (dihedral end atoms, minus any that are also 1,2 or 1,3
         pairs in rings), ``i < j``; the force field scales these.
+    pairs15 : list[tuple[int, int]]
+        1,5 pairs (atoms separated by exactly four bonds, minus any closer
+        pairs in rings), ``i < j``; the polarizable force fields (AMOEBA)
+        scale these.
     charges : list[float]
         Per-atom partial charges in e, for force fields whose charges belong
         to the structure (residue templates, AMBER) rather than to the atom
@@ -171,6 +175,7 @@ class MolecularTopology:
     improper_keys: list[str] = field(default_factory=list)
     exclusions: list[tuple[int, int]] = field(default_factory=list)
     pairs14: list[tuple[int, int]] = field(default_factory=list)
+    pairs15: list[tuple[int, int]] = field(default_factory=list)
     charges: list[float] = field(default_factory=list)
     residues: list = field(default_factory=list)
     residue_names: list = field(default_factory=list)
@@ -308,12 +313,29 @@ class MolecularTopology:
             if pair not in excl:
                 pairs14.add(pair)
 
+        # 1,5 pairs: one bond beyond a dihedral, not already closer
+        pairs15 = set()
+        for i, j, k, l in dihedrals:
+            for m in neighbors[l]:
+                if m in (i, j, k):
+                    continue
+                pair = (min(i, m), max(i, m))
+                if pair not in excl and pair not in pairs14:
+                    pairs15.add(pair)
+            for m in neighbors[i]:
+                if m in (j, k, l):
+                    continue
+                pair = (min(m, l), max(m, l))
+                if pair not in excl and pair not in pairs14:
+                    pairs15.add(pair)
+
         return cls(types=list(types), bonds=norm_bonds,
                    bond_orders=norm_orders, angles=angles,
                    dihedrals=dihedrals,
                    impropers=[tuple(int(x) for x in im) for im in impropers],
                    improper_keys=list(improper_keys),
                    exclusions=sorted(excl), pairs14=sorted(pairs14),
+                   pairs15=sorted(pairs15),
                    charges=[float(q) for q in charges] if charges is not None else [],
                    residues=[None if r is None else (int(r[0]), int(r[1]))
                              for r in residues] if residues is not None else [],
@@ -430,7 +452,7 @@ class MolecularTopology:
         out = MolecularTopology(types=list(self.types) * n_copies,
                                 bonds=[], bond_orders=[], angles=[],
                                 dihedrals=[], impropers=[], improper_keys=[],
-                                exclusions=[], pairs14=[],
+                                exclusions=[], pairs14=[], pairs15=[],
                                 charges=list(self.charges) * n_copies,
                                 residues=[],
                                 residue_names=list(self.residue_names) * n_copies)
@@ -448,6 +470,7 @@ class MolecularTopology:
             out.improper_keys += list(self.improper_keys)
             out.exclusions += shift(self.exclusions, off)
             out.pairs14 += shift(self.pairs14, off)
+            out.pairs15 += shift(self.pairs15, off)
         return out
 
     # persistence

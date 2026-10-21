@@ -446,6 +446,97 @@ SECTION_SCHEMA: dict[str, dict] = {
                             "type": "out-of-plane",
                             "constants": [("K", "kcal/mol/radian^2", float),
                                           ("Chi0", "degree", float)]},
+    # AMOEBA / HIPPO (Tinker-style polarizable force fields). Valence rows
+    # keep the force-field file's own convention: the anharmonic bond and
+    # angle polynomials E = K2 dr^2 (1 + c3 dr + c4 dr^2 ...) take their
+    # cubic .. sextic coefficients from #metadata (bond-cubic, angle-sextic,
+    # ...), as the Tinker and OpenMM files do
+    "amoeba_bond": {"n_atoms": 2, "symmetry": "like_bond", "type": "bond",
+                    "constants": [("R0", "Å", float),
+                                  ("K2", "kcal/mol/Å^2", float)]},
+    # Theta0_1 .. Theta0_3 are the ideal angles for a central atom carrying
+    # 0, 1 or 2 further hydrogens (Allinger's hydrogen environment); a row
+    # with one value uses it everywhere
+    "amoeba_angle": {"n_atoms": 3, "symmetry": "like_angle", "type": "angle",
+                     "constants": [("K2", "kcal/mol/radian^2", float),
+                                   ("Theta0_1", "degree", float),
+                                   ("Theta0_2", "degree", float),
+                                   ("Theta0_3", "degree", float)]},
+    # the in-plane (projected) angle of trigonal centers (Tinker ANGLEP)
+    "amoeba_angle_inplane": {"n_atoms": 3, "symmetry": "like_angle",
+                             "type": "angle",
+                             "constants": [("K2", "kcal/mol/radian^2", float),
+                                           ("Theta0_1", "degree", float),
+                                           ("Theta0_2", "degree", float)]},
+    # stretch-bend coupling E = (K1 dr_IJ + K2 dr_JK) dTheta; K1 belongs to
+    # the first bond of the key as written, so the values swap with a flip
+    "stretch_bend": {"n_atoms": 3, "symmetry": "like_angle",
+                     "type": "stretch-bend",
+                     "constants": [("K1", "kcal/mol/Å/radian", float),
+                                   ("K2", "kcal/mol/Å/radian", float)],
+                     "flip": 1},
+    # out-of-plane bend keyed I J K L with the out-of-plane atom I, the
+    # trigonal center J and the two other substituents K, L (* wildcards);
+    # the key is kept as written
+    "amoeba_out_of_plane": {"n_atoms": 4, "symmetry": "none",
+                            "type": "out-of-plane",
+                            "constants": [("K2", "kcal/mol/radian^2", float)]},
+    # the pi-orbital torsion of two bonded trigonal centers, keyed by the
+    # central bond: E = K2 [1 - cos(2 phi)] with phi between the p-orbitals
+    "pi_torsion": {"n_atoms": 2, "symmetry": "like_bond", "type": "torsion",
+                   "constants": [("K2", "kcal/mol", float)]},
+    # Halgren's buffered 14-7 with the per-class minimum distance (the
+    # like-pair diameter), well depth and the hydrogen reduction factor
+    "buffered_14-7": {"n_atoms": 1, "symmetry": "none", "type": "pair",
+                      "constants": [("rmin", "Å", float),
+                                    ("eps", "kcal/mol", float),
+                                    ("reduction", "", float)]},
+    "buffered_14-7_pair": {"n_atoms": 2, "symmetry": "like_bond", "type": "pair",
+                           "constants": [("rmin", "Å", float),
+                                         ("eps", "kcal/mol", float)]},
+    # permanent atomic multipoles keyed by the atom type and the three
+    # frame-defining atom types (Tinker's signed convention: Z X [Y], 0 for
+    # none, negative for bisector / z-bisect / 3-fold frames); dipoles in
+    # e bohr and traceless quadrupoles in e bohr^2, the atomic units of the
+    # parameter files and of the papers' tables
+    "atomic_multipole": {"n_atoms": 4, "symmetry": "none", "type": "multipole",
+                         "constants": [("Q", "e", float),
+                                       ("Dx", "e*bohr", float), ("Dy", "e*bohr", float),
+                                       ("Dz", "e*bohr", float),
+                                       ("Qxx", "e*bohr^2", float), ("Qxy", "e*bohr^2", float),
+                                       ("Qxz", "e*bohr^2", float), ("Qyy", "e*bohr^2", float),
+                                       ("Qyz", "e*bohr^2", float), ("Qzz", "e*bohr^2", float)]},
+    # dipole polarizability, Thole damping width (0 = charge-penetration
+    # damping) and the atom types of the same polarization group
+    "polarizability": {"n_atoms": 1, "symmetry": "none", "type": "polarize",
+                       "constants": [("alpha", "Å^3", float),
+                                     ("thole", "", float)],
+                       "text": "Group"},
+    "charge_penetration": {"n_atoms": 1, "symmetry": "none", "type": "penetration",
+                           "constants": [("Core", "e", float),
+                                         ("alpha", "1/Å", float)]},
+    "charge_transfer": {"n_atoms": 1, "symmetry": "none", "type": "transfer",
+                        "constants": [("eps", "kcal/mol", float),
+                                      ("alpha", "1/Å", float)]},
+    "pauli_repulsion": {"n_atoms": 1, "symmetry": "none", "type": "repulsion",
+                        "constants": [("K", "kcal/mol*Å", float),
+                                      ("alpha", "1/Å", float),
+                                      ("valence", "e", float)]},
+    "damped_dispersion": {"n_atoms": 1, "symmetry": "none", "type": "dispersion",
+                          "constants": [("C6", "(kcal/mol)^1/2*Å^3", float),
+                                        ("alpha", "1/Å", float)]},
+    # charge flux: the bond term moves J (r - R0) from the first atom of
+    # the key to the second (swapping sign with a flip); the angle term
+    # changes the charges of the outer atoms by Jt1 / Jt2 per radian of
+    # angle deviation and Jb1 / Jb2 per Angstrom of the other bond
+    "bond_charge_flux": {"n_atoms": 2, "symmetry": "like_bond", "type": "charge flux",
+                         "constants": [("J", "e/Å", float)], "sign_flip": True},
+    "angle_charge_flux": {"n_atoms": 3, "symmetry": "like_angle", "type": "charge flux",
+                          "constants": [("Jt1", "e/radian", float),
+                                        ("Jt2", "e/radian", float),
+                                        ("Jb1", "e/Å", float),
+                                        ("Jb2", "e/Å", float)], "flip": 1,
+                          "flip_pairs": 2},
     # ReaxFF sections: keys are element symbols exactly as written (the
     # library keeps the file's orientation of bond and angle types), value
     # columns are named by the header line
@@ -473,7 +564,7 @@ for _g in ("1-8", "9-16"):
         "n_atoms": 2, "symmetry": "none", "type": "reaxff bond",
         "constants": None}
 
-JSON_SECTIONS = ("templates", "fragments")
+JSON_SECTIONS = ("templates", "fragments", "torsion_torsion")
 # parameter names of each nonbond @type, the names @units modifiers refer to
 _NONBOND_FORM_PARAMS = {"sigma-eps": ("sigma", "eps"), "rmin-eps": ("rmin", "eps"),
                         "eps-rmin": ("eps", "rmin"), "A-B": ("A", "B"),
@@ -522,6 +613,31 @@ def register_section_schema(kind: str, n_atoms: Optional[int], symmetry: str,
                                 [tuple(c) if len(c) > 2 else (c[0], c[1], float)
                                  for c in constants]),
                             "text": text, "flip": flip, **extra}
+
+
+def flip_values(schema: dict, values: list) -> list:
+    """Reorder (or negate) a row's values after its key was flipped into
+    canonical order: swap the first ``flip`` values with the next ``flip``
+    for each of ``flip_pairs`` consecutive pairs, and negate every value
+    when the schema sets ``sign_flip`` (a bond charge flux changes direction).
+    Non-numeric tokens are negated as strings."""
+    vals = list(values)
+    flip = int(schema.get("flip", 0) or 0)
+    if flip:
+        for p in range(int(schema.get("flip_pairs", 1) or 1)):
+            a = 2 * p * flip
+            if len(vals) >= a + 2 * flip:
+                vals[a:a + flip], vals[a + flip:a + 2 * flip] = \
+                    vals[a + flip:a + 2 * flip], vals[a:a + flip]
+    if schema.get("sign_flip"):
+        out = []
+        for v in vals:
+            if isinstance(v, str):
+                out.append(v[1:] if v.startswith("-") else "-" + v)
+            else:
+                out.append(-v)
+        vals = out
+    return vals
 
 
 def canonical_key(symmetry: str, atoms: Sequence[str]) -> tuple[tuple, bool]:
@@ -1024,8 +1140,8 @@ class FrcFile:
             version, ref = w[0], w[1]
             key, flipped = canonical_key(symmetry, w[2:2 + n_atoms])
             vals = w[2 + n_atoms:]
-            if flipped and flip:
-                vals = vals[flip:2 * flip] + vals[:flip] + vals[2 * flip:]
+            if flipped and sch:
+                vals = flip_values(sch, vals)
             values: dict = {}
             for idx, c in enumerate(constants):
                 if idx >= len(vals):
@@ -1268,6 +1384,8 @@ class ForceField:
         out = []
         for kind, rows in self.sections.items():
             for row in rows.values():
+                if not isinstance(row, Row):          # JSON sections hold plain entries
+                    continue
                 key = (row.source, row.reference)
                 if key in seen:
                     continue
@@ -1521,10 +1639,17 @@ def make_section(kind: str, label: str, key_columns: Sequence[str],
     sec = Section(kind=kind, label=label, key_columns=list(key_columns),
                   columns=list(columns), annotations=list(annotations),
                   modifiers=dict(modifiers or {}))
+    names = [c[0] for c in sch["constants"]] if sch and sch.get("constants") else list(columns)
     for key, values in rows:
-        ck, _ = canonical_key(sym, key)
+        ck, flipped = canonical_key(sym, key)
+        values = dict(values)
+        if flipped and sch and (sch.get("flip") or sch.get("sign_flip")):
+            ordered = [values.get(n) for n in names]
+            for n, v in zip(names, flip_values(sch, ordered)):
+                if v is not None:
+                    values[n] = v
         sec.rows.append(Row(version=version, reference=reference, key=ck,
-                            values=dict(values)))
+                            values=values))
     return sec
 
 
