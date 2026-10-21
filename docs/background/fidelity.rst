@@ -132,7 +132,7 @@ Numerical agreement under identical weights involves:
   of the paper entry by entry; float32 within 1e-6 relative of float64.
 - **CHARMM22** (MacKerell *et al.* 1998): LAMMPS (harmonic, charmm angle and
   dihedral, harmonic improper and lj/charmm/coul/charmm styles with the
-  CHARMM 1,4 weights) to about 1e-8 kcal/mol on capped peptides, water and
+  CHARMM 1,4 weights) to about 1e-9 kcal/mol on capped peptides, water and
   ions; the atom types, charges and impropers of ``psfgen`` and the energy
   components of NAMD on sequence-built, patched peptides; the parameter files
   and the paper's quoted values entry by entry; float32 within 1e-6 relative
