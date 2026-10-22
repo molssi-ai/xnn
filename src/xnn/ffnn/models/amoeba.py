@@ -84,13 +84,21 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import cell_volume, scatter_sum
 
-from .geometry import TINY, pair_vectors, dihedral_cos_sin
-from .amoebalib import (AmoebaLibrary, read_amoeba, DEFAULT_SETTINGS, MAX_TORSION_TERMS,
-                        KCAL_TO_EV, WILDCARD)
+from .amoeba_ewald import (
+    dispersion_pme,
+    dispersion_real_kernel,
+    ewald_coefficient,
+    ewald_ladder,
+    multipole_pme,
+    multipole_reciprocal_energy,
+    multipole_self_energy,
+    pme_grid_size,
+    self_field_coefficient,
+    switching,
+)
+from .amoebalib import DEFAULT_SETTINGS, KCAL_TO_EV, MAX_TORSION_TERMS, WILDCARD, AmoebaLibrary, read_amoeba
+from .geometry import TINY, dihedral_cos_sin, pair_vectors
 from .topology import MolecularTopology, read_topology, residue_name_list
-from .amoeba_ewald import (dispersion_pme, dispersion_real_kernel, ewald_coefficient, ewald_ladder,
-                           multipole_pme, multipole_reciprocal_energy, multipole_self_energy,
-                           pme_grid_size, self_field_coefficient, switching)
 
 # Tinker's Coulomb constant in kcal A / (mol e^2) and in eV A / e^2
 COULOMB_KCAL = 332.063713
@@ -479,6 +487,10 @@ class AmoebaForceField(nn.Module):
         ``"quadrupole"``, ``"polarizability"``, ``"thole"``, ``"chgpen"``,
         ``"chgtrn"``, ``"repulsion"``, ``"dispersion"``, ``"cflux"``;
         ``"all"`` unfreezes every group.
+    symmetry_mask : bool, optional
+        Keep the dipole and quadrupole components that the library leaves
+        zero (by the symmetry of the local frame) at zero while they train,
+        by default ``True``.
 
     Attributes
     ----------
@@ -492,7 +504,8 @@ class AmoebaForceField(nn.Module):
     """
 
     def __init__(self, library: Union[AmoebaLibrary, str, Path],
-                 trainable: Union[Sequence[str], str] = ()):
+                 trainable: Union[Sequence[str], str] = (),
+                 symmetry_mask: bool = True):
         super().__init__()
         lib = _as_library(library)
         self.library = lib
@@ -620,6 +633,20 @@ class AmoebaForceField(nn.Module):
         make("mpole_q", qs, "charge")
         make("mpole_d", ds, "dipole", shape=(-1, 3), scale=BOHR)
         make("mpole_Q", Qs, "quadrupole", shape=(-1, 3, 3), scale=BOHR * BOHR / 3.0)
+        # components the library leaves zero stay zero while the multipoles train
+        d_mask = torch.tensor(ds, dtype=dtype) != 0
+        Q_mask = torch.tensor(Qs, dtype=dtype) != 0
+        if not symmetry_mask:
+            d_mask, Q_mask = torch.ones_like(d_mask), torch.ones_like(Q_mask)
+        self.register_buffer("mpole_d_mask", d_mask.to(dtype), persistent=False)
+        self.register_buffer("mpole_Q_mask", Q_mask.to(dtype), persistent=False)
+        # total-charge constraints of the bound topologies (rows of multipole-row counts, their
+        # totals and the pseudo-inverse of the rows); derived from the topologies, so not part
+        # of the state dict
+        n_rows = len(qs)
+        self.register_buffer("charge_rows", torch.zeros(0, n_rows, dtype=dtype), persistent=False)
+        self.register_buffer("charge_totals", torch.zeros(0, dtype=dtype), persistent=False)
+        self.register_buffer("charge_proj", torch.zeros(n_rows, 0, dtype=dtype), persistent=False)
         # polarizability per type
         pol = [lib.polarize.get(t, {"alpha": 0.0, "thole": 0.0, "groups": []}) for t in self.type_names]
         make("polarizability", [float(p["alpha"]) for p in pol], "polarizability")
@@ -660,7 +687,7 @@ class AmoebaForceField(nn.Module):
         self._pitors_index = {k: i for i, k in enumerate(self.pitors_keys)}
         self._tortor_index = {k: i for i, k in enumerate(self.tortor_keys)}
         self._mpole_index: dict[str, list[int]] = {}
-        for m, (t, frame) in enumerate(self.multipole_rows):
+        for m, (t, _frame) in enumerate(self.multipole_rows):
             self._mpole_index.setdefault(t, []).append(m)
         self._bndcflux_index = {k: i for i, k in enumerate(self.bndcflux_keys)}
         self._angcflux_index = {k: i for i, k in enumerate(self.angcflux_keys)}
@@ -674,8 +701,71 @@ class AmoebaForceField(nn.Module):
     def class_of(self, type_name: str) -> str:
         return self.class_names[self.type_class[self.type_index(type_name)]]
 
+    # multipole constraints
+    def constrain_charges(self, counts: Tensor, total: float) -> None:
+        """Fix a molecule's total charge across refits of ``charge``.
+
+        Adds the linear constraint ``counts . q == total`` on the multipole
+        row charges ``q``; :attr:`charges` is then the ``mpole_q`` parameter
+        projected onto every constraint registered so far, so the molecule
+        keeps its net charge whatever the optimizer does to the row values.
+        :class:`Amoeba` registers every molecule of its topology at
+        construction; a force field shared by several models accumulates
+        their constraints, identical molecules once.
+
+        Parameters
+        ----------
+        counts : Tensor
+            ``(R,)``, how many atoms of the molecule use each multipole row.
+        total : float
+            The molecule's total charge in e.
+        """
+        row = counts.detach().to(self.charge_rows).reshape(1, -1)
+        if self.charge_rows.shape[0] and bool((self.charge_rows == row).all(1).any()):
+            return
+        self.charge_rows = torch.cat([self.charge_rows, row])
+        self.charge_totals = torch.cat([self.charge_totals, row.new_tensor([float(total)])])
+        self.charge_proj = torch.linalg.pinv(self.charge_rows)
+
+    @property
+    def charges(self) -> Tensor:
+        """Tensor : The row charges satisfying the registered constraints.
+
+        The minimum-norm correction ``A^+ (A q - b)`` is removed from the
+        ``mpole_q`` parameter ``q``, with ``A`` the constraint rows and ``b``
+        their totals; without constraints this is ``q`` itself.
+        """
+        q = self.params["mpole_q"]
+        if self.charge_rows.shape[0] == 0:
+            return q
+        return q - self.charge_proj @ (self.charge_rows @ q - self.charge_totals)
+
+    def effective_multipoles(self) -> tuple[Tensor, Tensor, Tensor]:
+        """The multipoles the model uses.
+
+        The constrained charges, the masked dipoles and the quadrupoles made
+        symmetric, masked and traceless.
+
+        Returns
+        -------
+        tuple of Tensor
+            ``(R,)`` charges in e, ``(R, 3)`` dipoles in e Angstrom and
+            ``(R, 3, 3)`` quadrupoles in e Angstrom^2 / 3, one row per
+            ``(type, frame)`` entry, in the local frames.
+        """
+        d = self.params["mpole_d"] * self.mpole_d_mask
+        Q = self.params["mpole_Q"]
+        Q = 0.5 * (Q + Q.transpose(1, 2)) * self.mpole_Q_mask
+        tr = torch.diagonal(Q, dim1=1, dim2=2).sum(-1) / 3.0
+        Q = Q - tr[:, None, None] * torch.eye(3, dtype=Q.dtype, device=Q.device)
+        return self.charges, d, Q
+
     def export_library(self) -> AmoebaLibrary:
         """The current (possibly trained) parameters as an :class:`AmoebaLibrary`.
+
+        The multipoles are the ones the model uses (see
+        :meth:`effective_multipoles`), so a program reading the exported file
+        evaluates the same model.
 
         Returns
         -------
@@ -729,13 +819,13 @@ class AmoebaForceField(nn.Module):
             lib.pitors_types[k] = {"k": float(P["pitors_k"][m]) / KCAL_TO_EV}
         for m, k in enumerate(self.tortor_keys):
             lib.tortor_types[k]["values"] = (P[f"tortor_f_{m}"] / KCAL_TO_EV).tolist()
+        q_rows, d_rows, Q_rows = (x.detach().cpu().double() for x in self.effective_multipoles())
         for m, (t, frame) in enumerate(self.multipole_rows):
             for e in lib.multipoles[t]:
                 if tuple(str(x) for x in e["frame"]) == frame:
-                    e["q"] = float(P["mpole_q"][m])
-                    e["dipole"] = (P["mpole_d"][m] / BOHR).tolist()
-                    Q = P["mpole_Q"][m] * 3.0 / (BOHR * BOHR)
-                    e["quadrupole"] = Q.tolist()
+                    e["q"] = float(q_rows[m])
+                    e["dipole"] = (d_rows[m] / BOHR).tolist()
+                    e["quadrupole"] = (Q_rows[m] * 3.0 / (BOHR * BOHR)).tolist()
         for i, t in enumerate(self.type_names):
             if t in lib.polarize:
                 lib.polarize[t]["alpha"] = float(P["polarizability"][i])
@@ -841,6 +931,15 @@ class Amoeba(InteratomicPotential):
         otherwise), ``"dense"`` or ``"iterative"``.
     max_iter : int, optional
         Iteration limit of the solve (100).
+    conserve_charge : bool, optional
+        Hold the total charge of every molecule at its library value while
+        ``charge`` trains (a minimum-norm projection of the row charges,
+        registered on the force field), by default ``True``.
+    symmetry_mask : bool, optional
+        Keep the dipole and quadrupole components that the library leaves
+        zero at zero while they train, by default ``True``. The quadrupoles
+        stay symmetric and traceless in any case, and ``export_library``
+        writes the multipoles the model uses.
 
     Notes
     -----
@@ -880,7 +979,9 @@ class Amoeba(InteratomicPotential):
                  dispersion_cutoff: Optional[float] = None,
                  polar_eps: float = 1e-8,
                  solver: str = "auto",
-                 max_iter: int = 100):
+                 max_iter: int = 100,
+                 conserve_charge: bool = True,
+                 symmetry_mask: bool = True):
         super().__init__()
         self.ewald = ewald
         self.ewald_alpha = None if ewald_alpha is None else float(ewald_alpha)
@@ -905,7 +1006,9 @@ class Amoeba(InteratomicPotential):
         self.max_iter = int(max_iter)
         self._force_dense = False
         groups, model_groups = _split_trainable(trainable)
-        self.ff = ffield if isinstance(ffield, AmoebaForceField) else AmoebaForceField(ffield, trainable=groups)
+        self.ff = (ffield if isinstance(ffield, AmoebaForceField)
+                   else AmoebaForceField(ffield, trainable=groups, symmetry_mask=symmetry_mask))
+        self.conserve_charge = bool(conserve_charge)
         if self.ff.model != self.nonbonded:
             raise ValueError(f"library {self.ff.name!r} carries {self.ff.model.upper()} nonbonded terms; "
                              f"use the {self.ff.model.capitalize()} model class")
@@ -1205,6 +1308,29 @@ class Amoeba(InteratomicPotential):
         buf("mpole_row", mp_row, (-1,))
         self.register_buffer("has_mpole", torch.tensor([r >= 0 for r in mp_row], dtype=torch.bool))
 
+        # every molecule (connected component) keeps its total charge while the charges train
+        if self.conserve_charge and any(r >= 0 for r in mp_row):
+            q_rows = ff.charges.detach()
+            seen = [False] * n
+            for start in range(n):
+                if seen[start]:
+                    continue
+                members, stack = [], [start]
+                seen[start] = True
+                while stack:
+                    a = stack.pop()
+                    members.append(a)
+                    for b in neighbors[a]:
+                        if not seen[b]:
+                            seen[b] = True
+                            stack.append(b)
+                counts = torch.zeros(q_rows.shape[0], dtype=q_rows.dtype, device=q_rows.device)
+                for a in members:
+                    if mp_row[a] >= 0:
+                        counts[mp_row[a]] += 1.0
+                if float(counts.sum()) > 0:
+                    ff.constrain_charges(counts, float(counts @ q_rows))
+
         # polarization groups and their connectivity
         group = list(range(n))
 
@@ -1335,8 +1461,8 @@ class Amoeba(InteratomicPotential):
                 def pick(name, candidates):
                     for pool in candidates:
                         for a in pool:
-                            if a not in used and types[a] == name:
-                                used.append(a)
+                            if a not in used and types[a] == name:   # noqa: B023  # called in this iteration
+                                used.append(a)   # noqa: B023
                                 return a
                     return -1
 
@@ -1403,16 +1529,12 @@ class Amoeba(InteratomicPotential):
 
     def _rotated_multipoles(self, data: AtomicGraph, B: int):
         """Global-frame charge, dipole and quadrupole of every atom."""
-        P = self.ff.params
-        n = int(self.frame_type.shape[0])
         row = self.mpole_row.repeat(B).clamp_min(0)
         has = self.has_mpole.repeat(B)
-        q = torch.where(has, P["mpole_q"][row], torch.zeros_like(P["mpole_q"][row]))
-        d_loc = P["mpole_d"][row] * has[:, None].to(P["mpole_d"].dtype)
-        Q_loc = P["mpole_Q"][row] * has[:, None, None].to(P["mpole_Q"].dtype)
-        # keep trained quadrupoles traceless
-        tr = torch.diagonal(Q_loc, dim1=1, dim2=2).sum(-1) / 3.0
-        Q_loc = Q_loc - tr[:, None, None] * torch.eye(3, dtype=Q_loc.dtype, device=Q_loc.device)
+        q_rows, d_rows, Q_rows = self.ff.effective_multipoles()
+        q = torch.where(has, q_rows[row], torch.zeros_like(q_rows[row]))
+        d_loc = d_rows[row] * has[:, None].to(d_rows.dtype)
+        Q_loc = Q_rows[row] * has[:, None, None].to(Q_rows.dtype)
         R, chir = self._frames(data)
         flip = torch.ones_like(d_loc)
         flip[:, 1] = chir
@@ -1752,7 +1874,8 @@ class Amoeba(InteratomicPotential):
             jb1 = torch.where(flip, par[:, 3], par[:, 2])
             jb2 = torch.where(flip, par[:, 2], par[:, 3])
             nbond = int(self.bond_index.shape[1])
-            bsel = (self.cflux_angle_bonds.unsqueeze(1) + torch.arange(B, device=br.device).view(1, B, 1) * nbond).reshape(-1, 2)
+            bsel = (self.cflux_angle_bonds.unsqueeze(1)
+                    + torch.arange(B, device=br.device).view(1, B, 1) * nbond).reshape(-1, 2)
             dr_ab = br[bsel[:, 0]] - P["bond_r0"][bt[bsel[:, 0]]]
             dr_cb = br[bsel[:, 1]] - P["bond_r0"][bt[bsel[:, 1]]]
             dth = theta[sel] - theta0[sel]
@@ -2022,7 +2145,8 @@ class Amoeba(InteratomicPotential):
                 n = A.shape[1] // 3
                 alpha = self.ff.params["polarizability"][self.top_type.repeat(B)]
                 polar = (alpha > 0).to(A.dtype).view(B, n, 1)
-                rhs = (torch.eye(3, dtype=A.dtype, device=A.device).expand(B, n, 3, 3) * polar[..., None]).reshape(B, 3 * n, 3)
+                eye3 = torch.eye(3, dtype=A.dtype, device=A.device).expand(B, n, 3, 3)
+                rhs = (eye3 * polar[..., None]).reshape(B, 3 * n, 3)
                 mu = torch.linalg.solve(A, rhs).reshape(B, n, 3, 3)
                 return mu.sum(1)
         finally:
@@ -2214,8 +2338,9 @@ class Hippo(Amoeba):
         # in cells the real-space Ewald interaction of the total multipoles minus their bare
         # interaction is added and the mesh and self terms complete the sum
         Dc = coulomb_ladder(R, 4)
-        D_ki = derivative_ladder(core_valence_kernel(zi.double(), "i"), R, zi, zk, 3) + [zero]   # valence of i seen by core k
-        D_ik = derivative_ladder(core_valence_kernel(zk.double(), "j"), R, zi, zk, 3) + [zero]   # valence of k seen by core i
+        # valence of i seen by core k, and of k seen by core i
+        D_ki = derivative_ladder(core_valence_kernel(zi.double(), "i"), R, zi, zk, 3) + [zero]
+        D_ik = derivative_ladder(core_valence_kernel(zk.double(), "j"), R, zi, zk, 3) + [zero]
         D_ov = self._overlap_ladder(R, zi, zk, 4)
         e_cc = core_i * core_k * Dc[0]
         e_ck = multipole_energy(val_i, d[i_], Q[i_], core_k, zero3, zeroQ, r_vec, D_ki)
@@ -2348,7 +2473,8 @@ class Hippo(Amoeba):
 # the periodic and solver options of the constructor, also read by from_config
 _OPTION_KEYS = ("ewald", "ewald_alpha", "pewald_alpha", "dewald_alpha", "ewald_cutoff", "pme_grid", "pme_order",
                 "ppme_order", "dpme_grid", "dpme_order", "vdw_cutoff", "vdw_taper", "taper", "repulsion_cutoff",
-                "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "solver", "max_iter")
+                "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "solver", "max_iter", "conserve_charge",
+                "symmetry_mask")
 
 
 def _grid_option(value) -> Optional[list]:
@@ -2435,7 +2561,8 @@ def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_it
         p = z + (rz_new / rz) * p
         rz = rz_new
     else:
-        warnings.warn(f"the induced dipoles did not converge to {tol} Debye in {max_iter} iterations")
+        warnings.warn(f"the induced dipoles did not converge to {tol} Debye in {max_iter} iterations",
+                      stacklevel=2)
     return x
 
 
