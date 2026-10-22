@@ -51,11 +51,15 @@ Conventions and scope
   are converted to e Angstrom at assembly and the traceless quadrupoles are
   divided by three (the convention of the Tinker files), so the interaction
   tensors are the plain derivatives of the kernel.
-* Nonbonded interactions come from the neighbor list within ``cutoff`` and
-  are truncated there (no switching, no Ewald sum): for clusters use a
-  cutoff that encloses the system, as the reference calculations of the
-  papers do. Periodic systems are evaluated with the minimum image within
-  the cutoff.
+* Nonbonded interactions come from the neighbor list within ``cutoff``. For
+  clusters they are evaluated in full (no switching, no cutoffs below the
+  neighbor cutoff), as the reference calculations of the papers do. For
+  periodic cells the multipoles, the induction and HIPPO's dispersion are
+  Ewald sums with the reciprocal part on a particle mesh, and the
+  short-range terms are switched off smoothly between a taper distance and
+  their cutoff (``amoeba_ewald.py``); the induced dipoles of a cell are
+  solved iteratively (preconditioned conjugate gradients) with the gradient
+  from the converged dipoles through an implicit backward pass.
 * The HIPPO repulsion is ``K_i K_j S^2_total / R`` with the multipole
   expansion applied to the squared overlap of two normalised 1s Slater
   functions (the paper's ``f_exp``), the charge-penetration kernels are the
@@ -67,6 +71,7 @@ from __future__ import annotations
 
 import ast
 import math
+import warnings
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
@@ -77,12 +82,15 @@ from torch.nn import Parameter, ParameterDict
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import cell_volume, scatter_sum
 
 from .geometry import TINY, pair_vectors, dihedral_cos_sin
 from .amoebalib import (AmoebaLibrary, read_amoeba, DEFAULT_SETTINGS, MAX_TORSION_TERMS,
                         KCAL_TO_EV, WILDCARD)
 from .topology import MolecularTopology, read_topology, residue_name_list
+from .amoeba_ewald import (dispersion_pme, dispersion_real_kernel, ewald_coefficient, ewald_ladder,
+                           multipole_pme, multipole_reciprocal_energy, multipole_self_energy,
+                           pme_grid_size, self_field_coefficient, switching)
 
 # Tinker's Coulomb constant in kcal A / (mol e^2) and in eV A / e^2
 COULOMB_KCAL = 332.063713
@@ -92,6 +100,7 @@ COULOMB = COULOMB_KCAL * KCAL_TO_EV
 # model works in e Angstrom with the quadrupole divided by three
 BOHR = 0.52917721067
 DEG = math.pi / 180.0
+_DEBYE = 4.80320427            # Debye per e Angstrom (the unit of the induction convergence)
 _MAX_Z = 100
 
 # frame types of the permanent multipoles
@@ -780,9 +789,9 @@ class Amoeba(InteratomicPotential):
     topology : MolecularTopology, str or Path
         The system's topology (or a topology JSON path).
     cutoff : float, optional
-        Nonbonded cutoff in Angstrom (the neighbor-list cutoff, plain
-        truncation); by default 10.0. For clusters use a value that
-        encloses the whole system.
+        Neighbor-list cutoff in Angstrom, by default 10.0. For clusters use
+        a value that encloses the whole system (every pair interacts in
+        full); for cells it bounds the real-space cutoffs below.
     trainable : sequence of str or "all", optional
         Force-field groups (see :class:`AmoebaForceField`) plus the model
         group ``"atom_ref"``; ``"all"`` unfreezes everything.
@@ -795,6 +804,43 @@ class Amoeba(InteratomicPotential):
         ``self.intermediates``.
     atomic_energies : mapping, optional
         Per-element reference energies in eV loaded into ``atom_ref``.
+    ewald : bool, optional
+        Ewald sums for the electrostatics of periodic cells: ``None``
+        (default) switches them on for every structure that has a cell,
+        ``False`` truncates at the cutoff instead (minimum image). A slab
+        (two periodic axes) is summed on the full cell, which must hold a
+        vacuum gap along the free axis, with the Yeh-Berkowitz correction.
+    ewald_alpha, pewald_alpha, dewald_alpha : float, optional
+        Ewald coefficients (1/Angstrom) of the permanent multipoles, the
+        induction and HIPPO's dispersion; the defaults make the screened
+        interaction at the real-space cutoff ``1e-8``, the induction one
+        equal to the multipole one.
+    ewald_cutoff : float, optional
+        Real-space cutoff of the Ewald sums, by default the smaller of
+        7 Angstrom and ``cutoff``.
+    pme_grid, dpme_grid : sequence of int, optional
+        Mesh dimensions of the electrostatic and dispersion particle-mesh
+        sums; by default 1.2 (0.8) points per Angstrom rounded up to an
+        FFT-friendly even size, at least 16.
+    pme_order, ppme_order, dpme_order : int, optional
+        B-spline orders of the multipole, induction and dispersion meshes
+        (5, the multipole one, 4).
+    vdw_cutoff, repulsion_cutoff, chgtrn_cutoff, dispersion_cutoff : float, optional
+        Cutoffs of the switched short-range terms, by default ``cutoff``
+        (the dispersion one is the Ewald real-space cutoff when its sum is
+        on).
+    vdw_taper, taper : float, optional
+        Start of the C2 switch of the van der Waals term, and of every
+        switched term, in Angstrom; by default 0.9 of each cutoff for
+        cells and no switching for molecules.
+    polar_eps : float, optional
+        Convergence of the iterative induced-dipole solve, the rms change
+        per iteration in Debye (``1e-8``).
+    solver : str, optional
+        ``"auto"`` (dense for molecules up to a thousand atoms, iterative
+        otherwise), ``"dense"`` or ``"iterative"``.
+    max_iter : int, optional
+        Iteration limit of the solve (100).
 
     Notes
     -----
@@ -815,8 +861,49 @@ class Amoeba(InteratomicPotential):
                  trainable: Union[Sequence[str], str] = (),
                  polarization: str = "mutual",
                  keep_intermediates: bool = False,
-                 atomic_energies=None):
+                 atomic_energies=None,
+                 ewald: Optional[bool] = None,
+                 ewald_alpha: Optional[float] = None,
+                 pewald_alpha: Optional[float] = None,
+                 dewald_alpha: Optional[float] = None,
+                 ewald_cutoff: Optional[float] = None,
+                 pme_grid: Optional[Sequence[int]] = None,
+                 pme_order: int = 5,
+                 ppme_order: Optional[int] = None,
+                 dpme_grid: Optional[Sequence[int]] = None,
+                 dpme_order: int = 4,
+                 vdw_cutoff: Optional[float] = None,
+                 vdw_taper: Optional[float] = None,
+                 taper: Optional[float] = None,
+                 repulsion_cutoff: Optional[float] = None,
+                 chgtrn_cutoff: Optional[float] = None,
+                 dispersion_cutoff: Optional[float] = None,
+                 polar_eps: float = 1e-8,
+                 solver: str = "auto",
+                 max_iter: int = 100):
         super().__init__()
+        self.ewald = ewald
+        self.ewald_alpha = None if ewald_alpha is None else float(ewald_alpha)
+        self.pewald_alpha = None if pewald_alpha is None else float(pewald_alpha)
+        self.dewald_alpha = None if dewald_alpha is None else float(dewald_alpha)
+        self.ewald_cutoff = None if ewald_cutoff is None else float(ewald_cutoff)
+        self.pme_grid = _grid_option(pme_grid)
+        self.pme_order = int(pme_order)
+        self.ppme_order = None if ppme_order is None else int(ppme_order)
+        self.dpme_grid = _grid_option(dpme_grid)
+        self.dpme_order = int(dpme_order)
+        self.vdw_cutoff = None if vdw_cutoff is None else float(vdw_cutoff)
+        self.vdw_taper = None if vdw_taper is None else float(vdw_taper)
+        self.taper = None if taper is None else float(taper)
+        self.repulsion_cutoff = None if repulsion_cutoff is None else float(repulsion_cutoff)
+        self.chgtrn_cutoff = None if chgtrn_cutoff is None else float(chgtrn_cutoff)
+        self.dispersion_cutoff = None if dispersion_cutoff is None else float(dispersion_cutoff)
+        self.polar_eps = float(polar_eps)
+        if solver not in ("auto", "dense", "iterative"):
+            raise ValueError("solver must be 'auto', 'dense' or 'iterative'")
+        self.solver = solver
+        self.max_iter = int(max_iter)
+        self._force_dense = False
         groups, model_groups = _split_trainable(trainable)
         self.ff = ffield if isinstance(ffield, AmoebaForceField) else AmoebaForceField(ffield, trainable=groups)
         if self.ff.model != self.nonbonded:
@@ -1352,6 +1439,14 @@ class Amoeba(InteratomicPotential):
             return i, k, r, torch.ones(i.shape[0], 8, dtype=r.dtype, device=r.device)
         pos = torch.searchsorted(self.special_keys, key).clamp_max(self.special_keys.shape[0] - 1)
         hit = self.special_keys[pos] == key
+        if data.cell is not None and bool(hit.any()):
+            # the scale factors belong to the minimum image of a bonded pair; any other
+            # image within the cutoff is a plain pair
+            sel = hit.nonzero()[:, 0]
+            closest = pair_vectors(data, i[sel], k[sel]).detach()
+            same = ((r[sel].detach() - closest) ** 2).sum(-1) < 1e-10
+            hit = hit.clone()
+            hit[sel] = same
         scales = torch.where(hit[:, None], self.special_scales[pos],
                              torch.ones_like(self.special_scales[pos]))
         return i, k, r, scales
@@ -1586,7 +1681,8 @@ class Amoeba(InteratomicPotential):
         # nonbonded pairs
         i_, k_, r_vec, scales = self._pairs(data)
         R = torch.sqrt((r_vec * r_vec).sum(1) + TINY)
-        nb = self._nonbonded(data, i_, k_, r_vec, R, scales, q_perm, d_perm, Q_perm, cls_idx, typ_idx, B, N)
+        ew = self._ewald_setup(data, i_, R)
+        nb = self._nonbonded(data, i_, k_, r_vec, R, scales, q_perm, d_perm, Q_perm, cls_idx, typ_idx, B, N, ew)
         out_terms.update(nb["terms"])
 
         e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
@@ -1605,7 +1701,8 @@ class Amoeba(InteratomicPotential):
         if self.keep_intermediates:
             self.intermediates = dict(bond_r=br, e_bond=e_bond, angle_theta=theta, e_angle=e_angle,
                                       q=q_perm, d=d_perm, Q=Q_perm, induced=mu_ind, pair_i=i_, pair_k=k_,
-                                      pair_r=R, pair_scales=scales, **nb.get("extra", {}))
+                                      pair_r=R, pair_scales=scales, ewald=None if ew is None else ew["summary"],
+                                      **nb.get("extra", {}))
         result = {"node_energy": node_energy, "energy": energy, "charges": q_perm,
                   "node_features": q_perm.unsqueeze(1), "induced_dipoles": mu_ind, "dipole": dipole}
         for k, v in out_terms.items():
@@ -1696,13 +1793,16 @@ class Amoeba(InteratomicPotential):
         vec = pair_vectors(data, parent, idx)         # H - X
         return pos[parent].to(vec.dtype) + red[:, None] * vec
 
-    def _induced(self, i_, k_, r_vec, R, scales, field_d, field_p, D1, D2, N, B, alpha):
+    def _induced(self, i_, k_, r_vec, R, field_d, field_p, D1, D2, N, B, alpha, data, ew):
         """Solve the mutual induction and return ``(mu, e_polar_node)``.
 
         ``field_d`` / ``field_p`` are the direct- and polar-scaled permanent
-        fields at every atom; ``D1, D2`` the mutual-induction ladder per pair
-        (already including the mutual and induce scale factors); ``alpha``
-        the per-atom polarizability.
+        fields at every atom (mesh and self contributions included for
+        cells); ``D1, D2`` the mutual-induction ladder per pair (scale
+        factors and, for cells, the real-space Ewald part included);
+        ``alpha`` the per-atom polarizability. Molecules are solved with a
+        dense matrix (or iteratively when large), cells iteratively with
+        the mesh field of the induced dipoles.
         """
         n = int(self.top_type.shape[0])
         polar = alpha > 0
@@ -1711,24 +1811,183 @@ class Amoeba(InteratomicPotential):
             mu = mu_dir
         else:
             T = dipole_field_tensor(r_vec, D1, D2)                        # (M, 3, 3)
-            A = torch.zeros(B, n, n, 3, 3, dtype=R.dtype, device=R.device)
-            bi = i_ // n
-            li, lk = i_ % n, k_ % n
-            A[bi, li, lk] = -T
-            A[bi, lk, li] = -T.transpose(1, 2)
-            inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.full_like(alpha, 1.0))
-            eye = torch.eye(3, dtype=R.dtype, device=R.device)
-            diag = inv_alpha.view(B, n)[:, :, None, None] * eye
-            ar = torch.arange(n, device=R.device)
-            A[:, ar, ar] = diag
-            Afull = A.permute(0, 1, 3, 2, 4).reshape(B, 3 * n, 3 * n)
-            rhs = (field_d * polar[:, None].to(R.dtype)).reshape(B, 3 * n, 1)
-            mu = torch.linalg.solve(Afull, rhs).reshape(N, 3)
-            mu = mu * polar[:, None].to(R.dtype)
-            if self.keep_intermediates:
-                self._induction_matrix = Afull.detach()
+            if self._use_dense(N, ew):
+                A = torch.zeros(B, n, n, 3, 3, dtype=R.dtype, device=R.device)
+                bi = i_ // n
+                li, lk = i_ % n, k_ % n
+                A[bi, li, lk] = -T
+                A[bi, lk, li] = -T.transpose(1, 2)
+                inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.full_like(alpha, 1.0))
+                eye = torch.eye(3, dtype=R.dtype, device=R.device)
+                diag = inv_alpha.view(B, n)[:, :, None, None] * eye
+                ar = torch.arange(n, device=R.device)
+                A[:, ar, ar] = diag
+                Afull = A.permute(0, 1, 3, 2, 4).reshape(B, 3 * n, 3 * n)
+                rhs = (field_d * polar[:, None].to(R.dtype)).reshape(B, 3 * n, 1)
+                mu = torch.linalg.solve(Afull, rhs).reshape(N, 3)
+                mu = mu * polar[:, None].to(R.dtype)
+                if self.keep_intermediates:
+                    self._induction_matrix = Afull.detach()
+            else:
+                dtype = R.dtype
+                pos = data.pos.to(dtype)
+                cell = (ew["cells"] if ew is not None
+                        else torch.zeros(B, 3, 3, dtype=dtype, device=R.device))
+                op = _MutualField(i_, k_, N, polar, ew, self.polar_eps, self.max_iter)
+                mu = _ImplicitInduction.apply(field_d * polar[:, None].to(dtype), alpha, T, pos, cell, op)
+                mu = mu * polar[:, None].to(dtype)
         e_pol = -0.5 * (mu * field_p).sum(1) * COULOMB
         return mu, e_pol
+
+    def _use_dense(self, N: int, ew) -> bool:
+        if self.solver == "dense" or self._force_dense:
+            if ew is not None:
+                raise ValueError("the dense induction solve has no reciprocal part; cells need "
+                                 "solver='iterative' (and the polarizability tensor is for molecules)")
+            return True
+        if self.solver == "iterative":
+            return False
+        return ew is None and N <= 1000
+
+    # Ewald sums of periodic cells
+    def _ewald_setup(self, data: AtomicGraph, i_: Tensor, R: Tensor):
+        """Ewald parameters of the batch, or ``None`` when no structure is a
+        periodic cell (or Ewald is off)."""
+        if self.ewald is False or data.cell is None:
+            return None
+        B = data.num_graphs
+        dtype, device = R.dtype, R.device
+        cells = data.cell.to(dtype)
+        periodic = cell_volume(cells.detach()) > 1e-8
+        n_pbc = torch.full((B,), 3, dtype=torch.long, device=device)
+        if data.pbc is not None:
+            pbc = data.pbc.to(device)
+            n_pbc = pbc.sum(-1)
+            if bool((periodic & (n_pbc == 1)).any()):
+                raise ValueError("Ewald sums need two (slab) or three periodic axes")
+            periodic = periodic & (n_pbc >= 2)
+        if not bool(periodic.any()):
+            if self.ewald is True:
+                raise ValueError("ewald=True needs periodic structures with a cell")
+            return None
+        rc = self.ewald_cutoff if self.ewald_cutoff is not None else min(7.0, self.cutoff)
+        if rc > self.cutoff + 1e-9:
+            raise ValueError(f"ewald_cutoff {rc} exceeds the neighbor cutoff {self.cutoff}")
+        alpha_e = self.ewald_alpha if self.ewald_alpha is not None else ewald_coefficient(rc)
+        alpha_p = self.pewald_alpha if self.pewald_alpha is not None else alpha_e
+        rc_d = self.dispersion_cutoff if self.dispersion_cutoff is not None else rc
+        if rc_d > self.cutoff + 1e-9:
+            raise ValueError(f"dispersion_cutoff {rc_d} exceeds the neighbor cutoff {self.cutoff}")
+        alpha_d = self.dewald_alpha if self.dewald_alpha is not None else ewald_coefficient(rc_d)
+        lengths = torch.linalg.norm(cells.detach(), dim=-1)
+        structures = []
+        for b in range(B):
+            if not bool(periodic[b]):
+                continue
+            idx = (data.batch == b).nonzero()[:, 0]
+            grid = list(self.pme_grid) if self.pme_grid is not None else pme_grid_size(lengths[b].tolist())
+            dgrid = (list(self.dpme_grid) if self.dpme_grid is not None
+                     else pme_grid_size(lengths[b].tolist(), density=0.8))
+            normal = None
+            if int(n_pbc[b]) == 2:
+                # a slab: the unit normal of the periodic plane, for the Yeh-Berkowitz correction
+                free = int((~pbc[b]).nonzero()[0, 0])
+                a1, a2 = cells[b][(free + 1) % 3], cells[b][(free + 2) % 3]
+                normal = torch.linalg.cross(a1, a2)
+                normal = normal / torch.linalg.norm(normal)
+            structures.append((b, idx, grid, dgrid, normal))
+        pair_periodic = periodic[data.batch[i_]]
+        ones = torch.ones_like(R)
+        pf = pair_periodic.to(dtype)
+        summary = {"alpha": alpha_e, "pewald_alpha": alpha_p, "dewald_alpha": alpha_d, "cutoff": rc,
+                   "dispersion_cutoff": rc_d, "grids": [(b, grid, dgrid) for b, _, grid, dgrid, _ in structures],
+                   "slabs": [b for b, _, _, _, normal in structures if normal is not None]}
+        return {"periodic": periodic, "pair_periodic": pair_periodic, "structures": structures, "cells": cells,
+                "alpha_e": alpha_e * pf, "alpha_p": alpha_p * pf, "alpha_d": alpha_d * pf,
+                "keep": torch.where(pair_periodic, (R < rc).to(dtype), ones),
+                "keep_d": torch.where(pair_periodic, (R < rc_d).to(dtype), ones),
+                "alpha_e_value": alpha_e, "alpha_p_value": alpha_p, "alpha_d_value": alpha_d,
+                "order": self.pme_order, "porder": self.ppme_order or self.pme_order, "dorder": self.dpme_order,
+                "summary": summary}
+
+    def _switch(self, R: Tensor, pair_periodic: Optional[Tensor], cutoff_value: Optional[float],
+                taper_value: Optional[float]) -> Optional[Tensor]:
+        """The switch of a short-range term, or ``None`` when nothing is switched
+        (molecules without explicit cutoffs)."""
+        explicit = cutoff_value is not None or taper_value is not None or self.taper is not None
+        if pair_periodic is None and not explicit:
+            return None
+        cut = float(cutoff_value) if cutoff_value is not None else self.cutoff
+        if cut > self.cutoff + 1e-9:
+            raise ValueError(f"a term cutoff of {cut} exceeds the neighbor cutoff {self.cutoff}")
+        tap = (float(taper_value) if taper_value is not None
+               else (self.taper if self.taper is not None else 0.9 * cut))
+        sw = switching(R, tap, cut)
+        if not explicit:
+            sw = torch.where(pair_periodic, sw, torch.ones_like(sw))
+        return sw
+
+    def _reciprocal_energy(self, data: AtomicGraph, ew, q: Tensor, d: Tensor, Q: Tensor) -> Tensor:
+        """Per-atom mesh and self energies of the permanent multipoles, ``e^2 / A``."""
+        pos = data.pos.to(q.dtype)
+        out = torch.zeros_like(q)
+        ae = ew["alpha_e_value"]
+        for b, idx, grid, _, normal in ew["structures"]:
+            e = multipole_reciprocal_energy(q[idx], d[idx], Q[idx], pos[idx], ew["cells"][b], ae, grid, ew["order"])
+            e = e + multipole_self_energy(q[idx], d[idx], Q[idx], torch.full_like(q[idx], ae))
+            if normal is not None:
+                # Yeh-Berkowitz: 2 pi / V M_n^2 with M_n the dipole moment along the slab normal
+                moment = q[idx] * (pos[idx] @ normal) + d[idx] @ normal
+                e = e + 2.0 * math.pi / cell_volume(ew["cells"][b]) * moment * moment.sum()
+            out = out.index_add(0, idx, e)
+        return out
+
+    def _reciprocal_field(self, data: AtomicGraph, ew, q: Tensor, d: Tensor, Q: Tensor) -> Tensor:
+        """Mesh field of the permanent multipoles at every atom, self field included."""
+        pos = data.pos.to(q.dtype)
+        out = torch.zeros_like(d)
+        ap = ew["alpha_p_value"]
+        coef = self_field_coefficient(ap)
+        for b, idx, grid, _, normal in ew["structures"]:
+            _, dphi, _ = multipole_pme(q[idx], d[idx], Q[idx], pos[idx], ew["cells"][b], ap, grid,
+                                       ew["porder"], hessian=False)
+            field = -dphi + coef * d[idx]
+            if normal is not None:
+                moment = (q[idx] * (pos[idx] @ normal) + d[idx] @ normal).sum()
+                field = field - 4.0 * math.pi / cell_volume(ew["cells"][b]) * moment * normal
+            out = out.index_add(0, idx, field)
+        return out
+
+    def _reciprocal_dispersion(self, data: AtomicGraph, ew, c: Tensor) -> Tensor:
+        """Per-atom mesh (and self) energies of the ``-c_i c_j / R^6`` sum."""
+        pos = data.pos.to(c.dtype)
+        out = torch.zeros_like(c)
+        ad = ew["alpha_d_value"]
+        for b, idx, _, dgrid, _ in ew["structures"]:
+            out = out.index_add(0, idx, dispersion_pme(c[idx], pos[idx], ew["cells"][b], ad, dgrid, ew["dorder"]))
+        return out
+
+    def _ewald_fields(self, data, ew, i_, k_, r_vec, R, scales, q, d, Q, f_damp_k, f_damp_i, D1m, D2m,
+                      u_scale, N):
+        """Direct- and polar-scaled permanent fields and the mutual ladder of a
+        batch with cells: the real-space Ewald field of the total multipoles
+        minus their bare field, plus the scaled damped field of the vacuum
+        model, plus the mesh and self fields."""
+        keep = ew["keep"]
+        Dc = coulomb_ladder(R, 3)
+        Dp = ewald_ladder(R, ew["alpha_p"], 3)
+        Dew = [(a - c) * keep for a, c in zip(Dp, Dc)]
+        f_ew_k = multipole_field(q[i_], d[i_], Q[i_], r_vec, Dew, at_k=True)
+        f_ew_i = multipole_field(q[k_], d[k_], Q[k_], r_vec, Dew, at_k=False)
+        kp = keep[:, None]
+        field_d = (scatter_sum(f_ew_k + f_damp_k * (scales[:, 6:7] * kp), k_, N)
+                   + scatter_sum(f_ew_i + f_damp_i * (scales[:, 6:7] * kp), i_, N))
+        field_p = (scatter_sum(f_ew_k + f_damp_k * (scales[:, 2:3] * kp), k_, N)
+                   + scatter_sum(f_ew_i + f_damp_i * (scales[:, 2:3] * kp), i_, N))
+        rec = self._reciprocal_field(data, ew, q, d, Q)
+        D1u = (Dp[1] - Dc[1] + D1m * u_scale) * keep
+        D2u = (Dp[2] - Dc[2] + D2m * u_scale) * keep
+        return field_d + rec, field_p + rec, D1u, D2u
 
     def molecular_polarizability(self, data: AtomicGraph) -> Tensor:
         """Static dipole polarizability of every structure from the induction model.
@@ -1752,6 +2011,7 @@ class Amoeba(InteratomicPotential):
         """
         keep = self.keep_intermediates
         self.keep_intermediates = True
+        self._force_dense = True
         try:
             with torch.no_grad():
                 self.forward(data)
@@ -1767,13 +2027,15 @@ class Amoeba(InteratomicPotential):
                 return mu.sum(1)
         finally:
             self.keep_intermediates = keep
+            self._force_dense = False
 
-    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N) -> dict:
+    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew) -> dict:
         """AMOEBA nonbonded terms: buffered 14-7, permanent multipoles, Thole induction."""
         P = self.ff.params
         s = self.ff.settings
         terms: dict[str, Tensor] = {}
         ci, ck = cls_idx[i_], cls_idx[k_]
+        per = None if ew is None else ew["pair_periodic"]
         # van der Waals between the reduced sites
         sites = self._vdw_sites(data, B)
         vvec = r_vec + (sites[k_] - data.pos[k_].to(r_vec.dtype)) - (sites[i_] - data.pos[i_].to(r_vec.dtype))
@@ -1806,12 +2068,27 @@ class Amoeba(InteratomicPotential):
         rho7 = rho ** 7
         e_vdw = eps * ((1.0 + delta) / (rho + delta)) ** 7 * ((1.0 + gamma) / (rho7 + gamma) - 2.0)
         e_vdw = e_vdw * scales[:, 0]
+        e_vdw_raw = e_vdw
+        sw = self._switch(rv, per, self.vdw_cutoff, self.vdw_taper)
+        if sw is not None:
+            e_vdw = e_vdw * sw
         terms["e_vdw"] = scatter_sum(0.5 * e_vdw, i_, N) + scatter_sum(0.5 * e_vdw, k_, N)
 
-        # permanent multipole interactions (undamped Coulomb ladder)
+        # permanent multipole interactions: the Coulomb ladder for molecules; for cells
+        # the real-space Ewald ladder with the excluded fraction of the bare interaction
+        # removed, plus the mesh and self terms
         Dc = coulomb_ladder(R, 4)
-        e_mp = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec, Dc) * scales[:, 1] * COULOMB
-        terms["e_multipole"] = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        if ew is None:
+            e_mp = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec, Dc) * scales[:, 1] * COULOMB
+        else:
+            keep = ew["keep"]
+            De = ewald_ladder(R, ew["alpha_e"], 4)
+            Dm = [(a - (1.0 - scales[:, 1]) * c) * keep for a, c in zip(De, Dc)]
+            e_mp = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec, Dm) * COULOMB
+        e_node = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        if ew is not None:
+            e_node = e_node + self._reciprocal_energy(data, ew, q, d, Q) * COULOMB
+        terms["e_multipole"] = e_node
 
         # induction with Thole damping
         mu = torch.zeros_like(d)
@@ -1819,17 +2096,22 @@ class Amoeba(InteratomicPotential):
             alpha = P["polarizability"][typ_idx]
             thole = P["thole"][typ_idx]
             Dt = thole_ladder(R, alpha[i_], alpha[k_], thole[i_], thole[k_], 3)
+            u_scale = scales[:, 7] * scales[:, 3]
             f_at_k = multipole_field(q[i_], d[i_], Q[i_], r_vec, Dt, at_k=True)
             f_at_i = multipole_field(q[k_], d[k_], Q[k_], r_vec, Dt, at_k=False)
-            field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
-            field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
-            u_scale = scales[:, 7] * scales[:, 3]
-            mu, e_pol = self._induced(i_, k_, r_vec, R, scales, field_d, field_p,
-                                      Dt[1] * u_scale, Dt[2] * u_scale, N, B, alpha)
+            if ew is None:
+                field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
+                field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
+                D1u, D2u = Dt[1] * u_scale, Dt[2] * u_scale
+            else:
+                field_d, field_p, D1u, D2u = self._ewald_fields(data, ew, i_, k_, r_vec, R, scales, q, d, Q,
+                                                                f_at_k, f_at_i, Dt[1], Dt[2], u_scale, N)
+            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
-        return {"terms": terms, "induced": mu, "extra": {"vdw_r": rv, "e_vdw_pair": e_vdw, "e_mpole_pair": e_mp}}
+        return {"terms": terms, "induced": mu,
+                "extra": {"vdw_r": rv, "e_vdw_pair": e_vdw, "e_vdw_pair_raw": e_vdw_raw, "e_mpole_pair": e_mp}}
 
     # conveniences
     def export_library(self) -> AmoebaLibrary:
@@ -1876,6 +2158,9 @@ class Amoeba(InteratomicPotential):
         kwargs = dict(cutoff=float(cfg.cutoff), polarization=extra.get("polarization", "mutual"),
                       trainable=listy(extra.get("trainable")) or (),
                       atomic_energies=extra.get("atomic_energies"))
+        for key in _OPTION_KEYS:
+            if extra.get(key) is not None:
+                kwargs[key] = listy(extra[key])
         if extra.get("tinker_xyz"):
             model, _ = cls.from_tinker_xyz(extra["tinker_xyz"], library, **kwargs)
             return model
@@ -1912,10 +2197,11 @@ class Hippo(Amoeba):
     nonbonded = "hippo"
     default_library = "hippo-water-2021"
 
-    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N) -> dict:
+    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew) -> dict:
         P = self.ff.params
         terms: dict[str, Tensor] = {}
         ci, ck = cls_idx[i_], cls_idx[k_]
+        per = None if ew is None else ew["pair_periodic"]
         core_i, core_k = P["chgpen_core"][ci], P["chgpen_core"][ck]
         zi, zk = P["chgpen_alpha"][ci], P["chgpen_alpha"][ck]
         val_i = q[i_] - core_i
@@ -1924,7 +2210,9 @@ class Hippo(Amoeba):
         zeroQ = torch.zeros_like(Q[i_])
         zero = torch.zeros_like(R)
 
-        # permanent electrostatics: core-core, core-valence (one-center damping), valence-valence
+        # permanent electrostatics: core-core, core-valence (one-center damping), valence-valence;
+        # in cells the real-space Ewald interaction of the total multipoles minus their bare
+        # interaction is added and the mesh and self terms complete the sum
         Dc = coulomb_ladder(R, 4)
         D_ki = derivative_ladder(core_valence_kernel(zi.double(), "i"), R, zi, zk, 3) + [zero]   # valence of i seen by core k
         D_ik = derivative_ladder(core_valence_kernel(zk.double(), "j"), R, zi, zk, 3) + [zero]   # valence of k seen by core i
@@ -1933,8 +2221,19 @@ class Hippo(Amoeba):
         e_ck = multipole_energy(val_i, d[i_], Q[i_], core_k, zero3, zeroQ, r_vec, D_ki)
         e_ik = multipole_energy(core_i, zero3, zeroQ, val_k, d[k_], Q[k_], r_vec, D_ik)
         e_vv = multipole_energy(val_i, d[i_], Q[i_], val_k, d[k_], Q[k_], r_vec, D_ov)
-        e_mp = (e_cc + e_ck + e_ik + e_vv) * scales[:, 1] * COULOMB
-        terms["e_multipole"] = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        e_damped = (e_cc + e_ck + e_ik + e_vv) * scales[:, 1]
+        if ew is None:
+            e_mp = e_damped * COULOMB
+        else:
+            keep = ew["keep"]
+            De = ewald_ladder(R, ew["alpha_e"], 4)
+            e_full = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec,
+                                      [(a - c) * keep for a, c in zip(De, Dc)])
+            e_mp = (e_full + e_damped * keep) * COULOMB
+        e_node = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        if ew is not None:
+            e_node = e_node + self._reciprocal_energy(data, ew, q, d, Q) * COULOMB
+        terms["e_multipole"] = e_node
 
         # Pauli repulsion: K_i K_j S^2_total / R. The multipole expansion acts on the
         # squared overlap S^2 of the valence densities (its derivative ladder), the
@@ -1946,16 +2245,31 @@ class Hippo(Amoeba):
         D_rep = self._repulsion_ladder(R, ra_i, ra_k, 4)
         e_rep = rk_i * rk_k * multipole_energy(P["rep_valence"][ci], -d[i_], -Q[i_], P["rep_valence"][ck],
                                                -d[k_], -Q[k_], r_vec, D_rep) / R * scales[:, 4]
+        sw = self._switch(R, per, self.repulsion_cutoff, None)
+        if sw is not None:
+            e_rep = e_rep * sw
         terms["e_repulsion"] = scatter_sum(0.5 * e_rep, i_, N) + scatter_sum(0.5 * e_rep, k_, N)
 
-        # damped dispersion: -C6_i C6_k / R^6 [ (3 lambda_5 - lambda_3) / 2 ]^2
+        # damped dispersion: -C6_i C6_k / R^6 [ (3 lambda_5 - lambda_3) / 2 ]^2; in cells the
+        # Ewald real-space share replaces the bare 1/R^6 and the mesh adds the rest
         da_i, da_k = P["disp_alpha"][ci], P["disp_alpha"][ck]
         D_d = self._overlap_ladder(R, da_i, da_k, 2)
         lam3 = -D_d[1] * R ** 3
         lam5 = D_d[2] * R ** 5 / 3.0
         fdamp = 0.5 * (3.0 * lam5 - lam3)
-        e_disp = -P["disp_c6"][ci] * P["disp_c6"][ck] / R ** 6 * fdamp * fdamp * scales[:, 5]
-        terms["e_dispersion"] = scatter_sum(0.5 * e_disp, i_, N) + scatter_sum(0.5 * e_disp, k_, N)
+        c6 = P["disp_c6"][ci] * P["disp_c6"][ck]
+        if ew is None:
+            e_disp = -c6 / R ** 6 * fdamp * fdamp * scales[:, 5]
+            sw = self._switch(R, per, self.dispersion_cutoff, None)
+            if sw is not None:
+                e_disp = e_disp * sw
+        else:
+            g = dispersion_real_kernel(R, ew["alpha_d"])
+            e_disp = -c6 / R ** 6 * (scales[:, 5] * fdamp * fdamp - 1.0 + g) * ew["keep_d"]
+        e_dnode = scatter_sum(0.5 * e_disp, i_, N) + scatter_sum(0.5 * e_disp, k_, N)
+        if ew is not None:
+            e_dnode = e_dnode + self._reciprocal_dispersion(data, ew, P["disp_c6"][cls_idx])
+        terms["e_dispersion"] = e_dnode
 
         # charge transfer: -(eps_i e^-eta_k R + eps_k e^-eta_i R); a zero eta switches a term off
         eps_i, eps_k = P["chgtrn_eps"][ci], P["chgtrn_eps"][ck]
@@ -1963,6 +2277,9 @@ class Hippo(Amoeba):
         t1 = torch.where(eta_k > 0, eps_i * torch.exp(-eta_k * R), zero)
         t2 = torch.where(eta_i > 0, eps_k * torch.exp(-eta_i * R), zero)
         e_ct = -(t1 + t2) * scales[:, 1]
+        sw = self._switch(R, per, self.chgtrn_cutoff, None)
+        if sw is not None:
+            e_ct = e_ct * sw
         terms["e_chgtrn"] = scatter_sum(0.5 * e_ct, i_, N) + scatter_sum(0.5 * e_ct, k_, N)
 
         # induction: permanent field with one-center damping (the source atom's
@@ -1977,14 +2294,18 @@ class Hippo(Amoeba):
             f_val_i = multipole_field(val_k, d[k_], Q[k_], r_vec, D_ik, at_k=False)
             f_at_k = f_core_k + f_val_k
             f_at_i = f_core_i + f_val_i
-            field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
-            field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
-            if bool(self.ff.settings.get("d-equals-p", False)):
-                field_p = field_d
             D_mut = self._overlap_ladder(R, zi, zk, 2)
             u_scale = scales[:, 7] * scales[:, 3]
-            mu, e_pol = self._induced(i_, k_, r_vec, R, scales, field_d, field_p,
-                                      D_mut[1] * u_scale, D_mut[2] * u_scale, N, B, alpha)
+            if ew is None:
+                field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
+                field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
+                D1u, D2u = D_mut[1] * u_scale, D_mut[2] * u_scale
+            else:
+                field_d, field_p, D1u, D2u = self._ewald_fields(data, ew, i_, k_, r_vec, R, scales, q, d, Q,
+                                                                f_at_k, f_at_i, D_mut[1], D_mut[2], u_scale, N)
+            if bool(self.ff.settings.get("d-equals-p", False)):
+                field_p = field_d
+            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
@@ -2022,6 +2343,161 @@ class Hippo(Amoeba):
             for n in range(order + 1):
                 out[n] = out[n].index_put((mask.nonzero()[:, 0],), vals[n])
         return out
+
+
+# the periodic and solver options of the constructor, also read by from_config
+_OPTION_KEYS = ("ewald", "ewald_alpha", "pewald_alpha", "dewald_alpha", "ewald_cutoff", "pme_grid", "pme_order",
+                "ppme_order", "dpme_grid", "dpme_order", "vdw_cutoff", "vdw_taper", "taper", "repulsion_cutoff",
+                "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "solver", "max_iter")
+
+
+def _grid_option(value) -> Optional[list]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return [int(value)] * 3
+    out = [int(x) for x in value]
+    return out * 3 if len(out) == 1 else out
+
+
+# the iterative induced-dipole solve of large molecules and periodic cells
+class _MutualField:
+    """The field of a set of induced dipoles at every atom: the real-space
+    pairs through their mutual tensors ``T`` (:meth:`real`) and, in cells,
+    the mesh field plus the self field and, for slabs, the Yeh-Berkowitz
+    field (:meth:`mesh`). The two parts depend on disjoint inputs (``T``;
+    the positions and cells), which keeps the products of the implicit
+    backward pass exact."""
+
+    def __init__(self, i_: Tensor, k_: Tensor, N: int, polar: Tensor, ew, tol: float, max_iter: int):
+        self.i, self.k, self.N = i_, k_, N
+        self.polar = polar
+        self.tol, self.max_iter = tol, max_iter
+        self.structures = [] if ew is None else [(b, idx, grid, normal) for b, idx, grid, _, normal in ew["structures"]]
+        self.alpha_p = 0.0 if ew is None else ew["alpha_p_value"]
+        self.order = 0 if ew is None else ew["porder"]
+
+    def real(self, mu: Tensor, T: Tensor) -> Tensor:
+        return (scatter_sum(torch.einsum("mab,mb->ma", T, mu[self.i]), self.k, self.N)
+                + scatter_sum(torch.einsum("mab,mb->ma", T, mu[self.k]), self.i, self.N))
+
+    def mesh(self, mu: Tensor, pos: Tensor, cell: Tensor) -> Optional[Tensor]:
+        if not self.structures:
+            return None
+        f = torch.zeros_like(mu)
+        coef = self_field_coefficient(self.alpha_p)
+        for b, idx, grid, normal in self.structures:
+            m = mu[idx]
+            _, dphi, _ = multipole_pme(torch.zeros_like(m[:, 0]), m, None, pos[idx], cell[b], self.alpha_p, grid,
+                                       self.order, hessian=False)
+            field = -dphi + coef * m
+            if normal is not None:
+                field = field - 4.0 * math.pi / cell_volume(cell[b]) * (m @ normal).sum() * normal
+            f = f.index_add(0, idx, field)
+        return f
+
+    def __call__(self, mu: Tensor, T: Tensor, pos: Tensor, cell: Tensor) -> Tensor:
+        f = self.real(mu, T)
+        g = self.mesh(mu, pos, cell)
+        return f if g is None else f + g
+
+
+def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_iter: int) -> Tensor:
+    """Preconditioned conjugate gradients for ``(1/alpha - T) mu = rhs`` on the
+    polarizable atoms, preconditioned by ``alpha``, converged when the rms
+    change of the dipoles per iteration drops below ``tol`` Debye."""
+    mask = polar[:, None].to(rhs.dtype)
+    n_polar = max(int(polar.sum()), 1)
+    inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.zeros_like(alpha))[:, None]
+    diag = alpha[:, None] * mask
+
+    def apply(v):
+        return (v * inv_alpha - field_of(v)) * mask
+
+    x = diag * rhs
+    r = rhs * mask - apply(x)
+    z = diag * r
+    p = z
+    rz = (r * z).sum()
+    for _ in range(max_iter):
+        ap = apply(p)
+        denom = (p * ap).sum()
+        if float(denom) == 0.0:
+            break
+        a = rz / denom
+        step = a * p
+        x = x + step
+        r = r - a * ap
+        if math.sqrt(float((step * step).sum()) / n_polar) * _DEBYE < tol:
+            break
+        z = diag * r
+        rz_new = (r * z).sum()
+        p = z + (rz_new / rz) * p
+        rz = rz_new
+    else:
+        warnings.warn(f"the induced dipoles did not converge to {tol} Debye in {max_iter} iterations")
+    return x
+
+
+class _ImplicitInduction(torch.autograd.Function):
+    """``mu = (1/alpha - T)^-1 rhs`` by conjugate gradients, with the gradient of
+    the converged dipoles through the adjoint system (the same solve on the
+    incoming gradient): neither the iterations nor a dense matrix are stored.
+
+    The backward pass forms ``lambda^T (dA/dtheta) mu`` explicitly: the
+    real-space part is the outer product of the adjoint and the dipoles on
+    every pair, the mesh part the position and cell derivatives of
+    ``lambda . mesh(mu)`` with both vectors held fixed. For a second
+    derivative the dipoles and the adjoint are recomputed as differentiable
+    solves and the bilinear mesh term is re-attached to them on detached
+    copies of the positions, so every second derivative through the solve
+    (force training, Hessians) is exact.
+    """
+
+    @staticmethod
+    def forward(ctx, rhs, alpha, T, pos, cell, op):
+        with torch.no_grad():
+            mu = _pcg(rhs, alpha, lambda v: op(v, T, pos, cell), op.polar, op.tol, op.max_iter)
+        ctx.op = op
+        ctx.save_for_backward(mu, rhs, alpha, T, pos, cell)
+        return mu
+
+    @staticmethod
+    def backward(ctx, grad_mu):
+        mu, rhs, alpha, T, pos, cell = ctx.saved_tensors
+        op = ctx.op
+        mask = op.polar[:, None].to(mu.dtype)
+        create_graph = torch.is_grad_enabled()
+        if create_graph:
+            mu = _ImplicitInduction.apply(rhs, alpha, T, pos, cell, op)
+        lam = _ImplicitInduction.apply(grad_mu * mask, alpha, T, pos, cell, op)
+        grad_T = grad_pos = grad_cell = None
+        if T.requires_grad:
+            # d/dT of lam . (T mu[i] at k, T mu[k] at i) summed over the pairs
+            grad_T = lam[op.k][:, :, None] * mu[op.i][:, None, :] + lam[op.i][:, :, None] * mu[op.k][:, None, :]
+        if op.structures and (pos.requires_grad or cell.requires_grad):
+            mu_d, lam_d = mu.detach(), lam.detach()
+            with torch.enable_grad():
+                # the explicit dependence on the positions and the cell, with the vectors fixed
+                inputs = [t for t in (pos, cell) if t.requires_grad]
+                scalar = (lam_d * op.mesh(mu_d, pos, cell)).sum()
+                grads = list(torch.autograd.grad(scalar, inputs, create_graph=create_graph, allow_unused=True))
+                if create_graph:
+                    # the term is bilinear in the adjoint and the dipoles: their (zero-valued)
+                    # variations carry the graphs of the solves into the returned gradients. They
+                    # are differentiated on detached copies of the positions, as a separate pass,
+                    # so that this backward is not entered again through the recomputed solves.
+                    pv = pos.detach().requires_grad_(bool(pos.requires_grad))
+                    cv = cell.detach().requires_grad_(bool(cell.requires_grad))
+                    copies = [t for t in (pv, cv) if t.requires_grad]
+                    scalar = (lam_d * op.mesh(mu - mu_d, pv, cv)).sum() + ((lam - lam_d) * op.mesh(mu_d, pv, cv)).sum()
+                    more = torch.autograd.grad(scalar, copies, create_graph=True, allow_unused=True)
+                    grads = [g if m is None else (m if g is None else g + m) for g, m in zip(grads, more)]
+            found = dict(zip([id(t) for t in inputs], grads))
+            grad_pos, grad_cell = found.get(id(pos)), found.get(id(cell))
+        a2 = torch.where(op.polar, alpha * alpha, torch.ones_like(alpha))
+        grad_alpha = torch.where(op.polar, (lam * mu).sum(1) / a2, torch.zeros_like(alpha))
+        return lam, grad_alpha, grad_T, grad_pos, grad_cell, None
 
 
 # small helpers
@@ -2067,4 +2543,4 @@ def _opbend_key(lib: AmoebaLibrary, d: str, b: str, a: str, c: str) -> str:
 __all__ = ["Amoeba", "Hippo", "AmoebaForceField", "COULOMB", "COULOMB_KCAL", "RadialSeries",
            "multipole_energy", "multipole_field", "thole_ladder", "coulomb_ladder",
            "core_valence_kernel", "overlap_coulomb_kernel", "slater_overlap", "derivative_ladder",
-           "tortor_spline_tables", "bicubic_interpolate"]
+           "tortor_spline_tables", "bicubic_interpolate", "ewald_ladder", "multipole_pme"]

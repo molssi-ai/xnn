@@ -488,10 +488,11 @@ def test_periodic_minimum_image_and_stress():
     cell = np.diag([20.0, 20.0, 20.0])
     pos = DIMER1.copy()
     pos[3:] += np.array([20.0, 0.0, 0.0])            # the second molecule sits in the next image
-    model = ForceStressOutput(_model(), compute_stress=True)
+    model = ForceStressOutput(_model(ewald=False), compute_stress=True)
     out = model(_graph(pos, cell=cell, cutoff=9.0))
     ref = ForceStressOutput(_model())(_graph(DIMER1, cutoff=9.0))
-    # the molecular pair (shifted by one lattice vector) has the same energy as in free space
+    # without the Ewald sum the molecular pair (shifted by one lattice vector) has the same
+    # energy as in free space
     assert float(out["energy"]) == pytest.approx(float(ref["energy"]), abs=1e-9)
     assert out["stress"].shape == (1, 3, 3)
     assert torch.allclose(out["stress"][0], out["stress"][0].T, atol=1e-10)

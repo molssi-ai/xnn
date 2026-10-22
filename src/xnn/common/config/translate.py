@@ -31,6 +31,19 @@ from typing import Any
 # upstream spelling -> xnn canonical spelling, per model-registry name.
 # Targets may be typed core fields (cutoff/n_features/n_interactions/n_rbf)
 # or the model's documented `extra` keys.
+# the Tinker key-file spellings of the AMOEBA / HIPPO periodic and cutoff options
+_TINKER_KEYS = {
+    "ewald-alpha": "ewald_alpha", "pewald-alpha": "pewald_alpha", "dewald-alpha": "dewald_alpha",
+    "ewald-cutoff": "ewald_cutoff", "mpole-cutoff": "ewald_cutoff", "mpole_cutoff": "ewald_cutoff",
+    "pme-grid": "pme_grid", "pme-order": "pme_order", "ppme-order": "ppme_order",
+    "dpme-grid": "dpme_grid", "dpme-order": "dpme_order",
+    "vdw-cutoff": "vdw_cutoff", "vdw-taper": "vdw_taper",
+    "repuls-cutoff": "repulsion_cutoff", "repulsion-cutoff": "repulsion_cutoff",
+    "chgtrn-cutoff": "chgtrn_cutoff", "ctrn-cutoff": "chgtrn_cutoff",
+    "disp-cutoff": "dispersion_cutoff", "dispersion-cutoff": "dispersion_cutoff",
+    "dewald-cutoff": "dispersion_cutoff", "polar-eps": "polar_eps", "polar-iter": "max_iter",
+}
+
 _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
     # original MACE: CLI/yaml spellings plus mace.modules.MACE constructor ones
     "mace": {
@@ -297,9 +310,8 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "parameter_file": "library",
         "ffield": "library",
         "xyz": "tinker_xyz",
-        "vdw_cutoff": "cutoff",
-        "mpole_cutoff": "cutoff",
         "pair_cutoff": "cutoff",
+        **_TINKER_KEYS,
     },
     "hippo": {
         "frc": "library",
@@ -309,8 +321,8 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "parameter_file": "library",
         "ffield": "library",
         "xyz": "tinker_xyz",
-        "mpole_cutoff": "cutoff",
         "pair_cutoff": "cutoff",
+        **_TINKER_KEYS,
     },
     # DREIDING spellings used by LAMMPS / Cerius2-style inputs
     "dreiding": {
