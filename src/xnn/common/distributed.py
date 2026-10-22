@@ -75,8 +75,14 @@ def init_process_group(device: torch.device) -> tuple[torch.device, bool]:
 
 
 def destroy_process_group(owns: bool) -> None:
-    """Tear down the process group if ``owns`` says this caller created it."""
+    """Tear down the process group if ``owns`` says this caller created it.
+
+    The ranks synchronize first, so none of them leaves while another is
+    still finishing its last collective or writing its output: a rank that
+    exits early can leave the others, and the launcher, waiting at shutdown.
+    """
     if owns and dist.is_available() and dist.is_initialized():
+        dist.barrier()
         dist.destroy_process_group()
 
 
