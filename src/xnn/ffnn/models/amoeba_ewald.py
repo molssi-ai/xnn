@@ -406,6 +406,114 @@ def self_field_coefficient(alpha: Tensor) -> Tensor:
     return 4.0 * alpha ** 3 / (3.0 * SQRT_PI)
 
 
+def _alias_moments(size: int, order: int, dtype: torch.dtype, device: torch.device,
+                   n_alias: int = 24) -> Tensor:
+    """Per-axis alias sums ``sum_j sinc(m / K + j)^(2 p) (m + j K)^n`` for the
+    powers ``n`` from zero to four, ``(5, K)`` in FFT order: the position
+    average of the squared transform of a spline weight and of its
+    frequency moments."""
+    m = torch.fft.fftfreq(size, d=1.0 / size, dtype=dtype, device=device)
+    j = torch.arange(-n_alias, n_alias + 1, dtype=dtype, device=device)
+    weight = torch.sinc(m[:, None] / size + j[None, :]) ** (2 * order)
+    f = m[:, None] + j[None, :] * size
+    return torch.stack([(weight * f ** n).sum(1) for n in range(5)])
+
+
+def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str,
+                      max_rank: int = 4) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
+    """Moments of the spurious, position-averaged mesh self-interaction.
+
+    A multipole spread on the mesh interacts with itself through the mesh
+    sum; the spline interpolation makes that interaction differ from the
+    exact reciprocal-space self term by an amount that, averaged over the
+    position of the atom within a mesh cell, is
+    ``S0 q^2 - 2 q Q:S2 + d.S2.d + Q:S4:Q`` with the moments returned here
+    (the alias sums of the squared spline transform minus the exact term).
+    They vanish as the mesh is refined. Subtracting the spurious part
+    removes the mean discretisation error of the self-interaction from the
+    energy, the field and the dispersion sum (Ballenegger, Cerutti, Holm
+    and Lenz, J. Chem. Phys. 134, 162101, 2011).
+
+    Parameters
+    ----------
+    cell : Tensor
+        Lattice vectors as rows ``(3, 3)``.
+    alpha : float
+        Ewald coefficient.
+    mesh : list of int
+        Mesh dimensions.
+    order : int
+        B-spline order.
+    kind : str
+        ``"coulomb"`` or ``"r6"`` (dispersion, scalar moment only).
+    max_rank : int, optional
+        Highest moment wanted: 0 (charges), 2 (dipoles) or 4 (quadrupoles).
+
+    Returns
+    -------
+    tuple of Tensor
+        ``S0`` (scalar), ``S2`` ``(3, 3)`` and ``S4`` ``(3, 3, 3, 3)`` in
+        Cartesian components (``None`` beyond ``max_rank``), in the units
+        of the energy per squared multipole.
+    """
+    dtype, device = cell.dtype, cell.device
+    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
+    g = _influence(cell, alpha, mesh, order, kind) / (k1 * k2 * k3)
+    # the exact reciprocal self term carries the bare kernel, without the spline moduli of the mesh sum
+    g0 = g / spline_moduli(mesh, order, dtype, device)
+    mu = [_alias_moments(k, order, dtype, device) for k in (k1, k2, k3)]
+    freq = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2, k3)]
+    cache: dict = {}
+
+    def weighted(axes) -> Tensor:
+        counts = (axes.count(0), axes.count(1), axes.count(2))
+        if counts not in cache:
+            alias = (mu[0][counts[0]][:, None, None] * mu[1][counts[1]][None, :, None]
+                     * mu[2][counts[2]][None, None, :])
+            exact = (freq[0][:, None, None] ** counts[0] * freq[1][None, :, None] ** counts[1]
+                     * freq[2][None, None, :] ** counts[2])
+            cache[counts] = 0.5 * (g * alias - g0 * exact).sum()
+        return cache[counts]
+
+    s0 = weighted(())
+    if kind == "r6" or max_rank < 2:
+        return s0, None, None
+    inv = torch.linalg.inv(cell)                     # k_x = 2 pi sum_a inv[x, a] f_a
+    two_pi = 2.0 * math.pi
+    s2 = torch.stack([weighted((a, b)) for a in range(3) for b in range(3)]).reshape(3, 3) * two_pi ** 2
+    s2c = torch.einsum("ab,xa,yb->xy", s2, inv, inv)
+    if max_rank < 4:
+        return s0, s2c, None
+    s4 = torch.stack([weighted((a, b, c, d)) for a in range(3) for b in range(3) for c in range(3)
+                      for d in range(3)]).reshape(3, 3, 3, 3) * two_pi ** 4
+    s4c = torch.einsum("abcd,xa,yb,zc,wd->xyzw", s4, inv, inv, inv, inv)
+    return s0, s2c, s4c
+
+
+def mesh_self_energy(q: Tensor, d: Tensor, Q: Optional[Tensor], moments) -> Tensor:
+    """Per-atom spurious mesh self-interaction of the multipoles,
+    ``S0 q^2 - 2 q Q:S2 + d.S2.d + Q:S4:Q``, to be subtracted from the mesh
+    energy in addition to the analytic self energy.
+
+    Parameters
+    ----------
+    q, d, Q : Tensor
+        Multipoles ``(N,)``, ``(N, 3)``, ``(N, 3, 3)`` (``Q`` may be ``None``).
+    moments : tuple of Tensor
+        From :func:`mesh_self_moments` with ``kind="coulomb"``.
+
+    Returns
+    -------
+    Tensor
+        ``(N,)`` in ``e^2 / Angstrom``.
+    """
+    s0, s2, s4 = moments
+    e = q * q * s0 + torch.einsum("na,ab,nb->n", d, s2, d)
+    if Q is not None:
+        e = e - 2.0 * q * torch.einsum("nab,ab->n", Q, s2) + torch.einsum("nab,abcd,ncd->n", Q, s4, Q)
+    return e
+
+
 def dispersion_pme(c: Tensor, pos: Tensor, cell: Tensor, alpha: float, mesh: List[int],
                    order: int) -> Tensor:
     """Per-atom reciprocal energies of the ``-c_i c_j / R^6`` Ewald sum of one
@@ -466,4 +574,4 @@ def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
 __all__ = ["ewald_coefficient", "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
-           "dispersion_real_kernel"]
+           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy"]
