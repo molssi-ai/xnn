@@ -38,8 +38,13 @@ from typing import Optional, Sequence, Union
 
 from xnn.common.data.elements import CHEMICAL_SYMBOLS, atomic_number
 
-from .oplslib import (KCAL_TO_EV, WILDCARD, resolve_bond_type,
-                      resolve_angle_type, resolve_dihedral_type)
+from .oplslib import (  # noqa: F401  # KCAL_TO_EV and resolve_dihedral_type are re-exported
+    KCAL_TO_EV,
+    WILDCARD,
+    resolve_angle_type,
+    resolve_bond_type,
+    resolve_dihedral_type,
+)
 
 # 1,4 scaling of the Cornell et al. force field (section C and E of the
 # paper): van der Waals by 1/2, electrostatics by 1/1.2.
@@ -520,7 +525,7 @@ def to_forcefield(lib: AmberLibrary, name: Optional[str] = None,
     xnn.ffnn.common.frc.FrcFile
         Save it with ``.write(path)``.
     """
-    from ..common.frc import FrcFile, Define, Reference, Section, make_section
+    from ..common.frc import Define, FrcFile, Reference, Section, make_section
     name = name or lib.name or "amber"
     label = name
     frc = FrcFile.empty()
@@ -575,7 +580,8 @@ def to_forcefield(lib: AmberLibrary, name: Optional[str] = None,
                      annotations=["E = eps(ij) * [(rmin(ij)/r(ij))**12 - 2 * (rmin(ij)/r(ij))**6]",
                                   "rmin(ij) = (rmin(i) + rmin(j)) / 2 = R*(i) + R*(j)",
                                   "eps(ij) = sqrt(eps(i) * eps(j))",
-                                  "rmin(i) is the like-pair minimum distance, twice the R* of the Amber parameter files"],
+                                  "rmin(i) is the like-pair minimum distance, "
+                                  "twice the R* of the Amber parameter files"],
                      modifiers={"type": [["rmin-eps"]],
                                 "combination": [["arithmetic"]]}),
         make_section("quadratic_bond", label, ["I", "J"], ["R0", "K2"],

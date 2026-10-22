@@ -93,12 +93,12 @@ BOX = np.array([
 
 # Tinker 8.11.3 energy terms (kcal/mol), internal virial (kcal/mol, Tinker's sign) and the
 # forces of the first four atoms (kcal/mol/A) of the boxes
-TINKER_AMOEBA = {"e_bond": 0.00000001, "e_angle": 11.11097557, "e_urey": 3.87760444, "e_vdw": 91.74039763, "e_multipole": 34.56619814, "e_polar": -76.68072254, "energy": 64.61445325}
+TINKER_AMOEBA = {"e_bond": 0.00000001, "e_angle": 11.11097557, "e_urey": 3.87760444, "e_vdw": 91.74039763, "e_multipole": 34.56619814, "e_polar": -76.68072254, "energy": 64.61445325}   # noqa: E501
 TINKER_AMOEBA_VIRIAL = np.array([[-651.307, 8.948, 5.89], [8.948, -580.646, 39.172], [5.89, 39.172, -558.31]])
-TINKER_AMOEBA_FORCES = np.array([[-10.73049941, 10.45227510, -7.48333535], [-20.20383982, 16.71993053, -3.96736761], [-114.34227554, -61.52887798, 24.75483643], [2.93538084, 4.92715067, 2.39439932]])
-TINKER_HIPPO = {"e_bond": 0.00000001, "e_angle": 0.00000000, "e_repulsion": 624.27637121, "e_dispersion": -233.11745121, "e_multipole": -183.53106497, "e_polar": -87.82485316, "e_chgtrn": -125.76374408, "energy": -5.96074220}
+TINKER_AMOEBA_FORCES = np.array([[-10.73049941, 10.45227510, -7.48333535], [-20.20383982, 16.71993053, -3.96736761], [-114.34227554, -61.52887798, 24.75483643], [2.93538084, 4.92715067, 2.39439932]])   # noqa: E501
+TINKER_HIPPO = {"e_bond": 0.00000001, "e_angle": 0.00000000, "e_repulsion": 624.27637121, "e_dispersion": -233.11745121, "e_multipole": -183.53106497, "e_polar": -87.82485316, "e_chgtrn": -125.76374408, "energy": -5.96074220}   # noqa: E501
 TINKER_HIPPO_VIRIAL = np.array([[-374.733, 34.825, -23.782], [34.825, -320.221, 61.47], [-23.782, 61.47, -455.051]])
-TINKER_HIPPO_FORCES = np.array([[-4.27527556, 9.53332856, -1.34967508], [-6.45852711, 7.15980308, 3.56915377], [-10.62015902, -6.93775281, 1.99761812], [5.26340457, 5.54326675, 1.33678951]])
+TINKER_HIPPO_FORCES = np.array([[-4.27527556, 9.53332856, -1.34967508], [-6.45852711, 7.15980308, 3.56915377], [-10.62015902, -6.93775281, 1.99761812], [5.26340457, 5.54326675, 1.33678951]])   # noqa: E501
 TOL_TERM = 5e-3        # kcal/mol (the two particle-mesh sums differ at the level of their mesh error)
 TOL_DISPERSION = 2e-2  # kcal/mol (the order-4 dispersion mesh converges more slowly)
 TOL_FORCE = 2e-3       # kcal/mol/A
@@ -153,7 +153,8 @@ def test_switching_is_a_c2_step():
     d2s = torch.autograd.grad(ds.sum(), r)[0]
     assert torch.all(s[r.detach() <= 5.4] == 1.0) and torch.all(s[r.detach() >= 6.0] == 0.0)
     assert torch.all(ds <= 1e-12)
-    at = lambda x: int(torch.argmin((r.detach() - x).abs()))
+    def at(x):
+        return int(torch.argmin((r.detach() - x).abs()))
     assert abs(float(ds[at(5.4)])) < 1e-9 and abs(float(ds[at(6.0)])) < 1e-9
     assert abs(float(d2s[at(5.4)])) < 1e-6 and abs(float(d2s[at(6.0)])) < 1e-6
     assert float(s[at(5.7)]) == pytest.approx(0.5, abs=1e-12)
@@ -198,7 +199,8 @@ def _explicit_reciprocal(q, d, Q, pos, cell, alpha, bound=8):
     eik = torch.exp(1j * phase)
     phi = ((w * rho)[None] * eik).sum(1).real / V
     dphi = torch.einsum("nk,ka->na", (w * rho)[None] * eik * 1j, k.to(torch.complex128)).real / V
-    d2phi = -torch.einsum("nk,ka,kb->nab", (w * rho)[None] * eik, k.to(torch.complex128), k.to(torch.complex128)).real / V
+    kc = k.to(torch.complex128)
+    d2phi = -torch.einsum("nk,ka,kb->nab", (w * rho)[None] * eik, kc, kc).real / V
     return energy, phi, dphi, d2phi
 
 
@@ -230,7 +232,8 @@ def test_dispersion_ewald_matches_the_lattice_sum():
     dist2 = (rij * rij).sum(-1)
     rmax = nmax * L6
     mask = (dist2 > 1e-8) & (dist2 < rmax * rmax)
-    direct = -0.5 * (c[:, None] * c[None, :] * torch.where(mask, 1.0 / dist2.clamp_min(1e-8) ** 3, torch.zeros_like(dist2))).sum()
+    inv_r6 = torch.where(mask, 1.0 / dist2.clamp_min(1e-8) ** 3, torch.zeros_like(dist2))
+    direct = -0.5 * (c[:, None] * c[None, :] * inv_r6).sum()
     # the continuum beyond the sphere of radius rmax
     direct = direct - 0.5 * float(c.sum()) ** 2 / L6 ** 3 * 4 * math.pi / (3 * rmax ** 3)
     near = mask & (dist2 < rc * rc)
@@ -295,7 +298,8 @@ def test_box_forces_and_stress_are_derivatives(cls):
 def test_iterative_solve_matches_the_dense_one():
     pos = BOX[:24] - BOX[:24].mean(0)
     dense = ForceStressOutput(Amoeba("amoeba-water-2003", _topology(8), cutoff=30.0, solver="dense"))
-    iterative = ForceStressOutput(Amoeba("amoeba-water-2003", _topology(8), cutoff=30.0, solver="iterative", polar_eps=1e-12))
+    iterative = ForceStressOutput(Amoeba("amoeba-water-2003", _topology(8), cutoff=30.0,
+                                         solver="iterative", polar_eps=1e-12))
     a = dense(_graph(pos, cell=None, cutoff=30.0))
     b = iterative(_graph(pos, cell=None, cutoff=30.0))
     assert float(a["energy"]) == pytest.approx(float(b["energy"]), abs=1e-10)
@@ -323,7 +327,8 @@ def test_batches_of_cells_and_a_cell_with_a_molecule():
     vacuum = float(dimer(_graph(pos, cell=None))["energy"])
     both = dimer(collate([_graph(pos, cell=np.diag([40.0, 40.0, 40.0])), _graph(pos, cell=None)]))["energy"]
     assert float(both[1]) == pytest.approx(vacuum, abs=1e-10)
-    assert float(both[0]) == pytest.approx(vacuum, abs=5e-3)        # periodic images and the mesh error of a dilute cell
+    # periodic images and the mesh error of a dilute cell
+    assert float(both[0]) == pytest.approx(vacuum, abs=5e-3)
 
 
 def test_training_step_through_the_implicit_solve():
@@ -332,7 +337,8 @@ def test_training_step_through_the_implicit_solve():
     fso.train()
     out = fso(_graph(BOX))
     target = torch.tensor(TINKER_AMOEBA_FORCES * KCAL_TO_EV)
-    loss = (out["energy"][0] - TINKER_AMOEBA["energy"] * KCAL_TO_EV + 0.01) ** 2 + ((out["forces"][:4] - target) ** 2).mean()
+    loss = ((out["energy"][0] - TINKER_AMOEBA["energy"] * KCAL_TO_EV + 0.01) ** 2
+            + ((out["forces"][:4] - target) ** 2).mean())
     loss.backward()
     grads = {k: p.grad for k, p in model.ff.params.items() if p.requires_grad}
     present = {k: g for k, g in grads.items() if g is not None}
@@ -347,15 +353,18 @@ def test_config_keys_in_tinker_spelling():
            "bonds": [[0, 1], [0, 2]], "ewald-alpha": 0.6, "pme-grid": [16, 16, 16], "vdw-taper": 5.4,
            "polar-eps": 1e-9}
     t = translate_model_keys(raw)
-    assert t["ewald_alpha"] == 0.6 and t["pme_grid"] == [16, 16, 16] and t["vdw_taper"] == 5.4 and t["polar_eps"] == 1e-9
+    assert t["ewald_alpha"] == 0.6 and t["pme_grid"] == [16, 16, 16]
+    assert t["vdw_taper"] == 5.4 and t["polar_eps"] == 1e-9
     cfg = ModelConfig(name="amoeba", cutoff=6.0, extra={k: v for k, v in t.items() if k not in ("name", "cutoff")})
     model = Amoeba.from_config(cfg)
-    assert model.ewald_alpha == 0.6 and model.pme_grid == [16, 16, 16] and model.vdw_taper == 5.4 and model.polar_eps == 1e-9
+    assert model.ewald_alpha == 0.6 and model.pme_grid == [16, 16, 16]
+    assert model.vdw_taper == 5.4 and model.polar_eps == 1e-9
 
 
 def _slab_graph(gap, cutoff=6.3):
     cell = np.diag([L, L, L + gap])
-    return structure_to_graph({"pos": BOX, "atomic_numbers": Z, "cell": cell, "pbc": [True, True, False]}, cutoff=cutoff)
+    return structure_to_graph({"pos": BOX, "atomic_numbers": Z, "cell": cell, "pbc": [True, True, False]},
+                              cutoff=cutoff)
 
 
 def test_slab_energies_are_independent_of_the_vacuum_gap():
@@ -372,12 +381,15 @@ def test_slab_energies_are_independent_of_the_vacuum_gap():
         p = BOX.copy()
         p[atom, axis] += h
         cell = np.diag([L, L, 3 * L])
-        ep = float(model(structure_to_graph({"pos": p, "atomic_numbers": Z, "cell": cell, "pbc": [True, True, False]}, cutoff=6.3))["energy"])
+        ep = float(model(structure_to_graph({"pos": p, "atomic_numbers": Z, "cell": cell,
+                                             "pbc": [True, True, False]}, cutoff=6.3))["energy"])
         p[atom, axis] -= 2 * h
-        em = float(model(structure_to_graph({"pos": p, "atomic_numbers": Z, "cell": cell, "pbc": [True, True, False]}, cutoff=6.3))["energy"])
+        em = float(model(structure_to_graph({"pos": p, "atomic_numbers": Z, "cell": cell,
+                                             "pbc": [True, True, False]}, cutoff=6.3))["energy"])
         assert f[atom, axis] == pytest.approx(-(ep - em) / (2 * h), abs=2e-6)
     with pytest.raises(ValueError):
-        _box(Amoeba)(structure_to_graph({"pos": BOX, "atomic_numbers": Z, "cell": CELL, "pbc": [True, False, False]}, cutoff=6.3))
+        _box(Amoeba)(structure_to_graph({"pos": BOX, "atomic_numbers": Z, "cell": CELL,
+                                         "pbc": [True, False, False]}, cutoff=6.3))
 
 
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])

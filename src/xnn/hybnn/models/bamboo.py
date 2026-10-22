@@ -43,19 +43,18 @@ Given the same weights this matches the original ``bamboo`` package
 """
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
+from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.electrostatics import all_pairs
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 from xnn.trfnn.attention import EdgeMultiheadAttention
-from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing
 
 from .dispersion import D3CSODispersion
 

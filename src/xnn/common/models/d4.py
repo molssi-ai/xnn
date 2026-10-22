@@ -97,16 +97,15 @@ from .dispersion import (
     BOHR,
     HARTREE,
     DispersionCorrection,
+    edge_cell_shifts,
     evaluate_on_graph,
     gaussian_reference_weights,
     options_from_extra,
     switching_function,
-    edge_cell_shifts,
     three_body_energy,
     three_body_energy_chunked,
 )
-from .eeq import (EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit,
-                  reciprocal_vectors)
+from .eeq import EEQReuse, EEQSystem, eeq_charges_large, ewald_alpha, lu_solve_implicit, reciprocal_vectors
 from .fast import FastPathModule
 from .ops import cell_volume, scatter_sum, structure_sum
 from .registry import register_model

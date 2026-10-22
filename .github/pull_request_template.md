@@ -10,6 +10,7 @@
 
 - [ ] Branched from `dev` and targeting `dev`.
 - [ ] `pytest -q` passes; new code is tested (a bug fix adds a test that failed before the fix).
+- [ ] `ruff check` passes.
 - [ ] `sphinx-build -b html -W --keep-going docs docs/_build/html` passes.
 - [ ] Reuses existing helpers in `xnn.common` or the family package; no second implementation of an existing component.
 - [ ] No data files in `tests/` or `notebooks/`; examples build their inputs in code or load them through the hubs.

@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader
 from xnn.common.config import from_dict
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.train import Trainer
-from xnn.common.train.losses import weighted_loss
 from xnn.common.train.loggers import ConsoleLogger, _summary
+from xnn.common.train.losses import weighted_loss
 
 BOX = 6.0
 CUTOFF = 3.0

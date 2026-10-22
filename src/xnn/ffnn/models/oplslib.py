@@ -483,7 +483,7 @@ def to_forcefield(lib: OPLSLibrary, name: Optional[str] = None,
     xnn.ffnn.common.frc.FrcFile
         Save it with ``.write(path)``.
     """
-    from ..common.frc import FrcFile, Define, Reference, make_section
+    from ..common.frc import Define, FrcFile, Reference, make_section
     name = name or lib.name or "opls"
     label = name
     frc = FrcFile.empty()

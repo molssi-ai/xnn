@@ -32,10 +32,9 @@ from tqdm.auto import tqdm
 
 from ._download import download_file
 from .base import DatasetBuilder, register_dataset
+from .units import KCAL_MOL_TO_EV as _KCAL_MOL_TO_EV
 
 _FIGSHARE = "https://ndownloader.figshare.com/files/{file_id}"
-
-from .units import KCAL_MOL_TO_EV as _KCAL_MOL_TO_EV
 
 # molecule -> (figshare file id, md5) for the per-molecule .npz files.
 _MOLECULES: dict[str, tuple[str, str]] = {

@@ -22,8 +22,7 @@ from ...data.hub._download import download_file, extract_archive
 from ..fast import set_use_fast
 from ..registry import deployment_config
 from . import zenodo
-from .cache import (head_dir, is_cache_key, is_ready, offline, resolve_cache_dir,
-                    sanitize, url_slot)
+from .cache import head_dir, is_cache_key, is_ready, offline, resolve_cache_dir, sanitize, url_slot
 from .card import CARD_FILE, CONFIG_FILE, WEIGHTS_FILE, ModelCard
 from .checkpoint import build_potential, load_checkpoint, save_pretrained
 from .formats import XNN_FORMAT, detect_format, get_format, is_archive, suffixes

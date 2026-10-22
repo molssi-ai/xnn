@@ -17,8 +17,7 @@ import torch
 
 from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
-from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.common.models import d3
+from xnn.common.models import ForceStressOutput, available_models, build_model, d3
 from xnn.dnn.models.physnet import KEHALF, shifted_softplus
 
 

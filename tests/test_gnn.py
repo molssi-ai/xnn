@@ -3,12 +3,14 @@ import numpy as np
 import pytest
 import torch
 
-from xnn.common.data import structure_to_graph
-from xnn.dnn.featurizers import (
-    RadialSymmetryFunctions, AngularSymmetryFunctions, AEV, build_triplets,
-)
-from xnn.common.models import build_model, ForceStressOutput, available_models
 from xnn.common.config import from_dict
+from xnn.common.data import structure_to_graph
+from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.dnn.featurizers import (
+    AEV,
+    RadialSymmetryFunctions,
+    build_triplets,
+)
 
 e3nn = pytest.importorskip("e3nn")  # GNN tests need e3nn
 

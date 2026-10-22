@@ -485,6 +485,7 @@ def test_multihead_and_reference_energies():
 def test_ase_calculator_reports_dipole():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
 
     model = ForceStressOutput(_small(dipole=True)).eval()

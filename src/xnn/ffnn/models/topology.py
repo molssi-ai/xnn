@@ -23,11 +23,9 @@ system (e.g. a liquid box built with ``ase.build``).
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
-
 
 # Covalent radii in Angstrom (Cordero et al., Dalton Trans. 2008, 2832),
 # indexed by atomic number; used only by the bond-guessing helper.
@@ -304,11 +302,11 @@ class MolecularTopology:
                         dihedrals.append(quad)
 
         excl = set(norm_bonds)
-        for i, j, k in angles:
+        for i, _j, k in angles:
             excl.add((min(i, k), max(i, k)))
 
         pairs14 = set()
-        for i, j, k, l in dihedrals:
+        for i, _j, _k, l in dihedrals:
             pair = (min(i, l), max(i, l))
             if pair not in excl:
                 pairs14.add(pair)
@@ -398,8 +396,7 @@ class MolecularTopology:
             if forcefield is None:
                 raise ValueError("give per-atom types, or a forcefield whose "
                                  "templates assign them")
-            from ..common.typing import (assign_atom_types, perceive_bonds,
-                                         perceive_bond_orders)
+            from ..common.typing import assign_atom_types, perceive_bond_orders, perceive_bonds
             types, details = assign_atom_types(atoms, forcefield, charge=charge,
                                                bonds=bonds, return_details=True)
             mol = details["mol"]

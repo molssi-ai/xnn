@@ -8,10 +8,9 @@ directly: memory ``O(N)``, one pass over the pairs per product.
 from __future__ import annotations
 
 import torch
-from torch import Tensor
-
 import triton
 import triton.language as tl
+from torch import Tensor
 
 BLOCK_I = 64
 BLOCK_J = 64

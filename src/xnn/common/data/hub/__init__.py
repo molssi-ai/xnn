@@ -17,6 +17,23 @@ dataset by subclassing :class:`DatasetBuilder` and calling
 """
 from __future__ import annotations
 
+# Import builder modules for their registration side effects.
+from . import (
+    ani1,  # noqa: F401
+    ani1ccx,  # noqa: F401
+    ani1x,  # noqa: F401
+    ani2x,  # noqa: F401
+    argon_md,  # noqa: F401
+    ethanol_response,  # noqa: F401
+    gmtkn55,  # noqa: F401
+    hdnnp4g,  # noqa: F401
+    lode_dimers,  # noqa: F401
+    noncovalent,  # noqa: F401
+    qm7,  # noqa: F401
+    qm9,  # noqa: F401
+    rmd17,  # noqa: F401
+    spookynet_states,  # noqa: F401
+)
 from ._download import default_cache_dir
 from .base import (
     DatasetBuilder,
@@ -25,22 +42,6 @@ from .base import (
     load_dataset,
     register_dataset,
 )
-
-# Import builder modules for their registration side effects.
-from . import rmd17  # noqa: F401
-from . import lode_dimers  # noqa: F401
-from . import ani1  # noqa: F401
-from . import ani1x  # noqa: F401
-from . import ani1ccx  # noqa: F401
-from . import ani2x  # noqa: F401
-from . import argon_md  # noqa: F401
-from . import qm7  # noqa: F401
-from . import qm9  # noqa: F401
-from . import ethanol_response  # noqa: F401
-from . import hdnnp4g  # noqa: F401
-from . import spookynet_states  # noqa: F401
-from . import noncovalent  # noqa: F401
-from . import gmtkn55  # noqa: F401
 
 __all__ = [
     "load_dataset",

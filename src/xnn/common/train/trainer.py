@@ -673,8 +673,12 @@ class Trainer:
         if not markers:
             return
         from ..finetune.heads import head_options
-        from ..finetune.reference import (average_atomic_energies, estimate_atomic_energies,
-                                          get_atomic_energies, set_atomic_energies)
+        from ..finetune.reference import (
+            average_atomic_energies,
+            estimate_atomic_energies,
+            get_atomic_energies,
+            set_atomic_energies,
+        )
 
         structures = _structures(train_set, "train_set")
         extra = dict(self.cfg.model.extra or {})

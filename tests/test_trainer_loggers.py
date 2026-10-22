@@ -266,7 +266,8 @@ _TORCHRUN = [sys.executable, "-m", "torch.distributed.run",
                                           (_TORCHRUN + ["--nproc-per-node", "2"], 2)],
                          ids=["python", "torchrun-1", "ddp-2"])
 def test_logging_and_best_checkpoint_under_every_launcher(tmp_path, launch, world):
-    """Rank-0 logging, all-term dataset-level losses and errors, running step values and the monitored best.pt agree under every launcher."""
+    """Rank-0 logging, all-term dataset-level losses and errors, running step values and the
+    monitored best.pt agree under every launcher."""
     script = tmp_path / "run.py"
     script.write_text(f"OUTPUT_DIR = {str(tmp_path)!r}\n" + _SCRIPT)
     result = subprocess.run(launch + [str(script)], capture_output=True, text=True,

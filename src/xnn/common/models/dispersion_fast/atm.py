@@ -41,10 +41,9 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
-from torch import Tensor
-
 import triton
 import triton.language as tl
+from torch import Tensor
 
 #: pairs per tile side: a program holds ``BLOCK x BLOCK`` pairs in registers
 BLOCK = 32

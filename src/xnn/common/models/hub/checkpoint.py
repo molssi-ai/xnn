@@ -182,6 +182,7 @@ def write_config(config: Any, path: Union[str, Path]) -> Path:
 def read_config(path: Union[str, Path]):
     """Read a config written by :func:`write_config`."""
     import yaml
+
     from ...config import from_dict
     return from_dict(yaml.safe_load(Path(path).read_text()) or {})
 
@@ -346,6 +347,7 @@ def save_pretrained(model: Union[nn.Module, str, Path],
         If no config is available, or ``config`` does not rebuild the weights.
     """
     import xnn
+
     from ...config import ModelConfig
     from ..outputs import ForceStressOutput
     from ..registry import build_model
@@ -482,8 +484,7 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
     from ...finetune.heads import find_multihead
     from ...finetune.lora import has_lora, merge_lora
     from ..outputs import ForceStressOutput
-    from ..registry import (add_dispersion, build_model, recorded_dispersion, replace_module,
-                            resolve_dispersion)
+    from ..registry import add_dispersion, build_model, recorded_dispersion, replace_module, resolve_dispersion
 
     recorded = recorded_dispersion(config)
     spec = resolve_dispersion(dispersion, recorded)

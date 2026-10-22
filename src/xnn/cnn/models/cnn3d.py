@@ -18,13 +18,12 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-import torch
 from torch import Tensor, nn
 
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
-from .base import (VoxelPotential, default_fields, default_strides, field_dim,
-                   global_average_pool, low_pass_filter)
+
+from .base import VoxelPotential, default_fields, default_strides, field_dim, global_average_pool, low_pass_filter
 
 
 class Conv3dBlock(nn.Module):

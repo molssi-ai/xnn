@@ -99,6 +99,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import glorot_orthogonal_, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
+
 from ..featurizers import BesselRBF, PolynomialCutoff, SphericalBesselBasis
 
 _MAX_Z = 100

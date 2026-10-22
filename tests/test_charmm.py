@@ -19,16 +19,15 @@ import torch
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models
 from xnn.common.train import weighted_loss
-from xnn.ffnn.common import list_forcefields, find_forcefield, read_forcefield
+from xnn.ffnn.common import find_forcefield, list_forcefields, read_forcefield
 from xnn.ffnn.models import (
     Charmm,
     CharmmForceField,
     CharmmLibrary,
     MolecularTopology,
     builtin_charmm,
-    read_charmm,
-    read_topology,
     place_charmm_impropers,
+    read_charmm,
 )
 from xnn.ffnn.models.charmmlib import (
     COULOMB_CONSTANT,

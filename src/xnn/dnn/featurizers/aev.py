@@ -28,7 +28,8 @@ from torch import Tensor
 
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
-from .symmetry_functions import RadialSymmetryFunctions, AngularSymmetryFunctions
+
+from .symmetry_functions import AngularSymmetryFunctions, RadialSymmetryFunctions
 
 # ANI-1 elements: H, C, N, O.
 ANI_SPECIES = [1, 6, 7, 8]

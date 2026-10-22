@@ -43,19 +43,24 @@ import math
 from typing import List, Optional, Tuple
 
 import torch
-
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from .charge_solve import (bonded_fragments, charge_energy, coulomb_matrix, covalent_radii,
-                           fragment_targets, ion_charge_table, solve_charges)
-from .dispersion import BOHR, HARTREE
-from .ops import ATOMIC_MASSES, cell_volume, center_of_mass, scatter_sum
-from .pme import mesh_wavevectors, pme_weighted_sum
-
 from ..data import AtomicGraph
 from .base import InteratomicPotential
+from .charge_solve import (
+    bonded_fragments,
+    charge_energy,
+    coulomb_matrix,
+    covalent_radii,
+    fragment_targets,
+    ion_charge_table,
+    solve_charges,
+)
+from .dispersion import BOHR, HARTREE
 from .fast import AutoPolicy, FastPathModule
+from .ops import ATOMIC_MASSES, cell_volume, center_of_mass, scatter_sum
+from .pme import mesh_wavevectors, pme_weighted_sum
 
 #: complex entries of one column block of the factorized reciprocal sum (fast path)
 FAST_BLOCK_ENTRIES = 5 * 10 ** 7
@@ -371,8 +376,8 @@ class EwaldSummation(nn.Module, FastPathModule):
         recomputed in the backward pass. Differentiable to every order that
         :meth:`reciprocal` is.
         """
-        from .recompute import recompute
         from .reciprocal import PhaseColumns, complex_dtype, structure_factors
+        from .recompute import recompute
 
         grid, _, k2 = self.k_set(cell)
         columns = PhaseColumns(grid)

@@ -161,7 +161,7 @@ def prepare_model(cfg):
 
     from ..finetune.heads import MultiHead, head_names, head_options
     from ..finetune.lora import inject_lora, lora_options
-    from ..finetune.reference import REFERENCE_MARKERS, reference_markers, set_atomic_energies
+    from ..finetune.reference import REFERENCE_MARKERS, reference_markers
 
     markers = reference_markers(cfg)[1]
     if markers:

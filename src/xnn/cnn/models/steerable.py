@@ -55,9 +55,17 @@ from torch.nn import functional as F
 
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
-from .base import (VoxelPotential, default_fields, default_strides, field_dim,
-                   global_average_pool, grid_coordinates, low_pass_filter, rotate_voxels)
 
+from .base import (
+    VoxelPotential,
+    default_fields,
+    default_strides,
+    field_dim,
+    global_average_pool,
+    grid_coordinates,
+    low_pass_filter,
+    rotate_voxels,
+)
 
 
 def _import_o3():

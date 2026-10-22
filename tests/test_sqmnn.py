@@ -20,10 +20,10 @@ import torch
 from xnn.common.config.schema import ModelConfig
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, build_model
-from xnn.sqmnn.common import list_parameter_sets, read_parameters, write_parameters
 from xnn.sqmnn.common import elements as el
+from xnn.sqmnn.common import list_parameter_sets, read_parameters, write_parameters
 from xnn.sqmnn.common.constants import COULOMB, EV_TO_KCAL
-from xnn.sqmnn.models import NDDO, PM3, PM6, PM6ORG, PM7
+from xnn.sqmnn.models import PM3, PM6, PM6ORG, PM7
 from xnn.sqmnn.models.angular import LOCAL, gaunt, multipole_coefficient
 from xnn.sqmnn.models.corrections import h4_hbond, hh_repulsion, yne_correction
 from xnn.sqmnn.models.integrals import local_frames, overlap_local, slater_condon
@@ -67,6 +67,7 @@ def test_registration_and_config():
 def test_model_config_files():
     """The shipped model configs build the published methods."""
     import yaml
+
     from xnn.common.config.loaders import from_dict
     root = HERE.parent / "configs" / "model"
     for name, cls in (("pm3", PM3), ("pm6", PM6), ("pm6_org", PM6ORG), ("pm7", PM7)):

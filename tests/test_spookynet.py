@@ -22,8 +22,7 @@ from xnn.common.models.d4 import DFTD4
 from xnn.common.models.dispersion import BOHR, HARTREE
 from xnn.common.models.electrostatics import COULOMB_CONSTANT
 from xnn.hybnn.featurizers import ExponentialBernsteinRBF
-from xnn.hybnn.models.spookynet import (SpookyNet, electron_configurations,
-                                      orthogonal_random_features, smooth_switch)
+from xnn.hybnn.models.spookynet import SpookyNet, electron_configurations, orthogonal_random_features, smooth_switch
 
 CUTOFF = 4.0
 
@@ -633,6 +632,7 @@ def test_scripted_core_and_torchscript_export(tmp_path):
 def test_ase_calculator_reads_charge_and_spin():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
 
     model = ForceStressOutput(_small(seed=16)).eval()

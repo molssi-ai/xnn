@@ -230,7 +230,7 @@ def test_frames_give_the_monomer_dipole_of_table_2():
     mu = out["dipole"][0] * DEBYE
     assert float(mu.norm()) == pytest.approx(1.773, abs=2e-3)
     assert float(mu[0]) == pytest.approx(0.0, abs=1e-12) and float(mu[2]) > 0   # along the bisector
-    assert float(out["e_polar"]) == 0.0                                           # one group: no intramolecular induction
+    assert float(out["e_polar"]) == 0.0    # one group: no intramolecular induction
     # HIPPO monomer, Table 1 of Rackers et al. (2021): 1.843 D at the experimental geometry
     hippo = Hippo("hippo-water-2021", top, cutoff=30.0)
     out = hippo(_graph(_monomer(0.9572, 104.52), Z_DIMER[:3]))
@@ -286,8 +286,10 @@ def test_dimer_1_single_points_reproduce_the_paper():
     """HIPPO single-point energy of Smith dimer 1 (Table 2, Rackers et al. 2021: -4.917 kcal/mol)."""
     out = _model(Hippo)(_graph(DIMER1))
     assert float(out["energy"]) * EV_TO_KCAL == pytest.approx(-4.917, abs=2e-3)
-    comps = {k: float(out[k]) * EV_TO_KCAL for k in ("e_multipole", "e_repulsion", "e_polar", "e_dispersion", "e_chgtrn")}
-    # Table S4: electrostatics -8.633, repulsion 8.373, induction (polarization + charge transfer) -3.167, dispersion -1.522
+    comps = {k: float(out[k]) * EV_TO_KCAL
+             for k in ("e_multipole", "e_repulsion", "e_polar", "e_dispersion", "e_chgtrn")}
+    # Table S4: electrostatics -8.633, repulsion 8.373,
+    # induction (polarization + charge transfer) -3.167, dispersion -1.522
     assert comps["e_multipole"] == pytest.approx(-8.633, abs=2e-3)
     assert comps["e_repulsion"] == pytest.approx(8.373, abs=2e-3)
     assert comps["e_dispersion"] == pytest.approx(-1.522, abs=2e-3)
@@ -346,7 +348,8 @@ def test_hippo_pair_terms_by_hand():
     f_h = 1 - (1 + zh * R / 2) * math.exp(-zh * R)
     A = zh ** 2 / (zh ** 2 - zo ** 2)
     B = zo ** 2 / (zo ** 2 - zh ** 2)
-    f_ov = 1 - A ** 2 * (1 + 2 * B + zo * R / 2) * math.exp(-zo * R) - B ** 2 * (1 + 2 * A + zh * R / 2) * math.exp(-zh * R)
+    f_ov = (1 - A ** 2 * (1 + 2 * B + zo * R / 2) * math.exp(-zo * R)
+            - B ** 2 * (1 + 2 * A + zh * R / 2) * math.exp(-zh * R))
     e_mp = am.COULOMB_KCAL / R * (o["core"] * h["core"] + o["core"] * vh * f_h + h["core"] * vo * f_o + vo * vh * f_ov)
     assert float(out["e_multipole"]) * EV_TO_KCAL == pytest.approx(e_mp, rel=1e-12)
     e_ct = -lib.chgtrn["OW"]["eps"] * am.COULOMB_KCAL * math.exp(-lib.chgtrn["HW"]["alpha"] * R)

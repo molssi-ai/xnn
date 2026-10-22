@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Iterable, Optional, Sequence, Union
+from typing import Iterable, Optional, Union
 
 import numpy as np
 import torch
@@ -139,7 +139,7 @@ def pseudolabel(model: nn.Module, structures: Iterable[dict], batch_size: int = 
         stress = any(s.get("cell") is not None for s in structures)
     if device is None:
         device = next((p.device for p in model.parameters()), torch.device("cpu"))
-    cutoff = float(getattr(model, "cutoff"))
+    cutoff = float(model.cutoff)
     wrapped = ForceStressOutput(model, compute_forces=True, compute_stress=bool(stress))
     was_training = model.training
     model.eval()

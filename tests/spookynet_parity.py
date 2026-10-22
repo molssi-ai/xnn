@@ -16,8 +16,8 @@ random ones. The last line printed is the worst relative error of the code
 comparison.
 """
 import sys
-import warnings
 import tempfile
+import warnings
 
 import numpy as np
 import torch

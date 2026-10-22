@@ -9,7 +9,7 @@ from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
 from xnn.common.models import ForceStressOutput, build_model, eeq
 from xnn.common.models.d3 import D3Dispersion
-from xnn.common.models.d4 import AUTO_LARGE_MOLECULAR, AUTO_LARGE_PERIODIC, D4Dispersion, DFTD4
+from xnn.common.models.d4 import AUTO_LARGE_MOLECULAR, AUTO_LARGE_PERIODIC, DFTD4, D4Dispersion
 from xnn.common.models.dispersion import three_body_energy, three_body_energy_chunked
 
 pytestmark = pytest.mark.usefixtures("_f64")
@@ -82,7 +82,8 @@ def test_regime_options_and_auto_selection():
     cfg = from_dict({"model": {"name": "d4", "extra": {"regime": "large", "eeq_solver": "cg",
                                                         "checkpoint_triplets": False, "cutoff_eeq": 12.0}}})
     m = build_model(cfg.model)
-    assert (m.term.regime, m.term.eeq_solver, m.term.checkpoint_triplets, m.term.cutoff_eeq) == ("large", "cg", False, 12.0)
+    settings = (m.term.regime, m.term.eeq_solver, m.term.checkpoint_triplets, m.term.cutoff_eeq)
+    assert settings == ("large", "cg", False, 12.0)
 
 
 def test_large_regime_needs_twenty_bohr_of_neighbor_list_for_crystals():
@@ -248,8 +249,9 @@ def test_checkpointed_triplets_match_plain_loop_and_script():
         e_alpha = three_body_energy_chunked(zt, ei, vs, rs, *args, alpha_a=(3.0 / np.pi) * alpha * d4.cp_weights,
                                             alpha_b=alpha, chunk=chunk)
         assert torch.allclose(ref, e_mat, atol=1e-15, rtol=0) and torch.allclose(ref, e_alpha, atol=1e-15, rtol=0)
-    d3a = _run(D3Dispersion(s9=1.0, checkpoint_triplets=False, cutoff_pair=9.0, cutoff_triple=6.0, cutoff_cn=8.0), pos, z)
-    d3b = _run(D3Dispersion(s9=1.0, checkpoint_triplets=True, cutoff_pair=9.0, cutoff_triple=6.0, cutoff_cn=8.0), pos, z)
+    d3_cutoffs = dict(cutoff_pair=9.0, cutoff_triple=6.0, cutoff_cn=8.0)
+    d3a = _run(D3Dispersion(s9=1.0, checkpoint_triplets=False, **d3_cutoffs), pos, z)
+    d3b = _run(D3Dispersion(s9=1.0, checkpoint_triplets=True, **d3_cutoffs), pos, z)
     assert abs(float(d3a["energy_3body"] - d3b["energy_3body"])) < 1e-13
     assert torch.allclose(d3a["forces"], d3b["forces"], atol=1e-12, rtol=0)
 
@@ -446,6 +448,7 @@ def test_analytic_block_gradient_matches_autograd():
     a2, s9) equals autograd through the block, in eval mode and through the
     force-training double backward."""
     import functools
+
     from xnn.common.models import dispersion as disp
     rng = np.random.default_rng(11)
     pos, z, cell = rng.uniform(0, 9.0, (60, 3)), ([8, 1, 1, 6] * 15), np.eye(3) * 9.0
@@ -469,6 +472,7 @@ def test_analytic_block_gradient_matches_autograd():
 def _three_body_with(term, chunked, z, pos, edge_index, edge_vec, r, alpha_neutral, cell, batch, n_atoms):
     """DFTD4._three_body_chunked with a chosen chunked driver (test helper)."""
     import math
+
     from xnn.common.models.dispersion import edge_cell_shifts
     alpha_a = (3.0 / math.pi) * alpha_neutral * term.cp_weights
     c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)

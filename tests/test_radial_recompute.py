@@ -15,8 +15,11 @@ pytest.importorskip("e3nn")
 from xnn.common.config import from_dict  # noqa: E402
 from xnn.common.data import structure_to_graph  # noqa: E402
 from xnn.common.models import ForceStressOutput, build_model  # noqa: E402
-from xnn.gnn.models import RadialNet, set_recompute_radial  # noqa: E402
-from xnn.gnn.models import blocks  # noqa: E402
+from xnn.gnn.models import (  # noqa: E402
+    RadialNet,
+    blocks,  # noqa: E402
+    set_recompute_radial,
+)
 
 SPECIES = [1, 6, 8]
 CONFIGS = {

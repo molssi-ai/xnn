@@ -10,7 +10,6 @@ against float64. The LAMMPS cross-check lives in
 ``notebooks/fidelity_checks/ffnn/amber/amber_verification.ipynb``.
 """
 
-import json
 import math
 
 import numpy as np
@@ -20,22 +19,20 @@ import torch
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models
 from xnn.common.train import weighted_loss
-from xnn.ffnn.common import list_forcefields, find_forcefield, read_forcefield
+from xnn.ffnn.common import find_forcefield, list_forcefields, read_forcefield
 from xnn.ffnn.models import (
     Amber,
     AmberForceField,
     AmberLibrary,
     MolecularTopology,
     builtin_amber,
+    match_improper,
     read_amber,
     read_topology,
-    match_improper,
-    place_impropers,
 )
 from xnn.ffnn.models.amber import KE, KE_KCAL, multiple_angles
 from xnn.ffnn.models.amberlib import (
     KCAL_TO_EV,
-    SCALE_14_COULOMB,
     SCALE_14_VDW,
     resolve_improper_type,
 )

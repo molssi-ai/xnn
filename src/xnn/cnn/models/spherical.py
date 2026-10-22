@@ -50,6 +50,7 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
+
 from ..featurizers import SphericalGrid
 from .base import VoxelPotential
 
@@ -692,7 +693,8 @@ class SphericalCNN(VoxelPotential):
         latent = self.set_readout["phi"](features)
         pooled = torch.zeros(data.num_graphs, latent.shape[1], dtype=latent.dtype, device=latent.device)
         pooled = pooled.index_add(0, data.batch, latent)
-        residual = self.energy_scale * self.set_readout["psi"](pooled).squeeze(-1) + self.energy_shift * data.n_atoms.to(latent.dtype)
+        residual = (self.energy_scale * self.set_readout["psi"](pooled).squeeze(-1)
+                    + self.energy_shift * data.n_atoms.to(latent.dtype))
         ref = self.atom_ref(data.atomic_numbers).squeeze(-1)
         node_energy = residual[data.batch] / data.n_atoms.to(latent.dtype)[data.batch] + ref
         return {"node_energy": node_energy, "energy": self.aggregate_energy(node_energy, data),

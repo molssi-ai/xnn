@@ -33,7 +33,8 @@ Built with the published parameters (``PM6()`` reads the ``pm6`` values of
 MOPAC 23.2.5, see :mod:`xnn.sqmnn.common.published`) the models reproduce the
 reference program MOPAC; ``trainable=`` turns named parameter groups
 (``"BETAS"``, ``"USS"``, ``"ZS"``, ``"ALPB"``, ``"FN11"``, ...) into
-``torch.nn.Parameter`` tables refit by gradient descent like any xnn model. :meth:`NDDO.parameter_set` exports the current values,
+``torch.nn.Parameter`` tables refit by gradient descent like any xnn model.
+:meth:`NDDO.parameter_set` exports the current values,
 which :func:`~xnn.sqmnn.common.parameters.write_parameters` writes as a MOPAC
 ``EXTERNAL`` file.
 
@@ -51,7 +52,7 @@ shells (``spin_multiplicity`` > 1, or an odd electron count).
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Sequence, Union
+from typing import Dict, Sequence, Union
 
 import torch
 from torch import Tensor, nn
@@ -61,12 +62,10 @@ from xnn.common.models import InteratomicPotential
 
 from ..common import elements as el
 from ..common.constants import BOHR, COULOMB, EV_TO_KCAL
-from ..common.parameters import (ELEMENT_PARAMETERS, GAUSSIAN_PARAMETERS, PAIR_PARAMETERS,
-                                 ParameterSet, read_parameters)
-from .angular import dipole_factors, pair_type, L_OF, MOLECULAR
+from ..common.parameters import ELEMENT_PARAMETERS, GAUSSIAN_PARAMETERS, PAIR_PARAMETERS, ParameterSet, read_parameters
+from .angular import L_OF, MOLECULAR, dipole_factors, pair_type
 from .derived import element_quantities
-from .scf import (PAD_ENERGY, Layout, SCFDensity, electronic_energy, fock_matrices, lowest,
-                  run_scf)
+from .scf import PAD_ENERGY, Layout, SCFDensity, electronic_energy, fock_matrices, lowest, run_scf
 from .twocenter import pair_integrals
 
 _ELEMENT_NAMES = ELEMENT_PARAMETERS + GAUSSIAN_PARAMETERS
@@ -383,7 +382,9 @@ class NDDO(InteratomicPotential):
             atom_blocks = atom_blocks.index_add(0, pa, ints["VA"]).index_add(0, pb, ints["VB"])
             pair_blocks = ints["S"] * 0.5 * (beta[pa][:, :, None] + beta[pb][:, None, :])
             H = layout.scatter(atom_blocks, pair_blocks)
-            H = H + torch.diag_embed(torch.where(valid, torch.zeros((), dtype=dtype, device=device), torch.full((), PAD_ENERGY, dtype=dtype, device=device)))
+            diag_pad = torch.where(valid, torch.zeros((), dtype=dtype, device=device),
+                                   torch.full((), PAD_ENERGY, dtype=dtype, device=device))
+            H = H + torch.diag_embed(diag_pad)
             W1 = q["one_center"][ea][:, :k, :k, :k, :k]
             W1 = (W1 * mask[:, :, None, None, None] * mask[:, None, :, None, None]
                   * mask[:, None, None, :, None] * mask[:, None, None, None, :])

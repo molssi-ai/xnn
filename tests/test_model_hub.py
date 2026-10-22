@@ -23,10 +23,24 @@ import torch
 
 from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
-from xnn.common.models import (ForceStressOutput, ModelCard, build_model, from_pretrained,
-                               list_models, model_card, register_pretrained, save_pretrained)
-from xnn.common.models.hub import (default_model_cache_dir, fetch_model, load_checkpoint,
-                                   load_pretrained, registry, zenodo)
+from xnn.common.models import (
+    ForceStressOutput,
+    ModelCard,
+    build_model,
+    from_pretrained,
+    list_models,
+    model_card,
+    register_pretrained,
+    save_pretrained,
+)
+from xnn.common.models.hub import (
+    default_model_cache_dir,
+    fetch_model,
+    load_checkpoint,
+    load_pretrained,
+    registry,
+    zenodo,
+)
 from xnn.common.models.hub.cache import is_cache_key, url_slot
 from xnn.common.models.hub.checkpoint import config_to_dict
 
@@ -318,7 +332,7 @@ def test_tar_archive_refuses_path_traversal(tmp_path):
     with tarfile.open(evil, "w:gz") as t:
         t.add(payload, arcname="../escaped.txt")
     register_pretrained(name="evil", url=evil.as_uri())
-    with pytest.raises(Exception):
+    with pytest.raises((tarfile.TarError, OSError, ValueError, RuntimeError)):
         fetch_model("evil", cache_dir=tmp_path / "cache", quiet=True)
     assert not (tmp_path / "escaped.txt").exists()
 
@@ -406,9 +420,9 @@ def test_engine_calculator_and_classmethod_take_names(tmp_path):
     pytest.importorskip("ase")
     from ase import Atoms
 
-    from xnn.gnn.models.schnet import SchNet
     from xnn.common.deploy import MDIEngine, XNNCalculator
     from xnn.gnn.models.mace import MACE
+    from xnn.gnn.models.schnet import SchNet
 
     model, cfg = _model()
     save_pretrained(model, tmp_path / "tiny-schnet", config=cfg)

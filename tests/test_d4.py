@@ -19,8 +19,8 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import (
-    D4Dispersion,
     DFTD4,
+    D4Dispersion,
     ForceStressOutput,
     LatentEwald,
     build_model,
@@ -366,6 +366,7 @@ def test_nests_with_les_in_both_orders():
 def test_total_charge_flows_through_the_data_layer():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.data.ase_io import atoms_to_structure
     atoms = Atoms("NH4", positions=AMMONIUM[0])
     atoms.info["charge"] = 1.0
@@ -433,6 +434,7 @@ def test_export_records_dispersion_metadata(tmp_path):
 def test_ase_calculator_matches_eager():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
     model = D4Dispersion(**FAST)
     pos, z = _cluster(9, seed=7)
@@ -449,6 +451,7 @@ def test_trainer_widens_dataset_cutoff_to_the_wrapper(tmp_path):
     pytest.importorskip("ase")
     from ase import Atoms
     from ase.io import write
+
     from xnn.common.data import AtomicDataset
     from xnn.common.train import Trainer
     frames = []

@@ -17,8 +17,7 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.gnn.models.tensornet import (TensorNet, axial_vector, compose, decompose,
-                                      frobenius, skew_tensor)
+from xnn.gnn.models.tensornet import TensorNet, axial_vector, compose, decompose, frobenius, skew_tensor
 
 SPECIES = [1, 6, 8]
 

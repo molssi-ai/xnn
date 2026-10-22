@@ -10,7 +10,6 @@ under the rotations of the cube. Rotation invariance of the energy under
 arbitrary rotations is approximate (the bandlimit) and is compared with
 the conventional CNN, which has none.
 """
-import math
 
 import numpy as np
 import pytest
@@ -19,16 +18,24 @@ import torch
 e3nn = pytest.importorskip("e3nn")
 from e3nn import o3  # noqa: E402
 
-from xnn.common.config import from_dict  # noqa: E402
-from xnn.common.data import collate, structure_to_graph  # noqa: E402
-from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
-from xnn.cnn.models import (CNN3D, GatedBlock, SteerableBatchNorm, SteerableCNN,  # noqa: E402
-                            SteerableConv3d, angular_kernel_basis, field_dim,
-                            n_basis_kernels, rotate_fields, rotate_voxels,
-                            steerable_kernel_basis)
-from xnn.cnn.models.steerable import BANDLIMITS, shell_bandlimits  # noqa: E402
-
 from test_cnn3d import SPECIES, _graph, _structure, cube_rotations  # noqa: E402
+from xnn.cnn.models import (  # noqa: E402
+    CNN3D,
+    GatedBlock,
+    SteerableBatchNorm,
+    SteerableCNN,
+    SteerableConv3d,
+    angular_kernel_basis,
+    field_dim,
+    n_basis_kernels,
+    rotate_fields,
+    rotate_voxels,
+    steerable_kernel_basis,
+)
+from xnn.cnn.models.steerable import BANDLIMITS, shell_bandlimits  # noqa: E402
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import collate  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +104,7 @@ def test_basis_counts_and_bandlimits():
     assert n_basis_kernels(2, 3, 5, "conservative") == 0 + 2 + 4
     assert steerable_kernel_basis(3, 3, 1) is not None       # J = 0 at the origin
     assert steerable_kernel_basis(0, 3, 1) is None           # J = 3 is bandlimited away
-    for name, limits in BANDLIMITS.items():
+    for _name, limits in BANDLIMITS.items():
         assert limits[0] == 0 and all(a < b for a, b in zip(limits, limits[1:]))
 
 

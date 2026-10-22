@@ -35,7 +35,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import math
-from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 import torch
 from torch import Tensor, nn

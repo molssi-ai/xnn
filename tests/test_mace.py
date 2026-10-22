@@ -236,8 +236,7 @@ def test_distance_transform_formulas():
     ase = pytest.importorskip("ase")
     import math
 
-    from xnn.gnn.featurizers import (AgnesiDistanceTransform,
-                                     SoftDistanceTransform)
+    from xnn.gnn.featurizers import AgnesiDistanceTransform, SoftDistanceTransform
 
     z = torch.tensor([1, 8])
     edge_index = torch.tensor([[0, 1], [1, 0]])

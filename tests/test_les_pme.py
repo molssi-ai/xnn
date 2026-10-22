@@ -107,7 +107,8 @@ def test_model_option_and_config_hook():
     torch.manual_seed(0)
     model = build_model(cfg.model)
     assert isinstance(model, LatentEwald) and model.ewald.method == "pme"
-    kspace = build_model(from_dict({"model": {**cfg.model.__dict__, "extra": {"long_range": {"n_channels": 2, "dl": 1.5}}}}).model)
+    kspace = build_model(from_dict({"model": {**cfg.model.__dict__,
+                                              "extra": {"long_range": {"n_channels": 2, "dl": 1.5}}}}).model)
     kspace.load_state_dict(model.state_dict())
     rng = np.random.default_rng(1)
     s = {"pos": rng.uniform(0, 7, (24, 3)), "atomic_numbers": [1, 8] * 12, "cell": np.eye(3) * 7.0, "pbc": [True] * 3}
@@ -118,7 +119,9 @@ def test_model_option_and_config_hook():
     assert torch.allclose(a["stress"], b["stress"], atol=1e-5 * float(b["stress"].abs().max()))
     # molecules never use a reciprocal sum, so the option is inert there
     m = {"pos": rng.uniform(0, 5, (10, 3)), "atomic_numbers": [1, 8] * 5}
-    assert float(model(structure_to_graph(m, 4.5))["energy"]) == pytest.approx(float(kspace(structure_to_graph(m, 4.5))["energy"]), abs=1e-12)
+    e_mesh = float(model(structure_to_graph(m, 4.5))["energy"])
+    e_sum = float(kspace(structure_to_graph(m, 4.5))["energy"])
+    assert e_mesh == pytest.approx(e_sum, abs=1e-12)
     with pytest.raises(ValueError, match="method"):
         EwaldSummation(method="fft")
 
@@ -127,5 +130,6 @@ def test_les_is_refused_on_a_model_with_its_own_electrostatics():
     base = {"name": "physnet", "cutoff": 4.5, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
     with pytest.raises(ValueError, match="count them twice"):
         build_model(from_dict({"model": {**base, "extra": {"use_electrostatics": True, "long_range": True}}}).model)
-    model = build_model(from_dict({"model": {**base, "extra": {"use_electrostatics": False, "long_range": True}}}).model)
+    model = build_model(from_dict({"model": {**base,
+                                             "extra": {"use_electrostatics": False, "long_range": True}}}).model)
     assert isinstance(model, LatentEwald)

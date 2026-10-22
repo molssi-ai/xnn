@@ -328,7 +328,8 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
     coeff = coeff + df[:, 0:1] * st["0_"] + df[:, 1:2] * st["1_"] + df[:, 2:3] * st["2_"]
     if Qf is not None:
         coeff = coeff + (Qf[:, 0, 0, None] * st["00"] + Qf[:, 1, 1, None] * st["11"] + Qf[:, 2, 2, None] * st["22"]
-                         + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"] + Qf[:, 1, 2, None] * st["12"]))
+                         + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"]
+                                  + Qf[:, 1, 2, None] * st["12"]))
     grid = torch.zeros(k1 * k2 * k3, dtype=pos.dtype, device=pos.device)
     grid = grid.index_add(0, flat.reshape(-1), coeff.reshape(-1))
     influence = _influence(cell, alpha, mesh, order, "coulomb")

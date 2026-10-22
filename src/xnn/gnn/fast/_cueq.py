@@ -34,8 +34,8 @@ _broken: dict = {"reason": None}
 def _importable() -> bool:
     try:
         import cuequivariance  # noqa: F401
-        import cuequivariance_torch  # noqa: F401
         import cuequivariance_ops_torch  # noqa: F401
+        import cuequivariance_torch  # noqa: F401
     except Exception as exc:  # ImportError, or a CUDA library the kernels cannot load
         logger.debug("cuEquivariance is not available: %s", exc)
         return False
@@ -86,8 +86,8 @@ def e3nn_group():
     import dataclasses
     import itertools
 
-    import numpy as np
     import cuequivariance as cue
+    import numpy as np
 
     # repr=False keeps O3's '1o' spelling (a generated repr would replace it)
     @dataclasses.dataclass(frozen=True, repr=False)

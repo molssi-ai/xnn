@@ -11,12 +11,9 @@ eye.
 """
 import pytest
 
+from xnn.ffnn.common import builtin_data_dir, convert_units, find_forcefield, list_forcefields, read_frc
 from xnn.ffnn.common import frc as frc_mod
-from xnn.ffnn.common import (FrcFile, read_frc, find_forcefield,
-                              list_forcefields, convert_units,
-                              builtin_data_dir)
-from xnn.ffnn.common.frc import (canonical_key, nonbond_to_sigma_eps,
-                                  parse_version, read_forcefield, make_section)
+from xnn.ffnn.common.frc import canonical_key, make_section, nonbond_to_sigma_eps, parse_version, read_forcefield
 
 BASE = """!MolSSI forcefield 1
 

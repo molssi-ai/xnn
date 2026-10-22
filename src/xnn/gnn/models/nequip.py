@@ -46,12 +46,12 @@ it exactly (same sorted input layout, same ``normalize2mom`` activations).
 from typing import Dict, Final, List, Optional, Tuple
 
 import torch
-from torch import Tensor, nn
-
 from e3nn import o3
+from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.registry import register_model
+
 from ..fast import ConvTensorProduct
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as ACTS
@@ -343,8 +343,9 @@ class InteractionBlock(nn.Module):
                  n_radial: int, invariant_layers: int = 2,
                  invariant_neurons: int = 64,
                  avg_num_neighbors: Optional[float] = None, use_sc: bool = True,
-                 nonlinearity_scalars: Dict[str, str] = {"e": "silu"}):
+                 nonlinearity_scalars: Optional[Dict[str, str]] = None):
         super().__init__()
+        nonlinearity_scalars = nonlinearity_scalars or {"e": "silu"}
         irreps_in = o3.Irreps(irreps_in)
         irreps_out = o3.Irreps(irreps_out)
         self.irreps_in = irreps_in
@@ -463,10 +464,12 @@ class ConvNetLayer(nn.Module):
     def __init__(self, irreps_in: o3.Irreps, feature_irreps_hidden: o3.Irreps,
                  irreps_node_attr: o3.Irreps, irreps_edge_attr: o3.Irreps,
                  n_radial: int, resnet: bool = False,
-                 nonlinearity_scalars: Dict[str, str] = {"e": "silu", "o": "tanh"},
-                 nonlinearity_gates: Dict[str, str] = {"e": "silu", "o": "tanh"},
+                 nonlinearity_scalars: Optional[Dict[str, str]] = None,
+                 nonlinearity_gates: Optional[Dict[str, str]] = None,
                  **conv_kwargs):
         super().__init__()
+        nonlinearity_scalars = nonlinearity_scalars or {"e": "silu", "o": "tanh"}
+        nonlinearity_gates = nonlinearity_gates or {"e": "silu", "o": "tanh"}
         irreps_in = o3.Irreps(irreps_in)
         feature_irreps_hidden = o3.Irreps(feature_irreps_hidden)
         acts_s = {1: ACTS[nonlinearity_scalars["e"]], -1: ACTS[nonlinearity_scalars["o"]]}

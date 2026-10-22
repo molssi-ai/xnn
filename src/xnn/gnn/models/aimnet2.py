@@ -91,10 +91,17 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, GaussianRBF, MollifierCutoff
-from xnn.common.models.electrostatics import (COULOMB_CONSTANT, coulomb_direct, coulomb_dsf,
-                                              coulomb_ewald, coulomb_pme, ewald_parameters)
+from xnn.common.models.electrostatics import (
+    COULOMB_CONSTANT,
+    coulomb_direct,
+    coulomb_dsf,
+    coulomb_ewald,
+    coulomb_pme,
+    ewald_parameters,
+)
 from xnn.common.models.ops import scatter_sum, structure_sum
 from xnn.common.models.registry import register_model
+
 from .base import GNNPotential
 
 #: Electrostatics options: the all-pairs sum of molecules, the damped

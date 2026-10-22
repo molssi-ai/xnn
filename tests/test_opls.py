@@ -16,7 +16,6 @@ ethylene, ``opls_96``/``opls_97``/``opls_99`` alcohol O / H / C); bonded
 parameters are keyed by the equivalent types (``opls_18`` alkane carbon,
 ``opls_86`` alkene carbon, ``opls_5``/``opls_7`` alcohol O / H).
 """
-import json
 import math
 
 import pytest
@@ -25,12 +24,19 @@ import torch
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models
 from xnn.common.train import weighted_loss
-from xnn.ffnn.models import (OPLS, OPLSForceField, MolecularTopology,
-                              builtin_library, guess_bonds, read_opls,
-                              read_topology, fourier_to_rb, rb_to_fourier)
-from xnn.ffnn.models.oplslib import (KCAL_TO_EV, resolve_improper_type,
-                                      improper_key)
+from xnn.ffnn.models import (
+    OPLS,
+    MolecularTopology,
+    OPLSForceField,
+    builtin_library,
+    fourier_to_rb,
+    guess_bonds,
+    rb_to_fourier,
+    read_opls,
+    read_topology,
+)
 from xnn.ffnn.models.opls import KE
+from xnn.ffnn.models.oplslib import KCAL_TO_EV, improper_key, resolve_improper_type
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
 CT, HC, CM, OH, HO = "opls_18", "opls_85", "opls_86", "opls_5", "opls_7"
@@ -531,6 +537,7 @@ def test_relaxed_ethane_barrier_matches_paper():
     ase = pytest.importorskip("ase")
     from ase.constraints import FixInternals
     from ase.optimize import BFGS
+
     from xnn.common.deploy import XNNCalculator
 
     d, dh = 1.529, 1.09
@@ -573,9 +580,8 @@ def test_openmm_parity():
     mm = pytest.importorskip("openmm")
     import numpy as np
     import openmm.unit as u
-    from xnn.ffnn.models.oplslib import (resolve_angle_type,
-                                          resolve_bond_type,
-                                          resolve_dihedral_type)
+
+    from xnn.ffnn.models.oplslib import resolve_angle_type, resolve_bond_type, resolve_dihedral_type
 
     lib = builtin_library("oplsaa")
     at = lib.atom_types
@@ -879,9 +885,7 @@ def test_shared_forcefield_keeps_every_molecule_charge():
 
 
 def test_reference_energies_absorb_a_label_offset():
-    from xnn.common.finetune.reference import (estimate_atomic_energies,
-                                               get_atomic_energies,
-                                               set_atomic_energies)
+    from xnn.common.finetune.reference import estimate_atomic_energies, get_atomic_energies, set_atomic_energies
     torch.manual_seed(0)
     pos, z, types, bonds = _butane()
     top = MolecularTopology.from_bonds(types, bonds)

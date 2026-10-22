@@ -7,13 +7,11 @@ precedence rules: fragments first and final, later templates override
 earlier ones, every mapped atom of a pattern is typed, untyped atoms are an
 error.
 """
-import numpy as np
 import pytest
 
 pytest.importorskip("rdkit")
 
-from xnn.ffnn.common import (assign_atom_types, to_rdkit, perceive_bonds,
-                              AtomTypingError, read_frc, read_forcefield)
+from xnn.ffnn.common import AtomTypingError, assign_atom_types, perceive_bonds, read_forcefield, read_frc, to_rdkit
 from xnn.ffnn.models import OPLS, MolecularTopology, read_opls
 
 

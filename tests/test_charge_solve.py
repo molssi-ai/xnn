@@ -1,5 +1,4 @@
 """The LES global charge solve: charge equilibration with the latent Ewald kernel."""
-import math
 
 import numpy as np
 import pytest
@@ -8,7 +7,16 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import EwaldSummation, ForceStressOutput, LatentEwald, build_model
-from xnn.common.models.charge_solve import charge_energy, coulomb_matrix, solve_charges
+from xnn.common.models.charge_solve import (
+    ION_CHARGES,
+    bonded_fragments,
+    charge_energy,
+    coulomb_matrix,
+    covalent_radii,
+    fragment_targets,
+    ion_charge_table,
+    solve_charges,
+)
 from xnn.common.models.les import LATENT_CHARGE_PER_E
 
 SCHNET = {"name": "schnet", "cutoff": 4.5, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
@@ -116,7 +124,8 @@ def test_solve_matches_a_plain_dense_solve_with_its_forces_and_strain(periodic):
     # the oracle's own forces with the charges frozen: the charge response drops out
     pos = g.pos.clone().requires_grad_(True)
     q = results["oracle"][0]
-    hf = -torch.autograd.grad(charge_energy(chi, J, q).sum() + _energy_lr(ewald, pos, q, g.cell[0] if periodic else None), pos)[0]
+    e_total = charge_energy(chi, J, q).sum() + _energy_lr(ewald, pos, q, g.cell[0] if periodic else None)
+    hf = -torch.autograd.grad(e_total, pos)[0]
     assert torch.allclose(hf, -results["oracle"][2], atol=1e-9)
 
 
@@ -177,8 +186,9 @@ def test_model_forces_and_stress_are_the_energy_gradient():
                 eps[a, b] = eps[b, a] = 1e-4
 
                 def energy(sign):
-                    m = np.eye(3) + sign * eps
-                    return float(model(structure_to_graph(dict(s, pos=np.array(s["pos"]) @ m, cell=s["cell"] @ m), 4.5))["energy"])
+                    m = np.eye(3) + sign * eps   # noqa: B023  # called in this iteration
+                    g = structure_to_graph(dict(s, pos=np.array(s["pos"]) @ m, cell=s["cell"] @ m), 4.5)   # noqa: B023
+                    return float(model(g)["energy"])   # noqa: B023
 
                 fd = (energy(1) - energy(-1)) / 2e-4 / vol / (1 if a == b else 2)
                 assert float(out["stress"][0, a, b]) == pytest.approx(fd, abs=1e-6)
@@ -246,10 +256,6 @@ def test_float32_solve_is_refined():
 
 # fragments: one constraint row per molecule or ion
 
-from xnn.common.models.charge_solve import (
-    ION_CHARGES, bonded_fragments, covalent_radii, fragment_targets, ion_charge_table,
-)
-
 WATER = np.array([[0.0, 0.0, 0.119262], [0.0, 0.763239, -0.477047], [0.0, -0.763239, -0.477047]])
 
 
@@ -305,7 +311,8 @@ def test_fragment_solve_keeps_each_fragment_at_its_charge(periodic):
     assert float(q[6]) == pytest.approx(1.0, abs=1e-10) and float(q[7]) == pytest.approx(-1.0, abs=1e-10)
     assert out["chemical_potential"].shape == (4,)
     # without fragments the ions share their charge with the waters (plain charge equilibration)
-    plain = _model(charge_solve=True)(_ion_cluster(0.0, periodic=periodic))["latent_charges"][:, 1] / LATENT_CHARGE_PER_E
+    plain = (_model(charge_solve=True)(_ion_cluster(0.0, periodic=periodic))["latent_charges"][:, 1]
+             / LATENT_CHARGE_PER_E)
     assert abs(float(plain[6]) - 1.0) > 1e-3
     # a label overrides the ion table: Na counted neutral and Cl as -1 within a -1 structure
     labeled = model(_ion_cluster(-1.0, label=[0, 0, 0, 0, 0, 0, 0, -1], periodic=periodic))
@@ -345,6 +352,7 @@ def test_fragment_solve_forces_are_the_energy_gradient():
 
 def test_trainer_warns_without_fragment_labels(tmp_path):
     import warnings
+
     from xnn.common.data import AtomicDataset
     from xnn.common.train import Trainer
     rng = np.random.default_rng(0)
