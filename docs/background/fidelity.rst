@@ -168,7 +168,11 @@ Numerical agreement under identical weights involves:
   dispersion, switched short-range terms, iterative induced dipoles): the
   mesh sums against explicit reciprocal-space and lattice sums to 1e-8,
   slab sums independent of the vacuum gap, forces, stress and Hessians
-  against finite differences;
+  against finite differences; the optional mesh self-interaction
+  correction equals a brute-force position average to 1e-7, vanishes at
+  a fine mesh and cuts the coarse-mesh dispersion error of a 64-water
+  box by an order of magnitude; a 2x2x2 replica of a cell gives the same
+  energy per cell and the same forces to 1e-10 meV/A;
   Tinker 8 on 64-water boxes (AMOEBA and HIPPO, 48^3 meshes) within 5e-3
   kcal/mol per term and 2e-3 kcal/mol/A in forces; on 320- and 2560-atom
   ethylene carbonate cells and 648-atom water boxes (Tinker's own meshes)

@@ -244,6 +244,80 @@ def test_dispersion_ewald_matches_the_lattice_sum():
     assert float(real + recip) == pytest.approx(float(direct), rel=2e-7)
 
 
+def test_mesh_self_moments_match_a_brute_force_position_average():
+    """The spurious mesh self-interaction of one multipole equals the average over its position."""
+    cell = torch.tensor([[7.0, 0.0, 0.0], [0.5, 6.0, 0.0], [-0.3, 0.4, 6.5]])
+    alpha, mesh, order = 0.9, [12, 12, 10], 5
+    s0, s2, s4 = ew.mesh_self_moments(cell, alpha, mesh, order, "coulomb")
+    # the exact reciprocal self term of one unit charge over the mesh vectors: the bare kernel, no spline moduli
+    g = (ew._influence(cell, alpha, mesh, order, "coulomb") / (mesh[0] * mesh[1] * mesh[2])
+         / ew.spline_moduli(mesh, order, torch.float64, cell.device))
+    exact_self = 0.5 * float(g.sum())
+    n = 12
+    frac = torch.stack(torch.meshgrid(*[(torch.arange(n) + 0.5) / n] * 3, indexing="ij"), -1).reshape(-1, 3)
+    pos = (frac / torch.tensor(mesh, dtype=torch.float64)) @ cell    # positions spanning one mesh cell
+    one, zero3, zero33 = torch.ones(1), torch.zeros(1, 3), torch.zeros(1, 3, 3)
+    d = torch.tensor([[0.3, -0.2, 0.5]])
+    Q = torch.tensor([[[0.2, 0.1, 0.0], [0.1, -0.3, 0.2], [0.0, 0.2, 0.1]]])
+    e_q = e_d = e_Q = 0.0
+    for r in pos:
+        r = r[None]
+        e_q += float(ew.multipole_reciprocal_energy(one, zero3, zero33, r, cell, alpha, mesh, order))
+        e_d += float(ew.multipole_reciprocal_energy(torch.zeros(1), d, zero33, r, cell, alpha, mesh, order))
+        e_Q += float(ew.multipole_reciprocal_energy(one, zero3, Q, r, cell, alpha, mesh, order))
+    e_q, e_d, e_Q = e_q / len(pos), e_d / len(pos), e_Q / len(pos)
+    assert float(s0) == pytest.approx(e_q - exact_self, abs=1e-7)
+    assert abs(float(s0)) > 1e-6                                     # a coarse mesh: the spurious part is visible
+    exact_d = 0.5 * float((g * (ew.mesh_wavevectors(cell, mesh)[0] @ d[0]) ** 2).sum())
+    assert float(torch.einsum("a,ab,b->", d[0], s2, d[0])) == pytest.approx(e_d - exact_d, abs=1e-7)
+    k = ew.mesh_wavevectors(cell, mesh)[0]
+    kQk = torch.einsum("...a,ab,...b->...", k, Q[0], k)
+    exact_Q = 0.5 * float((g * (1.0 - kQk) ** 2).sum())
+    spurious_Q = float(s0 - 2.0 * torch.einsum("ab,ab->", Q[0], s2) + torch.einsum("ab,abcd,cd->", Q[0], s4, Q[0]))
+    assert spurious_Q == pytest.approx(e_Q - exact_Q, abs=1e-6)
+    r0, _, _ = ew.mesh_self_moments(cell, alpha, mesh, 4, "r6")
+    g6 = (ew._influence(cell, alpha, mesh, 4, "r6") / (mesh[0] * mesh[1] * mesh[2])
+          / ew.spline_moduli(mesh, 4, torch.float64, cell.device))
+    e_6 = sum(float(-ew.dispersion_pme(one, r[None], cell, alpha, mesh, 4) + alpha ** 6 / 12.0) for r in pos) / len(pos)
+    assert float(r0) == pytest.approx(e_6 - 0.5 * float(g6.sum()), abs=1e-7)
+    fine = ew.mesh_self_moments(torch.eye(3) * 6.0, 1.2, [64, 64, 64], 5, "coulomb")
+    # a fine mesh (alpha h = 0.11): the spurious moments are below 1e-6 of the analytic self coefficients
+    assert abs(float(fine[0])) < 1e-6 and float(fine[1].abs().max()) < 1e-6 and float(fine[2].abs().max()) < 1e-4
+
+
+def test_mesh_self_correction_cuts_the_coarse_mesh_dispersion_error():
+    """At 16^3 (order 4) the corrected dispersion sum is far closer to the converged one than the plain sum."""
+    model = _box(Hippo, polarization="none")
+    model(_graph(BOX))
+    c = model.ff.params["disp_c6"][model.top_class].detach()
+    pos, cell = torch.tensor(BOX), torch.tensor(CELL)
+    alpha = ew.ewald_coefficient(6.0)
+    converged = float(ew.dispersion_pme(c, pos, cell, alpha, [96] * 3, 6).sum())
+    plain = float(ew.dispersion_pme(c, pos, cell, alpha, [16] * 3, 4).sum())
+    s0 = ew.mesh_self_moments(cell, alpha, [16] * 3, 4, "r6")[0]
+    corrected = plain + float(s0 * (c * c).sum())
+    assert abs(plain - converged) * EV_TO_KCAL > 0.3
+    assert abs(corrected - converged) < 0.2 * abs(plain - converged)
+    full = _box(Hippo, polarization="none", dpme_grid=16, mesh_self=True)
+    plain_model = _box(Hippo, polarization="none", dpme_grid=16)
+    e_full, e_plain = float(full(_graph(BOX))["e_dispersion"]), float(plain_model(_graph(BOX))["e_dispersion"])
+    assert e_full - e_plain == pytest.approx(float(s0 * (c * c).sum()), rel=1e-9)
+    assert full.intermediates["ewald"]["mesh_self"] is True
+
+
+def _explicit_reciprocal_energy(q, d, Q, pos, cell, alpha, bound):
+    V = float(torch.linalg.det(cell))
+    recip = 2 * math.pi * torch.linalg.inv(cell).t()
+    m = torch.cartesian_prod(*[torch.arange(-bound, bound + 1, dtype=torch.float64)] * 3)
+    m = m[(m != 0).any(1)]
+    k = m @ recip
+    k2 = (k * k).sum(1)
+    w = 4 * math.pi / k2 * torch.exp(-k2 / (4 * alpha * alpha))
+    phase = pos @ k.t()
+    rho = ((q[:, None] - 1j * (d @ k.t()) - torch.einsum("ka,nab,kb->nk", k, Q, k)) * torch.exp(-1j * phase)).sum(0)
+    return float((w * (rho.real ** 2 + rho.imag ** 2)).sum() / (2 * V))
+
+
 def test_amoeba_box_matches_tinker():
     model = ForceStressOutput(_box(Amoeba), compute_stress=True)
     out = model(_graph(BOX))

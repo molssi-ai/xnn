@@ -89,6 +89,8 @@ from .amoeba_ewald import (
     dispersion_real_kernel,
     ewald_coefficient,
     ewald_ladder,
+    mesh_self_energy,
+    mesh_self_moments,
     multipole_pme,
     multipole_reciprocal_energy,
     multipole_self_energy,
@@ -886,9 +888,10 @@ class Amoeba(InteratomicPotential):
         Force-field groups (see :class:`AmoebaForceField`) plus the model
         group ``"atom_ref"``; ``"all"`` unfreezes everything.
     polarization : str, optional
-        ``"mutual"`` (default) solves the induced dipoles self-consistently;
-        ``"direct"`` uses the permanent field only; ``"none"`` switches the
-        induction off.
+        ``"mutual"`` solves the induced dipoles self-consistently,
+        ``"direct"`` uses the permanent field only and ``"none"`` switches
+        the induction off; by default the library's ``polarization``
+        setting (``MUTUAL`` unless the file says ``DIRECT``).
     keep_intermediates : bool, optional
         Stash the intermediate tensors of the last evaluation in
         ``self.intermediates``.
@@ -923,6 +926,14 @@ class Amoeba(InteratomicPotential):
         Start of the C2 switch of the van der Waals term, and of every
         switched term, in Angstrom; by default 0.9 of each cutoff for
         cells and no switching for molecules.
+    mesh_self : bool, optional
+        Remove the spurious, position-averaged mesh self-interaction of
+        every multipole from the particle-mesh energy, from the field
+        that polarizes it and from the dispersion sum. Off by default:
+        the plain smooth PME sums, the same algorithm as Tinker. On, the
+        mean discretisation error of the self-interaction leaves the
+        energies and the stress, which helps the induction, the
+        dispersion and the pressure at coarse meshes.
     polar_eps : float, optional
         Convergence of the iterative induced-dipole solve, the rms change
         per iteration in Debye (``1e-8``).
@@ -958,7 +969,7 @@ class Amoeba(InteratomicPotential):
     def __init__(self, ffield, topology: Union[MolecularTopology, str, Path], *,
                  cutoff: float = 10.0,
                  trainable: Union[Sequence[str], str] = (),
-                 polarization: str = "mutual",
+                 polarization: Optional[str] = None,
                  keep_intermediates: bool = False,
                  atomic_energies=None,
                  ewald: Optional[bool] = None,
@@ -978,6 +989,7 @@ class Amoeba(InteratomicPotential):
                  chgtrn_cutoff: Optional[float] = None,
                  dispersion_cutoff: Optional[float] = None,
                  polar_eps: float = 1e-8,
+                 mesh_self: bool = False,
                  solver: str = "auto",
                  max_iter: int = 100,
                  conserve_charge: bool = True,
@@ -1000,6 +1012,7 @@ class Amoeba(InteratomicPotential):
         self.chgtrn_cutoff = None if chgtrn_cutoff is None else float(chgtrn_cutoff)
         self.dispersion_cutoff = None if dispersion_cutoff is None else float(dispersion_cutoff)
         self.polar_eps = float(polar_eps)
+        self.mesh_self = bool(mesh_self)
         if solver not in ("auto", "dense", "iterative"):
             raise ValueError("solver must be 'auto', 'dense' or 'iterative'")
         self.solver = solver
@@ -1016,6 +1029,8 @@ class Amoeba(InteratomicPotential):
         nn.init.zeros_(self.atom_ref.weight)
         self.atom_ref.weight.requires_grad_("atom_ref" in model_groups)
         self.cutoff = float(cutoff)
+        if polarization is None:
+            polarization = str(self.ff.settings.get("polarization", "MUTUAL"))
         polarization = str(polarization).lower()
         if polarization not in ("mutual", "direct", "none"):
             raise ValueError("polarization must be 'mutual', 'direct' or 'none'")
@@ -1381,6 +1396,12 @@ class Amoeba(InteratomicPotential):
                     row = special.setdefault((i, j), [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
                     row[6] = direct[g]
                     row[7] = mutual[g]
+        if bool(s.get("d-equals-p", False)):
+            # Tinker's d-equals-p: the direct field uses the polar (connectivity) scale factors, and
+            # the mutual interactions the induce factors alone
+            for row in special.values():
+                row[6] = row[2]
+                row[7] = 1.0
         keys = sorted(special)
         self.register_buffer("special_keys", torch.tensor([i * n + j for i, j in keys], dtype=torch.long))
         self.register_buffer("special_scales", torch.tensor([special[k] for k in keys] or [[1.0] * 8],
@@ -2024,8 +2045,10 @@ class Amoeba(InteratomicPotential):
         pf = pair_periodic.to(dtype)
         summary = {"alpha": alpha_e, "pewald_alpha": alpha_p, "dewald_alpha": alpha_d, "cutoff": rc,
                    "dispersion_cutoff": rc_d, "grids": [(b, grid, dgrid) for b, _, grid, dgrid, _ in structures],
-                   "slabs": [b for b, _, _, _, normal in structures if normal is not None]}
-        return {"periodic": periodic, "pair_periodic": pair_periodic, "structures": structures, "cells": cells,
+                   "slabs": [b for b, _, _, _, normal in structures if normal is not None],
+                   "mesh_self": self.mesh_self}
+        return {"periodic": periodic, "mesh_self": self.mesh_self, "pair_periodic": pair_periodic,
+                "structures": structures, "cells": cells,
                 "alpha_e": alpha_e * pf, "alpha_p": alpha_p * pf, "alpha_d": alpha_d * pf,
                 "keep": torch.where(pair_periodic, (R < rc).to(dtype), ones),
                 "keep_d": torch.where(pair_periodic, (R < rc_d).to(dtype), ones),
@@ -2058,6 +2081,9 @@ class Amoeba(InteratomicPotential):
         for b, idx, grid, _, normal in ew["structures"]:
             e = multipole_reciprocal_energy(q[idx], d[idx], Q[idx], pos[idx], ew["cells"][b], ae, grid, ew["order"])
             e = e + multipole_self_energy(q[idx], d[idx], Q[idx], torch.full_like(q[idx], ae))
+            if self.mesh_self:
+                e = e - mesh_self_energy(q[idx], d[idx], Q[idx],
+                                         mesh_self_moments(ew["cells"][b], ae, grid, ew["order"], "coulomb"))
             if normal is not None:
                 # Yeh-Berkowitz: 2 pi / V M_n^2 with M_n the dipole moment along the slab normal
                 moment = q[idx] * (pos[idx] @ normal) + d[idx] @ normal
@@ -2075,6 +2101,9 @@ class Amoeba(InteratomicPotential):
             _, dphi, _ = multipole_pme(q[idx], d[idx], Q[idx], pos[idx], ew["cells"][b], ap, grid,
                                        ew["porder"], hessian=False)
             field = -dphi + coef * d[idx]
+            if self.mesh_self:
+                s2 = mesh_self_moments(ew["cells"][b], ap, grid, ew["porder"], "coulomb", max_rank=2)[1]
+                field = field + 2.0 * d[idx] @ s2
             if normal is not None:
                 moment = (q[idx] * (pos[idx] @ normal) + d[idx] @ normal).sum()
                 field = field - 4.0 * math.pi / cell_volume(ew["cells"][b]) * moment * normal
@@ -2087,7 +2116,11 @@ class Amoeba(InteratomicPotential):
         out = torch.zeros_like(c)
         ad = ew["alpha_d_value"]
         for b, idx, _, dgrid, _ in ew["structures"]:
-            out = out.index_add(0, idx, dispersion_pme(c[idx], pos[idx], ew["cells"][b], ad, dgrid, ew["dorder"]))
+            e = dispersion_pme(c[idx], pos[idx], ew["cells"][b], ad, dgrid, ew["dorder"])
+            if self.mesh_self:
+                s0 = mesh_self_moments(ew["cells"][b], ad, dgrid, ew["dorder"], "r6")[0]
+                e = e + s0 * c[idx] * c[idx]
+            out = out.index_add(0, idx, e)
         return out
 
     def _ewald_fields(self, data, ew, i_, k_, r_vec, R, scales, q, d, Q, f_damp_k, f_damp_i, D1m, D2m,
@@ -2279,7 +2312,7 @@ class Amoeba(InteratomicPotential):
             return value
 
         library = extra.get("library", cls.default_library)
-        kwargs = dict(cutoff=float(cfg.cutoff), polarization=extra.get("polarization", "mutual"),
+        kwargs = dict(cutoff=float(cfg.cutoff), polarization=extra.get("polarization"),
                       trainable=listy(extra.get("trainable")) or (),
                       atomic_energies=extra.get("atomic_energies"))
         for key in _OPTION_KEYS:
@@ -2428,8 +2461,6 @@ class Hippo(Amoeba):
             else:
                 field_d, field_p, D1u, D2u = self._ewald_fields(data, ew, i_, k_, r_vec, R, scales, q, d, Q,
                                                                 f_at_k, f_at_i, D_mut[1], D_mut[2], u_scale, N)
-            if bool(self.ff.settings.get("d-equals-p", False)):
-                field_p = field_d
             mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew)
             terms["e_polar"] = e_pol
         else:
@@ -2473,8 +2504,8 @@ class Hippo(Amoeba):
 # the periodic and solver options of the constructor, also read by from_config
 _OPTION_KEYS = ("ewald", "ewald_alpha", "pewald_alpha", "dewald_alpha", "ewald_cutoff", "pme_grid", "pme_order",
                 "ppme_order", "dpme_grid", "dpme_order", "vdw_cutoff", "vdw_taper", "taper", "repulsion_cutoff",
-                "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "solver", "max_iter", "conserve_charge",
-                "symmetry_mask")
+                "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "mesh_self", "solver", "max_iter",
+                "conserve_charge", "symmetry_mask")
 
 
 def _grid_option(value) -> Optional[list]:
@@ -2502,6 +2533,7 @@ class _MutualField:
         self.structures = [] if ew is None else [(b, idx, grid, normal) for b, idx, grid, _, normal in ew["structures"]]
         self.alpha_p = 0.0 if ew is None else ew["alpha_p_value"]
         self.order = 0 if ew is None else ew["porder"]
+        self.mesh_self = False if ew is None else bool(ew["mesh_self"])
 
     def real(self, mu: Tensor, T: Tensor) -> Tensor:
         return (scatter_sum(torch.einsum("mab,mb->ma", T, mu[self.i]), self.k, self.N)
@@ -2517,6 +2549,9 @@ class _MutualField:
             _, dphi, _ = multipole_pme(torch.zeros_like(m[:, 0]), m, None, pos[idx], cell[b], self.alpha_p, grid,
                                        self.order, hessian=False)
             field = -dphi + coef * m
+            if self.mesh_self:
+                s2 = mesh_self_moments(cell[b], self.alpha_p, grid, self.order, "coulomb", max_rank=2)[1]
+                field = field + 2.0 * m @ s2
             if normal is not None:
                 field = field - 4.0 * math.pi / cell_volume(cell[b]) * (m @ normal).sum() * normal
             f = f.index_add(0, idx, field)

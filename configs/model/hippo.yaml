@@ -5,7 +5,7 @@ topology: null                  # topology JSON written by MolecularTopology.sav
 tinker_xyz: null                # or a Tinker .xyz file carrying the atom types and connectivity
 types: null                     # or per-atom type names of the library ...
 bonds: null                     # ... with the bond index pairs, e.g. [[0, 1], [0, 2]]
-polarization: mutual            # mutual (self-consistent induced dipoles), direct, or none
+polarization: null              # null = the library's setting; mutual (self-consistent induced dipoles), direct, or none
 trainable: []                   # parameter groups to refit, e.g. [repulsion, dispersion, chgpen, chgtrn, polarizability, cflux]; "all" for every group
 conserve_charge: true           # hold every molecule's total charge while "charge" trains
 symmetry_mask: true             # multipole components the library leaves zero stay zero while they train
@@ -25,6 +25,7 @@ repulsion_cutoff: null          # switched repulsion and charge-transfer cutoffs
 chgtrn_cutoff: null
 taper: null                     # start of the switch of every switched term
 polar_eps: 1.0e-8               # convergence of the iterative induced-dipole solve, rms change in Debye
+mesh_self: false                # true removes the position-averaged mesh self-interaction from the mesh sums (plain smooth PME by default)
 solver: auto                    # auto (dense for molecules up to 1000 atoms), dense, iterative
 # HIPPO: AMOEBA's valence terms and atomic multipoles with intermolecular terms derived
 # from a model electron density: charge penetration, density-damped induction,

@@ -662,7 +662,7 @@ Molecules
 ---------
 For a molecule or cluster, every pair within ``cutoff`` interacts in full.
 Choose a cutoff that encloses the whole system. ``polarization`` selects
-mutual (default), direct or no induction. The induced dipoles come from a
+mutual, direct or no induction; the default is the library's setting. The induced dipoles come from a
 dense solve for up to a thousand atoms and from conjugate gradients above
 that (``solver`` overrides the choice).
 
@@ -687,6 +687,11 @@ three coefficients, ``pme_grid`` and ``pme_order`` for the mesh,
 the switch. Keep the neighbor cutoff about 0.3 Angstrom above the van der
 Waals cutoff, because the hydrogen sites of that term sit inside their atoms.
 ``polar_eps`` sets the convergence of the induced dipoles in Debye.
+``mesh_self=True`` removes the spurious mesh self-interaction of every
+multipole (its position average) from the energies, the polarizing field
+and the dispersion sum. It brings the induction, the dispersion and the
+pressure of a coarse mesh closer to the converged values, at the price of
+no longer matching Tinker's plain sums at the same keys.
 ``ewald=False`` truncates a cell at the cutoff instead. A slab with two
 periodic axes is summed on its cell with the Yeh-Berkowitz correction, so
 leave a vacuum gap of at least the slab thickness along the free axis.
