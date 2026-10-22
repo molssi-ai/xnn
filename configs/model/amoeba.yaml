@@ -7,6 +7,8 @@ types: null                     # or per-atom type names of the library ...
 bonds: null                     # ... with the bond index pairs, e.g. [[0, 1], [0, 2]]
 polarization: mutual            # mutual (self-consistent induced dipoles), direct, or none
 trainable: []                   # parameter groups to refit, e.g. [vdw, torsion, polarizability, charge, dipole, quadrupole]; "all" for every group
+conserve_charge: true           # hold every molecule's total charge while "charge" trains
+symmetry_mask: true             # multipole components the library leaves zero stay zero while they train
 # periodic cells: Ewald sums with particle-mesh reciprocal space (on by default when a cell is
 # present); the defaults follow Tinker (coefficient from the real-space cutoff, 1.2 mesh points
 # per Angstrom rounded up to an FFT-friendly size, B-spline order 5)
