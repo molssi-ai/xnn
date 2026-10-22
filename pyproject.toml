@@ -152,6 +152,36 @@ where = ["src"]
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
 "xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 
+# ruff: the linter the Lint workflow runs (ruff check). The formatter is not
+# enforced (ruff format --check is advisory there); the layout of the code,
+# including its aligned trailing comments, is kept as written.
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["*.ipynb"]   # executed notebooks are published as they are
+
+[tool.ruff.lint]
+select = [
+    "E", "W",     # pycodestyle
+    "F",          # pyflakes
+    "I",          # import order
+    "B",          # bugbear
+    "PLE",        # pylint errors
+    "PLR0124",    # comparison with itself
+]
+# no "UP" (pyupgrade): `X | None` annotations do not compile under TorchScript
+ignore = [
+    "E741",       # l, I, O as names: l is the angular momentum throughout
+    "E701", "E702",  # several short statements on one line are house style
+    "B008",       # function calls in defaults (torch.get_default_dtype(), o3.Irreps(...)) are intended
+    "B905",       # zip(strict=...) adds noise without catching anything here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]            # re-exports
+"tests/test_aimnet2.py" = ["E501"]  # reference tables kept on one line each
+
 # uv configuration -- reproduces the .venv the notebooks were created with.
 #
 # The host has 2x A100 with CUDA driver 12.2, so torch must use the cu121 GPU

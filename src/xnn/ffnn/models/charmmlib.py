@@ -26,8 +26,13 @@ from typing import Optional, Sequence, Union
 
 from xnn.common.data.elements import CHEMICAL_SYMBOLS, atomic_number
 
-from .oplslib import (KCAL_TO_EV, WILDCARD, resolve_bond_type,
-                      resolve_angle_type, resolve_dihedral_type)
+from .oplslib import (  # noqa: F401  # KCAL_TO_EV and resolve_dihedral_type are re-exported
+    KCAL_TO_EV,
+    WILDCARD,
+    resolve_angle_type,
+    resolve_bond_type,
+    resolve_dihedral_type,
+)
 
 # The Coulomb constant of the CHARMM program (CCELEC) in kcal Angstrom / (mol e^2).
 COULOMB_CONSTANT = 332.0716
@@ -500,7 +505,7 @@ def to_forcefield(lib: CharmmLibrary, name: Optional[str] = None,
     xnn.ffnn.common.frc.FrcFile
         Save it with ``.write(path)``.
     """
-    from ..common.frc import FrcFile, Define, Reference, Section, make_section
+    from ..common.frc import Define, FrcFile, Reference, Section, make_section
     name = name or lib.name or "charmm"
     label = name
     frc = FrcFile.empty()
@@ -556,7 +561,8 @@ def to_forcefield(lib: CharmmLibrary, name: Optional[str] = None,
                      annotations=["E = eps(ij) * [(rmin(ij)/r(ij))**12 - 2 * (rmin(ij)/r(ij))**6]",
                                   "rmin(ij) = (rmin(i) + rmin(j)) / 2 = Rmin/2(i) + Rmin/2(j)",
                                   "eps(ij) = sqrt(eps(i) * eps(j))",
-                                  "rmin(i) is the like-pair minimum distance, twice the Rmin/2 of the CHARMM parameter files"],
+                                  "rmin(i) is the like-pair minimum distance, "
+                                  "twice the Rmin/2 of the CHARMM parameter files"],
                      modifiers={"type": [["rmin-eps"]],
                                 "combination": [["arithmetic"]]}),
         make_section("nonbond_1-4(12-6)", label, ["I"], ["rmin", "eps"],
@@ -566,15 +572,18 @@ def to_forcefield(lib: CharmmLibrary, name: Optional[str] = None,
                       if a.get("rstar14") is not None and a.get("epsilon14") is not None],
                      version=version,
                      annotations=["The Lennard-Jones parameters of the listed types in their 1,4 interactions",
-                                  "(same form and combination as nonbond(12-6)); other types keep their regular values"],
+                                  "(same form and combination as nonbond(12-6)); "
+                                  "other types keep their regular values"],
                      modifiers={"type": [["rmin-eps"]],
                                 "combination": [["arithmetic"]]}),
         make_section("nonbond_pair(12-6)", label, ["I", "J"],
                      ["rmin", "eps", "rmin14", "eps14"],
                      [(split(k), pair_values(v)) for k, v in lib.nbfix_types.items()],
                      version=version,
-                     annotations=["Pair-specific overrides (NBFIX): rmin is the minimum distance of the pair I-J itself,",
-                                  "eps its well depth; rmin14 / eps14 apply to the pair's 1,4 interactions (same as rmin / eps when absent)"]),
+                     annotations=["Pair-specific overrides (NBFIX): "
+                                  "rmin is the minimum distance of the pair I-J itself,",
+                                  "eps its well depth; rmin14 / eps14 apply to the pair's 1,4 interactions "
+                                  "(same as rmin / eps when absent)"]),
         make_section("quadratic_bond", label, ["I", "J"], ["R0", "K2"],
                      [(split(k), {"R0": float(v["r0"]), "K2": float(v["k"])})
                       for k, v in lib.bond_types.items()], version=version,
@@ -595,8 +604,10 @@ def to_forcefield(lib: CharmmLibrary, name: Optional[str] = None,
                      [(split(k), {"K2": float(v["k"]), "Chi0": float(v.get("psi0", 0.0))})
                       for k, v in lib.improper_types.items()], version=version,
                      annotations=["E = K2 * (Chi - Chi0)^2",
-                                  "Chi is the dihedral angle over the atoms in the order given; the central atom is first in the",
-                                  "topology templates, and a row matches a quadruple as written or reversed, X matching any type"]),
+                                  "Chi is the dihedral angle over the atoms in the order given; "
+                                  "the central atom is first in the",
+                                  "topology templates, and a row matches a quadruple as written or reversed, "
+                                  "X matching any type"]),
     ]
     if lib.templates:
         tsec = Section(kind="templates", label=label)

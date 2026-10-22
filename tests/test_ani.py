@@ -15,17 +15,20 @@ import pytest
 import torch
 
 from xnn.common.config import from_dict
-from xnn.common.data import structure_to_graph
+from xnn.common.data import AtomicGraph, structure_to_graph
 from xnn.common.data.neighborlist import build_neighbor_list
-from xnn.common.data import AtomicGraph
 from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.dnn.featurizers import AEV
-from xnn.dnn.featurizers.aev import _angle_shifts, _even_shifts
+from xnn.dnn.featurizers.aev import ANI2X_SPECIES, _angle_shifts, _even_shifts
 from xnn.dnn.featurizers.symmetry_functions import build_triplets
 from xnn.dnn.models.ani import (
-    ANI, ANI1CCX_SELF_ENERGIES, ANI1X_HIDDEN, ANI1X_SELF_ENERGIES,
-    ANI2X_HIDDEN, ANI2X_SELF_ENERGIES)
-from xnn.dnn.featurizers.aev import ANI2X_SPECIES
+    ANI,
+    ANI1CCX_SELF_ENERGIES,
+    ANI1X_HIDDEN,
+    ANI1X_SELF_ENERGIES,
+    ANI2X_HIDDEN,
+    ANI2X_SELF_ENERGIES,
+)
 
 # H, C, N, O
 SPECIES = [1, 6, 7, 8]
@@ -173,8 +176,8 @@ def test_ani1ccx_architecture_matches_ani1x():
     x = ANI.ani1x(SPECIES)
     assert ccx.featurizer.output_dim == x.featurizer.output_dim == 384
     for z in SPECIES:
-        widths = lambda m: [l.out_features for l in m.element_nets.nets[str(z)]
-                            if hasattr(l, "out_features")]
+        def widths(m, z=z):
+            return [l.out_features for l in m.element_nets.nets[str(z)] if hasattr(l, "out_features")]
         assert widths(ccx) == widths(x)
         assert math.isclose(float(ccx._self_energies_by_z[z]),
                             ANI1CCX_SELF_ENERGIES[z])
@@ -279,7 +282,8 @@ def test_torchani_aev_parity(preset, grid):
     """xnn AEV matches torchani.AEVComputer element-for-element."""
     torchani = pytest.importorskip("torchani")
     Rcr, Rca, EtaR, nR, EtaA, Zeta, nA, nZ = grid
-    t = lambda x: torch.tensor(x, dtype=torch.float64)
+    def t(x):
+        return torch.tensor(x, dtype=torch.float64)
     tani = torchani.AEVComputer(Rcr, Rca, t(EtaR), t(_even_shifts(Rcr, nR)),
                                 t(EtaA), t(Zeta), t(_even_shifts(Rca, nA)),
                                 t(_angle_shifts(nZ)), 4)
@@ -338,7 +342,8 @@ def test_torchani_energy_force_parity(preset, upstream):
 def test_torchani_ani2x_aev_parity():
     """xnn ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
     torchani = pytest.importorskip("torchani")
-    t = lambda x: torch.tensor(x, dtype=torch.float64)
+    def t(x):
+        return torch.tensor(x, dtype=torch.float64)
     tani = torchani.AEVComputer(
         5.1, 3.5, t([19.7]), t(_even_shifts(5.1, 16, start=0.8)),
         t([12.5]), t([14.1]), t(_even_shifts(3.5, 8, start=0.8)),

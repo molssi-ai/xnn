@@ -16,8 +16,8 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
-from ..featurizers import (BesselRBF, PolynomialCutoff, SphericalBesselBasis,
-                           real_spherical_harmonics, zonal_harmonics)
+
+from ..featurizers import BesselRBF, PolynomialCutoff, SphericalBesselBasis, real_spherical_harmonics, zonal_harmonics
 
 _MAX_Z = 100
 

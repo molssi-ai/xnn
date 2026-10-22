@@ -34,7 +34,6 @@ set of xnn parameters.
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
@@ -489,7 +488,7 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
     xnn.ffnn.common.frc.FrcFile
         Save it with ``.write(path)``.
     """
-    from ..common.frc import FrcFile, Define, Reference, Section, make_section
+    from ..common.frc import Define, FrcFile, Reference, Section, make_section
     name = name or lib.name or "amoeba"
     label = name
     frc = FrcFile.empty()
@@ -533,7 +532,8 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
         make_section("equivalence", label, ["Type"], ["NonB", "Bond", "Angle", "Torsion", "OOP"],
                      [((n,), {c: str(a["class"]) for c in ("NonB", "Bond", "Angle", "Torsion", "OOP")})
                       for n, a in lib.atom_types.items()], version=version,
-                     annotations=["The equivalent 'type' is the AMOEBA atom class carrying the valence and van der Waals parameters"]),
+                     annotations=["The equivalent 'type' is the AMOEBA atom class carrying the valence "
+                                  "and van der Waals parameters"]),
     ]
     if lib.vdw_types:
         sections.append(make_section(
@@ -541,8 +541,10 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
             [((c,), {"rmin": float(v["rmin"]), "eps": float(v["eps"]),
                      "reduction": float(v.get("reduction", 1.0))}) for c, v in lib.vdw_types.items()],
             version=version,
-            annotations=["E = eps(ij) [(1 + delta)/(rho + delta)]^7 [(1 + gamma)/(rho^7 + gamma) - 2], rho = r/rmin(ij)",
-                         "rmin is the like-pair minimum distance; rmin(ij) and eps(ij) follow radiusrule and epsilonrule",
+            annotations=["E = eps(ij) [(1 + delta)/(rho + delta)]^7 [(1 + gamma)/(rho^7 + gamma) - 2], "
+                         "rho = r/rmin(ij)",
+                         "rmin is the like-pair minimum distance; rmin(ij) and eps(ij) follow radiusrule "
+                         "and epsilonrule",
                          "the hydrogen site sits on its bond at reduction x the bond length from the heavy atom"]))
     if lib.vdw_pair_types:
         sections.append(make_section(
@@ -561,7 +563,8 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
                 kind, label, ["I", "J", "K"], cols,
                 [(_split_key(k), {"K2": float(v["k"]), **thetas(v)}) for k, v in table.items()],
                 version=version,
-                annotations=["E = K2 dTheta^2 [1 + angle-cubic dTheta + ... + angle-sextic dTheta^4] (dTheta in degrees, K2 per radian^2)",
+                annotations=["E = K2 dTheta^2 [1 + angle-cubic dTheta + ... + angle-sextic dTheta^4] "
+                             "(dTheta in degrees, K2 per radian^2)",
                              "Theta0_2 / Theta0_3 apply when the center carries 1 / 2 further hydrogens"]))
     if lib.strbnd_types:
         sections.append(make_section(
@@ -578,7 +581,8 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
             "amoeba_out_of_plane", label, ["I", "J", "K", "L"], ["K2"],
             [(_split_key(k), {"K2": float(v["k"])}) for k, v in lib.opbend_types.items()],
             version=version,
-            annotations=["E = K2 chi^2 [1 + opbend-cubic chi + ...]: I the out-of-plane atom, J the trigonal center, K and L its other substituents",
+            annotations=["E = K2 chi^2 [1 + opbend-cubic chi + ...]: I the out-of-plane atom, J the trigonal center, "
+                         "K and L its other substituents",
                          "chi (degrees) follows opbendtype"]))
     if lib.torsion_types:
         sections.append(make_section(
@@ -590,7 +594,8 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
         sections.append(make_section(
             "pi_torsion", label, ["I", "J"], ["K2"],
             [(_split_key(k), {"K2": float(v["k"])}) for k, v in lib.pitors_types.items()],
-            version=version, annotations=["E = K2 [1 - cos(2 Phi)], Phi the angle between the p-orbitals of the two trigonal centers"]))
+            version=version,
+            annotations=["E = K2 [1 - cos(2 Phi)], Phi the angle between the p-orbitals of the two trigonal centers"]))
     if lib.multipoles:
         rows = []
         for t, entries in lib.multipoles.items():
@@ -604,16 +609,20 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
         sections.append(make_section(
             "atomic_multipole", label, ["Type", "Z", "X", "Y"],
             ["Q", "Dx", "Dy", "Dz", "Qxx", "Qxy", "Qxz", "Qyy", "Qyz", "Qzz"], rows, version=version,
-            annotations=["Local frame from the bonded (or 1-3) atoms of the given types: Z X = z-then-x, -Z -X = bisector,",
-                         "Z -X -Y = z-bisect, -Z -X -Y = 3-fold, Z 0 = z-only, 0 = none; a fourth atom Y fixes the chirality",
-                         "dipole in e bohr, traceless quadrupole in e bohr^2 (atomic units, as in the papers and the Tinker files)"]))
+            annotations=["Local frame from the bonded (or 1-3) atoms of the given types: "
+                         "Z X = z-then-x, -Z -X = bisector,",
+                         "Z -X -Y = z-bisect, -Z -X -Y = 3-fold, Z 0 = z-only, 0 = none; "
+                         "a fourth atom Y fixes the chirality",
+                         "dipole in e bohr, traceless quadrupole in e bohr^2 "
+                         "(atomic units, as in the papers and the Tinker files)"]))
     if lib.polarize:
         sections.append(make_section(
             "polarizability", label, ["I"], ["alpha", "thole", "Group"],
             [((t,), {"alpha": float(v["alpha"]), "thole": float(v.get("thole", 0.0)),
                      "Group": " ".join(str(g) for g in v.get("groups", []))}) for t, v in lib.polarize.items()],
             version=version,
-            annotations=["thole = 0 selects charge-penetration damping; Group lists the atom types of the polarization group"]))
+            annotations=["thole = 0 selects charge-penetration damping; "
+                         "Group lists the atom types of the polarization group"]))
     for kind, table, cols, conv in (
             ("charge_penetration", lib.chgpen, ["Core", "alpha"], lambda v: {"Core": v["core"], "alpha": v["alpha"]}),
             ("charge_transfer", lib.chgtrn, ["eps", "alpha"], lambda v: {"eps": v["eps"], "alpha": v["alpha"]}),
@@ -1025,13 +1034,15 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
         out += [*_banner("Stretch-Bend Parameters")]
         for k, v in lib.strbnd_types.items():
             a, b, c = _split_key(k)
-            out.append(f"strbnd {classes[a]:8d} {classes[b]:4d} {classes[c]:4d} {'':>4} {v['k1']:14.8f} {v['k2']:14.8f}")
+            out.append(f"strbnd {classes[a]:8d} {classes[b]:4d} {classes[c]:4d} {'':>4} "
+                       f"{v['k1']:14.8f} {v['k2']:14.8f}")
         out.append("")
     if lib.urey_types:
         out += [*_banner("Urey-Bradley Parameters")]
         for k, v in lib.urey_types.items():
             a, b, c = _split_key(k)
-            out.append(f"ureybrad {classes[a]:6d} {classes[b]:4d} {classes[c]:4d} {'':>4} {v['k']:14.8f} {v['r0']:14.8f}")
+            out.append(f"ureybrad {classes[a]:6d} {classes[b]:4d} {classes[c]:4d} {'':>4} "
+                       f"{v['k']:14.8f} {v['r0']:14.8f}")
         out.append("")
     if lib.opbend_types:
         out += [*_banner("Out-of-Plane Bend Parameters")]
@@ -1082,7 +1093,8 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
         out += [*_banner("Dipole Polarizability Parameters")]
         for t, v in lib.polarize.items():
             groups = " ".join(str(types[g]) for g in v.get("groups", []) if g in types)
-            thole = f"{v['thole']:14.8f}" if lib.model == "amoeba" or float(v.get("thole", 0.0)) != 0.0 else "          "
+            keep_thole = lib.model == "amoeba" or float(v.get("thole", 0.0)) != 0.0
+            thole = f"{v['thole']:14.8f}" if keep_thole else "          "
             out.append(f"polarize {types[t]:7d} {'':>7} {v['alpha']:14.8f} {thole} {groups}")
         out.append("")
     for kw, title, table, fmt in (

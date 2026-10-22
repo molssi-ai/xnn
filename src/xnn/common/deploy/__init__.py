@@ -1,8 +1,7 @@
 from .ase_calculator import XNNCalculator
-from .lammps import export_to_lammps, export_torchscript, LAMMPSWrapper
+from .lammps import LAMMPSWrapper, export_to_lammps, export_torchscript
 from .mdi_engine import MDIEngine
-from .torchscript import (TorchScriptPotential, build_neighbor_list_ts,
-                          export_torchscript_potential)
+from .torchscript import TorchScriptPotential, build_neighbor_list_ts, export_torchscript_potential
 
 __all__ = [
     "XNNCalculator",

@@ -12,14 +12,17 @@ import pytest
 import torch
 
 from xnn.common.config import from_dict
-from xnn.common.models.registry import recorded_dispersion, resolve_dispersion
 from xnn.common.data import structure_to_graph
 from xnn.common.deploy.mdi_engine import (
-    BOHR_TO_ANGSTROM, HARTREE_TO_EV, MDIEngine, main,
+    BOHR_TO_ANGSTROM,
+    HARTREE_TO_EV,
+    MDIEngine,
+    main,
 )
 from xnn.common.models import ForceStressOutput, build_model
 from xnn.common.models.d4 import DFTD4
 from xnn.common.models.dispersion import DispersionCorrection
+from xnn.common.models.registry import recorded_dispersion, resolve_dispersion
 
 BASE = {"name": "schnet", "cutoff": 4.0, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
 FAST_D4 = {"name": "d4", "cutoff_pair": 9.0, "cutoff_triple": 6.0,

@@ -813,7 +813,7 @@ class Define:
         """
         want = parse_version(version) if version is not None else None
         chosen: dict[str, tuple] = {}
-        for ver, ref, form, labels in self.entries:
+        for ver, _ref, form, labels in self.entries:
             vk = parse_version(ver)
             if want is not None and vk > want:
                 continue
@@ -1131,7 +1131,6 @@ class FrcFile:
             constants = [(nm, "", float) for nm in raw_names]
             sec.columns = list(out_names)
 
-        flip = sch.get("flip", 0) if sch else 0
         for ln in data_lines:
             w = ln.split()
             if len(w) < 2 + n_atoms:
@@ -1382,7 +1381,7 @@ class ForceField:
         """The ``#reference`` blocks cited by the merged rows, deduplicated."""
         seen = set()
         out = []
-        for kind, rows in self.sections.items():
+        for _kind, rows in self.sections.items():
             for row in rows.values():
                 if not isinstance(row, Row):          # JSON sections hold plain entries
                     continue

@@ -2,9 +2,10 @@
 import numpy as np
 import pytest
 import torch
+
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import D4Dispersion, ForceStressOutput
-from xnn.common.models.ops import shifted_softplus, Softplus
+from xnn.common.models.ops import Softplus, shifted_softplus
 from xnn.dnn.featurizers import AtomCenteredSymmetryFunctions
 from xnn.ffnn.models.geometry import minimum_image_vectors, pair_vectors
 from xnn.ffnn.models.topology import guess_bonds

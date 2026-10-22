@@ -107,7 +107,7 @@ def model_card(name: str, cache_dir: Optional[Union[str, Path]] = None) -> Model
         slot = resolve_cache_dir(cache_dir) / str(name)
         if is_ready(slot):
             return ModelCard.load(slot / "card.json")
-        for _, d, c in scan(slot):
+        for _, _d, c in scan(slot):
             return c
     raise KeyError(f"unknown model {name!r}; see list_models()")
 

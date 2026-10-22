@@ -25,7 +25,7 @@ import torch
 from torch import Tensor
 
 from ..common.constants import HARTREE
-from .angular import LOCAL, L_OF, M_OF, MOLECULAR
+from .angular import L_OF, LOCAL, M_OF, MOLECULAR
 
 # polynomial in (xi, eta) as a dict {(i, j): coefficient}
 

@@ -1,5 +1,5 @@
 name: hippo
-cutoff: 12.0                    # nonbonded cutoff in A (plain truncation; enclose the whole cluster for gas-phase work)
+cutoff: 12.0                    # neighbor-list cutoff in A (a molecule interacts in full within it: enclose the whole cluster for gas-phase work)
 library: hippo-water-2021       # parameter library: hippo-water-2021, a .frc path (file.frc:variant), a Tinker .prm, or a native JSON path
 topology: null                  # topology JSON written by MolecularTopology.save
 tinker_xyz: null                # or a Tinker .xyz file carrying the atom types and connectivity
@@ -7,6 +7,25 @@ types: null                     # or per-atom type names of the library ...
 bonds: null                     # ... with the bond index pairs, e.g. [[0, 1], [0, 2]]
 polarization: mutual            # mutual (self-consistent induced dipoles), direct, or none
 trainable: []                   # parameter groups to refit, e.g. [repulsion, dispersion, chgpen, chgtrn, polarizability, cflux]; "all" for every group
+conserve_charge: true           # hold every molecule's total charge while "charge" trains
+symmetry_mask: true             # multipole components the library leaves zero stay zero while they train
+# periodic cells: Ewald sums with particle-mesh reciprocal space (on by default when a cell is
+# present); the defaults follow Tinker (coefficient from the real-space cutoff, 1.2 mesh points
+# per Angstrom rounded up to an FFT-friendly size, B-spline order 5)
+ewald: null                     # null = on for cells, false = truncate at the cutoff
+ewald_cutoff: null              # real-space cutoff in A (default min(7, cutoff))
+ewald_alpha: null               # Ewald coefficient of the multipoles (1/A); default from ewald_cutoff
+pewald_alpha: null              # ... of the induction (default ewald_alpha)
+pme_grid: null                  # mesh dimensions, e.g. [24, 24, 24]
+pme_order: 5
+dewald_alpha: null              # ... of the dispersion sum (default from dispersion_cutoff)
+dpme_grid: null                 # dispersion mesh (default 0.8 points per Angstrom)
+dispersion_cutoff: null         # real-space cutoff of the dispersion sum (default ewald_cutoff)
+repulsion_cutoff: null          # switched repulsion and charge-transfer cutoffs (default the neighbor cutoff)
+chgtrn_cutoff: null
+taper: null                     # start of the switch of every switched term
+polar_eps: 1.0e-8               # convergence of the iterative induced-dipole solve, rms change in Debye
+solver: auto                    # auto (dense for molecules up to 1000 atoms), dense, iterative
 # HIPPO: AMOEBA's valence terms and atomic multipoles with intermolecular terms derived
 # from a model electron density: charge penetration, density-damped induction,
 # multipolar Pauli repulsion, damped dispersion, charge transfer and charge flux

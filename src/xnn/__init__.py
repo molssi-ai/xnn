@@ -25,18 +25,23 @@ Importing a family package registers its models, e.g.:
     from xnn.common.models import build_model
     from xnn.gnn.models.mace import MACE
 """
-from . import common  # noqa: F401  (data, config, models, train, deploy, cli)
-
 # importing the family packages registers their models by name; the hybrid
 # family (BAMBOO, SpookyNet), the classical force fields (ffnn), the semiempirical
 # methods (sqmnn) and the trfnn family (ET) need no e3nn
-from . import cnn, dnn, ffnn, hybnn, sqmnn, trfnn  # noqa: F401
-
 # the GNN family registers SchNet, DimeNet, GemNet, PaiNN and TensorNet unconditionally and its
 # equivariant models (NequIP/MACE/Allegro/CACE/AIMNet2) only when e3nn
 # is available (it warns otherwise, see gnn/models/__init__.py)
-from . import gnn  # noqa: F401
+from . import (  # noqa: F401
+           cnn,
+           common,  # noqa: F401  (data, config, models, train, deploy, cli)
+           dnn,
+           ffnn,
+           gnn,  # noqa: F401
+           hybnn,
+           sqmnn,
+           trfnn,
+)
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 __all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybnn", "sqmnn", "trfnn",
            "__version__"]

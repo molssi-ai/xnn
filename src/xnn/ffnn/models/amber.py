@@ -61,11 +61,19 @@ from xnn.common.data.elements import CHEMICAL_SYMBOLS
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import scatter_sum
 
-from .geometry import TINY, geometric_mean, pair_vectors, dihedral_cos_sin
-from .amberlib import (AmberLibrary, read_amber, resolve_bond_type,
-                       resolve_angle_type, resolve_dihedral_type,
-                       resolve_improper_type, place_impropers, KCAL_TO_EV,
-                       MAX_TERMS, MAX_IMPROPER_TERMS)
+from .amberlib import (
+    KCAL_TO_EV,
+    MAX_IMPROPER_TERMS,
+    MAX_TERMS,
+    AmberLibrary,
+    place_impropers,
+    read_amber,
+    resolve_angle_type,
+    resolve_bond_type,
+    resolve_dihedral_type,
+    resolve_improper_type,
+)
+from .geometry import TINY, dihedral_cos_sin, geometric_mean, pair_vectors
 from .topology import MolecularTopology, read_topology, residue_name_list
 
 # Coulomb constant of the AMBER programs in eV Angstrom: charges in the

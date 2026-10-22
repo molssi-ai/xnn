@@ -32,8 +32,17 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import register_model
 
 from ..common import elements as el
-from .corrections import (bond_topology, h4_hbond, hh_repulsion, nsp2_correction, peptide_torsion,
-                          pm7_dispersion, pm7_hbond, si_o_h_correction, yne_correction)
+from .corrections import (
+    bond_topology,
+    h4_hbond,
+    hh_repulsion,
+    nsp2_correction,
+    peptide_torsion,
+    pm7_dispersion,
+    pm7_hbond,
+    si_o_h_correction,
+    yne_correction,
+)
 from .nddo import NDDO
 
 

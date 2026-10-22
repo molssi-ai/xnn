@@ -398,10 +398,11 @@ The water dimer and cluster energetics of the AMOEBA and HIPPO water papers
 `Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
 <https://doi.org/10.1021/acs.jctc.1c00628>`_; the ten Smith dimers with their
 energy decomposition, the cyclic clusters), the monomer moments, an AMOEBA
-water model refit to HIPPO reference data by gradient descent, and the AMOEBA
+water model refit to HIPPO reference data by gradient descent, the AMOEBA
 protein force field (`Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
 <https://doi.org/10.1021/ct4003702>`_) on capped
-peptides with the alanine dipeptide map.
+peptides with the alanine dipeptide map, and a periodic water box with
+particle-mesh Ewald sums and a short microcanonical run.
 
 .. example-toctree::
    :caption: AMOEBA and HIPPO (ffnn)
@@ -410,6 +411,7 @@ peptides with the alanine dipeptide map.
    HIPPO water: the Smith dimers and their SAPT decomposition from Rackers et al. (2021) <nb/examples/ffnn/hippo/hippo_water_dimers>
    Refitting the AMOEBA water model to HIPPO reference data <nb/examples/ffnn/amoeba/amoeba_water_refit>
    AMOEBA protein force field: typing peptides and the alanine dipeptide map of Shi et al. (2013) <nb/examples/ffnn/amoeba/amoeba_protein_backbone>
+   AMOEBA and HIPPO water in a periodic box: Ewald sums, pressure and a short MD <nb/examples/ffnn/amoeba/amoeba_water_box_pme>
 
 Semiempirical methods (sqmnn)
 =============================

@@ -22,12 +22,19 @@ pytest.importorskip("e3nn")   # the gnn family (where AIMNet2 lives) registers w
 
 from xnn.common.config import from_dict  # noqa: E402
 from xnn.common.data import collate, structure_to_graph  # noqa: E402
-from xnn.common.models import (ForceStressOutput, available_models, build_model,  # noqa: E402
-                               from_pretrained, list_models, model_card, register_pretrained)
-from xnn.common.models.d3 import D3Dispersion  # noqa: E402
-from xnn.common.models.electrostatics import COULOMB_CONSTANT, all_pairs  # noqa: E402
-from xnn.common.models.hub import registry  # noqa: E402
 from xnn.common.featurizers import MollifierCutoff  # noqa: E402
+from xnn.common.models import (  # noqa: E402
+    ForceStressOutput,
+    available_models,
+    build_model,
+    from_pretrained,
+    list_models,
+    model_card,
+    register_pretrained,
+)
+from xnn.common.models.d3 import D3Dispersion  # noqa: E402
+from xnn.common.models.electrostatics import COULOMB_CONSTANT  # noqa: E402
+from xnn.common.models.hub import registry  # noqa: E402
 from xnn.gnn.models import aimnet2_foundation as foundation  # noqa: E402
 from xnn.gnn.models.aimnet2 import AIMNet2, ShellConvolution  # noqa: E402
 
@@ -299,6 +306,7 @@ def test_collate_and_ase_io_carry_spin_multiplicity():
 def test_ase_calculator_passes_charge_and_returns_charges():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
     model = ForceStressOutput(_build())
     atoms = Atoms("OHH", positions=[[0, 0, 0.12], [0, 0.76, -0.48], [0, -0.76, -0.48]])
@@ -690,8 +698,7 @@ def _periodic_pairs(pos, cell, cutoff):
 @pytest.mark.parametrize("method, accuracy, tol", [("ewald", 1e-8, 1e-7), ("pme", 1e-6, 2e-5)])
 def test_lattice_sums_reproduce_the_madelung_constant(method, accuracy, tol):
     """The Ewald and PME kernels on rock salt give the Madelung energy ``-M k_e / d`` per pair."""
-    from xnn.common.models.electrostatics import (coulomb_ewald, coulomb_pme, ewald_mesh_sizes,
-                                                  ewald_parameters)
+    from xnn.common.models.electrostatics import coulomb_ewald, coulomb_pme, ewald_mesh_sizes, ewald_parameters
     pos, charges, cell = _rock_salt()
     cutoff = 8.0
     alpha, k_cutoff = ewald_parameters(cutoff, accuracy)

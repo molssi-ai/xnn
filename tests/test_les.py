@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from xnn.common.config import from_dict
-from xnn.common.data import structure_to_graph, collate
+from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import (
     EwaldSummation,
     ForceStressOutput,
@@ -501,13 +501,14 @@ def test_charge_constraint_options_are_validated_and_reach_the_config_hook():
 def test_trainer_warns_when_the_constraint_sees_no_charge_labels(tmp_path):
     """One warning when no training structure carries a charge label."""
     import warnings
+
     from xnn.common.data import AtomicDataset
     from xnn.common.train import Trainer
     rng = np.random.default_rng(0)
 
     def structures(labeled):
         out = []
-        for i in range(3):
+        for _ in range(3):
             s = {"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 8, 1, 8],
                  "energy": 0.0, "forces": np.zeros((4, 3))}
             if labeled:
@@ -620,13 +621,14 @@ def test_les_charge_and_dipole_terms_fit_the_labels():
 def test_trainer_warns_when_les_terms_cannot_apply(tmp_path):
     """A warning for les_* weights without an LES wrapper or without labels."""
     import warnings
+
     from xnn.common.data import AtomicDataset
     from xnn.common.train import Trainer
     rng = np.random.default_rng(0)
 
     def structures(labeled):
         out = []
-        for i in range(3):
+        for _ in range(3):
             s = {"pos": rng.uniform(0, 4, (4, 3)), "atomic_numbers": [1, 8, 1, 8],
                  "energy": 0.0, "forces": np.zeros((4, 3))}
             if labeled:
@@ -722,6 +724,7 @@ def test_checkpoint_without_dielectric_loads_strictly(learn):
 def test_ase_calculator_reports_les_charges_and_dipole():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
 
     model = ForceStressOutput(_schnet_les(constrain_charge=True)).eval()

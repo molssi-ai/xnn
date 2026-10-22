@@ -17,10 +17,10 @@ import torch
 
 from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
+from xnn.common.featurizers import ExpNormalSmearing
 from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.hybnn.models.bamboo import BAMBOO, ELE_FACTOR
 from xnn.trfnn.attention import EdgeMultiheadAttention
-from xnn.common.featurizers import ExpNormalSmearing
 
 SPECIES = [3, 6, 7, 8, 9, 1]  # Li, C, N, O, F, H
 

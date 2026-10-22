@@ -31,6 +31,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import make_activation
+
 from ..featurizers import VoxelGrid
 
 _MAX_Z = 120

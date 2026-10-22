@@ -14,13 +14,20 @@ import numpy as np
 import pytest
 import torch
 
+from xnn.cnn.featurizers import VoxelGrid
+from xnn.cnn.models import (
+    CNN3D,
+    default_fields,
+    default_strides,
+    field_dim,
+    global_average_pool,
+    grid_coordinates,
+    low_pass_filter,
+    rotate_voxels,
+)
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.cnn.featurizers import VoxelGrid
-from xnn.cnn.models import (CNN3D, default_fields, default_strides, field_dim,
-                            global_average_pool, grid_coordinates, low_pass_filter,
-                            rotate_voxels)
 
 SPECIES = [1, 6, 8]
 

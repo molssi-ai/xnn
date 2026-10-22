@@ -13,7 +13,9 @@ The published parameter values are not shipped with xnn; see
 :mod:`xnn.sqmnn.common.published`. Importing this package registers the models (``pm3``, ``pm6``, ``pm6_org``,
 ``pm7``) with the shared model registry.
 """
-from . import common  # noqa: F401
-from . import models  # noqa: F401
+from . import (
+    common,  # noqa: F401
+    models,  # noqa: F401
+)
 
 __all__ = ["common", "models"]

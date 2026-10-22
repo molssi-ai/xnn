@@ -15,8 +15,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-import torch
-
 
 def _apply_dict_overrides(d: dict, overrides: list[str]) -> dict:
     """Apply ``a.b=c`` dotted overrides to a plain (pre-schema) config dict.
@@ -136,6 +134,7 @@ def main(argv=None):
                                 "then merge")
         args, _ = p.parse_known_args(rest)
         import yaml
+
         from ..benchmark import from_dict, run_benchmark
         from ..benchmark.runner import Benchmark, merge_parts, run_parallel, select_entries
         with open(args.config) as f:
@@ -183,9 +182,9 @@ def main(argv=None):
                        help="spin multiplicity of the deployed system (the "
                             "two-channel AIMNet2 models)")
         args, _ = p.parse_known_args(rest)
+        from ..deploy import export_torchscript_potential
         from ..models.hub import build_potential, fetch_model, load_checkpoint
         from ..models.registry import recorded_dispersion
-        from ..deploy import export_torchscript_potential
         ck = load_checkpoint(fetch_model(args.ckpt, cache_dir=args.cache_dir))
         # prefer the architecture embedded in the checkpoint, as `benchmark`
         # does, so exporting a trained run needs nothing but the .pt

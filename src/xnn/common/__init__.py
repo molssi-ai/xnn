@@ -5,7 +5,7 @@ from ._torch_compat import allow_e3nn_constants
 
 allow_e3nn_constants()
 
-from . import data, featurizers, config, models, distributed, finetune, train, deploy, benchmark, cli  # noqa: E402
+from . import benchmark, cli, config, data, deploy, distributed, featurizers, finetune, models, train  # noqa: E402
 
 __all__ = ["data", "featurizers", "config", "models", "distributed", "finetune", "train",
            "deploy", "benchmark", "cli"]

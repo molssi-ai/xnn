@@ -12,17 +12,27 @@ import pytest
 import torch
 
 from xnn.common.benchmark import (
-    BenchmarkConfig, from_dict, run_benchmark, Benchmark,
-    register_metric, get_metric, available_metrics, score,
-    register_writer, available_writers, write_all, format_table,
+    Benchmark,
+    available_metrics,
+    available_writers,
+    format_table,
+    from_dict,
+    get_metric,
+    register_metric,
+    register_writer,
+    run_benchmark,
+    score,
+    write_all,
 )
-from xnn.common.benchmark.metrics import mae, mse, rmse, collect_predictions
-from xnn.common.benchmark.report import columns
 from xnn.common.benchmark.energy import (
-    build_e0_lookup, fit_atomic_energies, dataset_structures,
+    build_e0_lookup,
+    dataset_structures,
+    fit_atomic_energies,
 )
+from xnn.common.benchmark.metrics import collect_predictions, mae, mse, rmse
+from xnn.common.benchmark.report import columns
 from xnn.common.config import from_dict as cfg_from_dict
-from xnn.common.models import build_model, ForceStressOutput
+from xnn.common.models import ForceStressOutput, build_model
 
 
 # helpers
@@ -288,8 +298,9 @@ def test_dataset_structures_reads_atomicdataset(tmp_path):
 
 def test_atomization_leaves_difference_metrics_invariant():
     """Subtracting the same E0 offset from pred and ref cannot change MAE/RMSE."""
-    from xnn.common.data import AtomicDataset, collate
     from torch.utils.data import DataLoader
+
+    from xnn.common.data import AtomicDataset, collate
 
     structs = [{"pos": np.random.default_rng(i).uniform(0, 4, (4, 3)),
                 "atomic_numbers": [1, 6, 8, 1],
@@ -506,6 +517,7 @@ def test_dataset_shared_per_cutoff(tmp_path):
 
 def test_cli_benchmark(tmp_path):
     import yaml
+
     from xnn.common.cli import main
     data = _write_dataset(tmp_path / "data.extxyz")
     ckpt = _make_checkpoint(tmp_path / "m.pt")
@@ -534,7 +546,8 @@ def test_select_entries_by_label_position_and_shard(tmp_path):
     from xnn.common.benchmark import select_entries
     data, models = _three_models(tmp_path)
     cfg = from_dict(_bench_dict(data, models))
-    labels = lambda es: [e.label for e in es]
+    def labels(es):
+        return [e.label for e in es]
     assert labels(select_entries(cfg)) == ["a", "b", "c"]
     assert labels(select_entries(cfg, "c, a")) == ["c", "a"]
     assert labels(select_entries(cfg, ["1"])) == ["b"]

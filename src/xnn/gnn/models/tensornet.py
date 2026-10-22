@@ -49,7 +49,7 @@ Conventions worth knowing:
 """
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies
 # the annotations that TorchScript needs to resolve.
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import torch
 from torch import Tensor, nn

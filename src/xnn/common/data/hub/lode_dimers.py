@@ -220,9 +220,8 @@ class LODEDimersBuilder(DatasetBuilder):
         ValueError
             If ``label`` is invalid or requested for a non-``bio`` subset.
         """
-        from tqdm.auto import tqdm
-
         from ase.io import read
+        from tqdm.auto import tqdm
 
         from ..ase_io import atoms_to_structure
 

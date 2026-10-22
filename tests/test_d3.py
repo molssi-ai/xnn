@@ -18,9 +18,9 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import (
+    DFTD3,
     D3Dispersion,
     D4Dispersion,
-    DFTD3,
     ForceStressOutput,
     LatentEwald,
     build_model,
@@ -129,7 +129,6 @@ def test_two_body_damping_closed_forms_on_a_dimer(damping):
         kw.update(bet=6.0)
     d3 = DFTD3(**kw)
     r_a = 5.0
-    z = torch.tensor([18, 18])
     pos = torch.tensor([[0.0, 0, 0], [r_a, 0, 0]])
     g = _graph(pos.numpy(), [18, 18], d3.cutoff)
     out = d3(g)
@@ -225,7 +224,6 @@ def _cluster_clear_of_cutoffs(cell, cutoffs=(7.0, 8.0, 9.0), margin=0.003):
     holds for the reference code); the test geometry keeps every pair farther
     from a cutoff than the finite-difference displacements move it.
     """
-    from xnn.common.data import build_neighbor_list
     for seed in range(2, 50):
         pos, z = _cluster(8, seed=seed)
         g = structure_to_graph({"pos": pos, "atomic_numbers": z, "cell": cell,
@@ -410,7 +408,8 @@ def test_wraps_every_model(name):
 
 def test_config_hook_selects_d3_or_d4():
     base = {"name": "schnet", "cutoff": 4.5, "n_interactions": 1, "n_rbf": 6, "n_features": 8}
-    m3 = build_model(from_dict({"model": {**base, "extra": {"dispersion": {"name": "d3", "damping": "zero", "s8": 0.5}}}}).model)
+    m3 = build_model(from_dict({"model": {**base, "extra": {"dispersion": {"name": "d3", "damping": "zero",
+                                                                          "s8": 0.5}}}}).model)
     assert isinstance(m3, D3Dispersion) and m3.term.damping == "zero" and float(m3.term.s8) == 0.5
     m4 = build_model(from_dict({"model": {**base, "extra": {"dispersion": {"name": "d4"}}}}).model)
     assert isinstance(m4, D4Dispersion)
@@ -469,6 +468,7 @@ def test_torchscript_export_matches_eager(kind, periodic):
 def test_ase_calculator_matches_eager():
     pytest.importorskip("ase")
     from ase import Atoms
+
     from xnn.common.deploy import XNNCalculator
     model = D3Dispersion(s9=1.0, **FAST)
     pos, z = _cluster(9, seed=7)

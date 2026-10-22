@@ -19,7 +19,6 @@ work unchanged, and periodic images enter only through the edge vectors.
 """
 from __future__ import annotations
 
-import math
 from typing import Optional, Sequence
 
 import torch

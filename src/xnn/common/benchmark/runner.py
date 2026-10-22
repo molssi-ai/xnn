@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 
 from .. import distributed
 from ..data import AtomicDataset, collate
-from ..models import build_model, ForceStressOutput
+from ..models import ForceStressOutput, build_model
 from ..train.trainer import resolve_device
 from . import metrics as _metrics
 from . import report
@@ -649,6 +649,7 @@ def run_parallel(raw: dict, workers: int | None = None) -> list[dict]:
         If any worker fails; the message names its log file.
     """
     import yaml
+
     from .config import from_dict
 
     if distributed.is_distributed():

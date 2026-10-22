@@ -8,7 +8,6 @@ forms, float32 against float64, and the Tinker / LAMMPS cross-checks live in
 ``notebooks/fidelity_checks/ffnn/{amoeba,hippo}/``.
 """
 import copy
-import json
 import math
 
 import numpy as np
@@ -18,12 +17,13 @@ import torch
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models
 from xnn.ffnn.common import list_forcefields, read_forcefield
+from xnn.ffnn.common.frc import SECTION_SCHEMA, flip_values, make_section
 from xnn.ffnn.models import (
     Amoeba,
     AmoebaForceField,
-    AmoebaLibrary,
     Hippo,
     MolecularTopology,
+    amoebalib,
     builtin_amoeba,
     read_amoeba,
     read_tinker_prm,
@@ -31,10 +31,8 @@ from xnn.ffnn.models import (
     write_tinker_prm,
     write_tinker_xyz,
 )
-from xnn.ffnn.common.frc import SECTION_SCHEMA, flip_values, make_section
 from xnn.ffnn.models import amoeba as am
-from xnn.ffnn.models import amoebalib
-from xnn.ffnn.models.amoebalib import KCAL_TO_EV, from_forcefield, to_forcefield
+from xnn.ffnn.models.amoebalib import KCAL_TO_EV, from_forcefield
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
 DEG = math.pi / 180.0
@@ -232,7 +230,7 @@ def test_frames_give_the_monomer_dipole_of_table_2():
     mu = out["dipole"][0] * DEBYE
     assert float(mu.norm()) == pytest.approx(1.773, abs=2e-3)
     assert float(mu[0]) == pytest.approx(0.0, abs=1e-12) and float(mu[2]) > 0   # along the bisector
-    assert float(out["e_polar"]) == 0.0                                           # one group: no intramolecular induction
+    assert float(out["e_polar"]) == 0.0    # one group: no intramolecular induction
     # HIPPO monomer, Table 1 of Rackers et al. (2021): 1.843 D at the experimental geometry
     hippo = Hippo("hippo-water-2021", top, cutoff=30.0)
     out = hippo(_graph(_monomer(0.9572, 104.52), Z_DIMER[:3]))
@@ -288,8 +286,10 @@ def test_dimer_1_single_points_reproduce_the_paper():
     """HIPPO single-point energy of Smith dimer 1 (Table 2, Rackers et al. 2021: -4.917 kcal/mol)."""
     out = _model(Hippo)(_graph(DIMER1))
     assert float(out["energy"]) * EV_TO_KCAL == pytest.approx(-4.917, abs=2e-3)
-    comps = {k: float(out[k]) * EV_TO_KCAL for k in ("e_multipole", "e_repulsion", "e_polar", "e_dispersion", "e_chgtrn")}
-    # Table S4: electrostatics -8.633, repulsion 8.373, induction (polarization + charge transfer) -3.167, dispersion -1.522
+    comps = {k: float(out[k]) * EV_TO_KCAL
+             for k in ("e_multipole", "e_repulsion", "e_polar", "e_dispersion", "e_chgtrn")}
+    # Table S4: electrostatics -8.633, repulsion 8.373,
+    # induction (polarization + charge transfer) -3.167, dispersion -1.522
     assert comps["e_multipole"] == pytest.approx(-8.633, abs=2e-3)
     assert comps["e_repulsion"] == pytest.approx(8.373, abs=2e-3)
     assert comps["e_dispersion"] == pytest.approx(-1.522, abs=2e-3)
@@ -348,7 +348,8 @@ def test_hippo_pair_terms_by_hand():
     f_h = 1 - (1 + zh * R / 2) * math.exp(-zh * R)
     A = zh ** 2 / (zh ** 2 - zo ** 2)
     B = zo ** 2 / (zo ** 2 - zh ** 2)
-    f_ov = 1 - A ** 2 * (1 + 2 * B + zo * R / 2) * math.exp(-zo * R) - B ** 2 * (1 + 2 * A + zh * R / 2) * math.exp(-zh * R)
+    f_ov = (1 - A ** 2 * (1 + 2 * B + zo * R / 2) * math.exp(-zo * R)
+            - B ** 2 * (1 + 2 * A + zh * R / 2) * math.exp(-zh * R))
     e_mp = am.COULOMB_KCAL / R * (o["core"] * h["core"] + o["core"] * vh * f_h + h["core"] * vo * f_o + vo * vh * f_ov)
     assert float(out["e_multipole"]) * EV_TO_KCAL == pytest.approx(e_mp, rel=1e-12)
     e_ct = -lib.chgtrn["OW"]["eps"] * am.COULOMB_KCAL * math.exp(-lib.chgtrn["HW"]["alpha"] * R)
@@ -488,10 +489,11 @@ def test_periodic_minimum_image_and_stress():
     cell = np.diag([20.0, 20.0, 20.0])
     pos = DIMER1.copy()
     pos[3:] += np.array([20.0, 0.0, 0.0])            # the second molecule sits in the next image
-    model = ForceStressOutput(_model(), compute_stress=True)
+    model = ForceStressOutput(_model(ewald=False), compute_stress=True)
     out = model(_graph(pos, cell=cell, cutoff=9.0))
     ref = ForceStressOutput(_model())(_graph(DIMER1, cutoff=9.0))
-    # the molecular pair (shifted by one lattice vector) has the same energy as in free space
+    # without the Ewald sum the molecular pair (shifted by one lattice vector) has the same
+    # energy as in free space
     assert float(out["energy"]) == pytest.approx(float(ref["energy"]), abs=1e-9)
     assert out["stress"].shape == (1, 3, 3)
     assert torch.allclose(out["stress"][0], out["stress"][0].T, atol=1e-10)
@@ -544,6 +546,52 @@ def test_shared_forcefield_accumulates_gradients():
     assert a.ff is b.ff
     (a(_graph(DIMER1))["energy"].sum() + b(_graph(DIMER1[:3], Z_DIMER[:3]))["energy"].sum()).backward()
     assert float(ff.params["vdw_rmin"].grad.abs().sum()) > 0
+
+
+def test_charge_conservation_and_symmetry_masks_in_training():
+    """Gradient steps keep every molecule's charge and the library's zero components."""
+    lib = builtin_amoeba("amoeba-water-2003")
+    graph = _graph(DIMER1)
+    model = _model(Amoeba, trainable=("charge", "dipole", "quadrupole"))
+    ff = model.ff
+    assert ff.charge_rows.shape == (1, 2) and float(ff.charge_totals[0]) == pytest.approx(0.0, abs=1e-12)
+    e0 = float(model(graph)["energy"])
+    plain = _model(Amoeba, conserve_charge=False, symmetry_mask=False)
+    assert float(plain(graph)["energy"]) == pytest.approx(e0, abs=1e-12)
+    q0 = torch.tensor([lib.multipoles[t][0]["q"] for t, _ in ff.multipole_rows])
+    d0 = torch.tensor([lib.multipoles[t][0]["dipole"] for t, _ in ff.multipole_rows])
+    Q0 = torch.tensor([lib.multipoles[t][0]["quadrupole"] for t, _ in ff.multipole_rows])
+    opt = torch.optim.SGD([p for p in ff.parameters() if p.requires_grad], lr=1e-2)
+    for _ in range(3):
+        opt.zero_grad()
+        model(graph)["energy"].sum().backward()
+        opt.step()
+    assert float((ff.params["mpole_q"] - q0).abs().max()) > 1e-4
+    q = model(graph)["charges"]
+    assert float(q[:3].sum()) == pytest.approx(0.0, abs=1e-12) and float(q[3:].sum()) == pytest.approx(0.0, abs=1e-12)
+    q_rows, d_rows, Q_rows = ff.effective_multipoles()
+    assert bool((d_rows[d0 == 0] == 0).all()) and bool((d_rows != d0 * am.BOHR).any())
+    assert bool((Q_rows[Q0 == 0] == 0).all())
+    assert torch.allclose(Q_rows, Q_rows.transpose(1, 2))
+    assert float(torch.diagonal(Q_rows, dim1=1, dim2=2).sum(-1).abs().max()) < 1e-15
+
+
+def test_export_after_training_writes_the_model_multipoles():
+    """Exported charges are neutral, quadrupoles symmetric and traceless, and reproduce the model."""
+    model = _model(Amoeba, trainable=("charge", "quadrupole"), symmetry_mask=False)
+    with torch.no_grad():
+        model.ff.params["mpole_Q"] += 0.01 * torch.eye(3)
+        model.ff.params["mpole_Q"][:, 0, 1] += 0.005
+        model.ff.params["mpole_q"] += 0.01
+    lib = model.export_library()
+    for rows in lib.multipoles.values():
+        Q = np.array(rows[0]["quadrupole"])
+        assert abs(np.trace(Q)) < 1e-12 and np.allclose(Q, Q.T)
+    assert lib.multipoles["OW"][0]["q"] + 2 * lib.multipoles["HW"][0]["q"] == pytest.approx(0.0, abs=1e-12)
+    assert lib.multipoles["OW"][0]["q"] != pytest.approx(-0.51966, abs=1e-6)
+    again = Amoeba(lib, _top(), cutoff=30.0)
+    e_model = float(model(_graph(DIMER1))["energy"])
+    assert float(again(_graph(DIMER1))["energy"]) == pytest.approx(e_model, abs=1e-10)
 
 
 # persistence and interchange

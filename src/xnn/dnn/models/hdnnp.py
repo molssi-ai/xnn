@@ -67,6 +67,7 @@ from xnn.common.models.ops import make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 from xnn.dnn.featurizers import AtomCenteredSymmetryFunctions
 from xnn.dnn.featurizers.acsf import cutoff_function
+
 from .base import DescriptorPotential, _ElementNetworks
 
 #: covalent radii in Angstrom (WebElements), indexed by atomic number; ``None``

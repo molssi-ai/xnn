@@ -334,7 +334,6 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
     # Centre node of every emitted pair, and that centre's block offset/count.
     center = torch.repeat_interleave(torch.arange(num_nodes, device=device), n_pairs)
     base = torch.repeat_interleave(offsets, n_pairs)   # (T,) offset into `order`
-    cnt = torch.repeat_interleave(counts, n_pairs)     # (T,) edges at this centre
 
     # Local pair (a, b) with 0 <= a < b < cnt, laid out from a shared template
     # sized to the largest centre, then masked down to each centre's count.

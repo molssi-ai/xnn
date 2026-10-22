@@ -35,8 +35,10 @@ from typing import Optional, Sequence, Union
 from xnn.common.config.coerce import coerce_per_species, coerce_species
 from xnn.common.models.registry import register_model
 from xnn.dnn.featurizers import AEV
-from xnn.dnn.featurizers.aev import (
-    ANI2X_SPECIES, ANI_SPECIES, _angle_shifts as _ang, _even_shifts as _even)
+from xnn.dnn.featurizers.aev import ANI2X_SPECIES, ANI_SPECIES
+from xnn.dnn.featurizers.aev import _angle_shifts as _ang
+from xnn.dnn.featurizers.aev import _even_shifts as _even
+
 from .base import DescriptorPotential
 
 # ANI-1x per-element hidden-layer widths (torchani), keyed by atomic number.

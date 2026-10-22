@@ -28,19 +28,36 @@ Extension points mirror the model registry: register new error metrics with
 from __future__ import annotations
 
 from .config import (
-    BenchmarkConfig, ModelEntry, OutputConfig, from_dict, from_yaml,
-)
-from .metrics import (
-    register_metric, get_metric, available_metrics, load_custom_metric,
-    collect_predictions, prediction_pairs, score,
+    BenchmarkConfig,
+    ModelEntry,
+    OutputConfig,
+    from_dict,
+    from_yaml,
 )
 from .energy import build_e0_lookup, fit_atomic_energies
+from .metrics import (
+    available_metrics,
+    collect_predictions,
+    get_metric,
+    load_custom_metric,
+    prediction_pairs,
+    register_metric,
+    score,
+)
 from .report import (
-    register_writer, available_writers, write, write_all, format_table,
     apply_units,
+    available_writers,
+    format_table,
+    register_writer,
+    write,
+    write_all,
 )
 from .runner import (
-    Benchmark, run_benchmark, select_entries, merge_parts, run_parallel,
+    Benchmark,
+    merge_parts,
+    run_benchmark,
+    run_parallel,
+    select_entries,
 )
 
 __all__ = [

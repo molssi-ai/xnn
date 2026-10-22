@@ -19,9 +19,14 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.gnn.featurizers import (BesselRBF, PolynomialCutoff, SphericalBesselBasis,
-                                 spherical_bessel_jn, spherical_bessel_zeros,
-                                 zonal_harmonics)
+from xnn.gnn.featurizers import (
+    BesselRBF,
+    PolynomialCutoff,
+    SphericalBesselBasis,
+    spherical_bessel_jn,
+    spherical_bessel_zeros,
+    zonal_harmonics,
+)
 from xnn.gnn.models.dimenet import DimeNet, DimeNetPP, directed_triplets
 
 SPECIES = [1, 6, 8]

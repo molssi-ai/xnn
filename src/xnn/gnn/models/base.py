@@ -17,12 +17,12 @@ of one family lives in a shared module of that family).
 from __future__ import annotations
 
 import torch
+from e3nn import o3
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from e3nn import o3
-
 from xnn.common.models.base import InteratomicPotential
+
 from ..constants import exact_float64_constants
 from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .blocks import species_irreps

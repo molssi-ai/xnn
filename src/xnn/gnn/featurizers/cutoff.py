@@ -1,9 +1,6 @@
 """Cutoff envelope of the GNN family: the NequIP/MACE polynomial."""
 from __future__ import annotations
 
-import math
-
-import torch
 from torch import Tensor, nn
 
 

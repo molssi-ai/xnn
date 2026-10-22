@@ -33,6 +33,7 @@ def setup() -> None:
     if not hasattr(np, "float"):
         np.float = float
     import importlib
+
     import s2cnn  # noqa: F401
     # the package re-exports functions under their module names, so take the modules by path
     s2_ft = importlib.import_module("s2cnn.s2_ft")
@@ -55,10 +56,12 @@ def setup() -> None:
     # the reference builds its constant tables in float64 (lie_learn) and stores
     # them in float32; take the float64 arrays in the working precision instead
     def wigner_s2(b, nl, weighted, device):
-        return torch.tensor(s2_fft._setup_s2_fft(b, nl, weighted), dtype=torch.get_default_dtype(), device=device).contiguous()
+        w = s2_fft._setup_s2_fft(b, nl, weighted)
+        return torch.tensor(w, dtype=torch.get_default_dtype(), device=device).contiguous()
 
     def wigner_so3(b, nl, weighted, device):
-        return torch.tensor(so3_fft._setup_so3_fft(b, nl, weighted), dtype=torch.get_default_dtype(), device=device).contiguous()
+        w = so3_fft._setup_so3_fft(b, nl, weighted)
+        return torch.tensor(w, dtype=torch.get_default_dtype(), device=device).contiguous()
 
     def setup_s2_ft(b, grid, device_type, device_index):
         return torch.tensor(getattr(s2_ft, "__setup_s2_ft")(b, grid), dtype=torch.get_default_dtype(),
@@ -136,14 +139,27 @@ def compare_all(dtype: torch.dtype = torch.float64, seed: int = 0) -> dict[str, 
     """Worst relative errors of every compared quantity, in ``dtype``."""
     setup()
     import importlib
-    from s2cnn import (S2Convolution as RefS2Conv, SO3Convolution as RefSO3Conv, s2_near_identity_grid as ref_s2_grid,
-                       so3_near_identity_grid as ref_so3_grid)
-    from s2cnn.soft.s2_fft import s2_fft as ref_s2_fft, s2_ifft as ref_s2_ifft
-    from s2cnn.soft.so3_fft import so3_rfft as ref_so3_rfft, so3_rifft as ref_so3_rifft
+
+    from s2cnn import S2Convolution as RefS2Conv
+    from s2cnn import SO3Convolution as RefSO3Conv
+    from s2cnn import s2_near_identity_grid as ref_s2_grid
+    from s2cnn import so3_near_identity_grid as ref_so3_grid
+    from s2cnn.soft.s2_fft import s2_fft as ref_s2_fft
+    from s2cnn.soft.s2_fft import s2_ifft as ref_s2_ifft
+    from s2cnn.soft.so3_fft import so3_rfft as ref_so3_rfft
+    from s2cnn.soft.so3_fft import so3_rifft as ref_so3_rifft
     ref_rotation = importlib.import_module("s2cnn.soft.so3_rotation").so3_rotation
     ref_integrate = importlib.import_module("s2cnn.soft.so3_integrate").so3_integrate
-    from xnn.cnn.models import (S2Convolution, S2Transform, SO3Convolution, SO3Transform,
-                                s2_near_identity_grid, so3_integrate, so3_near_identity_grid, so3_rotate)
+    from xnn.cnn.models import (
+        S2Convolution,
+        S2Transform,
+        SO3Convolution,
+        SO3Transform,
+        s2_near_identity_grid,
+        so3_integrate,
+        so3_near_identity_grid,
+        so3_rotate,
+    )
 
     old = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -185,7 +201,8 @@ def compare_all(dtype: torch.dtype = torch.float64, seed: int = 0) -> dict[str, 
         s2 = S2Convolution(3, 4, b_in, b_out, s2_pts)
         so3 = SO3Convolution(4, 2, b_out, b_out, so3_pts)
         errors["s2_grid"] = _relative(s2_pts, torch.tensor(ref_s2_grid(math.pi / 8, 2 * b_in, 2), dtype=dtype))
-        errors["so3_grid"] = _relative(so3_pts, torch.tensor(ref_so3_grid(math.pi / 8, 2 * math.pi, 2 * b_out, 2, 2), dtype=dtype))
+        ref_grid = torch.tensor(ref_so3_grid(math.pi / 8, 2 * math.pi, 2 * b_out, 2, 2), dtype=dtype)
+        errors["so3_grid"] = _relative(so3_pts, ref_grid)
         with torch.no_grad():
             for mine, theirs in ((s2, ref_s2), (so3, ref_so3)):
                 theirs.kernel.copy_(mine.kernel)
