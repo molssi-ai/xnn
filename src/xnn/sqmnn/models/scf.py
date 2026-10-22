@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import Tensor
@@ -368,7 +368,6 @@ class SCFDensity(torch.autograd.Function):
         C, eps, occ = res.orbitals, res.energies, res.occupations
         weight = 1.0 if uhf else 2.0
         gP = 0.5 * (gP + gP.transpose(-1, -2))
-        n_spin = C.shape[0]
         occ_mask = occ > 0
         # response of each spin density to a symmetric perturbation X of its
         # Fock matrix: R[X] = sum_ia w (C_i C_a^T + C_a C_i^T) X_ia / (e_i - e_a)
@@ -433,7 +432,8 @@ class SCFDensity(torch.autograd.Function):
                 rz = rz_new
             if bool(unstable.any()):
                 warnings.warn(f"the SCF solution of structure(s) {unstable.nonzero().flatten().tolist()} "
-                              "is not a minimum; their density response is incomplete", RuntimeWarning)
+                              "is not a minimum; their density response is incomplete", RuntimeWarning,
+                              stacklevel=2)
             z = from_mo(u)          # dL/dF (AO), one per spin
         # dL/dH = sum over spins of z; dL/dW from <z, G_W(P)>
         gH = z.sum(0)

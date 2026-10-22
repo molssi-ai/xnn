@@ -1,6 +1,6 @@
 """Featurizer base + basis functions shared across families."""
 from .base import Featurizer
-from .radial import ExpNormalSmearing, GaussianRBF
 from .cutoff import CosineCutoff, MollifierCutoff
+from .radial import ExpNormalSmearing, GaussianRBF
 
 __all__ = ["Featurizer", "GaussianRBF", "ExpNormalSmearing", "CosineCutoff", "MollifierCutoff"]

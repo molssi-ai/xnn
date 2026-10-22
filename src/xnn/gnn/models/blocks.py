@@ -12,12 +12,11 @@ import math
 from typing import Final, List, Tuple
 
 import torch
-from torch import Tensor, nn
-from torch.nn import functional as F
-
 from e3nn import nn as e3nn_nn
 from e3nn import o3
 from e3nn.math import normalize2mom
+from torch import Tensor, nn
+from torch.nn import functional as F
 
 
 def shifted_softplus(x: Tensor) -> Tensor:

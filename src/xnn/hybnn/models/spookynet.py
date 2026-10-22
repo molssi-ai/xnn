@@ -116,10 +116,9 @@ from xnn.common.featurizers import MollifierCutoff
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.d4 import DFTD4, _erf_count, _load_reference
 from xnn.common.models.dispersion import BOHR, HARTREE, gaussian_reference_weights
-from xnn.common.models.electrostatics import (COULOMB_CONSTANT, all_pairs, coulomb_ewald,
-                                              ewald_parameters)
-from xnn.common.models.ops import (exact_softplus as _exact_softplus, glorot_orthogonal_,
-                                   scatter_sum, softplus_inverse, structure_sum)
+from xnn.common.models.electrostatics import COULOMB_CONSTANT, all_pairs, coulomb_ewald, ewald_parameters
+from xnn.common.models.ops import exact_softplus as _exact_softplus
+from xnn.common.models.ops import glorot_orthogonal_, scatter_sum, softplus_inverse, structure_sum
 from xnn.common.models.registry import register_model
 from xnn.hybnn.featurizers import ExponentialBernsteinRBF
 

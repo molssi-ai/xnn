@@ -13,8 +13,8 @@ the node features and writes the node sums directly.
 from typing import Dict, List, Optional
 
 import torch
-from torch import Tensor
 from e3nn import o3
+from torch import Tensor
 
 from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum

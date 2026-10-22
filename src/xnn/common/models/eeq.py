@@ -54,6 +54,7 @@ from typing import Optional
 
 import torch
 from torch import Tensor
+
 from .electrostatics import reciprocal_lattice
 from .ops import cell_volume, scatter_sum
 from .recompute import recompute
@@ -119,7 +120,8 @@ def lu_solve_refined(lu: Tensor, pivots: Tensor, full: Tensor, rhs: Tensor,
     of iterative refinement.
 
     A float32 factor alone leaves the charges and, through the adjoint, the
-    forces well short of the float32 matrix's own accuracy. Each round (residual of the current solution, in float64 when the factor
+    forces well short of the float32 matrix's own accuracy. Each round (residual
+    of the current solution, in float64 when the factor
     is float32, solved with the same factor and added back) recovers about
     four digits; one round brings the solution to the accuracy of the float32
     matrix itself. ``rounds=0`` is the plain LAPACK solution.

@@ -24,7 +24,9 @@ published ReaxFF fields ship with xnn
 Importing this package registers the family's models with the shared model
 registry (``xnn.common.models``).
 """
-from . import common  # noqa: F401
-from . import models  # noqa: F401
+from . import (
+    common,  # noqa: F401
+    models,  # noqa: F401
+)
 
 __all__ = ["common", "models"]

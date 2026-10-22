@@ -33,7 +33,6 @@ import functools
 import json
 import os
 import platform
-import sys
 import time
 
 import numpy as np
@@ -54,7 +53,8 @@ p.add_argument("--cutoff-eeq", type=float, default=None,
 p.add_argument("--dtype", choices=["float32", "float64"], default="float32")
 p.add_argument("--regime", default="auto", help="EEQ regime: auto, dense or large")
 p.add_argument("--eeq-solver", default="auto", help="large-regime EEQ solver: auto, lu or cg")
-p.add_argument("--chunk", type=int, default=None, help="triplets per three-body recompute block (default: from free memory)")
+p.add_argument("--chunk", type=int, default=None,
+               help="triplets per three-body recompute block (default: from free memory)")
 p.add_argument("--triplet-cache", type=float, default=None,
                help="triple cache budget in GB (default: a quarter of the free memory; 0 disables it)")
 p.add_argument("--eeq-reuse", action="store_true", help="carry the EEQ solve between frames (needs --frames)")
@@ -75,13 +75,13 @@ p.add_argument("--fast", choices=["off", "on", "auto"], default="off",
 args = p.parse_args()
 
 import xnn  # noqa: E402
-from xnn.common.data import atomic_data, structure_to_graph  # noqa: E402
-from xnn.common.models import D3Dispersion, D4Dispersion, ForceStressOutput  # noqa: E402
 import xnn.common.models.d3 as d3mod  # noqa: E402
 import xnn.common.models.d4 as d4mod  # noqa: E402
 import xnn.common.models.dispersion as dispmod  # noqa: E402
 import xnn.common.models.eeq as eeqmod  # noqa: E402
 import xnn.common.models.recompute as recmod  # noqa: E402
+from xnn.common.data import atomic_data, structure_to_graph  # noqa: E402
+from xnn.common.models import D3Dispersion, D4Dispersion, ForceStressOutput  # noqa: E402
 from xnn.common.models import fast as fastmod  # noqa: E402
 
 DTYPE = getattr(torch, args.dtype)
@@ -359,7 +359,7 @@ if args.frames > 0:
     fresh.train(args.train)
     fastmod.set_use_fast(fresh, USE_FAST)
     x = pos.copy()
-    for k in range(args.frames):
+    for _k in range(args.frames):
         x = x + rng.normal(scale=args.step, size=x.shape)
         gk = graph_of(x)
         sync()

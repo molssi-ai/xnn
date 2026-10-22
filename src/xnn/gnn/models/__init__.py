@@ -2,10 +2,10 @@
 PyTorch) and the E(3)-equivariant NequIP / MACE / Allegro / CACE / AIMNet2 (e3nn)."""
 import warnings
 
-from .schnet import SchNet
 from .dimenet import DimeNet, DimeNetPP, directed_triplets
 from .gemnet import GemNet
-from .painn import PaiNN, GatedEquivariantBlock
+from .painn import GatedEquivariantBlock, PaiNN
+from .schnet import SchNet
 from .tensornet import TensorNet
 
 __all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "GemNet", "PaiNN",
@@ -17,16 +17,16 @@ __all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "GemNet", "Pai
 # other ways
 try:
     from ..constants import exact_float64_constants
-    from .base import EquivariantGNN, GNNPotential
-    from .blocks import RadialNet, set_recompute_radial
-    from .nequip import NequIP
-    from .mace import MACE
-    from .mace_foundation import FOUNDATION_MODELS, from_mace_torch
-    from .allegro import Allegro
-    from .cace import CACE
     from .aimnet2 import AIMNet2
     from .aimnet2_foundation import FOUNDATION_MODELS as AIMNET2_FOUNDATION_MODELS
     from .aimnet2_foundation import from_aimnet_artifact
+    from .allegro import Allegro
+    from .base import EquivariantGNN, GNNPotential
+    from .blocks import RadialNet, set_recompute_radial
+    from .cace import CACE
+    from .mace import MACE
+    from .mace_foundation import FOUNDATION_MODELS, from_mace_torch
+    from .nequip import NequIP
     __all__ += ["EquivariantGNN", "GNNPotential", "NequIP", "MACE", "Allegro",
                 "CACE", "AIMNet2", "FOUNDATION_MODELS", "AIMNET2_FOUNDATION_MODELS",
                 "from_mace_torch", "from_aimnet_artifact", "exact_float64_constants",

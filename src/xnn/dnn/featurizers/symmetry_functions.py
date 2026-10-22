@@ -32,8 +32,8 @@ import torch
 from torch import Tensor
 
 from xnn.common.data import AtomicGraph
+from xnn.common.featurizers import CosineCutoff, Featurizer
 from xnn.common.models.ops import build_triplets  # noqa: F401  (re-exported; canonical home is common)
-from xnn.common.featurizers import Featurizer, CosineCutoff
 
 
 class RadialSymmetryFunctions(Featurizer):

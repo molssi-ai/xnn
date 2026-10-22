@@ -16,16 +16,32 @@ import numpy as np
 import pytest
 import torch
 
+from xnn.cnn.featurizers import SphericalGrid
+from xnn.cnn.models import (
+    S2Convolution,
+    S2Transform,
+    SO3Convolution,
+    SO3Transform,
+    SphericalCNN,
+    SphericalResBlock,
+    euler_to_matrix,
+    matrix_to_euler,
+    quadrature_weights,
+    s2_equatorial_grid,
+    s2_grid_points,
+    s2_near_identity_grid,
+    s2_rotate,
+    so3_equatorial_grid,
+    so3_integrate,
+    so3_near_identity_grid,
+    so3_rotate,
+    wigner_D,
+    wigner_d,
+)
+from xnn.cnn.models.spherical import default_schedule, so3_alphas, so3_betas
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
-from xnn.cnn.featurizers import SphericalGrid
-from xnn.cnn.models import (S2Convolution, S2Transform, SO3Convolution, SO3Transform,
-                            SphericalCNN, SphericalResBlock, euler_to_matrix, matrix_to_euler,
-                            quadrature_weights, s2_grid_points, s2_near_identity_grid,
-                            s2_equatorial_grid, s2_rotate, so3_integrate, so3_near_identity_grid,
-                            so3_equatorial_grid, so3_rotate, wigner_D, wigner_d)
-from xnn.cnn.models.spherical import default_schedule, so3_alphas, so3_betas
 
 SPECIES = [1, 6, 8]
 
@@ -91,8 +107,8 @@ def test_quadrature_integrates_the_basis_exactly():
     blocks = {l: wigner_D(l, aa, bb, gg) for l in range(b)}                 # (2b, 2b, 2b, 2l+1, 2l+1)
     for l in range(b):
         for l2 in range(b):
-            gram = torch.einsum("jkl,jklmn,jklpq->mnpq", w[:, None, None].expand(2 * b, 2 * b, 2 * b).to(torch.complex128),
-                                blocks[l], blocks[l2].conj())
+            wc = w[:, None, None].expand(2 * b, 2 * b, 2 * b).to(torch.complex128)
+            gram = torch.einsum("jkl,jklmn,jklpq->mnpq", wc, blocks[l], blocks[l2].conj())
             if l == l2:
                 ref = torch.einsum("mp,nq->mnpq", torch.eye(2 * l + 1), torch.eye(2 * l + 1)) / (2 * l + 1)
                 assert torch.allclose(gram, ref.to(gram.dtype), atol=1e-13)
@@ -173,7 +189,8 @@ def _eval_s2(f_hat, points):
     out = torch.zeros(f_hat.shape[:-2] + points.shape[:-1], dtype=torch.complex128)
     for l in range(b):
         D = wigner_D(l, alpha, beta, torch.zeros_like(alpha))[..., :, l]   # (..., 2l+1): D_{m0}
-        out = out + (2 * l + 1) * torch.einsum("...m,pm->...p", f_hat[..., l, b - 1 - l:b + l], D.reshape(-1, 2 * l + 1)).reshape(out.shape)
+        term = torch.einsum("...m,pm->...p", f_hat[..., l, b - 1 - l:b + l], D.reshape(-1, 2 * l + 1))
+        out = out + (2 * l + 1) * term.reshape(out.shape)
     return out
 
 
@@ -333,7 +350,8 @@ def test_spherical_grid_rotation_and_invariances():
     # a rotation about z by a grid angle permutes the alpha samples
     k = 3
     R = euler_to_matrix(k * 2 * math.pi / 8, 0.0, 0.0).numpy()
-    assert torch.allclose(feat(_graph(dict(s, pos=np.asarray(s["pos"]) @ R.T))), torch.roll(ref, k, dims=-1), atol=1e-12)
+    rotated = feat(_graph(dict(s, pos=np.asarray(s["pos"]) @ R.T)))
+    assert torch.allclose(rotated, torch.roll(ref, k, dims=-1), atol=1e-12)
     shifted = dict(s, pos=np.asarray(s["pos"]) + np.array([1.0, -2.0, 0.5]))
     assert torch.allclose(feat(_graph(shifted)), ref, atol=1e-12)
     with pytest.raises(ValueError, match="no potential channel"):

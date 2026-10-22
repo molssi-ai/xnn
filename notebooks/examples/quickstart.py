@@ -4,12 +4,11 @@ Runs on CPU in a few seconds with a toy dataset. Demonstrates that the full
 pipeline is wired together. Run:  python notebooks/examples/quickstart.py
 """
 import numpy as np
-import torch
 
 from xnn.common.config import Config
 from xnn.common.data import AtomicDataset
+from xnn.common.models import available_models
 from xnn.common.train import Trainer
-from xnn.common.models import build_model, ForceStressOutput, available_models
 
 
 def toy_structures(n=24, periodic=False):

@@ -56,6 +56,7 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+
 from ..featurizers import BesselRBF, PolynomialCutoff
 from ..featurizers.cartesian import (
     CartesianAngularBasis,

@@ -67,7 +67,7 @@ import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
-from xnn.common.featurizers import GaussianRBF, CosineCutoff
+from xnn.common.featurizers import CosineCutoff, GaussianRBF
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import ShiftedSoftplus, scatter_sum, shifted_softplus
 from xnn.common.models.registry import register_model

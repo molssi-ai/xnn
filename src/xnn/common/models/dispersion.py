@@ -428,7 +428,7 @@ def _triplet_block_grad(e0: int, e1: int, grad_out: Tensor, z: Tensor, edge_inde
         a, b, c, j, k, distinct, e_jk, found = cached
     else:
         a, b, c, j, k, distinct = _block_triplets(e0, e1, edge_index, n_atoms, once)
-    zeros_like = lambda t: torch.zeros_like(t)
+    zeros_like = torch.zeros_like
     if a.numel() == 0:
         return (None, None, zeros_like(edge_vec), zeros_like(r), None, zeros_like(s9),
                 zeros_like(c6_edge), zeros_like(r0_atom), zeros_like(a1), zeros_like(a2))

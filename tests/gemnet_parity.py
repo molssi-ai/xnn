@@ -41,7 +41,7 @@ def _jn_zeros_float64(n, k):
     brackets = np.arange(1, k + n) * np.pi
     zeros[0] = brackets[:k]
     for l in range(1, n):
-        brackets = np.array([brentq(lambda x: spherical_jn(l, x), lo, hi, xtol=1e-15)
+        brackets = np.array([brentq(lambda x: spherical_jn(l, x), lo, hi, xtol=1e-15)   # noqa: B023
                              for lo, hi in zip(brackets[:-1], brackets[1:])])
         zeros[l] = brackets[:k]
     return zeros

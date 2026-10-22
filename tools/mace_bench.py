@@ -39,7 +39,6 @@ Examples::
 """
 import argparse
 import json
-import os
 import platform
 import statistics
 import subprocess
@@ -268,9 +267,9 @@ for reps in sizes:
         g = graph_of(pos, z, cell)
         sync()
         t_graph_cold = time.perf_counter() - t0
-        t_graph, _ = median_time(lambda: graph_of(pos, z, cell), max(3, args.repeats // 2), 1)
+        t_graph, _ = median_time(lambda: graph_of(pos, z, cell), max(3, args.repeats // 2), 1)   # noqa: B023
         torch.cuda.reset_peak_memory_stats(dev)
-        t_step, ts = median_time(lambda: md_step(g), args.repeats, args.warmup)
+        t_step, ts = median_time(lambda: md_step(g), args.repeats, args.warmup)   # noqa: B023
         peak = torch.cuda.max_memory_allocated(dev) / 1e9
         splits = [split_step(g) for _ in range(max(3, args.repeats // 2))]
         t_fwd = statistics.median(s[0] for s in splits)
@@ -429,9 +428,9 @@ if args.blocks and not args.train:
         tf_in, tb_in = span(rec, "f0", "f1"), span(rec, "b0", "b1")
         try:
             af, afb = block_cost(mod, captured[label])
-        except Exception as exc:
+        except Exception:
             af = afb = float("nan")
-        share = (tf_in + (tb_in if tb_in == tb_in else 0.0)) / (t_f + t_b)
+        share = (tf_in + (0.0 if np.isnan(tb_in) else tb_in)) / (t_f + t_b)
         rows.append({"block": label, "forward_s": tf_in, "backward_s": tb_in, "share_of_step": share,
                      "alone_forward_s": af, "alone_forward_backward_s": afb})
         print(f"{label:34s} {tf_in * 1e3:7.3f}ms {tb_in * 1e3:7.3f}ms {share:6.1%} | "

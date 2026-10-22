@@ -8,11 +8,16 @@ import zipfile
 import numpy as np
 import pytest
 
-from xnn.common.data import load_dataset, list_datasets
+from xnn.common.data import list_datasets, load_dataset
 from xnn.common.data.hub import gmtkn55
 from xnn.common.data.hub.gmtkn55 import (
-    CATEGORIES, PAPER_SCALE, SUBSETS, parse_reactions, reaction_energies,
-    subset_statistics, wtmad2,
+    CATEGORIES,
+    PAPER_SCALE,
+    SUBSETS,
+    parse_reactions,
+    reaction_energies,
+    subset_statistics,
+    wtmad2,
 )
 
 HARTREE_TO_KCAL = gmtkn55.HARTREE_TO_EV / gmtkn55.KCAL_MOL_TO_EV
@@ -206,7 +211,7 @@ def test_reaction_energies_and_wtmad2(fake_gmtkn55):
     energies = {(s["subset"], s["name"]): s["pbeh3c_energy"] for s in d["structures"]}
     pred = reaction_energies(d["reactions"], energies)
     s22 = [r for r in d["reactions"]].index(next(r for r in d["reactions"] if r["subset"] == "S22"))
-    assert pred[s22] == pytest.approx((-(-113.0) + 2 * (-56.6)) * HARTREE_TO_KCAL)
+    assert pred[s22] == pytest.approx((113.0 + 2 * (-56.6)) * HARTREE_TO_KCAL)
     hartree = {k: v / gmtkn55.HARTREE_TO_EV for k, v in energies.items()}
     assert reaction_energies(d["reactions"], hartree, units="hartree") == pytest.approx(pred)
 

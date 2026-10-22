@@ -126,7 +126,7 @@ def _brute_acsf(acsf, s):
             c = acsf.cutoffs[f["cutoff"]]
             val = 0.0
             if f["type"] in (1, 2):
-                for zj, d, r in nb:
+                for zj, _d, r in nb:
                     if zj != f["neighbors"][0]:
                         continue
                     val += fc(c, r) ** f["power"] if f["type"] == 1 else \
@@ -370,7 +370,8 @@ def test_4g_charge_equilibration():
     q = out["charges"].detach()
     assert abs(float(q.sum()) - 1.0) < 1e-12
     pos = torch.tensor(s["pos"])
-    amat = model.coulomb_constant * gaussian_coulomb_matrix(pos, model.gaussian_widths[torch.tensor(s["atomic_numbers"])])
+    widths = model.gaussian_widths[torch.tensor(s["atomic_numbers"])]
+    amat = model.coulomb_constant * gaussian_coulomb_matrix(pos, widths)
     resid = out["electronegativities"] + out["hardness"] * q + amat @ q
     torch.testing.assert_close(resid.detach(), out["chemical_potential"].expand_as(resid).detach(),
                                rtol=0, atol=1e-10)

@@ -30,7 +30,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Subset
 
-from ..config.coerce import coerce_per_species, coerce_species, _symbol_to_z
+from ..config.coerce import _symbol_to_z, coerce_per_species, coerce_species
 from ..data import energy_labelled
 
 # One more than the largest supported atomic number, so a lookup tensor of this

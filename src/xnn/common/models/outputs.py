@@ -16,9 +16,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .ops import cell_volume
-
 from ..data import AtomicGraph
+from .ops import cell_volume
 
 
 class ForceStressOutput(nn.Module):

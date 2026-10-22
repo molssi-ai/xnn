@@ -43,7 +43,7 @@ def test_periodic_edge_lengths_within_cutoff():
 
 def test_matches_ase_neighbor_list():
     """Edge count and the multiset of edge lengths must match ASE's neighbor_list."""
-    ase = __import__("importlib").import_module("ase")
+    pytest.importorskip("ase")
     from ase import Atoms
     from ase.neighborlist import neighbor_list
 

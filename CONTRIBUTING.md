@@ -226,6 +226,9 @@ Test conventions:
 - Type hints on public functions; NumPy-style docstrings on every public class and function.
 - Keep numerical constants derived from their sources (CODATA, the paper's tables), not
   retyped with fewer digits.
+- `ruff check` must pass (the Lint workflow runs it; the rules are in `pyproject.toml`).
+  Run it before pushing: `pip install ruff` (or `uvx ruff`), then `ruff check` at the repository
+  root. The formatter is not enforced: `ruff format --check` only reports in CI.
 
 ## Pull requests
 

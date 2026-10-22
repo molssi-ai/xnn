@@ -16,7 +16,7 @@ from xnn.common.config import from_dict
 from xnn.common.data import structure_to_graph
 from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine, main
 from xnn.common.models import ForceStressOutput, build_model
-from xnn.common.models.d4 import D4Dispersion, DFTD4
+from xnn.common.models.d4 import DFTD4, D4Dispersion
 from xnn.common.models.eeq import EEQReuse, lu_solve_implicit
 
 pytestmark = pytest.mark.usefixtures("_f64")

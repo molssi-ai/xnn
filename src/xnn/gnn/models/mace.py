@@ -41,27 +41,25 @@ import logging
 from typing import Final, List, Optional, Tuple, Union
 
 import torch
+from e3nn import nn as e3nn_nn
+from e3nn import o3
 from torch import Tensor, nn
 from torch.nn import functional as F
-
-from e3nn import o3
-from e3nn import nn as e3nn_nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
-from ..fast import ConvTensorProduct
-from ..fast import _cueq
+
 from ..constants import register_constant, restore_exact
+from ..fast import ConvTensorProduct, _cueq
 from ..fast import symmetric_contraction as _fast_sc
-from .base import EquivariantGNN
 from ..featurizers import DISTANCE_TRANSFORMS
+from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as GATES
-from .blocks import RadialNet
+from .blocks import RadialNet, tp_out_irreps_with_instructions
 from .blocks import ScalarActivation as _ScalarActivation
 from .blocks import hidden_irreps as _hidden_irreps
-from .blocks import tp_out_irreps_with_instructions
 
 
 # Clebsch-Gordan symmetric coupling basis (the ``U`` tensors)

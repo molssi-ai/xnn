@@ -12,8 +12,7 @@ import pytest
 import torch
 
 from xnn.common.data import AtomicDataset, list_datasets, load_dataset
-from xnn.common.data.hub import (
-    ani1x, ani2x, default_cache_dir, lode_dimers, rmd17)
+from xnn.common.data.hub import ani1x, ani2x, default_cache_dir, lode_dimers, rmd17
 
 
 @pytest.fixture(autouse=True)
@@ -702,7 +701,7 @@ def fake_argon(tmp_path):
     REF_energy / REF_forces / REF_stress, so the builder's E0 filtering and
     MACE-key parsing can be checked offline.
     """
-    ase = pytest.importorskip("ase")
+    pytest.importorskip("ase")
     from ase import Atoms
     from ase.io import write
 
@@ -770,7 +769,7 @@ def test_argon_bad_split(fake_argon):
 @pytest.fixture
 def fake_bio_scan(tmp_path):
     """Write a synthetic bundled bio_scan file under tmp_path/lode_dimers/."""
-    ase = pytest.importorskip("ase")
+    pytest.importorskip("ase")
     from ase import Atoms
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import write
@@ -819,9 +818,10 @@ def test_ethanol_response_builder(monkeypatch, tmp_path):
     ase_db = pytest.importorskip("ase.db")
     import tarfile
 
+    from ase import Atoms
+
     from xnn.common.data.hub import ethanol_response
     from xnn.common.data.hub.units import BOHR_TO_ANGSTROM, HARTREE_TO_EV
-    from ase import Atoms
 
     src = tmp_path / "src"
     src.mkdir()
@@ -868,6 +868,7 @@ def fake_qm9(monkeypatch, tmp_path):
     """Patch the QM9 downloader with a tiny xyz archive (8 molecules) and an
     uncharacterized list naming two of them; returns the generating arrays."""
     import tarfile
+
     from xnn.common.data.hub import qm9
 
     rng = np.random.default_rng(0)

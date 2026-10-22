@@ -64,12 +64,10 @@ from xnn.common.data.elements import CHEMICAL_SYMBOLS
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import scatter_sum
 
-from .geometry import TINY, geometric_mean, pair_vectors, dihedral_cos_sin
-from .amber import multiple_angles, _exact_trig
-from .charmmlib import (CharmmLibrary, read_charmm, resolve_improper_type,
-                        place_impropers, KCAL_TO_EV, MAX_TERMS)
-from .oplslib import (resolve_bond_type, resolve_angle_type,
-                      resolve_dihedral_type)
+from .amber import _exact_trig, multiple_angles
+from .charmmlib import KCAL_TO_EV, MAX_TERMS, CharmmLibrary, place_impropers, read_charmm, resolve_improper_type
+from .geometry import TINY, dihedral_cos_sin, geometric_mean, pair_vectors
+from .oplslib import resolve_angle_type, resolve_bond_type, resolve_dihedral_type
 from .topology import MolecularTopology, read_topology, residue_name_list
 
 DEG = math.pi / 180.0

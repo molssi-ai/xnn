@@ -13,12 +13,23 @@ The model-specific bridges that turn a resolved force field into the
 parameter tables a model consumes live next to the models
 (:mod:`xnn.ffnn.models.oplslib`, :mod:`xnn.ffnn.models.ffield`).
 """
-from .frc import (ForceField, FrcFile, Section, Row, read_frc, write_frc,
-                  read_forcefield, find_forcefield, list_forcefields,
-                  builtin_data_dir, register_section_schema, convert_units)
-from .typing import (assign_atom_types, to_rdkit, perceive_bonds,
-                     perceive_bond_orders, AtomTypingError)
 from xnn.common.data.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z, atomic_number
+
+from .frc import (
+    ForceField,
+    FrcFile,
+    Row,
+    Section,
+    builtin_data_dir,
+    convert_units,
+    find_forcefield,
+    list_forcefields,
+    read_forcefield,
+    read_frc,
+    register_section_schema,
+    write_frc,
+)
+from .typing import AtomTypingError, assign_atom_types, perceive_bond_orders, perceive_bonds, to_rdkit
 
 __all__ = [
     "ForceField", "FrcFile", "Section", "Row", "read_frc", "write_frc",

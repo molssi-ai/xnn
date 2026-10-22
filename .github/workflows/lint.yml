@@ -1,0 +1,40 @@
+name: Lint
+
+# Lints the Python sources with ruff (rules and exclusions in pyproject.toml,
+# [tool.ruff]); findings are annotated on the pull request. The formatter is
+# advisory: `ruff format --check` reports what it would change without failing
+# the workflow, so files can be moved to the ruff format one at a time.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version: "0.17.1"
+          args: check --output-format=github
+
+      - name: Format check (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version: "0.17.1"
+          args: format --check --diff

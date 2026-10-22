@@ -39,15 +39,15 @@ import math
 from typing import Final, List, Optional, Tuple
 
 import torch
-from torch import Tensor, nn
-from torch.nn import functional as F
-
 from e3nn import o3
 from e3nn.nn import FullyConnectedNet
+from torch import Tensor, nn
+from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
+
 from ..constants import register_constant, restore_exact
 from .base import EquivariantGNN
 from .blocks import tp_path_exists

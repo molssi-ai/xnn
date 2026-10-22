@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from .schema import Config, ModelConfig, DataConfig, OptimConfig, TrainerConfig
+from .schema import Config, DataConfig, ModelConfig, OptimConfig, TrainerConfig
 from .translate import translate_model_keys
 
 _SECTIONS = {"model": ModelConfig, "data": DataConfig, "optim": OptimConfig,

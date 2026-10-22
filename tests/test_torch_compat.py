@@ -46,7 +46,7 @@ def test_gnn_failure_does_not_break_the_package(monkeypatch):
     """An optional family must degrade, not take the package down."""
     import importlib
 
-    import xnn
+    importlib.import_module("xnn")   # loaded, so the deletion below is real
 
     monkeypatch.setitem(sys.modules, "e3nn", None)
     for name in [m for m in sys.modules if m.startswith("xnn")]:

@@ -19,8 +19,11 @@ from e3nn import o3  # noqa: E402
 
 from xnn.common.config import from_dict  # noqa: E402
 from xnn.common.data import structure_to_graph  # noqa: E402
-from xnn.common.models import ForceStressOutput, build_model  # noqa: E402
-from xnn.common.models import fast  # noqa: E402
+from xnn.common.models import (  # noqa: E402
+    ForceStressOutput,
+    build_model,
+    fast,  # noqa: E402
+)
 from xnn.gnn.fast import AUTO_POLICY, ConvTensorProduct, available  # noqa: E402
 from xnn.gnn.models.blocks import tp_out_irreps_with_instructions  # noqa: E402
 from xnn.gnn.models.mace import SymmetricContraction  # noqa: E402

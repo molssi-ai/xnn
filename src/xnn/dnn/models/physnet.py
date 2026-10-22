@@ -60,10 +60,11 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
+from xnn.common.finetune.lora import register_lora_target
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import scatter_sum, shifted_softplus, softplus_inverse
 from xnn.common.models.registry import register_model
-from xnn.common.finetune.lora import register_lora_target
+
 from ...common.models import d3
 
 MAX_Z = 95  # element-indexed tables cover Z = 0..94 (through Pu)

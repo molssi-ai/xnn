@@ -62,9 +62,8 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import scatter_sum
 
-from .dreidinglib import (DreidingLibrary, read_dreiding, torsion_rule,
-                          TORSION_RULES)
-from .geometry import TINY, geometric_mean, pair_vectors, dihedral_cos
+from .dreidinglib import TORSION_RULES, DreidingLibrary, read_dreiding, torsion_rule
+from .geometry import TINY, dihedral_cos, geometric_mean, pair_vectors
 from .oplslib import KCAL_TO_EV
 from .topology import MolecularTopology, read_topology
 
@@ -463,8 +462,7 @@ class Dreiding(InteratomicPotential):
         Dreiding
             The model, bound to the derived topology.
         """
-        from ..common.typing import (assign_atom_types, perceive_bonds,
-                                     perceive_bond_orders)
+        from ..common.typing import assign_atom_types, perceive_bond_orders, perceive_bonds
         source = ffield.lib if isinstance(ffield, DreidingForceField) \
             else _as_library(ffield)
         types, mol = assign_atom_types(structure, source, charge=charge,
@@ -541,7 +539,7 @@ class Dreiding(InteratomicPotential):
 
         # --- torsions: rule per dihedral, total barrier per central bond -
         n_shared: dict[tuple[int, int], int] = {}
-        for i, j, k, l in top.dihedrals:
+        for _i, j, k, _l in top.dihedrals:
             key = (min(j, k), max(j, k))
             n_shared[key] = n_shared.get(key, 0) + 1
         order_of = {b: o for b, o in zip(top.bonds, orders)}

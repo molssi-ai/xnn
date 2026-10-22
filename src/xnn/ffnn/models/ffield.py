@@ -37,9 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-
 from xnn.common.data.elements import CHEMICAL_SYMBOLS, SYMBOL_TO_Z  # noqa: F401  (re-exported)
-
 
 # Layout of the standard `ffield` text library (column -> parameter name).
 # This is the published file format shared by every ReaxFF code; "n.u." marks
@@ -777,7 +775,7 @@ def to_forcefield(lib: FFieldLibrary, name: Optional[str] = None,
         For a ReaxFF-nn library (network weights cannot be expressed in the
         format; use :meth:`FFieldLibrary.save`).
     """
-    from ..common.frc import FrcFile, Define, Reference, make_section
+    from ..common.frc import Define, FrcFile, Reference, make_section
     if lib.is_nn:
         raise ValueError("a ReaxFF-nn library carries network weights, which "
                          "the .frc format cannot hold; use FFieldLibrary.save() "

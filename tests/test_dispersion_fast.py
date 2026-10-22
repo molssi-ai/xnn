@@ -15,8 +15,7 @@ import pytest
 import torch
 
 from xnn.common.data import structure_to_graph
-from xnn.common.models import D3Dispersion, D4Dispersion, ForceStressOutput
-from xnn.common.models import fast
+from xnn.common.models import D3Dispersion, D4Dispersion, ForceStressOutput, fast
 from xnn.common.models.dispersion_fast import supported
 
 GPU = torch.cuda.is_available() and supported(torch.device("cuda"), torch.float64)
@@ -186,8 +185,8 @@ def test_wrapped_model_trains_with_the_fast_dispersion():
 # the fast EEQ operator
 def _eeq_system(periodic, device, fast_cls):
     from xnn.common.models.d4 import DFTD4
-    from xnn.common.models.eeq import EEQSystem, ewald_alpha, reciprocal_vectors
     from xnn.common.models.dispersion_fast.eeq import FastEEQSystem
+    from xnn.common.models.eeq import EEQSystem, ewald_alpha, reciprocal_vectors
     d4 = DFTD4(**OPTIONS, **D4_ONLY, regime="large").to(device)
     s = _water(4, periodic)
     pos = torch.tensor(s["pos"], device=device) / d4.bohr

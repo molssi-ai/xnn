@@ -81,7 +81,6 @@ choice, the defaults reproduce ``s-dftd3`` exactly.
 """
 # NOTE: no ``from __future__ import annotations`` -- TorchScript resolves the
 # annotations of the exported methods at compile time.
-import math
 import os
 from typing import Dict, Optional
 

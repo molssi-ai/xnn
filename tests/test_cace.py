@@ -16,7 +16,9 @@ from xnn.common.config import from_dict  # noqa: E402
 from xnn.common.data import structure_to_graph  # noqa: E402
 from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
 from xnn.gnn.featurizers.cartesian import (  # noqa: E402
-    CartesianAngularBasis, lxlylz_list, n_lxlylz,
+    CartesianAngularBasis,
+    lxlylz_list,
+    n_lxlylz,
 )
 from xnn.gnn.models.cace import _Symmetrizer  # noqa: E402
 

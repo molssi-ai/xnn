@@ -53,7 +53,7 @@ class _Batches:
         return iter(batches)
 
     def __len__(self):
-        return -(-self.n // self.size)
+        return (self.n + self.size - 1) // self.size
 
 
 def test_builtin_loader_reshuffles_every_epoch(tmp_path):

@@ -31,9 +31,15 @@ import torch
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models
 from xnn.common.train import weighted_loss
-from xnn.ffnn.models import (Dreiding, DreidingForceField, DreidingLibrary,
-                             MolecularTopology, read_dreiding, torsion_rule,
-                             hybridization, TORSION_RULES)
+from xnn.ffnn.models import (
+    TORSION_RULES,
+    Dreiding,
+    DreidingForceField,
+    MolecularTopology,
+    hybridization,
+    read_dreiding,
+    torsion_rule,
+)
 from xnn.ffnn.models.dreiding import KE
 from xnn.ffnn.models.oplslib import KCAL_TO_EV
 
@@ -498,7 +504,6 @@ def test_fourteen_pairs_are_included_in_full():
     assert all(p not in top.exclusions for p in top.pairs14)
     model(_graph(_ethane_pos(0.0), z, 14.0))
     w = model.intermediates["nb_weight"]
-    src = model.intermediates["type_index"]
     assert float(w.min()) == 0.0 and float(w.max()) == 1.0
     # the nine 1,4 H-H pairs survive (each direction of the edge list)
     assert int((w > 0).sum()) == 2 * len(top.pairs14)

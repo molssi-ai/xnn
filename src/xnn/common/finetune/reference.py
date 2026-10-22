@@ -125,7 +125,7 @@ def predict_energies(model: nn.Module, structures, batch_size: int = 32,
     structures = list(getattr(structures, "structures", structures))
     if device is None:
         device = next((p.device for p in model.parameters()), torch.device("cpu"))
-    cutoff = float(getattr(model, "cutoff"))
+    cutoff = float(model.cutoff)
     was_training = model.training
     model.eval()
     out = []

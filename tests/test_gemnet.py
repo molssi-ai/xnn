@@ -784,7 +784,7 @@ def test_lora_adapts_the_dense_layers():
     inject_lora(model, rank=2)
     assert abs(float(model(g)["energy"]) - e0) < 1e-12
     with torch.no_grad():
-        for name, p in model.named_parameters():
+        for _name, p in model.named_parameters():
             if p.requires_grad:
                 p.add_(0.01 * torch.randn_like(p))
     e1 = float(model(g)["energy"])

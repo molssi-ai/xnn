@@ -70,10 +70,16 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.ops import scatter_sum
 
-from .geometry import TINY, geometric_mean, pair_vectors, dihedral_cos
-from .oplslib import (OPLSLibrary, read_opls, resolve_bond_type,
-                      resolve_angle_type, resolve_dihedral_type,
-                      resolve_improper_type, KCAL_TO_EV)
+from .geometry import TINY, dihedral_cos, geometric_mean, pair_vectors
+from .oplslib import (
+    KCAL_TO_EV,
+    OPLSLibrary,
+    read_opls,
+    resolve_angle_type,
+    resolve_bond_type,
+    resolve_dihedral_type,
+    resolve_improper_type,
+)
 from .topology import MolecularTopology, read_topology
 
 # Coulomb constant e^2 / (4 pi eps_0) in eV * Angstrom: the OpenMM/CODATA
