@@ -698,10 +698,14 @@ Training and files
 ``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
 ``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
 (``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``cflux``) and
-``atom_ref``. ``forward`` reports every energy term, the monopoles, the
-induced dipoles and the molecular dipole. Libraries are read from ``.frc``
-and Tinker ``.prm`` files and written back to either. A Tinker ``.xyz`` file
-builds the topology directly.
+``atom_ref``. While the multipoles train, every molecule keeps its total
+charge (``conserve_charge``), components the library leaves zero by the
+symmetry of the local frame stay zero (``symmetry_mask``), and the
+quadrupoles stay symmetric and traceless; ``export_library`` writes the
+multipoles the model uses. ``forward`` reports every energy term, the
+monopoles, the induced dipoles and the molecular dipole. Libraries are read
+from ``.frc`` and Tinker ``.prm`` files and written back to either. A Tinker
+``.xyz`` file builds the topology directly.
 
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================
