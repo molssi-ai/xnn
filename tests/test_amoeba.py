@@ -594,6 +594,41 @@ def test_export_after_training_writes_the_model_multipoles():
     assert float(again(_graph(DIMER1))["energy"]) == pytest.approx(e_model, abs=1e-10)
 
 
+def test_d_equals_p_uses_the_polar_scales_for_the_direct_field():
+    """With d-equals-p the direct field carries the polar scale factors (Tinker), whatever the groups."""
+    lib = builtin_amoeba("hippo-water-2021")
+    for t in ("OW", "HW"):
+        lib.polarize[t]["groups"] = []              # every atom its own polarization group, as in EC
+    model = Hippo(lib, _top(), cutoff=30.0)
+    assert lib.settings["d-equals-p"] is True
+    assert torch.equal(model.special_scales[:, 6], model.special_scales[:, 2])
+    assert bool((model.special_scales[:, 7] == 1.0).all())
+    graph = _graph(DIMER1)
+    e_dp = float(model(graph)["e_polar"])
+    plain = copy.deepcopy(lib)
+    plain.settings["d-equals-p"] = False
+    other = Hippo(plain, _top(), cutoff=30.0)
+    assert not torch.equal(other.special_scales[:, 6], other.special_scales[:, 2])
+    assert float(other(graph)["e_polar"]) != pytest.approx(e_dp, rel=1e-3)
+    assert -5.0 < e_dp * EV_TO_KCAL < 0.0           # bounded, no runaway dipoles
+
+
+def test_polarization_setting_of_the_library_is_the_default():
+    """The file's polarization keyword sets the model's mode; the constructor argument overrides it."""
+    lib = builtin_amoeba("hippo-water-2021")
+    assert Hippo(lib, _top(), cutoff=30.0).polarization == "mutual"
+    direct = copy.deepcopy(lib)
+    direct.settings["polarization"] = "DIRECT"
+    model = Hippo(direct, _top(), cutoff=30.0)
+    assert model.polarization == "direct"
+    graph = _graph(DIMER1)
+    e_direct = float(model(graph)["e_polar"])
+    explicit = Hippo(lib, _top(), cutoff=30.0, polarization="direct")
+    assert e_direct == pytest.approx(float(explicit(graph)["e_polar"]), abs=1e-12)
+    assert e_direct != pytest.approx(float(Hippo(lib, _top(), cutoff=30.0)(graph)["e_polar"]), rel=1e-4)
+    assert Hippo(direct, _top(), cutoff=30.0, polarization="mutual").polarization == "mutual"
+
+
 # persistence and interchange
 def test_export_and_frc_round_trip(tmp_path):
     model = _model(Hippo, trainable=("repulsion",))
