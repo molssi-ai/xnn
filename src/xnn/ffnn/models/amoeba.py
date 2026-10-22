@@ -929,10 +929,11 @@ class Amoeba(InteratomicPotential):
     mesh_self : bool, optional
         Remove the spurious, position-averaged mesh self-interaction of
         every multipole from the particle-mesh energy, from the field
-        that polarizes it and from the dispersion sum, by default
-        ``True``. This takes the mean discretisation error of the
-        self-interaction out of the energies and the stress at coarse
-        meshes; ``False`` gives the plain smooth PME sums.
+        that polarizes it and from the dispersion sum. Off by default:
+        the plain smooth PME sums, the same algorithm as Tinker. On, the
+        mean discretisation error of the self-interaction leaves the
+        energies and the stress, which helps the induction, the
+        dispersion and the pressure at coarse meshes.
     polar_eps : float, optional
         Convergence of the iterative induced-dipole solve, the rms change
         per iteration in Debye (``1e-8``).
@@ -988,7 +989,7 @@ class Amoeba(InteratomicPotential):
                  chgtrn_cutoff: Optional[float] = None,
                  dispersion_cutoff: Optional[float] = None,
                  polar_eps: float = 1e-8,
-                 mesh_self: bool = True,
+                 mesh_self: bool = False,
                  solver: str = "auto",
                  max_iter: int = 100,
                  conserve_charge: bool = True,

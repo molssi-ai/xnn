@@ -298,8 +298,8 @@ def test_mesh_self_correction_cuts_the_coarse_mesh_dispersion_error():
     corrected = plain + float(s0 * (c * c).sum())
     assert abs(plain - converged) * EV_TO_KCAL > 0.3
     assert abs(corrected - converged) < 0.2 * abs(plain - converged)
-    full = _box(Hippo, polarization="none", dpme_grid=16)
-    plain_model = _box(Hippo, polarization="none", dpme_grid=16, mesh_self=False)
+    full = _box(Hippo, polarization="none", dpme_grid=16, mesh_self=True)
+    plain_model = _box(Hippo, polarization="none", dpme_grid=16)
     e_full, e_plain = float(full(_graph(BOX))["e_dispersion"]), float(plain_model(_graph(BOX))["e_dispersion"])
     assert e_full - e_plain == pytest.approx(float(s0 * (c * c).sum()), rel=1e-9)
     assert full.intermediates["ewald"]["mesh_self"] is True
