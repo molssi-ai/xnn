@@ -571,26 +571,26 @@ charges with ``charges=``).
    model = Amber.from_atoms(atoms, "ff94", charges=resp_charges)  # a small molecule with its own charges
    model = Amber.from_atoms(atoms, "ff94", trainable=("dihedral_k", "charge"))
 
-``cutoff``, ``switch_width``, ``fudge_lj`` / ``fudge_qq`` (or the AMBER
-divisors ``scnb`` / ``scee`` in a config) are available as for OPLS. The
-trainable groups are the barrier heights (``dihedral_k``, ``improper_k``), the
-bond and angle constants, the van der Waals ``rstar`` / ``epsilon``, the
-per-atom ``charge`` (held to the system's total charge by
-``constrain_charge``) and ``atom_ref``; the periodicities and phases of the
-Fourier terms stay fixed. Later AMBER parameter sets of the same functional
-form are further ``.frc`` libraries for this one model.
+The options ``cutoff``, ``switch_width``, ``fudge_lj`` and ``fudge_qq`` work
+as for OPLS. A config may give the AMBER divisors ``scnb`` and ``scee``
+instead of the fudge factors. The trainable groups are the barrier heights
+``dihedral_k`` and ``improper_k``, the bond and angle constants, the van der
+Waals ``rstar`` and ``epsilon``, the per-atom ``charge`` and ``atom_ref``.
+``constrain_charge`` holds the charges to the system's total charge. The
+periodicities and phases of the Fourier terms stay fixed. Later AMBER sets
+with the same functional form are further ``.frc`` libraries for this model.
 
 CHARMM22
 ========
 :class:`~xnn.ffnn.models.charmm.Charmm` is the all-atom protein force field of
 `MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
-<https://doi.org/10.1021/jp973084f>`_, matching LAMMPS and
-NAMD. Besides the terms AMBER has it carries Urey-Bradley 1,3 terms, harmonic
-impropers, per-type Lennard-Jones parameters for 1,4 pairs and pair-specific
-overrides (NBFIX); 1,4 electrostatics are not scaled. ``from_atoms`` matches
-the residue templates of the parameter file (amino acids with their terminal,
-capped and patched forms, TIP3P water, ions) to assign types, charges and the
-residues' impropers, and types small model compounds from SMARTS templates.
+<https://doi.org/10.1021/jp973084f>`_, matching LAMMPS and NAMD. On top
+of the AMBER terms it has Urey-Bradley 1,3 terms, harmonic impropers,
+Lennard-Jones parameters for 1,4 pairs and pair-specific overrides (NBFIX).
+The 1,4 electrostatics are not scaled. ``from_atoms`` assigns types, charges
+and impropers from the residue templates of the parameter file: amino acids
+with their terminal, capped and patched forms, TIP3P water and ions. Small
+model compounds are typed from SMARTS templates.
 
 .. code-block:: python
 
@@ -599,65 +599,46 @@ residues' impropers, and types small model compounds from SMARTS templates.
    model = Charmm.from_atoms(atoms, "charmm22", cutoff=12.0)   # a peptide, water, ions
    model = Charmm.from_atoms(atoms, "charmm22", trainable=("dihedral_k", "ub_k", "charge"))
 
-``cutoff``, ``switch_width``, ``fudge_qq`` (CHARMM's ``e14fac``) and
-``coulomb_constant`` (332.0716 of the CHARMM program by default; NAMD and
-LAMMPS use 332.0636 and 332.06371) are available. The trainable groups are the
-force constants (``bond_k``, ``angle_k``, ``ub_k``, ``dihedral_k``,
+The options are ``cutoff``, ``switch_width``, ``fudge_qq`` (CHARMM's
+``e14fac``) and ``coulomb_constant``. The constant defaults to 332.0716 of the
+CHARMM program. NAMD uses 332.0636 and LAMMPS 332.06371. The trainable groups
+are the force constants (``bond_k``, ``angle_k``, ``ub_k``, ``dihedral_k``,
 ``improper_k``), the equilibrium values (``bond_r0``, ``angle_theta0``,
-``ub_s0``), the Lennard-Jones ``rstar`` / ``epsilon`` with their 1,4 and
-pair-override counterparts, the per-atom ``charge`` and ``atom_ref``;
-periodicities, phases and improper reference angles stay fixed. The CMAP
+``ub_s0``), the Lennard-Jones ``rstar`` and ``epsilon`` with their 1,4 and
+pair-override counterparts, the per-atom ``charge`` and ``atom_ref``.
+Periodicities, phases and improper reference angles stay fixed. The CMAP
 correction of later CHARMM sets is not implemented, so ``charmm22`` is the
 1998 force field.
 
 .. note::
 
-   **1,4 interactions in rings of six atoms or fewer.** CHARMM ties its 1,4
-   pairs to the dihedrals: every dihedral i-j-k-l implies a Lennard-Jones and
-   Coulomb pair between i and l. In a six-membered ring the para atoms are
-   1,4 both ways round, so two dihedrals reach the same pair; in a
-   five-membered ring a "1,4" pair is 1,3 the other way round, and in a
-   four-membered ring it is bonded. The CHARMM rule is that the shortest bond
-   path wins and that a pair counts once, whatever the number of dihedrals
-   (or Fourier terms) that reach it. xnn builds its 1,4 list that way from
-   the topology (:class:`~xnn.ffnn.models.topology.MolecularTopology`), as
-   CHARMM, NAMD, GROMACS and OpenMM do, so proline, the aromatic side chains
-   and small cyclic molecules are right by construction. The exception is
-   LAMMPS, where ``dihedral_style charmm`` evaluates the 1,4 pair *per
-   dihedral* with a weight the user supplies: a data file that writes the
-   weight 1 everywhere double counts the para pairs of six-membered rings
-   and adds 1,2 / 1,3 pairs across five- and four-membered rings. When
-   comparing with or exporting to LAMMPS, set the weight to 1/2 in
-   six-membered rings, 0 in four- and five-membered rings and on all but one
-   of the terms sharing a quadruple (``dihedral_style charmmfsw`` behaves
-   the same). The fidelity notebook derives those weights from xnn's pair
-   list and shows the error of the naive choice.
+   **1,4 interactions in small rings.** CHARMM ties its 1,4 pairs to the
+   dihedrals: every dihedral i-j-k-l implies a Lennard-Jones and Coulomb pair
+   between i and l. In a six-membered ring two dihedrals reach the same para
+   pair. In a five-membered ring a "1,4" pair is 1,3 the other way round, and
+   in a four-membered ring it is bonded. The CHARMM rule is that the shortest
+   bond path wins and that a pair counts once. xnn builds its 1,4 list that
+   way from the topology, as CHARMM, NAMD, GROMACS and OpenMM do.
+
+   LAMMPS is the exception. Its ``dihedral_style charmm`` evaluates the 1,4
+   pair once per dihedral with a weight from the data file, so a weight of 1
+   everywhere double counts the para pairs of six-membered rings and adds
+   1,2 and 1,3 pairs across smaller rings. When comparing with or exporting
+   to LAMMPS, use 1/2 in six-membered rings, 0 in four- and five-membered
+   rings, and 0 on all but one of the terms that share a quadruple. The
+   fidelity notebook derives those weights from xnn's pair list.
 
 AMOEBA and HIPPO
 ================
-:class:`~xnn.ffnn.models.amoeba.Amoeba` is the polarizable atomic multipole
-force field of `Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
-<https://doi.org/10.1021/jp027815+>`_ and
-`Ponder et al., J. Phys. Chem. B 114, 2549 (2010)
-<https://doi.org/10.1021/jp910674d>`_ (the protein set of
-`Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
-<https://doi.org/10.1021/ct4003702>`_), matching Tinker and the LAMMPS
-AMOEBA package: anharmonic bonds and angles (in-plane at trigonal centers),
-stretch-bend and Urey-Bradley terms, Allinger out-of-plane bends, Fourier and
-pi-torsions, splined torsion-torsion maps, Halgren's buffered 14-7 van der
-Waals form with hydrogen sites displaced along their bonds, permanent
-multipoles through the quadrupole in local frames built from the bonded
-neighbours, and Thole-damped mutual induction with the group-based direct
-field and the connectivity-based 1,4 / 1,5 scaling of the AMOEBA papers.
-:class:`~xnn.ffnn.models.amoeba.Hippo` is the HIPPO force field of
-`Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
-<https://doi.org/10.1021/acs.jctc.1c00628>`_: the same valence terms and
-multipoles with density-based intermolecular terms (charge penetration,
-density-damped induction, multipolar Pauli repulsion, damped dispersion,
-charge transfer) and a charge flux that moves the monopoles with the bond and
-angle geometry. Forces, including the torques of the anisotropic terms, come
-from autograd because the frames are built from the positions inside the
-graph; the induced dipoles come from a differentiable dense solve.
+:class:`~xnn.ffnn.models.amoeba.Amoeba` is the polarizable multipole force
+field of `Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
+<https://doi.org/10.1021/jp027815+>`_ and `Ponder et al., J. Phys. Chem. B
+114, 2549 (2010) <https://doi.org/10.1021/jp910674d>`_, with the protein set
+of `Shi et al., J. Chem. Theory Comput. 9, 4046 (2013)
+<https://doi.org/10.1021/ct4003702>`_. :class:`~xnn.ffnn.models.amoeba.Hippo`
+is the HIPPO force field of `Rackers et al., J. Chem. Theory Comput. 17, 7056
+(2021) <https://doi.org/10.1021/acs.jctc.1c00628>`_. Both match Tinker term
+by term. Forces, torques and the stress come from autograd.
 
 .. code-block:: python
 
@@ -669,18 +650,58 @@ graph; the induced dipoles come from a differentiable dense solve.
    model, structure = Amoeba.from_tinker_xyz("ubiquitin.xyz", "amoebapro13")
    model = Amoeba.from_atoms(atoms, "amoebapro13", trainable=("torsion", "vdw", "polarizability"))
 
-``cutoff`` truncates the nonbonded terms at the neighbor-list cutoff (no
-switching and no Ewald sum; enclose a cluster for gas-phase work), and
-``polarization`` selects mutual, direct or no induction. The trainable groups
-are the valence tables (``bond``, ``angle``, ``strbnd``, ``urey``, ``opbend``,
-``torsion``, ``pitors``, ``tortor``), the van der Waals ``vdw``, the
-multipoles (``charge``, ``dipole``, ``quadrupole``; trained quadrupoles stay
-traceless), ``polarizability`` and ``thole``, the HIPPO density parameters
+The AMOEBA energy has the valence terms of the papers (anharmonic bonds and
+angles, stretch-bend, Urey-Bradley, out-of-plane bends, torsions, pi-torsions
+and torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
+multipoles in local frames and Thole-damped mutual induction. HIPPO keeps the
+valence terms and multipoles and replaces the intermolecular terms by charge
+penetration, density-damped induction, Pauli repulsion, damped dispersion,
+charge transfer and charge flux.
+
+Molecules
+---------
+For a molecule or cluster, every pair within ``cutoff`` interacts in full.
+Choose a cutoff that encloses the whole system. ``polarization`` selects
+mutual (default), direct or no induction. The induced dipoles come from a
+dense solve for up to a thousand atoms and from conjugate gradients above
+that (``solver`` overrides the choice).
+
+Periodic cells
+--------------
+A structure with a cell is evaluated with Ewald sums: the multipoles, the
+induction and HIPPO's dispersion split into a real-space part within
+``ewald_cutoff`` and a particle-mesh part. The van der Waals, repulsion and
+charge-transfer terms are switched off smoothly before their cutoff.
+
+.. code-block:: python
+
+   box = Amoeba.from_atoms(water_box, "amoeba-water-2003", cutoff=7.3, vdw_cutoff=7.0, taper=6.3)
+   out = ForceStressOutput(box, compute_stress=True)(graph)
+
+The defaults follow Tinker. The Ewald coefficient comes from the real-space
+cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. The
+options are ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` for the
+three coefficients, ``pme_grid`` and ``pme_order`` for the mesh,
+``vdw_cutoff``, ``repulsion_cutoff``, ``chgtrn_cutoff`` and
+``dispersion_cutoff`` for the switched terms, and ``taper`` for the start of
+the switch. Keep the neighbor cutoff about 0.3 Angstrom above the van der
+Waals cutoff, because the hydrogen sites of that term sit inside their atoms.
+``polar_eps`` sets the convergence of the induced dipoles in Debye.
+``ewald=False`` truncates a cell at the cutoff instead. A slab with two
+periodic axes is summed on its cell with the Yeh-Berkowitz correction, so
+leave a vacuum gap of at least the slab thickness along the free axis.
+
+Training and files
+------------------
+``trainable`` names the parameter groups to refit: the valence tables
+(``bond``, ``angle``, ``strbnd``, ``urey``, ``opbend``, ``torsion``,
+``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
+``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
 (``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``cflux``) and
-``atom_ref``. ``forward`` reports every term, the monopoles (charge flux
-included), the induced dipoles and the molecular dipole. Libraries are read
-from ``.frc`` files, from Tinker ``.prm`` files and written back to either;
-Tinker ``.xyz`` files (types and connectivity) build the topology directly.
+``atom_ref``. ``forward`` reports every energy term, the monopoles, the
+induced dipoles and the molecular dipole. Libraries are read from ``.frc``
+and Tinker ``.prm`` files and written back to either. A Tinker ``.xyz`` file
+builds the topology directly.
 
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================

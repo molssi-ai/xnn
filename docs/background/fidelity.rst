@@ -164,6 +164,17 @@ Numerical agreement under identical weights involves:
   terminal residues; the LAMMPS AMOEBA package on the water systems; the
   water monomer moments, dimer and cluster energies and vibrational
   frequencies of the papers; float32 within 2e-5 relative of float64.
+  Periodic cells (particle-mesh Ewald multipoles, induction and HIPPO
+  dispersion, switched short-range terms, iterative induced dipoles): the
+  mesh sums against explicit reciprocal-space and lattice sums to 1e-8,
+  slab sums independent of the vacuum gap, forces, stress and Hessians
+  against finite differences;
+  Tinker 8 on 64-water boxes (AMOEBA and HIPPO, 48^3 meshes) within 5e-3
+  kcal/mol per term and 2e-3 kcal/mol/A in forces; on 320- and 2560-atom
+  ethylene carbonate cells and 648-atom water boxes (Tinker's own meshes)
+  within 0.01 kcal/mol in the multipole energy per 320 atoms and 0.007 to
+  0.19 meV/A rms in atomic forces, the level at which Tinker's GPU build and
+  the LAMMPS AMOEBA package agree with Tinker.
 - **PM3, PM6, PM6-ORG, PM7** (`Stewart, J. Comput. Chem. 10, 209 (1989)
   <https://doi.org/10.1002/jcc.540100208>`_; `Stewart, J. Mol. Model. 13, 1173
   (2007) <https://doi.org/10.1007/s00894-007-0233-4>`_;
