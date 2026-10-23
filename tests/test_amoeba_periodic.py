@@ -244,6 +244,38 @@ def test_dispersion_ewald_matches_the_lattice_sum():
     assert float(real + recip) == pytest.approx(float(direct), rel=2e-7)
 
 
+def test_predictor_and_adjoint_warm_start_save_iterations_and_keep_the_results():
+    """Along a short trajectory ASPC and the adjoint memory cut iterations; energies and forces stay."""
+    cold = ForceStressOutput(_box(Amoeba, pme_grid=24)).eval()
+    hot = ForceStressOutput(_box(Amoeba, pme_grid=24, predictor="aspc")).eval()
+    velocity = np.random.default_rng(5).normal(scale=0.004, size=BOX.shape)      # Angstrom per step
+    first_adjoint = None
+    for step in range(7):
+        g = _graph(BOX + step * velocity)
+        a, b = cold(g), hot(g)
+        assert float(b["energy"][0]) == pytest.approx(float(a["energy"][0]), abs=1e-8)
+        assert torch.allclose(b["forces"], a["forces"], atol=1e-7)
+        if first_adjoint is None:
+            first_adjoint = cold.model.solver_stats["adjoint"]
+    assert hot.model.solver_stats["forward_guess"]
+    assert hot.model.solver_stats["forward"] <= 0.75 * cold.model.solver_stats["forward"]
+    assert cold.model.solver_stats["adjoint_guess"] and cold.model.solver_stats["adjoint"] < first_adjoint
+
+
+def test_a_batch_of_different_cells_matches_the_structures_one_by_one():
+    """Strained copies of a box in one batch (one mesh plan, one batched FFT) equal separate evaluations."""
+    model = ForceStressOutput(_box(Hippo, pme_grid=24, dpme_grid=24), compute_stress=True)
+    strains = [np.eye(3), np.diag([1.02, 0.99, 1.0]), np.array([[1.0, 0.01, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.98]])]
+    graphs = [_graph(BOX @ s, cell=CELL @ s) for s in strains]
+    together = model(collate(graphs))
+    for b, g in enumerate(graphs):
+        alone = model(g)
+        assert float(together["energy"][b]) == pytest.approx(float(alone["energy"][0]), abs=1e-9)
+        rows = slice(b * len(BOX), (b + 1) * len(BOX))
+        assert torch.allclose(together["forces"][rows], alone["forces"], atol=1e-8)
+        assert torch.allclose(together["stress"][b], alone["stress"][0], atol=1e-9)
+
+
 def test_mesh_self_moments_match_a_brute_force_position_average():
     """The spurious mesh self-interaction of one multipole equals the average over its position."""
     cell = torch.tensor([[7.0, 0.0, 0.0], [0.5, 6.0, 0.0], [-0.3, 0.4, 6.5]])

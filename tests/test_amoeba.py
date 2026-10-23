@@ -328,6 +328,29 @@ def test_density_kernels_match_their_closed_forms():
     assert torch.allclose(S_un, 8 * (zi * zj) ** 1.5 / (zi + zj) ** 3, rtol=1e-4)
 
 
+def test_compiled_ladders_match_the_symbolic_derivation():
+    """Every HIPPO kernel's ladder from its plan equals the term-by-term symbolic ladder."""
+    g = torch.Generator().manual_seed(3)
+    R = 0.8 + 5.0 * torch.rand(40, generator=g, dtype=torch.float64)
+    zi = 3.0 + 2.0 * torch.rand(40, generator=g, dtype=torch.float64)
+    # unequal exponents as far apart as HIPPO's atom classes; nearly equal ones cancel in either form
+    zj = zi + 0.6 + 1.5 * torch.rand(40, generator=g, dtype=torch.float64)
+    S_eq, S_un = am.slater_overlap(zi, zi, True), am.slater_overlap(zi, zj, False)
+    kernels = [(am.core_valence_kernel(zi, "i"), zi, zj, 3), (am.core_valence_kernel(zj, "j"), zi, zj, 3),
+               (am.overlap_coulomb_kernel(zi, zi, True), zi, zi, 4),
+               (am.overlap_coulomb_kernel(zi, zj, False), zi, zj, 4), (S_eq * S_eq, zi, zi, 4),
+               (S_un * S_un, zi, zj, 4)]
+    for kernel, a, b, order in kernels:
+        fast = am.derivative_ladder(kernel, R, a, b, order)
+        series = kernel
+        for n in range(order + 1):
+            ref = series.evaluate(R, a, b)
+            assert torch.allclose(fast[n], ref, rtol=1e-10, atol=1e-13 * float(ref.abs().max())), n
+            series = series.ladder()
+    scalar = am.derivative_ladder(am.overlap_coulomb_kernel(zi[:1], zj[:1], False), R[0], zi[0], zj[0], 2)
+    assert scalar[2].shape == torch.Size([]) or scalar[2].shape == torch.Size([1])
+
+
 def test_hippo_pair_terms_by_hand():
     """Charge transfer, dispersion and the charge-charge core of the penetration
     electrostatics on two bare atoms, from the equations."""
@@ -507,6 +530,60 @@ def test_missing_parameters_are_reported_together():
 
 
 # training
+def test_dense_induction_is_chosen_per_molecule_and_matches_the_iterative_solve():
+    """Many small molecules go to the block-diagonal direct solve, which equals the iterative one."""
+    model = _model(Hippo)
+    assert model._use_dense(6, 400, None) and not model._use_dense(1200, 1, None)
+    assert not model._use_dense(18, 30_000, None)
+    graphs = collate([_graph(_perturbed(s, 0.05)) for s in range(5)])
+    dense = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="dense")
+    iterative = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="iterative", polar_eps=1e-12)
+    e_dense, e_iter = dense(graphs)["e_polar"], iterative(graphs)["e_polar"]
+    assert torch.allclose(e_dense, e_iter, rtol=0, atol=1e-12)
+    warm = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="iterative", polar_eps=1e-12,
+                 predictor="previous").eval()
+    first = warm(graphs)["e_polar"]
+    cold_iterations = warm.solver_stats["forward"]
+    again = warm(graphs)["e_polar"]
+    assert warm.solver_stats["forward_guess"] and warm.solver_stats["forward"] < cold_iterations
+    assert torch.allclose(first, again, rtol=0, atol=1e-12) and torch.allclose(first, e_dense, rtol=0, atol=1e-12)
+    # an explicit guess: the exact dipoles converge at once, a poor one is passed over
+    exact = warm(graphs)["induced_dipoles"].detach()
+    warm.set_dipole_predictor(None)
+    warm.dipole_guess = exact
+    warm(graphs)
+    assert warm.solver_stats["forward_guess"] and warm.solver_stats["forward"] <= 2 and warm.dipole_guess is None
+    warm.dipole_guess = torch.full_like(exact, 50.0)
+    warm(graphs)
+    assert not warm.solver_stats["forward_guess"]
+
+
+def test_dipole_predictor_coefficients_and_history():
+    """ASPC and Gear weights from their closed forms; exactness and history handling."""
+    P = am.DipolePredictor
+    assert P.coefficients("aspc", 2) == pytest.approx([2.0, -1.0])
+    assert P.coefficients("aspc", 6) == pytest.approx([22 / 7, -55 / 14, 55 / 21, -22 / 21, 5 / 21, -1 / 42])
+    assert P.coefficients("gear", 6) == [6.0, -15.0, 20.0, -15.0, 6.0, -1.0]
+    for m in range(2, 8):
+        aspc, gear = P.coefficients("aspc", m), P.coefficients("gear", m)
+        assert sum(aspc) == pytest.approx(1.0)
+        assert sum(j * b for j, b in enumerate(aspc, 1)) == pytest.approx(0.0, abs=1e-12)
+        # Gear reproduces any polynomial of degree m - 1 at the next step
+        poly = np.polynomial.Polynomial(np.arange(1.0, m + 1.0))
+        assert sum(b * poly(-j) for j, b in enumerate(gear, 1)) == pytest.approx(poly(0.0), rel=1e-12)
+    pred = P("gear", 4)
+    cubic = np.polynomial.Polynomial([0.3, -1.0, 0.5, 0.2])
+    for t in (-4, -3, -2, -1):
+        pred.push(torch.full((5, 3), float(cubic(t)), dtype=torch.float64))
+    assert torch.allclose(pred.predict(torch.zeros(5, 3, dtype=torch.float64)),
+                          torch.full((5, 3), float(cubic(0)), dtype=torch.float64))
+    assert pred.predict(torch.zeros(4, 3, dtype=torch.float64)) is None
+    pred.push(torch.zeros(4, 3, dtype=torch.float64))
+    assert len(pred._sets) == 1
+    with pytest.raises(ValueError):
+        P("lsq")
+
+
 def test_trainable_selection_and_gradients():
     model = ForceStressOutput(_model(Amoeba, trainable=("vdw", "polarizability", "dipole")))
     P = model.model.ff.params
