@@ -662,9 +662,13 @@ Molecules
 ---------
 For a molecule or cluster, every pair within ``cutoff`` interacts in full.
 Choose a cutoff that encloses the whole system. ``polarization`` selects
-mutual, direct or no induction; the default is the library's setting. The induced dipoles come from a
-dense solve for up to a thousand atoms and from conjugate gradients above
-that (``solver`` overrides the choice).
+mutual, direct or no induction. The default is the library's setting.
+A batch of molecules of up to a thousand atoms each is solved directly, as
+one block-diagonal system. Larger molecules and cells use conjugate
+gradients, and ``solver`` overrides the choice. In molecular dynamics,
+``predictor="aspc"`` starts each solve from dipoles extrapolated from the
+last steps, which saves about half the iterations. The MDI engine turns it
+on by default. Every backward solve starts from the previous one.
 
 Periodic cells
 --------------

@@ -73,7 +73,9 @@ checkpoint to LAMMPS ``fix mdi/qm`` or any other `MDI
            -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
 
 You can use the ``--dispersion d4`` flag to add a dispersion term to a plain
-model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. The :ref:`cli` guide
+model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA and
+HIPPO the engine predicts each step's induced dipoles from the last steps
+(``--dipole-predictor``, ASPC by default). The :ref:`cli` guide
 lists every option available to you. 
 
 There are example notebooks in ``notebooks/examples/common/deploy`` which illustrate how to drive
