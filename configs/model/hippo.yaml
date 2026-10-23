@@ -27,6 +27,7 @@ taper: null                     # start of the switch of every switched term
 polar_eps: 1.0e-8               # convergence of the iterative induced-dipole solve, rms change in Debye
 mesh_self: false                # true removes the position-averaged mesh self-interaction from the mesh sums (plain smooth PME by default)
 solver: auto                    # auto (dense for molecules up to 1000 atoms), dense, iterative
+predictor: null                 # aspc, gear or previous: predict the starting dipoles from the last steps (MD)
 # HIPPO: AMOEBA's valence terms and atomic multipoles with intermolecular terms derived
 # from a model electron density: charge penetration, density-damped induction,
 # multipolar Pauli repulsion, damped dispersion, charge transfer and charge flux
