@@ -107,6 +107,12 @@ class MDIEngine:
         :attr:`~xnn.common.data.AtomicGraph.total_charge` (D4's EEQ charges
         and charge-aware models such as PhysNet use it). Defaults to 0; a
         driver can change it at run time with ``>TOTCHARGE``.
+    dipole_predictor : str or None, optional
+        For polarizable models (AMOEBA, HIPPO): the scheme that predicts each
+        step's induced dipoles from the last steps as the start of the
+        solve, ``"aspc"`` (default), ``"gear"``, ``"previous"`` or ``None``
+        (see :class:`~xnn.ffnn.models.DipolePredictor`). The dipoles are
+        converged to the model's tolerance either way. Other models ignore it.
 
     Attributes
     ----------
@@ -128,11 +134,18 @@ class MDIEngine:
     """
 
     def __init__(self, model: torch.nn.Module, cutoff: float,
-                 device: str = "cpu", total_charge: float = 0.0):
+                 device: str = "cpu", total_charge: float = 0.0,
+                 dipole_predictor: str | None = "aspc"):
         self.device = torch.device(device)
         self.model = model.to(self.device).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
+        # the engine persists over the run, so the induced dipoles of a polarizable model
+        # are predicted from the last steps
+        self.dipole_predictor = dipole_predictor
+        for module in self.model.modules():
+            if hasattr(module, "set_dipole_predictor"):
+                module.set_dipole_predictor(dipole_predictor)
         self.cutoff = float(cutoff)
         self.total_charge = float(total_charge)
         self.dtype = float_dtype(model)
@@ -165,7 +178,8 @@ class MDIEngine:
                         eeq_reuse: bool = False,
                         cache_dir: str | None = None,
                         use_fast: bool | str = "auto",
-                        head: str | None = None) -> "MDIEngine":
+                        head: str | None = None,
+                        dipole_predictor: str | None = "aspc") -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -224,6 +238,8 @@ class MDIEngine:
             or the reference implementation (see :mod:`xnn.common.models.fast`).
         head : str, optional
             The head of a multi-head (replay fine-tuned) checkpoint to serve.
+        dipole_predictor : str or None, optional
+            The induced-dipole predictor of polarizable models (see the class).
 
         Returns
         -------
@@ -246,7 +262,8 @@ class MDIEngine:
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff,
                     str(float_dtype(model)).replace("torch.", ""), total_charge)
-        return cls(model, cutoff=cutoff, device=device, total_charge=total_charge)
+        return cls(model, cutoff=cutoff, device=device, total_charge=total_charge,
+                   dipole_predictor=dipole_predictor)
 
     # evaluation
 
@@ -538,6 +555,9 @@ def main(argv=None) -> None:
                    help="carry the large-regime D4 EEQ solve over between steps "
                         "(MD, optimization); results agree with the fresh solve "
                         "to the solver tolerance")
+    p.add_argument("--dipole-predictor", choices=["aspc", "gear", "previous", "none"], default="aspc",
+                   help="polarizable models (AMOEBA, HIPPO): predict each step's induced dipoles "
+                        "from the last steps as the start of the solve (default aspc)")
     p.add_argument("--fast", choices=["auto", "on", "off"], default="auto",
                    help="fused GPU kernels (cuEquivariance) for the blocks that have "
                         "them: 'auto' (default) where available and faster for the "
@@ -568,7 +588,9 @@ def main(argv=None) -> None:
                                        cache_dir=args.cache_dir,
                                        use_fast={"auto": "auto", "on": True,
                                                  "off": False}[args.fast],
-                                       head=args.head)
+                                       head=args.head,
+                                       dipole_predictor=None if args.dipole_predictor == "none"
+                                       else args.dipole_predictor)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

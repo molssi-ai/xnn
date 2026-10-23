@@ -1,7 +1,7 @@
 from .amber import Amber, AmberForceField
 from .amberlib import AmberLibrary, match_improper, place_impropers, read_amber
 from .amberlib import builtin_library as builtin_amber
-from .amoeba import Amoeba, AmoebaForceField, Hippo
+from .amoeba import Amoeba, AmoebaForceField, DipolePredictor, Hippo
 from .amoebalib import AmoebaLibrary, read_amoeba, read_tinker_prm, read_tinker_xyz, write_tinker_prm, write_tinker_xyz
 from .amoebalib import builtin_library as builtin_amoeba
 from .charmm import Charmm, CharmmForceField
@@ -26,4 +26,4 @@ __all__ = ["FFieldLibrary", "read_ffield", "template_library", "ReaxFF",
            "AmberForceField", "CharmmLibrary", "read_charmm", "builtin_charmm",
            "place_charmm_impropers", "Charmm", "CharmmForceField", "AmoebaLibrary",
            "read_amoeba", "builtin_amoeba", "read_tinker_prm", "write_tinker_prm",
-           "read_tinker_xyz", "write_tinker_xyz", "Amoeba", "Hippo", "AmoebaForceField"]
+           "read_tinker_xyz", "write_tinker_xyz", "Amoeba", "Hippo", "AmoebaForceField", "DipolePredictor"]

@@ -214,46 +214,9 @@ def bspline_with_derivatives(t: Tensor, order: int) -> Tuple[Tensor, Tensor, Ten
     return w, dw, d2w
 
 
-def _mesh_setup(pos: Tensor, cell: Tensor, mesh: List[int], order: int):
-    """Flat mesh indices ``(N, p^3)`` of every atom and the per-axis spline
-    weights and derivatives ``(N, 3, p)`` in the scaled fractional
-    coordinate, plus the Jacobian ``J[beta, a] = K_a (cell^-1)[beta, a]``
-    of that coordinate with respect to the Cartesian position."""
-    dtype, device = pos.dtype, pos.device
-    n = pos.shape[0]
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    sizes = torch.tensor([k1, k2, k3], dtype=dtype, device=device)
-    inv = torch.linalg.inv(cell)
-    u = (pos @ inv) * sizes
-    base = torch.floor(u)
-    w, dw, d2w = bspline_with_derivatives(u - base, order)                 # (N, 3, p)
-    offsets = torch.arange(order, dtype=dtype, device=device)
-    index = (base[:, :, None] - offsets).remainder(sizes[:, None]).to(torch.long)
-    flat = (index[:, 0, :, None, None] * (k2 * k3) + index[:, 1, None, :, None] * k3
-            + index[:, 2, None, None, :]).reshape(n, -1)
-    jac = inv * sizes[None, :]                                             # (3, 3): J[beta, a]
-    return flat, w, dw, d2w, jac
-
-
 def _outer3(a: Tensor, b: Tensor, c: Tensor) -> Tensor:
     """``(N, p, p, p)`` products of three per-axis weight sets ``(N, p)``."""
     return (a[:, :, None, None] * b[:, None, :, None] * c[:, None, None, :])
-
-
-def _derivative_stencils(w: Tensor, dw: Tensor, d2w: Tensor) -> dict:
-    """The 3D spline weights of an atom and their first and second
-    derivatives with respect to the scaled fractional coordinates, each
-    ``(N, p^3)``: keys ``"0"``, ``"a"`` and ``"ab"`` for axes ``a <= b``."""
-    wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
-    dx, dy, dz = dw[:, 0], dw[:, 1], dw[:, 2]
-    n = w.shape[0]
-    st = {
-        "0": _outer3(wx, wy, wz),
-        "0_": _outer3(dx, wy, wz), "1_": _outer3(wx, dy, wz), "2_": _outer3(wx, wy, dz),
-        "00": _outer3(d2w[:, 0], wy, wz), "11": _outer3(wx, d2w[:, 1], wz), "22": _outer3(wx, wy, d2w[:, 2]),
-        "01": _outer3(dx, dy, wz), "02": _outer3(dx, wy, dz), "12": _outer3(wx, dy, dz),
-    }
-    return {k: v.reshape(n, -1) for k, v in st.items()}
 
 
 def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str) -> Tensor:
@@ -278,6 +241,198 @@ def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: st
     return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
 
 
+_MODULI_CACHE: dict = {}
+
+
+def _moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device) -> Tensor:
+    """The spline moduli of a mesh, cached (they depend on the mesh and the order only)."""
+    key = (tuple(mesh), order, dtype, str(device))
+    if key not in _MODULI_CACHE:
+        if len(_MODULI_CACHE) > 64:
+            _MODULI_CACHE.clear()
+        _MODULI_CACHE[key] = spline_moduli(list(mesh), order, dtype, device)
+    return _MODULI_CACHE[key]
+
+
+class MeshPlan:
+    """The fixed particle-mesh data of a group of periodic structures on one mesh.
+
+    The spline weights, their derivative stencils and the Jacobian of the
+    scaled fractional coordinates depend on the positions and the cells
+    only; the influence functions on the cells, the mesh, the spline order
+    and the Ewald coefficient. A plan computes each of them once, so the
+    permanent multipole terms, every iteration of the induced-dipole solve
+    and the adjoint solve of the backward pass share them. The structures
+    of a group sit side by side, each on its own mesh, and one batched real
+    FFT serves them all. Everything stays differentiable with respect to the
+    positions and the cells.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Positions ``(N, 3)`` of the atoms of the group.
+    cells : Tensor
+        Lattice vectors as rows ``(G, 3, 3)``, one per structure.
+    batch : Tensor
+        Structure of every atom ``(N,)``, from zero to ``G - 1``.
+    mesh : list of int
+        Mesh dimensions ``(K_1, K_2, K_3)``, shared by the structures.
+    order : int
+        B-spline order.
+    """
+
+    def __init__(self, pos: Tensor, cells: Tensor, batch: Tensor, mesh: List[int], order: int):
+        dtype, device = pos.dtype, pos.device
+        self.mesh = [int(mesh[0]), int(mesh[1]), int(mesh[2])]
+        self.order = int(order)
+        self.cells = cells
+        self.batch = batch
+        self.groups = int(cells.shape[0])
+        k1, k2, k3 = self.mesh
+        sizes = torch.tensor([k1, k2, k3], dtype=dtype, device=device)
+        inv = torch.linalg.inv(cells)                                       # (G, 3, 3)
+        inv_n = inv[batch]
+        u = torch.einsum("nb,nba->na", pos, inv_n) * sizes
+        base = torch.floor(u)
+        self._splines = bspline_with_derivatives(u - base, self.order)      # (N, 3, p) each
+        offsets = torch.arange(self.order, dtype=dtype, device=device)
+        index = (base[:, :, None] - offsets).remainder(sizes[:, None]).to(torch.long)
+        n = pos.shape[0]
+        self.flat = (batch[:, None, None, None] * (k1 * k2 * k3) + index[:, 0, :, None, None] * (k2 * k3)
+                     + index[:, 1, None, :, None] * k3 + index[:, 2, None, None, :]).reshape(n, -1)
+        self.jac = inv_n * sizes                                            # (N, 3, 3): J[n, beta, a]
+        self.inv = inv
+        self.volume = cell_volume(cells)
+        self._stencils: dict = {}
+        self._influence: dict = {}
+        self._self: dict = {}
+
+    def stencils(self, second: bool = False) -> dict:
+        """The 3D spline weights ``"0"``, their first derivatives ``"a_"`` and, with
+        ``second``, the second derivatives ``"ab"``, each ``(N, p^3)``."""
+        w, dw, d2w = self._splines
+        n = w.shape[0]
+        st = self._stencils
+        if "0" not in st:
+            wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
+            dx, dy, dz = dw[:, 0], dw[:, 1], dw[:, 2]
+            for key, (a, b, c) in {"0": (wx, wy, wz), "0_": (dx, wy, wz), "1_": (wx, dy, wz),
+                                   "2_": (wx, wy, dz)}.items():
+                st[key] = _outer3(a, b, c).reshape(n, -1)
+        if second and "00" not in st:
+            wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
+            dx, dy, dz = dw[:, 0], dw[:, 1], dw[:, 2]
+            for key, (a, b, c) in {"00": (d2w[:, 0], wy, wz), "11": (wx, d2w[:, 1], wz),
+                                   "22": (wx, wy, d2w[:, 2]), "01": (dx, dy, wz), "02": (dx, wy, dz),
+                                   "12": (wx, dy, dz)}.items():
+                st[key] = _outer3(a, b, c).reshape(n, -1)
+        return st
+
+    def influence(self, alpha: float, kind: str) -> Tensor:
+        """The influence function of every structure on the half spectrum of the
+        real FFT, ``(G, K_1, K_2, K_3 // 2 + 1)`` (see :func:`_influence`)."""
+        key = (float(alpha), kind)
+        if key not in self._influence:
+            dtype, device = self.cells.dtype, self.cells.device
+            k1, k2, k3 = self.mesh
+            h3 = k3 // 2 + 1
+            axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
+            axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
+            moduli = _moduli(self.mesh, self.order, dtype, device)[:, :, :h3]
+            scale = ((k1 * k2 * k3) / self.volume)[:, None, None, None]
+
+            def kernel(frequencies):
+                grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
+                miller = torch.stack(grid, dim=-1)                            # (K1, K2, H3, 3)
+                kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, self.inv)
+                k2sq = (kvec * kvec).sum(-1)                                   # (G, K1, K2, H3)
+                if kind == "coulomb":
+                    m2 = k2sq / (4.0 * math.pi * math.pi)
+                    safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
+                    g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
+                    return torch.where(m2 > 0, g, torch.zeros_like(g))
+                b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
+                f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
+                return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
+
+            g = kernel(axes)
+            # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
+            # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
+            # the full complex transform applies through its real part
+            flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
+                       for a, k in zip(axes, (k1, k2, k3))]
+            if any(k % 2 == 0 for k in (k1, k2, k3)):
+                g = 0.5 * (g + kernel(flipped))
+            self._influence[key] = g
+        return self._influence[key]
+
+    def convolve(self, coeff: Tensor, influence: Tensor) -> Tensor:
+        """Spread the stencil coefficients ``(N, p^3)`` onto the meshes, apply the
+        influence function and return the mesh potential at the stencil points."""
+        k1, k2, k3 = self.mesh
+        grid = torch.zeros(self.groups * k1 * k2 * k3, dtype=coeff.dtype, device=coeff.device)
+        grid = grid.index_add(0, self.flat.reshape(-1), coeff.reshape(-1))
+        spectrum = torch.fft.rfftn(grid.view(self.groups, k1, k2, k3), dim=(1, 2, 3))
+        potential = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3)).reshape(-1)
+        return potential[self.flat]
+
+    def potential(self, q: Optional[Tensor], d: Optional[Tensor], Q: Optional[Tensor], alpha: float,
+                  hessian: bool = True) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+        """The mesh potential, its gradient and (with ``hessian``) its Hessian at the
+        atoms of the group, for multipoles ``q``, ``d``, ``Q`` (any of which may be
+        ``None``); see :func:`multipole_pme`."""
+        st = self.stencils(second=hessian or Q is not None)
+        jac = self.jac
+        coeff = None
+        if q is not None:
+            coeff = q[:, None] * st["0"]
+        if d is not None:
+            df = torch.einsum("nb,nba->na", d, jac)                           # d^f_a = sum_beta d_beta J[beta, a]
+            term = df[:, 0:1] * st["0_"] + df[:, 1:2] * st["1_"] + df[:, 2:3] * st["2_"]
+            coeff = term if coeff is None else coeff + term
+        if Q is not None:
+            Qf = torch.einsum("nba,nbd,ndc->nac", jac, Q, jac)
+            term = (Qf[:, 0, 0, None] * st["00"] + Qf[:, 1, 1, None] * st["11"] + Qf[:, 2, 2, None] * st["22"]
+                    + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"]
+                             + Qf[:, 1, 2, None] * st["12"]))
+            coeff = term if coeff is None else coeff + term
+        at = self.convolve(coeff, self.influence(alpha, "coulomb"))
+        phi = (at * st["0"]).sum(-1)
+        dphi_f = torch.stack([(at * st["0_"]).sum(-1), (at * st["1_"]).sum(-1), (at * st["2_"]).sum(-1)], dim=1)
+        dphi = torch.einsum("nba,na->nb", jac, dphi_f)                        # grad_beta = sum_a J[beta, a] d_a
+        if not hessian:
+            return phi, dphi, None
+        h00 = (at * st["00"]).sum(-1)
+        h11 = (at * st["11"]).sum(-1)
+        h22 = (at * st["22"]).sum(-1)
+        h01 = (at * st["01"]).sum(-1)
+        h02 = (at * st["02"]).sum(-1)
+        h12 = (at * st["12"]).sum(-1)
+        h = torch.stack([torch.stack([h00, h01, h02], -1), torch.stack([h01, h11, h12], -1),
+                         torch.stack([h02, h12, h22], -1)], -2)
+        d2phi = torch.einsum("nba,nac,ndc->nbd", jac, h, jac)
+        return phi, dphi, d2phi
+
+    def dispersion(self, c: Tensor, alpha: float) -> Tensor:
+        """Per-atom reciprocal energies of the ``-c_i c_j / R^6`` sum, self term
+        included (see :func:`dispersion_pme`)."""
+        w0 = self.stencils()["0"]
+        at = self.convolve(c[:, None] * w0, self.influence(alpha, "r6"))
+        phi6 = (at * w0).sum(-1)
+        return -(0.5 * c * phi6 - alpha ** 6 / 12.0 * c * c)
+
+    def self_moments(self, alpha: float, kind: str, max_rank: int = 4):
+        """:func:`mesh_self_moments` of every structure, stacked: ``(G,)``,
+        ``(G, 3, 3)`` and ``(G, 3, 3, 3, 3)`` (``None`` beyond ``max_rank``)."""
+        key = (float(alpha), kind, int(max_rank))
+        if key not in self._self:
+            per = [mesh_self_moments(self.cells[g], alpha, self.mesh, self.order, kind, max_rank)
+                   for g in range(self.groups)]
+            self._self[key] = tuple(None if per[0][r] is None else torch.stack([m[r] for m in per])
+                                    for r in range(3))
+        return self._self[key]
+
+
 def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, alpha: float,
                   mesh: List[int], order: int, hessian: bool = True
                   ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
@@ -287,7 +442,8 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
     The sources ``q_k delta - d_k . grad delta + Q_k : grad grad delta`` are
     spread as ``q_k W + d_k . grad_k W + Q_k : grad_k grad_k W`` (``W`` the
     spline weight, differentiated with respect to the atom position); the
-    potential is interpolated back with the same weights.
+    potential is interpolated back with the same weights. A one-structure
+    :class:`MeshPlan`; use a plan directly to reuse the setup.
 
     Parameters
     ----------
@@ -296,7 +452,7 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
     d : Tensor
         Dipoles ``(N, 3)`` in e Angstrom.
     Q : Tensor
-        Quadrupoles ``(N, 3, 3)`` (traceless, divided by three).
+        Quadrupoles ``(N, 3, 3)`` (traceless, divided by three), or ``None``.
     pos : Tensor
         Positions ``(N, 3)``.
     cell : Tensor
@@ -317,44 +473,9 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
         ``(N, 3, 3)`` (``None`` without ``hessian``), in ``e / Angstrom``
         and its derivatives (multiply by the Coulomb constant).
     """
-    n = pos.shape[0]
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    flat, w, dw, d2w, jac = _mesh_setup(pos, cell, mesh, order)
-    st = _derivative_stencils(w, dw, d2w)
-    # fractional dipoles and quadrupoles: d^f_a = sum_beta d_beta J[beta, a]
-    df = d @ jac                                                           # (N, 3)
-    Qf = jac.t() @ Q @ jac if Q is not None else None                     # (N, 3, 3)
-    coeff = q[:, None] * st["0"]
-    coeff = coeff + df[:, 0:1] * st["0_"] + df[:, 1:2] * st["1_"] + df[:, 2:3] * st["2_"]
-    if Qf is not None:
-        coeff = coeff + (Qf[:, 0, 0, None] * st["00"] + Qf[:, 1, 1, None] * st["11"] + Qf[:, 2, 2, None] * st["22"]
-                         + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"]
-                                  + Qf[:, 1, 2, None] * st["12"]))
-    grid = torch.zeros(k1 * k2 * k3, dtype=pos.dtype, device=pos.device)
-    grid = grid.index_add(0, flat.reshape(-1), coeff.reshape(-1))
-    influence = _influence(cell, alpha, mesh, order, "coulomb")
-    potential = torch.real(torch.fft.ifftn(torch.fft.fftn(grid.view(k1, k2, k3)) * influence)).reshape(-1)
-    at = potential[flat]                                                   # (N, p^3)
-    phi = (at * st["0"]).sum(-1)
-    dphi_f = torch.stack([(at * st["0_"]).sum(-1), (at * st["1_"]).sum(-1), (at * st["2_"]).sum(-1)], dim=1)
-    dphi = dphi_f @ jac.t()                                                # grad_beta = sum_a J[beta, a] d_a
-    if not hessian:
-        return phi, dphi, None
-    h = torch.zeros(n, 3, 3, dtype=pos.dtype, device=pos.device)
-    h[:, 0, 0] = (at * st["00"]).sum(-1)
-    h[:, 1, 1] = (at * st["11"]).sum(-1)
-    h[:, 2, 2] = (at * st["22"]).sum(-1)
-    h01 = (at * st["01"]).sum(-1)
-    h02 = (at * st["02"]).sum(-1)
-    h12 = (at * st["12"]).sum(-1)
-    h[:, 0, 1] = h01
-    h[:, 1, 0] = h01
-    h[:, 0, 2] = h02
-    h[:, 2, 0] = h02
-    h[:, 1, 2] = h12
-    h[:, 2, 1] = h12
-    d2phi = jac @ h @ jac.t()
-    return phi, dphi, d2phi
+    batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
+    plan = MeshPlan(pos, cell[None], batch, mesh, order)
+    return plan.potential(q, d, Q, alpha, hessian=hessian)
 
 
 def multipole_reciprocal_energy(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor,
@@ -540,15 +661,8 @@ def dispersion_pme(c: Tensor, pos: Tensor, cell: Tensor, alpha: float, mesh: Lis
     Tensor
         ``(N,)`` in the units of ``c_i c_j / R^6``.
     """
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    flat, w, _, _, _ = _mesh_setup(pos, cell, mesh, order)
-    w3 = _outer3(w[:, 0], w[:, 1], w[:, 2]).reshape(pos.shape[0], -1)
-    grid = torch.zeros(k1 * k2 * k3, dtype=pos.dtype, device=pos.device)
-    grid = grid.index_add(0, flat.reshape(-1), (c[:, None] * w3).reshape(-1))
-    influence = _influence(cell, alpha, mesh, order, "r6")
-    potential = torch.real(torch.fft.ifftn(torch.fft.fftn(grid.view(k1, k2, k3)) * influence)).reshape(-1)
-    phi6 = (potential[flat] * w3).sum(-1)
-    return -(0.5 * c * phi6 - alpha ** 6 / 12.0 * c * c)
+    batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
+    return MeshPlan(pos, cell[None], batch, mesh, order).dispersion(c, alpha)
 
 
 def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
@@ -574,4 +688,4 @@ def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
 __all__ = ["ewald_coefficient", "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
-           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy"]
+           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "MeshPlan"]
