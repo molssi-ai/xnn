@@ -4,7 +4,7 @@
 
 ## How it was checked
 
-<!-- The tests you added or ran, and any numbers (parity, timings) that support the change. -->
+<!-- The tests you added or ran, and any numbers (fidelity, parity, timings) that support the change. -->
 
 ## Checklist
 
@@ -15,7 +15,7 @@
 - [ ] Reuses existing helpers in `xnn.common` or the family package; no second implementation of an existing component.
 - [ ] No data files in `tests/` or `notebooks/`; examples build their inputs in code or load them through the hubs.
 - [ ] `README.md` and the documentation are updated where behaviour, models or options change (including the model tables).
-- [ ] For a model: registration, invariance and equivariance, periodic stress, finite-difference forces, script parity if it exports, and parity with its reference.
+- [ ] For a model: registration, invariance and equivariance, periodic stress, finite-difference forces, script parity if it exports, and fidelity to its reference.
 - [ ] No code copied from other projects; any reference implementation I consulted is not under a copyleft license; the sources and licenses of new data files are stated below.
 
 ## Sources and licenses
