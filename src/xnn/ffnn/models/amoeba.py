@@ -123,7 +123,7 @@ FRAME_NONE, FRAME_ZONLY, FRAME_ZTHENX, FRAME_BISECTOR, FRAME_ZBISECT, FRAME_THRE
 # trainable parameter groups of the force field, and the model-level ones
 _GROUPS = ("vdw", "bond", "angle", "strbnd", "urey", "opbend", "torsion", "pitors", "tortor",
            "charge", "dipole", "quadrupole", "polarizability", "thole", "chgpen", "chgtrn",
-           "repulsion", "dispersion", "cflux")
+           "repulsion", "dispersion", "exchpol", "cflux")
 _MODEL_GROUPS = ("atom_ref",)
 
 
@@ -741,6 +741,28 @@ def multipole_field(c, d, Q, r, D, at_k: bool) -> Tensor:
             + sign * D3[:, None] * r * qrr + sign * 2.0 * D2[:, None] * Qr)
 
 
+def exchange_polarization_tensor(r_vec: Tensor, R: Tensor, i_: Tensor, k_: Tensor, N: int, spring_i: Tensor,
+                                 spring_k: Tensor, size_i: Tensor, size_k: Tensor, damp_i: Tensor, damp_k: Tensor,
+                                 weight: Tensor) -> Tensor:
+    """The exchange-polarization tensors of the atoms, ``(N, 3, 3)``.
+
+    Chung, Wang, Rackers and Ponder, *J. Phys. Chem. B* **126**, 7579 (2022):
+    the overlap of two hydrogen-like orbitals,
+    ``S = sqrt(q_i q_k) (1 + x + x^2 / 3) e^{-x}`` with ``x = zeta R / 2`` and
+    ``zeta = sqrt(zeta_i zeta_k)`` (their eqs 8c, 8d, 8g), damps the
+    polarizability of each atom of a pair along the pair:
+    ``K_i = k_i sum_j S_ij^2 r_ij r_ij^T / R_ij^2`` and the polarizability
+    becomes ``alpha_i (I + K_i)^-1`` (eqs 7d, 9, 11a). ``weight`` scales
+    every pair (zero drops it).
+    """
+    x = 0.5 * torch.sqrt(damp_i * damp_k) * R
+    s2 = size_i * size_k * (1.0 + x + x * x / 3.0).square() * torch.exp(-2.0 * x) * weight
+    u = r_vec / R[:, None]
+    outer = (u[:, :, None] * u[:, None, :]).reshape(-1, 9)
+    K = scatter_sum((spring_i * s2)[:, None] * outer, i_, N) + scatter_sum((spring_k * s2)[:, None] * outer, k_, N)
+    return K.view(N, 3, 3)
+
+
 def _take(t: Tensor, idx: Tensor) -> Tensor:
     """Rows ``t[idx]`` by ``index_select``: its backward is an atomic ``index_add``,
     where the advanced-index gather sorts the indices and sums every atom's many
@@ -985,8 +1007,8 @@ class AmoebaForceField(nn.Module):
         ``"angle"``, ``"strbnd"``, ``"urey"``, ``"opbend"``, ``"torsion"``,
         ``"pitors"``, ``"tortor"``, ``"charge"``, ``"dipole"``,
         ``"quadrupole"``, ``"polarizability"``, ``"thole"``, ``"chgpen"``,
-        ``"chgtrn"``, ``"repulsion"``, ``"dispersion"``, ``"cflux"``;
-        ``"all"`` unfreezes every group.
+        ``"chgtrn"``, ``"repulsion"``, ``"dispersion"``, ``"exchpol"``,
+        ``"cflux"``; ``"all"`` unfreezes every group.
     symmetry_mask : bool, optional
         Keep the dipole and quadrupole components that the library leaves
         zero (by the symmetry of the local frame) at zero while they train,
@@ -1171,6 +1193,14 @@ class AmoebaForceField(nn.Module):
         dp = [lib.dispersion.get(c, {"c6": 0.0, "alpha": 1.0}) for c in self.class_names]
         make("disp_c6", [float(v["c6"]) for v in dp], "dispersion", scale=math.sqrt(KCAL_TO_EV))
         make("disp_alpha", [float(v["alpha"]) for v in dp], "dispersion")
+        # exchange polarization per class; a pair takes part when either of its classes is used
+        xp = [lib.exchpol.get(c, {"spring": 0.0, "size": 0.0, "damp": 1.0, "use": False}) for c in self.class_names]
+        make("expol_spring", [float(v["spring"]) for v in xp], "exchpol")
+        make("expol_size", [float(v["size"]) for v in xp], "exchpol")
+        make("expol_damp", [float(v["damp"]) for v in xp], "exchpol")
+        self.register_buffer("expol_use", torch.tensor([bool(v["use"]) for v in xp], dtype=torch.bool),
+                             persistent=False)
+        self.has_exchpol = bool(lib.exchpol)
         self.has_penetration = has_pen
         # charge flux
         self.bndcflux_keys = list(lib.bndcflux)
@@ -1292,6 +1322,9 @@ class AmoebaForceField(nn.Module):
             if c in lib.dispersion:
                 lib.dispersion[c] = {"c6": float(P["disp_c6"][i]) / math.sqrt(KCAL_TO_EV),
                                      "alpha": float(P["disp_alpha"][i])}
+            if c in lib.exchpol:
+                lib.exchpol[c] = {"spring": float(P["expol_spring"][i]), "size": float(P["expol_size"][i]),
+                                  "damp": float(P["expol_damp"][i]), "use": lib.exchpol[c]["use"]}
         for m, k in enumerate(self.vdw_pair_keys):
             lib.vdw_pair_types[k] = {"rmin": float(P["vdw_pair_rmin"][m]),
                                      "eps": float(P["vdw_pair_eps"][m]) / KCAL_TO_EV}
@@ -1429,11 +1462,9 @@ class Amoeba(InteratomicPotential):
     mesh_self : bool, optional
         Remove the spurious, position-averaged mesh self-interaction of
         every multipole from the particle-mesh energy, from the field
-        that polarizes it and from the dispersion sum. Off by default:
-        the plain smooth PME sums, the same algorithm as Tinker. On, the
-        mean discretisation error of the self-interaction leaves the
-        energies and the stress, which helps the induction, the
-        dispersion and the pressure at coarse meshes.
+        that polarizes it and from the dispersion sum. Off by default,
+        as in Tinker. On, the mean discretisation error of the
+        self-interaction leaves the energies and the stress.
     polar_eps : float, optional
         Convergence of the iterative induced-dipole solve, the rms change
         per iteration in Debye (``1e-8``).
@@ -2680,7 +2711,7 @@ class Amoeba(InteratomicPotential):
 
     @region("amoeba.induction")
     def _induced(self, i_, k_, r_vec, R, field_d, field_p, D1, D2, N, B, alpha, data, ew,
-                 x0: Optional[Tensor] = None, plan: Optional[StepPlan] = None):
+                 x0: Optional[Tensor] = None, plan: Optional[StepPlan] = None, expol: Optional[Tensor] = None):
         """Solve the mutual induction and return ``(mu, e_polar_node)``.
 
         ``field_d`` / ``field_p`` are the direct- and polar-scaled permanent
@@ -2694,11 +2725,17 @@ class Amoeba(InteratomicPotential):
         once) or the predictor's extrapolation is tried, and the solve starts
         from whichever of the guess and the direct dipoles has the smaller
         residual. A plan supplies the count of polarizable atoms, and its
-        recording evaluation leaves the predictor alone.
+        recording evaluation leaves the predictor alone. ``expol``, the
+        exchange-polarization tensors ``K`` (:func:`exchange_polarization_tensor`),
+        turns the polarizabilities into ``alpha (I + K)^-1``.
         """
         n = int(self.top_type.shape[0])
         polar = alpha > 0
-        mu_dir = alpha[:, None] * field_d
+        if expol is None:
+            mu_dir = alpha[:, None] * field_d
+        else:
+            eye = torch.eye(3, dtype=R.dtype, device=R.device)
+            mu_dir = alpha[:, None] * torch.einsum("nab,nb->na", _inverse3(eye + expol), field_d)
         if plan is not None and plan.replaying():
             has_polar, n_polar = plan.has_polar, plan.n_polar
         else:
@@ -2719,7 +2756,10 @@ class Amoeba(InteratomicPotential):
                 A.index_put_((bi, lk, li), -T.transpose(1, 2), accumulate=True)
                 inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.full_like(alpha, 1.0))
                 eye = torch.eye(3, dtype=R.dtype, device=R.device)
-                diag = inv_alpha.view(B, n)[:, :, None, None] * eye
+                inv = inv_alpha[:, None, None] * eye
+                if expol is not None:
+                    inv = torch.where(polar[:, None, None], inv_alpha[:, None, None] * (eye + expol), eye)
+                diag = inv.view(B, n, 3, 3)
                 ar = torch.arange(n, device=R.device)
                 A[:, ar, ar] = diag
                 Afull = A.permute(0, 1, 3, 2, 4).reshape(B, 3 * n, 3 * n)
@@ -2745,7 +2785,8 @@ class Amoeba(InteratomicPotential):
                     shift = (torch.arange(B, device=R.device) * self.pc_blocks).repeat_interleave(n)
                     op.precond = _Preconditioner(self.preconditioner, alpha, polar, r_vec, D1, D2, i_, k_, R,
                                                  self.pc_block.repeat(B) + shift, self.pc_slot.repeat(B),
-                                                 B * self.pc_blocks, self.pc_size, self.precond_cutoff, N)
+                                                 B * self.pc_blocks, self.pc_size, self.precond_cutoff, N,
+                                                 expol)
                 op.adjoint_predictor = self.adjoint_predictor if (self.predictor is not None
                                                                   and not self.training) else None
                 predict = (self.predictor is not None and not self.training
@@ -2756,8 +2797,8 @@ class Amoeba(InteratomicPotential):
                     x0 = self.predictor.predict(field_d)
                 if x0 is not None and x0.shape == field_d.shape:
                     op.guess = x0.detach().to(device=field_d.device, dtype=dtype)
-                mu = _ImplicitInduction.apply(field_d * polar[:, None].to(dtype), alpha, r_vec, D1, D2, pos, cell,
-                                              op)
+                mu = _ImplicitInduction.apply(field_d * polar[:, None].to(dtype), alpha, expol, r_vec, D1, D2, pos,
+                                              cell, op)
                 mu = mu * polar[:, None].to(dtype)
                 if predict:
                     self.predictor.push(mu.detach())
@@ -2895,6 +2936,29 @@ class Amoeba(InteratomicPotential):
                 "alpha_e_value": alpha_e, "alpha_p_value": alpha_p, "alpha_d_value": alpha_d,
                 "order": self.pme_order, "porder": self.ppme_order or self.pme_order, "dorder": self.dpme_order,
                 "summary": summary}
+
+    def _exchange_polarization(self, i_: Tensor, k_: Tensor, r_vec: Tensor, R: Tensor, scales: Tensor,
+                               cls_idx: Tensor, N: int, switch: Optional[Tensor],
+                               plan: Optional[StepPlan] = None) -> Optional[Tensor]:
+        """The exchange-polarization tensors of the atoms (:func:`exchange_polarization_tensor`), or
+        ``None`` when the library has no exchange polarization. A pair takes part when either of its
+        classes is used, with the polarization scale factors of the permanent field (the
+        intra-group ones within a polarization group) and, in a cell, the switch of the repulsion."""
+        if not self.ff.has_exchpol:
+            return None
+        P = self.ff.params
+        ci, ck = cls_idx[i_], cls_idx[k_]
+        use = self.ff.expol_use
+        weight = scales[:, 2] * (_take(use, ci) | _take(use, ck)).to(R.dtype)
+        weight = weight * (R.detach() < self.cutoff).to(R.dtype)
+        if plan is not None and plan.valid is not None:
+            weight = weight * plan.valid
+        if switch is not None:
+            weight = weight * switch
+        return exchange_polarization_tensor(r_vec, R, i_, k_, N, _take(P["expol_spring"], ci),
+                                            _take(P["expol_spring"], ck), _take(P["expol_size"], ci),
+                                            _take(P["expol_size"], ck), _take(P["expol_damp"], ci),
+                                            _take(P["expol_damp"], ck), weight)
 
     def _switch(self, R: Tensor, pair_periodic: Optional[Tensor], cutoff_value: Optional[float],
                 taper_value: Optional[float]) -> Optional[Tensor]:
@@ -3089,8 +3153,10 @@ class Amoeba(InteratomicPotential):
             if ew is not None:
                 rec = self._reciprocal_field(data, ew, q, d, Q)
                 field_d, field_p = field_d + rec, field_p + rec
+            expol = self._exchange_polarization(i_, k_, r_vec, R, scales, cls_idx, N,
+                                                self._switch(R, per, self.repulsion_cutoff, None), plan)
             mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew,
-                                      plan=plan)
+                                      plan=plan, expol=expol)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
@@ -3223,8 +3289,10 @@ class Hippo(Amoeba):
             if ew is not None:
                 rec = self._reciprocal_field(data, ew, q, d, Q)
                 field_d, field_p = field_d + rec, field_p + rec
+            expol = self._exchange_polarization(i_, k_, r_vec, R, scales, cls_idx, N, switches["repulsion"],
+                                                plan)
             mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew,
-                                      plan=plan)
+                                      plan=plan, expol=expol)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
@@ -3390,19 +3458,22 @@ class _Preconditioner:
     positive definite as long as the near field is weaker than the blocks,
     which the solver checks. Everything is built from detached tensors: the
     preconditioner changes the iterations, not the solution or its gradient.
+    With exchange-polarization tensors ``K`` the diagonal blocks are
+    ``(I + K) / alpha``.
     """
 
     KINDS = ("diagonal", "block", "neumann", "block-neumann")
 
     def __init__(self, kind: str, alpha: Tensor, polar: Tensor, r: Tensor, D1: Tensor, D2: Tensor, i_: Tensor,
                  k_: Tensor, R: Tensor, block: Tensor, slot: Tensor, n_blocks: int, size: int, cutoff: float,
-                 N: int):
+                 N: int, expol: Optional[Tensor] = None):
         with torch.no_grad():
             r, D1, D2 = r.detach(), D1.detach(), D2.detach()
             dtype, device = r.dtype, r.device
             self.N = N
             self.mask = polar[:, None].to(dtype)
-            self.diag = alpha.detach()[:, None] * self.mask
+            expol = None if expol is None else expol.detach()
+            self.diag = _diagonal_inverse(alpha.detach(), expol, self.mask)
             pair_ok = polar[i_] & polar[k_]
             self.binv = None
             same = torch.zeros_like(pair_ok)
@@ -3418,7 +3489,8 @@ class _Preconditioner:
                 eye = torch.eye(3, dtype=dtype, device=device)
                 occupied = torch.zeros(n_blocks, s, dtype=torch.bool, device=device)
                 occupied[block, slot] = True
-                Ab[block, slot, slot] = Ab[block, slot, slot] + inv_alpha[:, None, None] * eye
+                own = eye if expol is None else eye + expol
+                Ab[block, slot, slot] = Ab[block, slot, slot] + inv_alpha[:, None, None] * own
                 pad = (~occupied).nonzero()
                 Ab[pad[:, 0], pad[:, 1], pad[:, 1]] = eye
                 full = Ab.permute(0, 1, 3, 2, 4).reshape(n_blocks, 3 * s, 3 * s)
@@ -3436,7 +3508,7 @@ class _Preconditioner:
 
     def _blocks(self, r: Tensor) -> Tensor:
         if self.binv is None:
-            return self.diag * r
+            return self.diag(r)
         rb = torch.zeros(self.n_blocks, self.size, 3, dtype=r.dtype, device=r.device)
         rb[self.block, self.slot] = r
         zb = torch.bmm(self.binv, rb.reshape(self.n_blocks, 3 * self.size, 1)).reshape(self.n_blocks, self.size, 3)
@@ -3557,12 +3629,37 @@ class _MutualField:
 
 
 @region("amoeba.pcg")
+def _inverse3(M: Tensor) -> Tensor:
+    """Inverses of a batch of 3 x 3 matrices by their adjugate: no host synchronization, so it
+    runs inside a captured CUDA graph (the matrices ``I + K`` have determinants of at least one)."""
+    a, b, c = M[..., 0, 0], M[..., 0, 1], M[..., 0, 2]
+    d, e, f = M[..., 1, 0], M[..., 1, 1], M[..., 1, 2]
+    g, h, i = M[..., 2, 0], M[..., 2, 1], M[..., 2, 2]
+    adj = torch.stack([torch.stack([e * i - f * h, c * h - b * i, b * f - c * e], -1),
+                       torch.stack([f * g - d * i, a * i - c * g, c * d - a * f], -1),
+                       torch.stack([d * h - e * g, b * g - a * h, a * e - b * d], -1)], -2)
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    return adj / det[..., None, None]
+
+
+def _diagonal_inverse(alpha: Tensor, expol: Optional[Tensor], mask: Tensor):
+    """The inverse of the diagonal blocks of the induction matrix as a function of a
+    field ``(N, 3)``: ``alpha``, or ``alpha (I + K)^-1`` with exchange polarization."""
+    if expol is None:
+        diag = alpha[:, None] * mask
+        return lambda v: diag * v
+    eye = torch.eye(3, dtype=expol.dtype, device=expol.device)
+    blocks = alpha[:, None, None] * _inverse3(eye + expol) * mask[:, :, None]
+    return lambda v: torch.einsum("nab,nb->na", blocks, v)
+
+
 def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_iter: int,
          x0: Optional[Tensor] = None, precond=None, n_polar: Optional[int] = None,
-         fixed: Optional[int] = None) -> tuple[Tensor, int, Tensor, Optional[Tensor]]:
+         fixed: Optional[int] = None, expol: Optional[Tensor] = None) -> tuple[Tensor, int, Tensor, Optional[Tensor]]:
     """Preconditioned conjugate gradients for ``(1/alpha - T) mu = rhs`` on the
-    polarizable atoms, converged when the rms change of the dipoles per
-    iteration drops below ``tol`` Debye.
+    polarizable atoms (``((I + K)/alpha - T) mu = rhs`` with the
+    exchange-polarization tensors ``expol``), converged when the rms change of
+    the dipoles per iteration drops below ``tol`` Debye.
 
     ``precond`` applies ``M^-1`` (:class:`_Preconditioner`); by default the
     polarizabilities. The solve starts from ``M^-1 rhs`` or from ``x0``,
@@ -3583,15 +3680,12 @@ def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_it
     mask = polar[:, None].to(rhs.dtype)
     n_polar = max(int(polar.sum()), 1) if n_polar is None else n_polar
     inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.zeros_like(alpha))[:, None]
-    diag = alpha[:, None] * mask
-
-    def diagonal(v):
-        return diag * v
-
+    diagonal = _diagonal_inverse(alpha, expol, mask)
     precond = diagonal if precond is None else precond
 
     def apply(v):
-        return (v * inv_alpha - field_of(v)) * mask
+        own = v if expol is None else v + torch.einsum("nab,nb->na", expol, v)
+        return (own * inv_alpha - field_of(v)) * mask
 
     x = precond(rhs * mask)
     r = rhs * mask - apply(x)
@@ -3626,7 +3720,7 @@ def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_it
             break
         if curvature <= 0.0 and precond is not diagonal:
             precond = diagonal
-            z = diag * r
+            z = diagonal(r)
             p = z
             rz = (r * z).sum()
             continue
@@ -3662,7 +3756,8 @@ def _pcg_fixed(x, r, z, p, rz, apply, precond, tol: float, n_polar: int, length:
 
 
 class _ImplicitInduction(torch.autograd.Function):
-    """``mu = (1/alpha - T)^-1 rhs`` by conjugate gradients, with the gradient of
+    """``mu = ((I + K)/alpha - T)^-1 rhs`` by conjugate gradients (``K`` the
+    exchange-polarization tensors, or ``None``), with the gradient of
     the converged dipoles through the adjoint system (the same solve on the
     incoming gradient): neither the iterations nor a dense matrix are stored.
     The backward pass forms ``lambda^T (dA/dtheta) mu`` explicitly: the
@@ -3678,12 +3773,13 @@ class _ImplicitInduction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, rhs, alpha, r, D1, D2, pos, cell, op):
+    def forward(ctx, rhs, alpha, expol, r, D1, D2, pos, cell, op):
         with torch.no_grad():
             pair = (r.detach(), D1.detach(), D2.detach())
             fixed = None if op.fixed is None else op.fixed.get(op.phase)
             mu, iterations, used, converged = _pcg(rhs, alpha, lambda v: op(v, pair), op.polar, op.tol, op.max_iter,
-                                                   op.guess, op.precond, op.n_polar, fixed)
+                                                   op.guess, op.precond, op.n_polar, fixed,
+                                                   None if expol is None else expol.detach())
             if converged is not None and op.converged is not None:
                 op.converged.logical_and_(converged)
         op.stats[op.phase] = iterations
@@ -3695,12 +3791,12 @@ class _ImplicitInduction(torch.autograd.Function):
             op.stats[op.phase + "_guess_error"] = float(
                 ((op.guess * m - mu) ** 2).sum() / op.n_polar) ** 0.5 * _DEBYE
         ctx.op = op
-        ctx.save_for_backward(mu, rhs, alpha, r, D1, D2, pos, cell)
+        ctx.save_for_backward(mu, rhs, alpha, expol, r, D1, D2, pos, cell)
         return mu
 
     @staticmethod
     def backward(ctx, grad_mu):
-        mu, rhs, alpha, r, D1, D2, pos, cell = ctx.saved_tensors
+        mu, rhs, alpha, expol, r, D1, D2, pos, cell = ctx.saved_tensors
         op = ctx.op
         mask = op.polar[:, None].to(mu.dtype)
         create_graph = torch.is_grad_enabled()
@@ -3708,14 +3804,14 @@ class _ImplicitInduction(torch.autograd.Function):
         if create_graph:
             # the differentiable recompute starts from the converged dipoles
             op.guess, op.phase = mu.detach(), "recompute"
-            mu = _ImplicitInduction.apply(rhs, alpha, r, D1, D2, pos, cell, op)
+            mu = _ImplicitInduction.apply(rhs, alpha, expol, r, D1, D2, pos, cell, op)
         # the adjoint starts from the last adjoint of this shape (molecular dynamics steps,
         # repeated training batches), when that is closer than the direct start
         key = (tuple(grad_mu.shape), grad_mu.dtype, str(grad_mu.device), create_graph)
         predictor = op.adjoint_predictor if not create_graph else None
         start = predictor.predict(grad_mu) if predictor is not None else None
         op.guess, op.phase = (start if start is not None else op.adjoints.get(key)), "adjoint"
-        lam = _ImplicitInduction.apply(grad_mu * mask, alpha, r, D1, D2, pos, cell, op)
+        lam = _ImplicitInduction.apply(grad_mu * mask, alpha, expol, r, D1, D2, pos, cell, op)
         # updated in place, so a recorded graph refreshes it on replay
         last = op.adjoints.get(key)
         if last is None:
@@ -3725,16 +3821,16 @@ class _ImplicitInduction(torch.autograd.Function):
         if predictor is not None:
             predictor.push(lam.detach())
         op.guess, op.phase = guess, phase
-        grad_r = grad_D1 = grad_D2 = grad_pos = grad_cell = None
-        if any(ctx.needs_input_grad[2:5]):
+        grad_r = grad_D1 = grad_D2 = grad_pos = grad_cell = grad_expol = None
+        if any(ctx.needs_input_grad[3:6]):
             # lam . T mu summed over both directions of the pairs: D1 (l . m) + D2 (r . l)(r . m)
             m, l_ = mu[op.ik].view(2, -1, 3), lam[op.ki].view(2, -1, 3)
             rm, rl = (r * m).sum(-1), (r * l_).sum(-1)
-            if ctx.needs_input_grad[2]:
-                grad_r = D2[:, None] * (rm[..., None] * l_ + rl[..., None] * m).sum(0)
             if ctx.needs_input_grad[3]:
-                grad_D1 = (l_ * m).sum((0, 2))
+                grad_r = D2[:, None] * (rm[..., None] * l_ + rl[..., None] * m).sum(0)
             if ctx.needs_input_grad[4]:
+                grad_D1 = (l_ * m).sum((0, 2))
+            if ctx.needs_input_grad[5]:
                 grad_D2 = (rm * rl).sum(0)
         if op.structures and (pos.requires_grad or cell.requires_grad):
             mu_d, lam_d = mu.detach(), lam.detach()
@@ -3761,8 +3857,14 @@ class _ImplicitInduction(torch.autograd.Function):
             found = dict(zip([id(t) for t in inputs], grads))
             grad_pos, grad_cell = found.get(id(op.pos)), found.get(id(op.cell))
         a2 = torch.where(op.polar, alpha * alpha, torch.ones_like(alpha))
-        grad_alpha = torch.where(op.polar, (lam * mu).sum(1) / a2, torch.zeros_like(alpha))
-        return lam, grad_alpha, grad_r, grad_D1, grad_D2, grad_pos, grad_cell, None
+        # the diagonal blocks (I + K) / alpha: -lam^T (d/d theta) mu for alpha and for K
+        own = mu if expol is None else mu + torch.einsum("nab,nb->na", expol, mu)
+        grad_alpha = torch.where(op.polar, (lam * own).sum(1) / a2, torch.zeros_like(alpha))
+        if expol is not None and ctx.needs_input_grad[2]:
+            inv = torch.where(op.polar, 1.0 / torch.where(op.polar, alpha, torch.ones_like(alpha)),
+                              torch.zeros_like(alpha))
+            grad_expol = -inv[:, None, None] * lam[:, :, None] * mu[:, None, :]
+        return lam, grad_alpha, grad_expol, grad_r, grad_D1, grad_D2, grad_pos, grad_cell, None
 
 
 # small helpers

@@ -15,7 +15,11 @@ The periodic electrostatics of the AMOEBA / HIPPO models (``amoeba.py``):
   field and the field gradient are interpolated back onto the atoms with
   the same splines, so that the reciprocal energy is ``1/2 sum_i [q_i phi +
   d_i . grad phi + Q_i : grad grad phi]`` and the reciprocal field drives
-  the induced dipoles (:func:`multipole_pme`);
+  the induced dipoles (:func:`multipole_pme`); the influence function
+  carries the least-squares spline moduli
+  (:func:`~xnn.common.models.pme.least_squares_moduli`) rather than the
+  Euler exponential-spline ones of the paper, which at coarse meshes
+  leaves a far smaller mean error in the energies and reproduces Tinker's;
 * the self-interaction terms of Gaussian-smeared multipoles, half the
   interaction of a multipole with its own smeared kernel ``erf(alpha R) / R``
   at zero separation, ``-alpha / sqrt(pi) [q^2 + 2 alpha^2 / 3 |d|^2 +
@@ -377,12 +381,12 @@ def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: st
     ``K^3 / (pi V) exp(-pi^2 m^2 / alpha^2) / m^2 B(m)`` (zero at ``m = 0``), for
     ``kind="r6"`` ``K^3 / V pi^(3/2) alpha^3 / 3 f(b) B(m)`` with
     ``f(b) = (1 - 2 b^2) e^{-b^2} + 2 b^3 sqrt(pi) erfc(b)``, ``b = k / (2 alpha)``
-    (``f(0) = 1``)."""
+    (``f(0) = 1``) and ``B(m)`` the least-squares spline moduli."""
     dtype, device = cell.dtype, cell.device
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     volume = cell_volume(cell)
     _, k2sq = mesh_wavevectors(cell, mesh)
-    moduli = spline_moduli(mesh, order, dtype, device)
+    moduli = _moduli(mesh, order, dtype, device)
     scale = (k1 * k2 * k3) / volume
     if kind == "coulomb":
         m2 = k2sq / (4.0 * math.pi * math.pi)
@@ -398,12 +402,12 @@ _MODULI_CACHE: dict = {}
 
 
 def _moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device) -> Tensor:
-    """The spline moduli of a mesh, cached (they depend on the mesh and the order only)."""
+    """The least-squares spline moduli of a mesh, cached (they depend on the mesh and the order only)."""
     key = (tuple(mesh), order, dtype, str(device))
     if key not in _MODULI_CACHE:
         if len(_MODULI_CACHE) > 64:
             _MODULI_CACHE.clear()
-        _MODULI_CACHE[key] = spline_moduli(list(mesh), order, dtype, device)
+        _MODULI_CACHE[key] = spline_moduli(list(mesh), order, dtype, device, least_squares=True)
     return _MODULI_CACHE[key]
 
 
@@ -684,8 +688,8 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     (the alias sums of the squared spline transform minus the exact term).
     They vanish as the mesh is refined. Subtracting the spurious part
     removes the mean discretisation error of the self-interaction from the
-    energy, the field and the dispersion sum (Ballenegger, Cerutti, Holm
-    and Lenz, J. Chem. Phys. 134, 162101, 2011).
+    energy, the field and the dispersion sum (Ballenegger, Cerda and Holm,
+    Comput. Phys. Commun. 182, 1919, 2011).
 
     Parameters
     ----------
@@ -713,7 +717,7 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     g = _influence(cell, alpha, mesh, order, kind) / (k1 * k2 * k3)
     # the exact reciprocal self term carries the bare kernel, without the spline moduli of the mesh sum
-    g0 = g / spline_moduli(mesh, order, dtype, device)
+    g0 = g / _moduli(mesh, order, dtype, device)
     mu = [_alias_moments(k, order, dtype, device) for k in (k1, k2, k3)]
     freq = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2, k3)]
     cache: dict = {}
