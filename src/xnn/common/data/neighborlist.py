@@ -17,6 +17,7 @@ reference implementation runs unchanged.
 from __future__ import annotations
 
 import itertools
+import math
 import warnings
 from typing import Optional
 
@@ -35,6 +36,9 @@ except ImportError:
         VesinNeighborList, _HAS_VESIN = None, False
 
 _NVRTC_LOADED = False
+# the most cells vesin's GPU cell list is given for a molecule: its cells tile the
+# bounding box, and an exploded simulation makes their count overflow
+_MAX_GPU_CELLS = 2 ** 24
 
 
 def _preload_nvrtc() -> None:
@@ -114,6 +118,12 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
     * periodicity must be uniform. vesin takes a single ``periodic`` flag,
       while this module supports it per axis, so a slab or a wire falls back.
 
+    On the GPU the positions are checked first: vesin's kernels fault (an
+    illegal address, after which the CUDA context is unusable) on positions
+    that are not finite and on a molecule spread over more than
+    ``_MAX_GPU_CELLS`` cells, as in a simulation that blew up. Non-finite
+    positions raise; a molecule that large is listed by vesin on the CPU.
+
     The gain is large enough to matter at any real system size: on 5001 atoms
     with a 6 A cutoff, 1674 ms of brute force becomes 0.6 ms.
 
@@ -136,6 +146,11 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
         ``(edge_index, cell_shifts)`` as :func:`build_neighbor_list` returns
         them, or ``None`` when vesin is absent or cannot express the request,
         leaving the caller to fall back.
+
+    Raises
+    ------
+    ValueError
+        If positions on the GPU are not finite.
     """
     if not _HAS_VESIN or self_interaction:
         return None
@@ -158,6 +173,13 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
            if molecular else cell)
     if pos.is_cuda:
         _preload_nvrtc()
+        # one read of the coordinate range guards vesin's kernels (see above)
+        lo, hi = torch.stack([pos.detach().amin(0), pos.detach().amax(0)]).double().tolist()
+        if not all(math.isfinite(v) for v in lo + hi):
+            raise ValueError("the positions are not finite (an unstable simulation?)")
+        cells = math.prod(max(1, math.ceil((b - a) / cutoff)) for a, b in zip(lo, hi))
+        if molecular and cells > _MAX_GPU_CELLS:
+            pos, box = pos.detach().cpu(), box.detach().cpu()
 
     def compute(points, lattice):
         return VesinNeighborList(cutoff=cutoff, full_list=True).compute(
