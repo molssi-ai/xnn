@@ -1,6 +1,6 @@
 """DimeNet / DimeNet++ tests: manuscript fidelity (ICLR 2020, NeurIPS-W 2020),
 the bases, the directed triplets, physical invariances, smoothness,
-TorchScript deployment, config handling and (optionally) parity with the
+TorchScript deployment, config handling and (optionally) fidelity to the
 authors' TensorFlow code.
 
 The centerpiece is ``_reference_energy``: an independent, loop-based
@@ -632,9 +632,9 @@ def test_from_config_pp_and_reference_key_translation():
     assert m2.interactions[0].bilinear.shape == (2, 16, 16) and m2.n_sbf == 6
 
 
-# parity with the authors' TensorFlow implementation (optional)
+# fidelity to the authors' TensorFlow implementation (optional)
 
-def _parity(mode):
+def _fidelity(mode):
     pytest.importorskip("tensorflow")
     path = os.environ.get("DIMENET_UPSTREAM_PATH")
     if not path or not os.path.isdir(os.path.join(path, "dimenet")):
@@ -643,24 +643,24 @@ def _parity(mode):
         pytest.skip("the checkout has no pretrained/dimenet_pp/U0")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "dimenet_tf_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "dimenet_tf_fidelity.py")
     res = subprocess.run([sys.executable, script, path, mode], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-def test_parity_vs_reference_random_weights():
+def test_fidelity_vs_reference_random_weights():
     """Weight transplant from the TF DimeNet and DimeNet++ (float64, random
     weights) gives identical energies and forces: the worst relative error
     (energy relative to ``|E|``, forces relative to ``max|F|``) is at the float64
     floor, measured at 7e-14 over both models; a convention error (angle,
     envelope, basis order) would show as O(1)."""
-    assert _parity("random") < 1e-12
+    assert _fidelity("random") < 1e-12
 
 
-def test_parity_vs_reference_pretrained():
+def test_fidelity_vs_reference_pretrained():
     """The published DimeNet++ U0 weights give the same energies and forces
     in xnn. The published models exist in float32 only; measured floors over
     four molecules: energies 1e-7 relative (float32 epsilon), forces 1.5e-5
     of the largest force component (gradients of a 4-block float32 net)."""
-    assert _parity("pretrained") < 1e-4
+    assert _fidelity("pretrained") < 1e-4

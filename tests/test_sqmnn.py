@@ -6,8 +6,8 @@ integrals reproduce the parameters they are built from, the two-center
 integrals reach their one-center and point-charge limits, overlaps agree
 with numerical quadrature, the energy is invariant and its derivatives match
 finite differences, and parameter gradients through the SCF response are
-exact. Parity with the MOPAC program runs when ``XNN_MOPAC`` names its
-executable (``sqmnn_mopac_parity.py``).
+exact. Fidelity to the MOPAC program runs when ``XNN_MOPAC`` names its
+executable (``sqmnn_mopac_fidelity.py``).
 """
 import math
 import os
@@ -386,13 +386,13 @@ def test_h4_hydrogen_bond_sign_and_range():
 
 @pytest.mark.skipif(not os.environ.get("XNN_MOPAC"), reason="needs the MOPAC executable (XNN_MOPAC)")
 @pytest.mark.parametrize("method", ["PM3", "PM6", "PM6-ORG", "PM7"])
-def test_mopac_parity(method):
+def test_mopac_fidelity(method):
     """Heats of formation, gradients, dipoles and charges equal MOPAC's."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("parity", HERE / "sqmnn_mopac_parity.py")
-    parity = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(parity)
-    worst = parity.compare(method, verbose=False)
+    spec = importlib.util.spec_from_file_location("fidelity", HERE / "sqmnn_mopac_fidelity.py")
+    fidelity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fidelity)
+    worst = fidelity.compare(method, verbose=False)
     assert worst["hof"] < 1e-5
     assert worst["gradients"] < 2e-3
     assert worst["dipole"] < 1e-3 and worst["charges"] < 1e-4

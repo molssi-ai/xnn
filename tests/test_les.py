@@ -6,7 +6,7 @@ rotation/translation/lattice-shift invariance, cubic and triclinic cells,
 :class:`~xnn.common.models.les.LatentEwald` wrapper around **every**
 registered model (the ``node_features`` contract), batching consistency, the
 ``model.extra["long_range"]`` config hook, and -- when the original ``cace``
-package is installed -- machine-precision parity against its
+package is installed -- machine-precision fidelity to its
 ``EwaldPotential`` plus a whole-model CACE-LR weight-transplant check.
 """
 import math
@@ -260,7 +260,7 @@ def test_dispersion_is_periodic_only():
 
 
 # fidelity vs the original cace EwaldPotential
-def test_parity_vs_original_ewald():
+def test_fidelity_vs_original_ewald():
     """The Ewald kernels match upstream cace.modules.EwaldPotential.
 
     float64 against upstream's dtype-safe orthorhombic reference loop and its
@@ -314,12 +314,12 @@ def test_parity_vs_original_ewald():
     assert abs(e32 - e_up) / abs(e_up) < 1e-5
 
 
-def test_parity_vs_original_cace_lr():
+def test_fidelity_vs_original_cace_lr():
     """Weight-transplanted LatentEwald(CACE) == upstream CACE-LR NNP.
 
     Runs in float32 -- upstream's triclinic Ewald path hard-codes a float32
     k-grid and cannot run in float64; the float64 math is covered by
-    ``test_parity_vs_original_ewald`` and ``tests/test_cace.py``.
+    ``test_fidelity_vs_original_ewald`` and ``tests/test_cace.py``.
     """
     pytest.importorskip("cace")
     from cace.models.atomistic import NeuralNetworkPotential

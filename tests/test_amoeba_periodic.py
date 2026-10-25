@@ -13,6 +13,8 @@ import pytest
 import torch
 
 from xnn.common.data import collate, structure_to_graph
+from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine
+from xnn.common.deploy.step_graph import StepGraph
 from xnn.common.models import ForceStressOutput
 from xnn.common.models.ops import cell_volume
 from xnn.ffnn.models import Amoeba, Hippo, MolecularTopology
@@ -242,6 +244,19 @@ def test_dispersion_ewald_matches_the_lattice_sum():
     real = -0.5 * (cc / R ** 6 * ew.dispersion_real_kernel(R, torch.full_like(R, alpha))).sum()
     recip = ew.dispersion_pme(c, pos, cell, alpha, [48, 48, 48], 6).sum()
     assert float(real + recip) == pytest.approx(float(direct), rel=2e-7)
+
+
+@pytest.mark.parametrize("kind", ["block", "neumann", "block-neumann"])
+def test_preconditioners_reproduce_the_diagonal_solve(kind):
+    """Every preconditioner gives the diagonal one's energies and forces; the block one in fewer iterations."""
+    base = ForceStressOutput(_box(Amoeba, pme_grid=24, polar_eps=1e-10)).eval()
+    other = ForceStressOutput(_box(Amoeba, pme_grid=24, polar_eps=1e-10, preconditioner=kind)).eval()
+    g = _graph(BOX)
+    a, b = base(g), other(g)
+    assert float(b["energy"][0]) == pytest.approx(float(a["energy"][0]), abs=1e-9)
+    assert torch.allclose(b["forces"], a["forces"], atol=1e-8)
+    if kind == "block":
+        assert other.model.solver_stats["forward"] < base.model.solver_stats["forward"]
 
 
 def test_predictor_and_adjoint_warm_start_save_iterations_and_keep_the_results():
@@ -516,3 +531,154 @@ def test_second_derivatives_through_the_iterative_solve(cls):
         p[other, ax2] -= 2 * h
         fm = float(fso(_graph(p))["forces"][atom, axis])
         assert float(row[other, ax2]) == pytest.approx((fp - fm) / (2 * h), rel=1e-4, abs=1e-3)
+
+
+def test_use_fast_validates_and_keeps_the_reference_on_the_cpu():
+    """use_fast is validated, reached by set_use_fast, and inactive on the CPU."""
+    from xnn.common.models.fast import set_use_fast
+    with pytest.raises(ValueError):
+        _box(Amoeba, use_fast="always")
+    ref, fast = _box(Amoeba), _box(Amoeba)
+    set_use_fast(ForceStressOutput(fast), True)
+    assert fast.use_fast is True and ref.use_fast is False
+    fast.eval()
+    assert not fast._fused_active(torch.ones(3, dtype=torch.float64))
+    e_ref = float(ref.eval()(_graph(BOX))["energy"])
+    assert float(fast(_graph(BOX))["energy"]) == e_ref
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_fused_pair_arithmetic_matches_the_reference_on_the_gpu(cls):
+    """Energies, forces and stress agree with the reference over eager, compiling and compiled calls."""
+    g = _graph(BOX).to("cuda")
+    ref = ForceStressOutput(_box(cls), compute_stress=True).to("cuda").eval()
+    fast = ForceStressOutput(_box(cls, use_fast=True), compute_stress=True).to("cuda").eval()
+    want = ref(g)
+    for _ in range(3):
+        got = fast(g)
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_forward_on_a_plan_matches_the_plain_forward(cls, periodic):
+    """A recorded plan reproduces the plain evaluation, also after the atoms move."""
+    model = _box(cls).eval()
+    cell = CELL if periodic else None
+    g = _graph(BOX, cell=cell, cutoff=7.3)
+    padded = model.plan_step(g, skin=1.0, capacity=int(g.edge_index.shape[1]))
+    rng = np.random.default_rng(3)
+    cases = [(model.plan_step(_graph(BOX, cell=cell)), 0.0), (padded, 0.0), (padded, 0.02), (padded, 0.02)]
+    for plan, scale in cases:
+        moved = BOX + rng.normal(scale=scale, size=BOX.shape)
+        results = []
+        for p in (None, plan):
+            g = _graph(moved if p is None else BOX, cell=cell)
+            g.pos = torch.tensor(moved, dtype=g.pos.dtype).requires_grad_(True)
+            out = model(g, p)
+            forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+            results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+        assert not bool(plan.outdated(g.pos))
+        for a, b in zip(*results):
+            assert torch.allclose(a, b, rtol=1e-10, atol=1e-8)
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_a_solve_of_fixed_length_matches_the_tested_solve(cls):
+    """Solves of fixed length on a plan give the tested solve's results and report their convergence."""
+    model = _box(cls).eval()
+    g = _graph(BOX)
+    plan = model.plan_step(g)
+    results = []
+    for fixed in (None, {"forward": 100, "adjoint": 100}):
+        model.set_dipole_predictor(None)
+        model._adjoints.clear()
+        plan.solve_iterations = fixed
+        g.pos = g.pos.detach().requires_grad_(True)
+        out = model(g, plan)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+    assert bool(plan.converged)
+    for a, b in zip(*results):
+        assert torch.equal(a, b)
+    plan.solve_iterations = {"forward": 1, "adjoint": 1}
+    with torch.no_grad():
+        model(g, plan)
+    assert not bool(plan.converged)
+
+
+def _walk(cls, device, steps, **kw):
+    """Plain steps and steps on a plan along a random walk of the box."""
+    ref, model = (ForceStressOutput(_box(cls, **kw).to(device), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.3, warmup=3)
+    rng = np.random.default_rng(5)
+    pos = BOX.copy()
+    for _ in range(steps):
+        pos = pos + rng.normal(scale=0.03, size=BOX.shape)
+        s = {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(Z, device=device),
+             "cell": torch.tensor(CELL, device=device), "pbc": torch.ones(3, dtype=torch.bool, device=device)}
+        got = stepper(s)
+        want = ref(structure_to_graph(s, 6.3, device=device))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+    assert stepper.rebuilds >= 1 and stepper.full_rebuilds == 0 and stepper.plan.solve_iterations
+    return stepper
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_on_a_plan_follow_the_plain_steps(cls):
+    """Steps on a plan follow the plain steps through rebuilds of the pair list and fixed solves."""
+    _walk(cls, "cpu", 6)
+
+
+def test_steps_on_a_plan_follow_an_atom_wrapped_into_the_cell():
+    """An atom wrapped into the cell makes the steps on a plan record their bonded image shifts again."""
+    ref, model = (ForceStressOutput(_box(Amoeba), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
+    for wrap in (0.0, 0.0, L):
+        pos = BOX.copy()
+        pos[0, 0] += wrap
+        s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(Z), "cell": torch.tensor(CELL),
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+    assert stepper.full_rebuilds == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_replayed_as_a_cuda_graph_follow_the_plain_steps(cls):
+    """Steps replayed as a CUDA graph follow the plain steps on the GPU."""
+    stepper = _walk(cls, "cuda", 10, use_fast=True)
+    assert stepper.recordings >= 1 and stepper.replays >= 1
+
+
+def test_the_engine_evaluates_steps_on_a_plan():
+    """The MDI engine on step plans gives the plain engine's results."""
+    engines = [MDIEngine(ForceStressOutput(_box(Amoeba), compute_stress=True), 6.3, step_graph=flag, skin=0.5)
+               for flag in (False, True)]
+    for engine in engines:
+        engine.natoms, engine.atomic_numbers = len(BOX), Z.astype(np.int64)
+        engine.cell_bohr = CELL / BOHR_TO_ANGSTROM
+    for shift in (0.0, 0.01):
+        for engine in engines:
+            engine.coords_bohr = (BOX + shift) / BOHR_TO_ANGSTROM
+            engine.calculate()
+        plain, planned = engines
+        assert planned.energy == pytest.approx(plain.energy, rel=1e-10)
+        np.testing.assert_allclose(planned.forces, plain.forces, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(planned.stress, plain.stress, rtol=1e-8, atol=1e-12)
+    assert engines[1].steps is not None
+
+
+def test_the_engine_replays_steps_by_default_only_on_a_gpu():
+    """The engine's step graph is on by default only on a GPU, and its option is validated."""
+    model = ForceStressOutput(_box(Amoeba), compute_stress=True)
+    assert MDIEngine(model, 6.3).steps is None
+    with pytest.raises(ValueError, match="step_graph"):
+        MDIEngine(model, 6.3, step_graph="yes")
+    if torch.cuda.is_available():
+        assert MDIEngine(model, 6.3, device="cuda").steps is not None

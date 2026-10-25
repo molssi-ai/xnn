@@ -951,3 +951,71 @@ def test_qm9_splits(fake_qm9, tmp_path):
 def test_qm9_invalid_args(fake_qm9, tmp_path, kwargs):
     with pytest.raises(ValueError):
         load_dataset("qm9", cache_dir=tmp_path, quiet=True, **kwargs)
+
+
+# oc20 (S2EF 200K archive of LZMA-compressed extxyz and reference files)       #
+def _oc20_archive(path):
+    import io
+    import lzma
+    import tarfile
+    frames = [(["Cu", "Cu", "O"], [-10.5, -11.0], [[0, 0, 10], [1.8, 0, 10], [0.9, 0.9, 12]],
+               ["F", "T", "T"], [0, 1, 2]),
+              (["Pt", "C"], [-20.25], [[0, 0, 9], [0, 0, 11]], ["T", "T"], [1, 2])]
+    xyz, txt = [], []
+    for k, (sym, _, pos, mask, tags) in enumerate(frames):
+        xyz.append(str(len(sym)))
+        xyz.append('Lattice="5.0 0.0 0.0 0.0 6.0 0.0 0.0 0.0 30.0" '
+                   "Properties=species:S:1:pos:R:3:move_mask:L:1:tags:I:1:forces:R:3 "
+                   f'energy={-100.0 - k} free_energy={-100.5 - k} pbc="T T T"')
+        for s, p, m, t in zip(sym, pos, mask, tags):
+            xyz.append(f"{s} {p[0]} {p[1]} {p[2]} {m} {t} 0.1 -0.2 0.3")
+        txt.append(f"random{k},frame{3 * k},{-90.0 - 2 * k}")
+    with tarfile.open(path, "w") as tar:
+        for name, text in (("0.extxyz.xz", "\n".join(xyz) + "\n"), ("0.txt.xz", "\n".join(txt) + "\n")):
+            blob = lzma.compress(text.encode())
+            info = tarfile.TarInfo(f"s2ef_train_200K/s2ef_train_200K/{name}")
+            info.size = len(blob)
+            tar.addfile(info, io.BytesIO(blob))
+
+
+@pytest.fixture
+def fake_oc20(monkeypatch):
+    from xnn.common.data.hub import oc20
+
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            _oc20_archive(dest)
+        return dest
+
+    monkeypatch.setattr(oc20, "download_file", fake_download)
+
+
+def test_oc20_registered():
+    assert "oc20" in list_datasets()
+
+
+def test_oc20_adsorption_energies_fixed_atoms_and_cells(fake_oc20, tmp_path):
+    frames = load_dataset("oc20", split="all", cache_dir=tmp_path, return_info=True)
+    assert len(frames) == 2
+    first = frames[0]
+    assert first["energy"] == pytest.approx(-100.0 - (-90.0))
+    assert first["info"]["total_energy"] == pytest.approx(-100.0)
+    assert list(first["atomic_numbers"]) == [29, 29, 8]
+    assert list(first["atom_force_weight"]) == [0.0, 1.0, 1.0]
+    assert list(first["info"]["tags"]) == [0, 1, 2] and first["info"]["sid"] == "random0"
+    assert np.allclose(first["cell"], np.diag([5.0, 6.0, 30.0]))
+    assert np.allclose(first["forces"], [[0.1, -0.2, 0.3]] * 3)
+    total = load_dataset("oc20", split="all", cache_dir=tmp_path, energy="total")
+    assert total[1]["energy"] == pytest.approx(-101.0)
+
+
+def test_oc20_splits_and_dataset(fake_oc20, tmp_path):
+    splits = load_dataset("oc20", cache_dir=tmp_path, n_val=1)
+    assert len(splits["train"]) == 1 and len(splits["val"]) == 1
+    ds = load_dataset("oc20", split="train", cache_dir=tmp_path, n_val=1, cutoff=4.0)
+    assert isinstance(ds, AtomicDataset)
+    with pytest.raises(ValueError):
+        load_dataset("oc20", cache_dir=tmp_path, energy="free")

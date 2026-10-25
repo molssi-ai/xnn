@@ -1,6 +1,6 @@
 """GemNet tests: manuscript fidelity (NeurIPS 2021), the bases, the triplet and
 quadruplet enumeration, invariances, smoothness, scaling factors, direct
-forces, deployment, configs and (optionally) parity with the reference code.
+forces, deployment, configs and (optionally) fidelity to the reference code.
 
 ``_reference`` re-implements the paper's equations (eq 8-11, the blocks of
 Fig. 4) with loops over atoms, closed-form spherical Bessel functions and
@@ -834,28 +834,28 @@ def test_reference_key_translation():
     assert not t.quadruplets and t.cutoff == 5.0
 
 
-# parity with the reference implementation (optional)
+# fidelity to the reference implementation (optional)
 
-def _parity(mode):
+def _fidelity(mode):
     path = os.environ.get("GEMNET_UPSTREAM_PATH")
     if not path or not os.path.isdir(os.path.join(path, "gemnet")):
         pytest.skip("set GEMNET_UPSTREAM_PATH to a checkout of TUM-DAML/gemnet_pytorch")
     pytest.importorskip("sympy")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "gemnet_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "gemnet_fidelity.py")
     res = subprocess.run([sys.executable, script, path, mode], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-def test_parity_vs_reference_random_weights():
+def test_fidelity_vs_reference_random_weights():
     """Transplanted random weights (all four variants, float64): energies and
     forces agree with the reference code to float64 round-off."""
-    assert _parity("random") < 1e-10
+    assert _fidelity("random") < 1e-10
 
 
-def test_parity_vs_reference_pretrained():
+def test_fidelity_vs_reference_pretrained():
     """The published GemNet-Q and GemNet-T weights give the same energies and
     forces in xnn (float32)."""
-    assert _parity("pretrained") < 1e-3
+    assert _fidelity("pretrained") < 1e-3

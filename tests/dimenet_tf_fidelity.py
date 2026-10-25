@@ -1,6 +1,6 @@
-"""Helper for ``test_dimenet.py::test_parity_vs_reference_*``.
+"""Helper for ``test_dimenet.py::test_fidelity_vs_reference_*``.
 
-    python dimenet_tf_parity.py <checkout of gasteigerjo/dimenet> random|pretrained
+    python dimenet_tf_fidelity.py <checkout of gasteigerjo/dimenet> random|pretrained
 
 ``random``: builds the authors' TensorFlow DimeNet and DimeNet++ with random
 weights in float64, transplants every variable into the xnn models and

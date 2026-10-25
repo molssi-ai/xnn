@@ -32,6 +32,7 @@ from xnn.ffnn.models import (
     write_tinker_xyz,
 )
 from xnn.ffnn.models import amoeba as am
+from xnn.ffnn.models.amoeba_ewald import matmul3, matvec, vecmat
 from xnn.ffnn.models.amoebalib import KCAL_TO_EV, from_forcefield
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
@@ -556,6 +557,49 @@ def test_dense_induction_is_chosen_per_molecule_and_matches_the_iterative_solve(
     warm.dipole_guess = torch.full_like(exact, 50.0)
     warm(graphs)
     assert not warm.solver_stats["forward_guess"]
+
+
+def test_block_preconditioner_inverts_a_molecule_exactly():
+    """One water molecule is one block: the block-preconditioned solve converges at once and equals the dense one."""
+    g = _graph(_monomer(), Z_DIMER[:3])
+    dense = Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, solver="dense")
+    block = Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, solver="iterative", preconditioner="block",
+                   polar_eps=1e-12)
+    assert block.pc_blocks == 1 and block.pc_size == 3
+    mu_dense, mu_block = dense(g)["induced_dipoles"], block(g)["induced_dipoles"]
+    assert block.solver_stats["forward"] <= 2
+    assert torch.allclose(mu_block, mu_dense, atol=1e-12)
+    with pytest.raises(ValueError):
+        Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, preconditioner="ilu")
+
+
+def test_pcg_restarts_with_the_diagonal_when_a_preconditioner_is_indefinite():
+    """A preconditioner that loses definiteness is replaced and the solve still converges."""
+    rng = np.random.default_rng(4)
+    Q = rng.normal(size=(9, 9))
+    A = torch.tensor(Q @ Q.T + 9.0 * np.eye(9))
+    b = torch.tensor(rng.normal(size=(3, 3)))
+    alpha, polar = torch.ones(3, dtype=torch.float64), torch.ones(3, dtype=torch.bool)
+
+    def field_of(v):
+        return v - (A @ v.reshape(-1)).reshape(3, 3)
+
+    x, iterations, _, _ = am._pcg(b, alpha, field_of, polar, 1e-12, 200, precond=lambda r: -r)
+    assert torch.allclose(x.reshape(-1), torch.linalg.solve(A, b.reshape(-1)), atol=1e-10)
+    assert iterations < 200
+
+
+def test_matrix_free_pair_products_match_the_tensor_products():
+    """dipole_field, matvec, vecmat and matmul3 equal their einsum and matmul forms."""
+    g = torch.Generator().manual_seed(5)
+    r, m, D1, D2 = (torch.randn(s, generator=g, dtype=torch.float64) for s in ((7, 3), (2, 7, 3), (7,), (7,)))
+    A = torch.randn(7, 3, 3, generator=g, dtype=torch.float64)
+    T = am.dipole_field_tensor(r, D1, D2)
+    assert torch.allclose(am.dipole_field(m, r, D1, D2), torch.einsum("mab,smb->sma", T, m), atol=1e-14)
+    assert torch.allclose(matvec(A, r), torch.einsum("mab,mb->ma", A, r), atol=1e-14)
+    assert torch.allclose(vecmat(r, A), torch.einsum("mb,mba->ma", r, A), atol=1e-14)
+    B = torch.randn(7, 3, 3, generator=g, dtype=torch.float64)
+    assert torch.allclose(matmul3(A, B), A @ B, atol=1e-14)
 
 
 def test_dipole_predictor_coefficients_and_history():

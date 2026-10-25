@@ -7,7 +7,7 @@ generalized Fourier transforms), the correlation layers against the direct
 evaluation of eq 4 and eq 6 for point filters, the rotation operators
 against exact grid rotations, and the equivariance of every layer and of
 the potential; the spherical-signal featurizer against a loop reference.
-``tests/s2cnn_parity.py`` compares with the reference implementation when
+``tests/s2cnn_fidelity.py`` compares with the reference implementation when
 it is importable.
 """
 import math
@@ -511,10 +511,10 @@ def test_train_step_energy_only():
 
 # the reference implementation
 
-def test_reference_parity():
+def test_reference_fidelity():
     pytest.importorskip("s2cnn")
     pytest.importorskip("lie_learn")
-    from s2cnn_parity import compare_all
+    from s2cnn_fidelity import compare_all
     for dtype, tol in ((torch.float32, 1e-5), (torch.float64, 1e-11)):
         worst = compare_all(dtype)
         assert max(worst.values()) < tol, worst

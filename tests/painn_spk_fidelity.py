@@ -1,6 +1,6 @@
-"""Parity of the xnn PaiNN with the reference implementation (schnetpack).
+"""Fidelity of the xnn PaiNN to the reference implementation (schnetpack).
 
-    python painn_spk_parity.py [float32|float64] [bessel|gaussian]
+    python painn_spk_fidelity.py [float32|float64] [bessel|gaussian]
 
 Builds a randomly initialized xnn :class:`~xnn.gnn.models.painn.PaiNN` with
 the dipole and polarizability heads, transplants its weights into the

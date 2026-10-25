@@ -1,6 +1,6 @@
 """PaiNN tests: manuscript fidelity (ICML 2021), physical invariances and
 equivariances of the tensorial heads, smoothness, TorchScript deployment,
-config handling and (optionally) parity with the reference code.
+config handling and (optionally) fidelity to the reference code.
 
 The centerpiece is ``_reference``: an independent, loop-based implementation
 of the paper's equations (the message block of eq 7 and 8, the update block of
@@ -548,13 +548,13 @@ def test_reference_key_translation():
     assert cfg.model.cutoff == 4.5 and cfg.data.cutoff == 4.5
 
 
-# parity with the reference implementation (optional)
+# fidelity to the reference implementation (optional)
 
-def _parity(dtype, radial_basis):
+def _fidelity(dtype, radial_basis):
     pytest.importorskip("schnetpack")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "painn_spk_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "painn_spk_fidelity.py")
     res = subprocess.run([sys.executable, script, dtype, radial_basis],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
@@ -562,14 +562,14 @@ def _parity(dtype, radial_basis):
 
 
 @pytest.mark.parametrize("radial_basis", ["bessel", "gaussian"])
-def test_parity_vs_reference_float64(radial_basis):
+def test_fidelity_vs_reference_float64(radial_basis):
     """Transplanted weights give the reference energies, forces, charges,
     dipoles and polarizabilities at the float64 floor (a layout or sign
     convention error would show as O(1))."""
-    assert _parity("float64", radial_basis) < 1e-12
+    assert _fidelity("float64", radial_basis) < 1e-12
 
 
 @pytest.mark.parametrize("radial_basis", ["bessel", "gaussian"])
-def test_parity_vs_reference_float32(radial_basis):
+def test_fidelity_vs_reference_float32(radial_basis):
     """The same in float32, at float32 round-off."""
-    assert _parity("float32", radial_basis) < 1e-5
+    assert _fidelity("float32", radial_basis) < 1e-5

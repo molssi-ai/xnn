@@ -572,7 +572,7 @@ def test_relaxed_ethane_barrier_matches_paper():
         f"{HC}-{CT}-{OH}-{HO}"]["v"][3] == 0.352
 
 
-def test_openmm_parity():
+def test_openmm_fidelity():
     # independent verification: the same library + topology evaluated
     # through OpenMM (Coulomb via NonbondedForce, LJ via a
     # CustomNonbondedForce with OPLS geometric mixing, exact 1,4

@@ -4,8 +4,8 @@ Covers the symmetry-function / AEV building blocks, rotation/translation/
 permutation invariance of energies and equivariance of forces, the ANI-1,
 ANI-1x, and ANI-1ccx presets (AEV lengths and per-element architectures), self
 atomic energies, config building with upstream key translation, and -- when
-``torchani`` is available -- element-for-element AEV parity against
-``torchani.AEVComputer`` and full energy/force parity via weight transplant of
+``torchani`` is available -- element-for-element AEV fidelity to
+``torchani.AEVComputer`` and full energy/force fidelity via weight transplant of
 both the pretrained ANI-1x and ANI-1ccx models.
 """
 import math
@@ -264,7 +264,7 @@ def test_behler_parrinello_conventions():
     assert math.isclose(bp.angular.cos_factor, 1.0)
 
 
-# torchani parity (only where torchani is installed)                          #
+# torchani fidelity (only where torchani is installed)                          #
 def _xnn_graph(Z, pos, cutoff):
     Z = torch.as_tensor(Z, dtype=torch.long)
     pos = torch.as_tensor(pos, dtype=torch.float64)
@@ -278,7 +278,7 @@ def _xnn_graph(Z, pos, cutoff):
     ("ani1x", (5.2, 3.5, [16.0], 16, [8.0], [32.0], 4, 8)),
     ("ani1", (4.6, 3.1, [16.0], 32, [8.0], [8.0], 8, 8)),
 ])
-def test_torchani_aev_parity(preset, grid):
+def test_torchani_aev_fidelity(preset, grid):
     """xnn AEV matches torchani.AEVComputer element-for-element."""
     torchani = pytest.importorskip("torchani")
     Rcr, Rca, EtaR, nR, EtaA, Zeta, nA, nZ = grid
@@ -303,7 +303,7 @@ def test_torchani_aev_parity(preset, grid):
     ("ani1x", "ANI1x"),
     ("ani1ccx", "ANI1ccx"),
 ])
-def test_torchani_energy_force_parity(preset, upstream):
+def test_torchani_energy_force_fidelity(preset, upstream):
     """Transplanting torchani's pretrained ANI-1x/ANI-1ccx weights reproduces E and F."""
     torchani = pytest.importorskip("torchani")
     model = getattr(torchani.models, upstream)(
@@ -339,7 +339,7 @@ def test_torchani_energy_force_parity(preset, upstream):
     assert torch.allclose(out["forces"].detach(), f, atol=1e-6)
 
 
-def test_torchani_ani2x_aev_parity():
+def test_torchani_ani2x_aev_fidelity():
     """xnn ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
     torchani = pytest.importorskip("torchani")
     def t(x):
@@ -360,7 +360,7 @@ def test_torchani_ani2x_aev_parity():
     assert torch.allclose(x, ref[0], atol=1e-10)
 
 
-def test_torchani_ani2x_energy_force_parity():
+def test_torchani_ani2x_energy_force_fidelity():
     """Transplanting torchani's pretrained ANI-2x weights reproduces E and F."""
     torchani = pytest.importorskip("torchani")
     model = torchani.models.ANI2x(periodic_table_index=False).double()

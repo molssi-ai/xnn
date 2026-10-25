@@ -3,7 +3,7 @@
 Covers the exact e3nn-Gate stand-in, model equivariance / force co-rotation,
 periodic stress, the flexible number of layers, TorchScript/LAMMPS export,
 upstream yaml key translation, and -- when the original ``nequip`` package is
-installed -- machine-precision weight-transplant parity against it.
+installed -- machine-precision weight-transplant fidelity to it.
 """
 import numpy as np
 import pytest
@@ -188,7 +188,7 @@ def test_upstream_nequip_key_translation():
     assert both.model.cutoff == 4.0
 
 
-def test_parity_vs_original_nequip():
+def test_fidelity_vs_original_nequip():
     """Weight transplant from the original nequip gives identical E and F."""
     pytest.importorskip("nequip")
     from nequip.data import AtomicData, AtomicDataDict

@@ -1,7 +1,7 @@
 """TensorNet tests: manuscript fidelity (the tensor embedding, interaction and readout
 of the NeurIPS 2023 paper as released in TorchMD-Net 2.0), the O(3) / SO(3) variants,
 the total-charge coupling, smoothness, TorchScript deployment, config handling and
-(optionally) parity with the reference code.
+(optionally) fidelity to the reference code.
 
 ``_reference`` is a loop-based implementation of the equations (explicit 3 x 3
 matrices per atom and feature, the self term of the reference neighbor list) that
@@ -492,24 +492,24 @@ def test_reference_key_translation():
     assert m.tensor_embedding.emb.weight.shape == (50, 16) and m.equivariance_group == "SO(3)"
 
 
-# parity with the reference implementation (optional)
+# fidelity to the reference implementation (optional)
 
-def _parity(dtype):
+def _fidelity(dtype):
     path = os.environ.get("TORCHMDNET_UPSTREAM_PATH")
     if not path:
         pytest.skip("set TORCHMDNET_UPSTREAM_PATH to a checkout of torchmd/torchmd-net")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "torchmdnet_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "torchmdnet_fidelity.py")
     res = subprocess.run([sys.executable, script, path, "tensornet", dtype],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-def test_parity_vs_reference_float64():
-    assert _parity("float64") < 1e-12
+def test_fidelity_vs_reference_float64():
+    assert _fidelity("float64") < 1e-12
 
 
-def test_parity_vs_reference_float32():
-    assert _parity("float32") < 1e-4
+def test_fidelity_vs_reference_float32():
+    assert _fidelity("float32") < 1e-4
