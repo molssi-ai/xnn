@@ -1,0 +1,22 @@
+# Equiformer, the equivariant graph attention transformer (Liao & Smidt, ICLR 2023),
+# the MD17 model of the paper with l_max = 2 (Table 11, 3.5 M parameters): six blocks of
+# 128x0e+64x1e+32x2e, four heads, MLP attention with non-linear messages, 32
+# exponential-normal radial functions at 5 A. n_features scales the irreps of the
+# paper architecture chosen by l_max (1, 2 or 3) and e3 (both parities).
+name: equiformer
+cutoff: 5.0
+n_features: 128
+n_interactions: 6
+n_rbf: 32
+extra:
+  l_max: 2
+  e3: false
+  radial_basis: expnorm         # gaussian (QM9, OC20) / bessel
+  attention: mlp                # dot_product: the ablation of appendix C.3
+  nonlinear_message: true
+  # smooth_cutoff: true         # continuous energy at the cutoff (MD); not in the paper
+  # avg_degree: 15.58           # set from the training data
+  # avg_num_nodes: 18.03
+  # irreps_node_embedding: 128x0e+64x1e+32x2e   # explicit irreps override the preset
+  # species: [1, 6, 8]
+  # atomic_energies: average

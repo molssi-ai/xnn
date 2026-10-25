@@ -1,0 +1,29 @@
+# EquiformerV2 (Liao, Wood, Das & Smidt, ICLR 2024), the QM9 model of the paper
+# (Table 13): six blocks of 96 channels up to degree 4, four heads, separable S2
+# activations on an 18 x 18 grid, separable layer norm, attention re-normalization,
+# 128 Gaussians at 5 A. The OC20 base model is l_max 6, m_max 2, n_features 128,
+# 12 blocks, 8 heads (attn_hidden 64, value 16, ffn 128, edge_channels 128).
+name: equiformer_v2
+cutoff: 5.0
+n_features: 96
+n_interactions: 6
+n_rbf: 128
+extra:
+  l_max: 4
+  m_max: 4
+  num_heads: 4
+  attn_hidden_channels: 48
+  attn_alpha_channels: 64
+  attn_value_channels: 24
+  ffn_hidden_channels: 96
+  edge_channels: 64
+  grid_resolution: 18
+  norm_type: layer_norm_sh      # layer_norm / rms_norm_sh
+  activation: sep_s2            # s2 / gate
+  use_grid_mlp: true
+  # direct_forces: true         # the OC20 S2EF force head (not conservative)
+  # smooth_cutoff: true         # continuous energy at the cutoff (MD); not in the paper
+  # avg_degree: 15.58           # set from the training data
+  # avg_num_nodes: 18.03
+  # species: [1, 6, 7, 8, 9]
+  # atomic_energies: average
