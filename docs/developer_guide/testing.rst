@@ -21,18 +21,22 @@ What the tests check
   forces against finite differences, size extensivity, batching, config
   key translation, and TorchScript parity with the eager model where the
   model exports.
-- **Faithful implementations** (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet, GemNet, SpookyNet,
-  PaiNN, TensorNet, ET, PhysNet, ANI, HDNNP, BAMBOO, LES, D3, D4): parity with the upstream code under
-  transplanted weights, to about 1e-15 (HDNNP against the RuNNer executable
-  when ``XNN_RUNNER`` points to it) (``test_mace`` also covers the
-  foundation-checkpoint conversion in process, without downloads).
-- **Clean-room implementations** (SchNet, the SE(3) steerable CNN,
-  ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO): parity
-  with an independent implementation of the papers' equations, hand-recomputed
-  terms, the published tables and, for OPLS, OpenMM (``test_amber``,
-  ``test_charmm`` and ``test_amoeba`` also check float32 against float64, the
-  improper and multipole-frame conventions, for CHARMM the 1,4 bookkeeping in
-  small rings and for HIPPO the density kernels against their closed forms).
+- **Fidelity** (every model, whatever the implementation method): numerical
+  agreement with the reference to float64 round-off, and to float32 round-off
+  in single precision. The reference is the upstream code under identical
+  weights where one exists (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
+  GemNet, SpookyNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, PhysNet,
+  ANI, the spherical CNN, HDNNP against the RuNNer executable when
+  ``XNN_RUNNER`` points to it,
+  BAMBOO, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
+  AMBER, CHARMM and DREIDING, Tinker for AMOEBA and HIPPO, MOPAC for the NDDO
+  methods), and otherwise an independent implementation of the paper's
+  equations with its published tables (SchNet, the SE(3) steerable CNN).
+  ``test_mace`` also covers the foundation-checkpoint conversion in
+  process, without downloads; ``test_amber``, ``test_charmm`` and
+  ``test_amoeba`` also check float32 against float64, the improper and
+  multipole-frame conventions, for CHARMM the 1,4 bookkeeping in small rings
+  and for HIPPO the density kernels against their closed forms.
 - **Pipeline**: neighbor lists against ASE and the vesin backend, mixed
   batches and label masks, float64 geometry, the data and model hubs, ASE
   file I/O, the losses, the benchmark runner, the MDI engine, the fast
@@ -48,6 +52,8 @@ Conventions for new code
 - A new model gets, at minimum: a registration test, an invariance or
   equivariance test, a periodic-stress test and, if it exports, a
   script-versus-eager parity test.
-- A faithful re-implementation also pins parity with the upstream code under
-  transplanted weights, guarded by an import check. A clean-room build pins
-  parity with an independent implementation of the paper's equations instead.
+- Every model also pins its fidelity: agreement with its reference to round-off,
+  whatever the implementation method. The reference is the upstream code under
+  identical weights (guarded by an import check), the reference program, or,
+  where neither exists, an independent implementation of the paper's equations
+  and its published numbers.

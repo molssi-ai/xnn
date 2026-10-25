@@ -437,6 +437,67 @@ keys / values / none), ``attn_activation``, ``trainable_rbf`` and
 ``energy_shift`` / ``energy_scale``, are also available. The attention weights
 of a structure are returned by ``model.attention_weights(graph)``.
 
+Equiformer
+==========
+:class:`~xnn.trfnn.models.equiformer.Equiformer` (`atomicarchitects/equiformer
+<https://github.com/atomicarchitects/equiformer>`_) is the equivariant graph
+attention transformer of `Liao and Smidt, Int. Conf. Learn. Represent. (2023)
+<https://arxiv.org/abs/2206.11990>`_. Irreps features pass through pre-norm
+blocks of graph attention and feed-forward networks. The attention combines MLP
+attention weights with non-linear messages built from depth-wise tensor
+products.
+
+.. code-block:: yaml
+
+   model:
+     name: equiformer
+     cutoff: 5.0
+     n_features: 128      # even scalars of the paper architecture
+     n_interactions: 6
+     n_rbf: 32
+     l_max: 2             # 1 (OC20), 2 (QM9, MD17) or 3 (MD17)
+     e3: false            # true: the E(3) model with both parities
+     radial_basis: expnorm
+     smooth_cutoff: true  # continuous energy at the cutoff (not in the paper)
+
+``n_features`` scales the irreps of the paper architecture. Explicit irreps
+(``irreps_node_embedding``, ``irreps_head``, ``irreps_mlp_mid``) override it.
+Other options include ``attention: dot_product`` (the ablation baseline),
+``nonlinear_message``, ``avg_degree`` / ``avg_num_nodes`` and the dropout rates.
+
+EquiformerV2
+============
+:class:`~xnn.trfnn.models.equiformer_v2.EquiformerV2` (`fairchem
+<https://github.com/facebookresearch/fairchem>`_) is the eSCN-based successor of
+`Liao et al., Int. Conf. Learn. Represent. (2024)
+<https://arxiv.org/abs/2306.12059>`_. The tensor products become SO(2) linear
+maps in edge-aligned frames, which makes degrees up to 6 or 8 affordable. The
+attention adds a layer norm on its scalars, the activations act on samples of
+the sphere, and the layer norm treats degree 0 separately.
+
+.. code-block:: yaml
+
+   model:
+     name: equiformer_v2
+     cutoff: 5.0
+     n_features: 96       # channels per coefficient
+     n_interactions: 6
+     n_rbf: 128
+     l_max: 4
+     m_max: 4             # orders kept in the edge frames (2 in the OC20 models)
+     num_heads: 4
+     smooth_cutoff: true
+     # direct_forces: true  # the OC20 force head (not conservative)
+
+Forces and stress from autograd include the dependence of the edge frames on the
+positions, so they are exact derivatives of the energy. The reference code
+detaches the frames. ``norm_type`` (``layer_norm_sh`` / ``layer_norm`` /
+``rms_norm_sh``), ``activation`` (``sep_s2`` / ``s2`` / ``gate``),
+``use_grid_mlp`` and ``grid_resolution`` select the variants of the paper's
+ablations. The reference's truncation to the nearest ``max_neighbors`` atoms is
+not supported, because it makes the energy discontinuous. Use a smaller cutoff
+instead.
+
 BAMBOO
 ======
 :class:`~xnn.hybnn.models.bamboo.BAMBOO` (`bytedance/bamboo
@@ -665,10 +726,24 @@ Choose a cutoff that encloses the whole system. ``polarization`` selects
 mutual, direct or no induction. The default is the library's setting.
 A batch of molecules of up to a thousand atoms each is solved directly, as
 one block-diagonal system. Larger molecules and cells use conjugate
-gradients, and ``solver`` overrides the choice. In molecular dynamics,
+gradients, and ``solver`` overrides the choice. ``preconditioner`` selects
+``"diagonal"`` (the default), ``"block"``, ``"neumann"`` or
+``"block-neumann"``. The others take fewer iterations but rarely give a
+faster step. In molecular dynamics,
 ``predictor="aspc"`` starts each solve from dipoles extrapolated from the
-last steps, which saves about half the iterations. The MDI engine turns it
+last steps, which saves a fifth to a third of the iterations. The MDI engine turns it
 on by default. Every backward solve starts from the previous one.
+``use_fast=True`` compiles the pair terms into fused GPU kernels. It
+applies to evaluation on a GPU, such as molecular dynamics, while
+training keeps the reference path. The first evaluations pay for the
+compilation. The MDI engine sets ``use_fast="auto"``.
+
+For molecular dynamics, ``plan_step(data, skin, capacity)`` records the
+decisions of one evaluation, and ``model(data, plan)`` reuses them while
+the atoms move. The plan keeps a Verlet pair list built with
+``cutoff + skin``, and ``plan.outdated(pos)`` tells when to rebuild it. The
+MDI engine runs the steps on a plan on a GPU and replays each step as one
+CUDA graph (``--step-graph``).
 
 Periodic cells
 --------------

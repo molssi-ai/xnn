@@ -73,10 +73,12 @@ checkpoint to LAMMPS ``fix mdi/qm`` or any other `MDI
            -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
 
 You can use the ``--dispersion d4`` flag to add a dispersion term to a plain
-model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA and
-HIPPO the engine predicts each step's induced dipoles from the last steps
-(``--dipole-predictor``, ASPC by default). The :ref:`cli` guide
-lists every option available to you. 
+model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA and HIPPO
+the engine predicts each step's induced dipoles from the last steps
+(``--dipole-predictor``, ASPC by default). On a GPU it also evaluates their
+steps on a Verlet pair list (``--skin``, 1 angstrom by default) and replays each
+step as one CUDA graph. The ``--step-graph off`` flag disables this behavior.
+The :ref:`cli` guide lists every option available to you. 
 
 There are example notebooks in ``notebooks/examples/common/deploy`` which illustrate how to drive
 the engine from Python and LAMMPS deployment interfaces.
@@ -104,5 +106,5 @@ it.
 Which model deploys how
 =======================
 - **ASE and MDI**: every model is supported, with or without a D3 / D4 term.
-- **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET,
+- **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2,
   SpookyNet, NequIP, MACE, Allegro and AIMNet2, with or without a D3 / D4 term.

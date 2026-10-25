@@ -28,6 +28,10 @@ implemented in the ``xnn.common.featurizers`` namespace:
 - :class:`~xnn.common.featurizers.cutoff.MollifierCutoff` denotes a
   bump-function envelope, ``exp(-r^2 / (r_c^2 - r^2))``, which is smooth and
   differentiable to infinite order (e.g., it is employed in AIMNet2, SpookyNet).
+- :class:`~xnn.common.featurizers.radial.BesselRBF` and
+  :class:`~xnn.common.featurizers.cutoff.PolynomialCutoff` offer trainable
+  Bessel basis functions and polynomial envelopes (NequIP, MACE, DimeNet and
+  the Equiformers).
 
 DNN atomic descriptors
 ======================
@@ -116,9 +120,6 @@ namespace and are often used to create edge features for graph neural networks
 - :class:`~xnn.gnn.featurizers.cartesian.CartesianAngularBasis` featurizes edges
   using the Cartesian monomials of CACE, spanning the latent space without using
   e3nn.
-- :class:`~xnn.gnn.featurizers.radial.BesselRBF` and
-  :class:`~xnn.gnn.featurizers.cutoff.PolynomialCutoff` offer trainable
-  Bessel basis functions and polynomial envelopes in NequIP, MACE and DimeNet.
 - :class:`~xnn.gnn.featurizers.spherical_bessel.SphericalBesselBasis` provides
   the 2D spherical Fourier-Bessel basis of DimeNet and GemNet with
   ``n_spherical`` degrees times ``n_radial`` Bessel roots over a distance and an

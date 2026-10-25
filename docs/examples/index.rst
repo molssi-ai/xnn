@@ -284,6 +284,38 @@ Table 2 on rMD17 aspirin, with and without the fix.
    ET from the paper: sizes, attention, equivariance and the cutoff fix of TorchMD-Net 2.0 <nb/examples/trfnn/et/et_paper_checks>
    ET on rMD17 aspirin: the MD17 protocol of the paper at a short budget <nb/examples/trfnn/et/et_md17_train>
 
+Equiformer (trfnn)
+==================
+
+The equivariant graph attention paper
+(`Liao and Smidt, Int. Conf. Learn. Represent. (2023)
+<https://arxiv.org/abs/2206.11990>`_): the sizes of Table 6 and section E.1,
+the irreps and tensor-product paths, SE(3) against E(3) under reflections, the
+cost of the attention variants and the cutoff. Then the MD17 protocol on rMD17
+aspirin, with and without the smooth cutoff.
+
+.. example-toctree::
+   :caption: Equiformer (trfnn)
+
+   Equiformer from the paper: sizes, equivariance, attention variants and the cutoff <nb/examples/trfnn/equiformer/equiformer_paper_checks>
+   Equiformer on rMD17 aspirin: the MD17 protocol of the paper at a short budget <nb/examples/trfnn/equiformer/equiformer_md17_train>
+
+EquiformerV2 (trfnn)
+====================
+
+The EquiformerV2 paper (`Liao et al., Int. Conf. Learn. Represent. (2024)
+<https://arxiv.org/abs/2306.12059>`_): the sizes of Tables 8 and 13, the eSCN
+edge frames, the sphere sampling, forces through the frames and liquid argon.
+Then Equiformer and EquiformerV2 on a QM9 subset, and EquiformerV2 on OC20 S2EF
+with conservative and direct forces.
+
+.. example-toctree::
+   :caption: EquiformerV2 (trfnn)
+
+   EquiformerV2 from the paper: sizes, eSCN frames, sphere sampling, exact forces and a liquid <nb/examples/trfnn/equiformer_v2/equiformer_v2_paper_checks>
+   Equiformer and EquiformerV2 on QM9 U0 at a short budget <nb/examples/trfnn/equiformer_v2/equiformer_v2_qm9_u0>
+   EquiformerV2 on OC20 S2EF: adsorbates on catalyst slabs <nb/examples/trfnn/equiformer_v2/equiformer_v2_oc20_s2ef>
+
 BAMBOO (hybnn)
 ===============
 

@@ -209,6 +209,16 @@ Currently, the following datasets are available:
   - Available arguments: ``system`` (``ag3`` or ``carbene``), ``n_train`` /
     ``n_val`` (1000 / 100, the rest is ``test``), ``seed``.
 
+- ``oc20``: the 200K training set of Open Catalyst 2020 S2EF
+  (`Chanussot et al., ACS Catal. 11, 6059 (2021)
+  <https://doi.org/10.1021/acscatal.0c04525>`_), adsorbates on periodic
+  catalyst slabs with RPBE energies and forces. Fixed subsurface atoms have
+  ``atom_force_weight`` 0, as in the paper's force metrics.
+
+  - Available arguments: ``split`` (``train`` / ``val``, or ``all``),
+    ``energy`` (``adsorption`` or ``total``), ``n_train``, ``n_val``,
+    ``seed``, ``return_info`` (system ids, atom tags, reference energies).
+
 - ``argon_md``: periodic argon with energies, forces and stress, bundled
   with the repository. This dataset is used by several example notebooks.
 - ``lode_dimers``: the LODE non-bonded sets (biomolecular dimers, monomers,

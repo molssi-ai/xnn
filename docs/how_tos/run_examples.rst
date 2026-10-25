@@ -65,6 +65,11 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
       and 2 layer models with ET on a QM9 subset (TorchMD-Net 2.0 Table 1).
 - ``trfnn/et`` checks the ET paper (sizes, attention weights, the cutoff fix of
   TorchMD-Net 2.0) and trains ET on rMD17 aspirin.
+- ``trfnn/equiformer`` checks the Equiformer paper (sizes, reflections, the
+  attention variants) and trains Equiformer on rMD17 aspirin.
+- ``trfnn/equiformer_v2`` checks the EquiformerV2 paper (sizes, edge frames,
+  sphere sampling, liquid argon), compares Equiformer and EquiformerV2 on a QM9
+  subset, and trains EquiformerV2 on OC20 S2EF.
 - ``cnn/se3cnn`` provides the Tetris experiment of the SE(3) steerable CNN
   paper, then compares its performance against that of conventional 3D CNN
   potentials, trained on rMD17 under rotations.
