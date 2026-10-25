@@ -82,6 +82,7 @@ from torch.nn import Parameter, ParameterDict
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
+from xnn.common.models.fast import AutoPolicy, resolve_use_fast
 from xnn.common.models.ops import cell_volume, scatter_sum
 
 from .amoeba_ewald import (
@@ -89,14 +90,20 @@ from .amoeba_ewald import (
     dispersion_real_kernel,
     ewald_coefficient,
     ewald_ladder,
+    fusable,
+    fused,
+    fused_active,
+    matmul3,
+    matvec,
     multipole_pme,
     multipole_self_energy,
     pme_grid_size,
+    region,
     self_field_coefficient,
     switching,
 )
 from .amoebalib import DEFAULT_SETTINGS, KCAL_TO_EV, MAX_TORSION_TERMS, WILDCARD, AmoebaLibrary, read_amoeba
-from .geometry import TINY, dihedral_cos_sin, pair_vectors
+from .geometry import TINY, dihedral_cos_sin, pair_image_shifts, pair_vectors
 from .topology import MolecularTopology, read_topology, residue_name_list
 
 # Tinker's Coulomb constant in kcal A / (mol e^2) and in eV A / e^2
@@ -373,7 +380,7 @@ class _LadderPlan:
         decay = torch.exp(-0.5 * R[:, None] * (en * zi[:, None] + em * zj[:, None]))
         basis = r_pow[:, bp] * decay[:, be]                                         # (M, nB)
         coef = (features @ W).view(R.shape[0], self.n_basis, self.order + 1)
-        return torch.einsum("mbo,mb->mo", coef, basis)
+        return (coef * basis[:, :, None]).sum(1)
 
 
 _LADDER_PLANS: dict = {}
@@ -385,6 +392,7 @@ def _ladder_plan(keys: tuple, order: int) -> _LadderPlan:
     return _LADDER_PLANS[(keys, order)]
 
 
+@region("hippo.ladder")
 def derivative_ladder(kernel: RadialSeries, R: Tensor, zi: Tensor, zj: Tensor, order: int
                       ) -> list[Tensor]:
     """``[D_0, ..., D_order]`` with ``D_n = (1/R d/dR)^n g`` evaluated per pair.
@@ -431,6 +439,213 @@ def _warm_hippo_ladders() -> None:
         _ladder_plan(tuple(kernel.terms), order)
 
 
+@fusable
+def core_valence_ladder(R: Tensor, zi: Tensor, zk: Tensor, slot: str, order: int) -> list[Tensor]:
+    """The ladder of the one-center (core-valence) kernel of the exponent of
+    ``zi`` (``slot="i"``) or ``zk`` (``slot="j"``), with a zero ``D_4``."""
+    zeta = zi if slot == "i" else zk
+    return derivative_ladder(core_valence_kernel(zeta.double(), slot), R, zi, zk, order) + [torch.zeros_like(R)]
+
+
+@fusable
+def two_center_ladder(R: Tensor, zi: Tensor, zk: Tensor, order: int, kernel) -> list[Tensor]:
+    """The ladder of a two-center kernel on every pair, selected between its
+    forms for equal and unequal exponents without a host synchronization;
+    the unequal form sees a distinct stand-in exponent where the two agree.
+    ``kernel(zi, zk, equal)`` builds the series."""
+    eq = (zi - zk).abs() <= 1e-9 * torch.maximum(zi.abs(), zk.abs())
+    zi64, zk64 = zi.double(), zk.double()
+    zk_un = torch.where(eq, 1.5 * zi64 + 1.0, zk64)
+    same = derivative_ladder(kernel(zi64, zk64, True), R, zi64, zk64, order)
+    diff = derivative_ladder(kernel(zi64, zk_un, False), R, zi64, zk_un, order)
+    return [torch.where(eq, a, b) for a, b in zip(same, diff)]
+
+
+def squared_overlap(zi: Tensor, zj: Tensor, equal: bool) -> RadialSeries:
+    """The squared overlap ``S^2`` of two Slater densities (HIPPO repulsion)."""
+    S = slater_overlap(zi, zj, equal)
+    return S * S
+
+
+def two_center(R: Tensor, zi: Tensor, zk: Tensor, order: int, kernel) -> list[Tensor]:
+    """The ladder of a two-center kernel (``kernel(zi, zk, equal)`` builds the
+    series), with the closed form of equal exponents where the two agree: on
+    a GPU both forms on every pair (:func:`two_center_ladder`), on a CPU each
+    form on its own pairs."""
+    if R.is_cuda:
+        return two_center_ladder(R, zi, zk, order, kernel)
+    eq = (zi - zk).abs() <= 1e-9 * torch.maximum(zi.abs(), zk.abs())
+    out = [torch.zeros_like(R) for _ in range(order + 1)]
+    for mask, equal in ((eq, True), (~eq, False)):
+        if not bool(mask.any()):
+            continue
+        Rm, zim, zkm = R[mask], zi[mask].double(), zk[mask].double()
+        vals = derivative_ladder(kernel(zim, zkm, equal), Rm, zim, zkm, order)
+        rows = mask.nonzero()[:, 0]
+        for n in range(order + 1):
+            out[n] = out[n].index_put((rows,), vals[n])
+    return out
+
+
+def _real_space_fields(f_at_k, f_at_i, D1m, D2m, scales, i_, k_, N: int, r_vec, R, q_i, q_k, d_i, d_k, Q_i, Q_k,
+                       keep, alpha_p):
+    """The real-space permanent fields at the atoms, direct- and polar-scaled,
+    and the mutual ladder of the solve, from the damped pair fields
+    ``f_at_k`` / ``f_at_i`` and mutual ladder ``D1m, D2m``. Molecules
+    (``keep`` ``None``): the scaled damped fields. Cells: the Ewald field of
+    the total multipoles minus their bare field, plus the scaled damped field
+    of the pairs kept; the mesh and self fields are added by the caller."""
+    u_scale = scales[:, 7] * scales[:, 3]
+    if keep is None:
+        sd, sp = scales[:, 6:7], scales[:, 2:3]
+        field_d = scatter_sum(f_at_k * sd, k_, N) + scatter_sum(f_at_i * sd, i_, N)
+        field_p = scatter_sum(f_at_k * sp, k_, N) + scatter_sum(f_at_i * sp, i_, N)
+        return field_d, field_p, D1m * u_scale, D2m * u_scale
+    Dc = coulomb_ladder(R, 3)
+    Dp = ewald_ladder(R, alpha_p, 3)
+    Dew = [(a - c) * keep for a, c in zip(Dp, Dc)]
+    f_ew_k = multipole_field(q_i, d_i, Q_i, r_vec, Dew, at_k=True)
+    f_ew_i = multipole_field(q_k, d_k, Q_k, r_vec, Dew, at_k=False)
+    kp = keep[:, None]
+    field_d = (scatter_sum(f_ew_k + f_at_k * (scales[:, 6:7] * kp), k_, N)
+               + scatter_sum(f_ew_i + f_at_i * (scales[:, 6:7] * kp), i_, N))
+    field_p = (scatter_sum(f_ew_k + f_at_k * (scales[:, 2:3] * kp), k_, N)
+               + scatter_sum(f_ew_i + f_at_i * (scales[:, 2:3] * kp), i_, N))
+    D1u = (Dp[1] - Dc[1] + D1m * u_scale) * keep
+    D2u = (Dp[2] - Dc[2] + D2m * u_scale) * keep
+    return field_d, field_p, D1u, D2u
+
+
+@fusable
+def amoeba_pair_block(R, r_vec, scales, q_i, q_k, d_i, d_k, Q_i, Q_k, i_, k_, N: int, keep, alpha_e, alpha_p,
+                      thole) -> dict:
+    """The AMOEBA multipole pairs as one function of per-pair tensors: the
+    permanent multipole energies (per pair and summed to the atoms) and, with
+    ``thole = (alpha_i, alpha_k, thole_i, thole_k)``, the real-space permanent
+    fields and mutual ladder of the induction (:func:`_real_space_fields`).
+    ``keep``, ``alpha_e`` and ``alpha_p`` are the Ewald inputs of cells
+    (``None`` for molecules)."""
+    Dc = coulomb_ladder(R, 4)
+    if keep is None:
+        e_mp = multipole_energy(q_i, d_i, Q_i, q_k, d_k, Q_k, r_vec, Dc) * scales[:, 1] * COULOMB
+    else:
+        De = ewald_ladder(R, alpha_e, 4)
+        Dm = [(a - (1.0 - scales[:, 1]) * c) * keep for a, c in zip(De, Dc)]
+        e_mp = multipole_energy(q_i, d_i, Q_i, q_k, d_k, Q_k, r_vec, Dm) * COULOMB
+    out = {"e_mp": e_mp, "e_mp_node": scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)}
+    if thole is not None:
+        Dt = thole_ladder(R, *thole, 3)
+        f_at_k = multipole_field(q_i, d_i, Q_i, r_vec, Dt, at_k=True)
+        f_at_i = multipole_field(q_k, d_k, Q_k, r_vec, Dt, at_k=False)
+        out["fields"] = _real_space_fields(f_at_k, f_at_i, Dt[1], Dt[2], scales, i_, k_, N, r_vec, R,
+                                           q_i, q_k, d_i, d_k, Q_i, Q_k, keep, alpha_p)
+    return out
+
+
+@fusable
+def hippo_pair_block(R, r_vec, scales, q_i, q_k, d_i, d_k, Q_i, Q_k, i_, k_, N: int, params: dict, keep,
+                     alpha_e, alpha_p, alpha_d, keep_d, switches: dict, polar: bool) -> dict:
+    """The HIPPO pairs as one function of per-pair tensors: charge-penetration
+    electrostatics, Pauli repulsion, damped dispersion and charge transfer
+    (per pair and summed to the atoms) and, with ``polar``, the real-space
+    permanent fields and mutual ladder of the induction. ``params`` holds the
+    per-pair class parameters (``"name_i"`` / ``"name_k"``), ``switches`` the
+    switches of the short-range terms (or ``None``); ``keep``, the Ewald
+    coefficients and ``keep_d`` are the inputs of cells (``None`` for
+    molecules)."""
+    p = params
+    core_i, core_k, zi, zk = p["core_i"], p["core_k"], p["zeta_i"], p["zeta_k"]
+    val_i = q_i - core_i
+    val_k = q_k - core_k
+    zero3 = torch.zeros_like(d_i)
+    zeroQ = torch.zeros_like(Q_i)
+    zero = torch.zeros_like(R)
+    out = {}
+
+    # permanent electrostatics: core-core, core-valence (one-center damping), valence-valence;
+    # in cells the real-space Ewald interaction of the total multipoles minus their bare
+    # interaction is added and the mesh and self terms complete the sum
+    Dc = coulomb_ladder(R, 4)
+    # valence of i seen by core k, and of k seen by core i
+    D_ki = core_valence_ladder(R, zi, zk, "i", 3)
+    D_ik = core_valence_ladder(R, zi, zk, "j", 3)
+    D_ov = two_center(R, zi, zk, 4, overlap_coulomb_kernel)
+    e_cc = core_i * core_k * Dc[0]
+    e_ck = multipole_energy(val_i, d_i, Q_i, core_k, zero3, zeroQ, r_vec, D_ki)
+    e_ik = multipole_energy(core_i, zero3, zeroQ, val_k, d_k, Q_k, r_vec, D_ik)
+    e_vv = multipole_energy(val_i, d_i, Q_i, val_k, d_k, Q_k, r_vec, D_ov)
+    e_damped = (e_cc + e_ck + e_ik + e_vv) * scales[:, 1]
+    if keep is None:
+        e_mp = e_damped * COULOMB
+    else:
+        De = ewald_ladder(R, alpha_e, 4)
+        e_full = multipole_energy(q_i, d_i, Q_i, q_k, d_k, Q_k, r_vec, [(a - c) * keep for a, c in zip(De, Dc)])
+        e_mp = (e_full + e_damped * keep) * COULOMB
+    out["e_mp"] = e_mp
+
+    # Pauli repulsion: K_i K_j S^2_total / R. The multipole expansion acts on the
+    # squared overlap S^2 of the valence densities (its derivative ladder), the
+    # 1/R stays outside, and the valence electron density carries the valence
+    # electron count as its monopole with dipoles and quadrupoles of the opposite
+    # sign to those of the total charge distribution
+    D_rep = two_center(R, p["rep_alpha_i"], p["rep_alpha_k"], 4, squared_overlap)
+    e_rep = p["rep_k_i"] * p["rep_k_k"] * multipole_energy(p["rep_valence_i"], -d_i, -Q_i, p["rep_valence_k"],
+                                                           -d_k, -Q_k, r_vec, D_rep) / R * scales[:, 4]
+    if switches["repulsion"] is not None:
+        e_rep = e_rep * switches["repulsion"]
+    out["e_rep"] = e_rep
+
+    # damped dispersion: -C6_i C6_k / R^6 [ (3 lambda_5 - lambda_3) / 2 ]^2; in cells the
+    # Ewald real-space share replaces the bare 1/R^6 and the mesh adds the rest
+    D_d = two_center(R, p["disp_alpha_i"], p["disp_alpha_k"], 2, overlap_coulomb_kernel)
+    lam3 = -D_d[1] * R ** 3
+    lam5 = D_d[2] * R ** 5 / 3.0
+    fdamp = 0.5 * (3.0 * lam5 - lam3)
+    c6 = p["disp_c6_i"] * p["disp_c6_k"]
+    if keep is None:
+        e_disp = -c6 / R ** 6 * fdamp * fdamp * scales[:, 5]
+        if switches["dispersion"] is not None:
+            e_disp = e_disp * switches["dispersion"]
+    else:
+        g = dispersion_real_kernel(R, alpha_d)
+        e_disp = -c6 / R ** 6 * (scales[:, 5] * fdamp * fdamp - 1.0 + g) * keep_d
+    out["e_disp"] = e_disp
+
+    # charge transfer: -(eps_i e^-eta_k R + eps_k e^-eta_i R); a zero eta switches a term off
+    eta_i, eta_k = p["chgtrn_alpha_i"], p["chgtrn_alpha_k"]
+    t1 = torch.where(eta_k > 0, p["chgtrn_eps_i"] * torch.exp(-eta_k * R), zero)
+    t2 = torch.where(eta_i > 0, p["chgtrn_eps_k"] * torch.exp(-eta_i * R), zero)
+    e_ct = -(t1 + t2) * scales[:, 1]
+    if switches["chgtrn"] is not None:
+        e_ct = e_ct * switches["chgtrn"]
+    out["e_ct"] = e_ct
+    for name in ("e_mp", "e_rep", "e_disp", "e_ct"):
+        out[name + "_node"] = scatter_sum(0.5 * out[name], i_, N) + scatter_sum(0.5 * out[name], k_, N)
+
+    # induction: permanent field with one-center damping (the source atom's
+    # exponent), mutual induction with the two-center overlap damping
+    if polar:
+        # field at k from atom i: core (Coulomb) + valence (damped by zeta_i)
+        f_at_k = (multipole_field(core_i, zero3, zeroQ, r_vec, Dc, at_k=True)
+                  + multipole_field(val_i, d_i, Q_i, r_vec, D_ki, at_k=True))
+        f_at_i = (multipole_field(core_k, zero3, zeroQ, r_vec, Dc, at_k=False)
+                  + multipole_field(val_k, d_k, Q_k, r_vec, D_ik, at_k=False))
+        D_mut = two_center(R, zi, zk, 2, overlap_coulomb_kernel)
+        out["fields"] = _real_space_fields(f_at_k, f_at_i, D_mut[1], D_mut[2], scales, i_, k_, N, r_vec, R,
+                                           q_i, q_k, d_i, d_k, Q_i, Q_k, keep, alpha_p)
+    return out
+
+
+@fusable
+def buffered_14_7(rv: Tensor, rmin: Tensor, eps: Tensor, delta: float, gamma: float) -> Tensor:
+    """Halgren's buffered 14-7 energy ``eps ((1 + delta) / (rho + delta))^7
+    ((1 + gamma) / (rho^7 + gamma) - 2)`` with ``rho = rv / rmin``."""
+    rho = rv / rmin
+    rho7 = rho ** 7
+    return eps * ((1.0 + delta) / (rho + delta)) ** 7 * ((1.0 + gamma) / (rho7 + gamma) - 2.0)
+
+
+@fusable
 def coulomb_ladder(R: Tensor, order: int) -> list[Tensor]:
     """The undamped ladder ``1/R, -1/R^3, 3/R^5, -15/R^7, 105/R^9``."""
     inv = 1.0 / R
@@ -439,6 +654,7 @@ def coulomb_ladder(R: Tensor, order: int) -> list[Tensor]:
     return out[:order + 1]
 
 
+@fusable
 def thole_ladder(R: Tensor, alpha_i: Tensor, alpha_j: Tensor, thole_i: Tensor, thole_j: Tensor,
                  order: int = 3) -> list[Tensor]:
     """The Thole-damped ladder ``D_1`` to ``D_3`` (``D_0`` is the plain Coulomb
@@ -461,6 +677,7 @@ def thole_ladder(R: Tensor, alpha_i: Tensor, alpha_j: Tensor, thole_i: Tensor, t
     return out[:order + 1]
 
 
+@fusable
 def multipole_energy(ci, di, Qi, ck, dk, Qk, r, D) -> Tensor:
     """Interaction energy of two multipole sets through a radial kernel.
 
@@ -490,8 +707,8 @@ def multipole_energy(ci, di, Qi, ck, dk, Qk, r, D) -> Tensor:
     dir_ = (di * r).sum(-1)
     dkr = (dk * r).sum(-1)
     dik = (di * dk).sum(-1)
-    Qir = torch.einsum("mab,mb->ma", Qi, r)
-    Qkr = torch.einsum("mab,mb->ma", Qk, r)
+    Qir = matvec(Qi, r)
+    Qkr = matvec(Qk, r)
     qir = (Qir * r).sum(-1)
     qkr = (Qkr * r).sum(-1)
     qik = (Qir * Qkr).sum(-1)
@@ -506,6 +723,7 @@ def multipole_energy(ci, di, Qi, ck, dk, Qk, r, D) -> Tensor:
             + D4 * qir * qkr + 4.0 * D3 * qik + 2.0 * D2 * qiqk)
 
 
+@fusable
 def multipole_field(c, d, Q, r, D, at_k: bool) -> Tensor:
     """Electric field of a multipole set through a radial kernel.
 
@@ -516,11 +734,161 @@ def multipole_field(c, d, Q, r, D, at_k: bool) -> Tensor:
     """
     D1, D2, D3 = D[1], D[2], D[3]
     dr = (d * r).sum(-1, keepdim=True)
-    Qr = torch.einsum("mab,mb->ma", Q, r)
+    Qr = matvec(Q, r)
     qrr = (Qr * r).sum(-1, keepdim=True)
     sign = -1.0 if at_k else 1.0
     return (sign * c[:, None] * D1[:, None] * r + D2[:, None] * r * dr + D1[:, None] * d
             + sign * D3[:, None] * r * qrr + sign * 2.0 * D2[:, None] * Qr)
+
+
+def _take(t: Tensor, idx: Tensor) -> Tensor:
+    """Rows ``t[idx]`` by ``index_select``: its backward is an atomic ``index_add``,
+    where the advanced-index gather sorts the indices and sums every atom's many
+    pairs one after the other, far below the memory bandwidth."""
+    return t.index_select(0, idx)
+
+
+def _plan_vectors(data: AtomicGraph, i: Tensor, k: Tensor, shift: Optional[Tensor]) -> Tensor:
+    """``pos[k] - pos[i]`` plus the image shift of the plan's pairs. The gathers
+    are :func:`_take`, whose backward adds atomically: the advanced indexing of
+    :func:`pair_vectors` sorts the indices of every pair in its backward. A
+    single cell enters as one product rather than a copy per pair."""
+    pos = data.pos
+    vec = _take(pos, k) - _take(pos, i)
+    if shift is not None:
+        cell = data.cell.to(vec.dtype)
+        if cell.shape[0] == 1:
+            vec = vec + shift @ cell[0]
+        else:
+            vec = vec + (shift[:, :, None] * _take(cell, _take(data.batch, i))).sum(1)
+    return vec.to(data.model_dtype)
+
+
+class StepPlan:
+    """What an evaluation of a structure decides on the host, recorded once and
+    reused while the structure moves by small steps (molecular dynamics between
+    rebuilds of the pair list): the image shifts of every bonded vector, the
+    unique pairs of the neighbor list with their image shifts and scale
+    factors, the layout of the Ewald sums and the polarizable atoms. An
+    evaluation on a plan reads these instead of deciding them, so it waits for
+    the device only in the convergence tests of the induced-dipole solve.
+
+    The pairs form a Verlet list: built with a neighbor list of ``cutoff +
+    skin``, they hold every pair within the cutoff until an atom has moved
+    by more than half the skin (:meth:`outdated`); the pairs beyond the
+    cutoff and the padding up to a fixed capacity get zero weight.
+
+    ``solve_iterations``, a dict from ``"forward"`` and ``"adjoint"`` to a
+    number of iterations, makes those solves run exactly that long without
+    reading the device (the counts of earlier steps are in ``solver_stats``);
+    ``converged`` then tells on the device whether every solve of the last
+    evaluation and its backward pass converged. Build a plan with
+    :meth:`Amoeba.plan_step`.
+    """
+
+    def __init__(self, skin: float = 0.0, capacity: Optional[int] = None):
+        self.recording = True
+        self.skin = float(skin)
+        self.capacity = capacity
+        self.shifts: list = []
+        self.pairs: Optional[tuple] = None
+        self.valid: Optional[Tensor] = None
+        self.scales: Optional[Tensor] = None
+        self.reference: Optional[Tensor] = None
+        self.ewald = None
+        self.has_polar: Optional[bool] = None
+        self.n_polar: Optional[int] = None
+        self.solve_iterations: Optional[dict] = None
+        self.converged: Optional[Tensor] = None
+
+    def replaying(self) -> bool:
+        """Whether the plan is complete and evaluations read it."""
+        return not self.recording
+
+    def outdated(self, pos: Tensor) -> Tensor:
+        """Whether an atom at ``pos`` has moved by more than half the skin since
+        the plan was built, as a boolean on the device (the pair list then
+        misses pairs and the plan must be built again).
+
+        Parameters
+        ----------
+        pos : Tensor
+            Positions ``(N, 3)``.
+
+        Returns
+        -------
+        Tensor
+            A boolean scalar.
+        """
+        step = pos.detach().to(self.reference.dtype) - self.reference
+        return (step * step).sum(-1).max() > (0.5 * self.skin) ** 2
+
+    def update(self, other: "StepPlan", bonded: bool = True) -> bool:
+        """Copy the pairs, image shifts and reference positions of ``other``, a
+        plan of the same structure built later, into this plan's tensors in
+        place, so a CUDA graph recorded on this plan replays the new ones.
+
+        Parameters
+        ----------
+        other : StepPlan
+            The new plan.
+        bonded : bool, optional
+            Copy the image shifts of the bonded vectors too (``other`` recorded
+            a whole evaluation), by default ``True``.
+
+        Returns
+        -------
+        bool
+            Whether every tensor matched in shape and was copied; nothing is
+            copied otherwise.
+        """
+        mine = [*self.pairs, self.valid, self.scales, self.reference, *(self.shifts if bonded else [])]
+        theirs = [*other.pairs, other.valid, other.scales, other.reference, *(other.shifts if bonded else [])]
+        if len(mine) != len(theirs) or any(
+                (a is None) != (b is None) or (a is not None and a.shape != b.shape) for a, b in zip(mine, theirs)):
+            return False
+        for a, b in zip(mine, theirs):
+            if a is not None:
+                a.copy_(b)
+        return True
+
+
+class _Images:
+    """The displacement vectors of the bonded terms of one evaluation: with a
+    recording plan the image shifts of every call are searched and recorded,
+    with a complete plan they are replayed in the same order."""
+
+    def __init__(self, data: AtomicGraph, plan: Optional[StepPlan]):
+        self.data, self.plan, self.calls = data, plan, 0
+
+    def __call__(self, a: Tensor, b: Tensor) -> Tensor:
+        if self.plan is None or self.data.cell is None:
+            return pair_vectors(self.data, a, b)
+        if self.plan.recording:
+            shift = pair_image_shifts(self.data, a, b)
+            self.plan.shifts.append(shift)
+        else:
+            shift = self.plan.shifts[self.calls]
+        self.calls += 1
+        return pair_vectors(self.data, a, b, shift=shift)
+
+
+def dipole_field(m: Tensor, r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
+    """The field of dipoles ``m`` ``(..., M, 3)`` at the other ends of the pairs.
+
+    It is ``T m = D_1 m + D_2 (r m) r`` (``r m`` the dot product), computed
+    without forming ``T``.
+    """
+    return D1[:, None] * m + (D2 * (r * m).sum(-1))[..., None] * r
+
+
+@fusable
+def mutual_field_real(mu: Tensor, r: Tensor, D1: Tensor, D2: Tensor, ik: Tensor, ki: Tensor, N: int) -> Tensor:
+    """The real-space field of dipoles ``mu`` ``(N, 3)`` through the pair ladders,
+    both directions of every pair at once: gather by ``ik = [i; k]``, scatter by
+    ``ki = [k; i]``."""
+    f = dipole_field(mu.index_select(0, ik).view(2, -1, 3), r, D1, D2)
+    return scatter_sum(f.view(-1, 3), ki, N)
 
 
 def dipole_field_tensor(r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
@@ -580,13 +948,20 @@ _BCU_WT = np.array([
     [4, -4, 4, -4, 2, 2, -2, -2, 2, -2, -2, 2, 1, 1, 1, 1]], dtype=float)
 
 
+_BCU_ON: dict = {}
+
+
 def bicubic_interpolate(f, fx, fy, fxy, x, y, x1, x2, y1, y2):
     """Bicubic interpolation (the Numerical Recipes construction) inside the
     cell with corner values ``f`` ``(M, 4)`` and derivatives, corners counted
     counter-clockwise from the lower left: ``(x1,y1), (x2,y1), (x2,y2), (x1,y2)``."""
     d1 = x2 - x1
     d2 = y2 - y1
-    wt = torch.as_tensor(_BCU_WT, dtype=f.dtype, device=f.device)
+    # kept on the device: a copy from the host at every evaluation cannot be recorded in a CUDA graph
+    key = (f.dtype, str(f.device))
+    if key not in _BCU_ON:
+        _BCU_ON[key] = torch.as_tensor(_BCU_WT, dtype=f.dtype, device=f.device)
+    wt = _BCU_ON[key]
     packed = torch.cat([f, fx * d1[:, None], fy * d2[:, None], fxy * (d1 * d2)[:, None]], dim=1)
     c = torch.einsum("ij,mj->mi", wt, packed).reshape(-1, 4, 4)
     t = ((x - x1) / d1)[:, None]
@@ -724,6 +1099,8 @@ class AmoebaForceField(nn.Module):
                 [[0.0] * MAX_TORSION_TERMS], [[0.0] * MAX_TORSION_TERMS]
         self.params["torsion_k"] = Parameter(torch.tensor(ks, dtype=dtype), requires_grad="torsion" in trainable_set)
         self.register_buffer("torsion_n", torch.tensor(ns, dtype=torch.long))
+        # the highest periodicity, on the host: reading it from the buffer waits for the device
+        self.torsion_nmax = max([n for row in ns for n in row] or [1])
         self.register_buffer("torsion_mask", torch.tensor(ms, dtype=dtype))
         ph = torch.tensor(phs, dtype=torch.float64)
         c, s = torch.cos(ph), torch.sin(ph)
@@ -1060,6 +1437,16 @@ class Amoeba(InteratomicPotential):
     polar_eps : float, optional
         Convergence of the iterative induced-dipole solve, the rms change
         per iteration in Debye (``1e-8``).
+    preconditioner : str, optional
+        Preconditioner of the iterative solve: ``"diagonal"`` (default,
+        the polarizabilities), ``"block"`` (the exact inverse of every
+        molecule's real-space block, polarization groups for molecules of
+        more than 32 atoms), ``"neumann"`` (the diagonal plus a first-order
+        correction from the pairs within ``precond_cutoff``) or
+        ``"block-neumann"`` (both). The dipoles are converged to
+        ``polar_eps`` either way; only the number of iterations changes.
+    precond_cutoff : float, optional
+        Pair distance of the Neumann correction, in Angstrom (4.5).
     solver : str, optional
         ``"auto"`` (dense for molecules up to a thousand atoms, iterative
         otherwise), ``"dense"`` or ``"iterative"``.
@@ -1083,6 +1470,13 @@ class Amoeba(InteratomicPotential):
         zero at zero while they train, by default ``True``. The quadrupoles
         stay symmetric and traceless in any case, and ``export_library``
         writes the multipoles the model uses.
+    use_fast : bool or str, optional
+        Compile the pair arithmetic (damping ladders, pair energies and
+        fields) into fused GPU kernels: ``False`` (default), ``True``, or
+        ``"auto"`` (on a GPU above a measured size). It runs on a GPU in
+        evaluation mode only, since compiled code has no second
+        derivatives: training and Hessians use the reference path. The
+        first evaluations compile, which takes some seconds per shape kind.
 
     Notes
     -----
@@ -1121,13 +1515,16 @@ class Amoeba(InteratomicPotential):
                  chgtrn_cutoff: Optional[float] = None,
                  dispersion_cutoff: Optional[float] = None,
                  polar_eps: float = 1e-8,
+                 preconditioner: str = "diagonal",
+                 precond_cutoff: float = 4.5,
                  mesh_self: bool = False,
                  solver: str = "auto",
                  max_iter: int = 100,
                  predictor: Optional[str] = None,
                  predictor_history: int = 6,
                  conserve_charge: bool = True,
-                 symmetry_mask: bool = True):
+                 symmetry_mask: bool = True,
+                 use_fast: Union[bool, str] = False):
         super().__init__()
         self.ewald = ewald
         self.ewald_alpha = None if ewald_alpha is None else float(ewald_alpha)
@@ -1146,11 +1543,16 @@ class Amoeba(InteratomicPotential):
         self.chgtrn_cutoff = None if chgtrn_cutoff is None else float(chgtrn_cutoff)
         self.dispersion_cutoff = None if dispersion_cutoff is None else float(dispersion_cutoff)
         self.polar_eps = float(polar_eps)
+        if preconditioner not in _Preconditioner.KINDS:
+            raise ValueError(f"preconditioner must be one of {_Preconditioner.KINDS} (got {preconditioner!r})")
+        self.preconditioner = preconditioner
+        self.precond_cutoff = float(precond_cutoff)
         self.mesh_self = bool(mesh_self)
         if solver not in ("auto", "dense", "iterative"):
             raise ValueError("solver must be 'auto', 'dense' or 'iterative'")
         self.solver = solver
         self.max_iter = int(max_iter)
+        self.set_use_fast(use_fast)
         self.predictor: Optional[DipolePredictor] = None
         self.set_dipole_predictor(predictor, predictor_history)
         # a one-shot starting guess for the next iterative solve, and the last adjoint of each
@@ -1339,6 +1741,7 @@ class Amoeba(InteratomicPotential):
         buf("angle_env", a_env, (-1,))
         buf("angle_fourth", a_fourth, (-1,))
         self.register_buffer("angle_inplane", torch.tensor(a_inplane, dtype=torch.bool))
+        self._inplane_any = any(a_inplane)
 
         # stretch-bend and Urey-Bradley on the angles that have them
         sb_idx, sb_type, sb_flip = [], [], []
@@ -1429,6 +1832,7 @@ class Amoeba(InteratomicPotential):
         buf("tortor_index", tt_idx, (-1, 5))
         self.tortor_index = self.tortor_index.t().contiguous()
         buf("tortor_type", tt_type, (-1,))
+        self._tortor_maps = set(tt_type)
         self.register_buffer("tortor_reverse", torch.tensor(tt_rev, dtype=torch.bool))
         self._tortor_tables = []
         for m in range(len(ff.tortor_keys)):
@@ -1513,6 +1917,44 @@ class Amoeba(InteratomicPotential):
                 gneigh[atom_group[j]].add(atom_group[i])
         gsep = _bfs_separations(n_groups, [sorted(s) for s in gneigh], 3)
         buf("atom_group", atom_group, (-1,))
+
+        # blocks of the block-Jacobi preconditioner: whole molecules up to _BLOCK_ATOMS atoms,
+        # otherwise polarization groups; atoms of a larger group stand alone
+        component = [-1] * n
+        for start in range(n):
+            if component[start] >= 0:
+                continue
+            component[start] = start
+            stack = [start]
+            while stack:
+                a = stack.pop()
+                for b in neighbors[a]:
+                    if component[b] < 0:
+                        component[b] = start
+                        stack.append(b)
+        comp_size: dict = {}
+        group_size: dict = {}
+        for i in range(n):
+            comp_size[component[i]] = comp_size.get(component[i], 0) + 1
+            group_size[atom_group[i]] = group_size.get(atom_group[i], 0) + 1
+        block_ids: dict = {}
+        fill: dict = {}
+        pc_block, pc_slot = [], []
+        for i in range(n):
+            if comp_size[component[i]] <= _BLOCK_ATOMS:
+                key = ("molecule", component[i])
+            elif group_size[atom_group[i]] <= _BLOCK_ATOMS:
+                key = ("group", atom_group[i])
+            else:
+                key = ("atom", i)
+            block = block_ids.setdefault(key, len(block_ids))
+            pc_block.append(block)
+            pc_slot.append(fill.get(block, 0))
+            fill[block] = fill.get(block, 0) + 1
+        buf("pc_block", pc_block, (-1,))
+        buf("pc_slot", pc_slot, (-1,))
+        self.pc_blocks = len(block_ids)
+        self.pc_size = max(fill.values()) if fill else 1
 
         # pair scale factors by bonded separation and group separation
         sep = _bfs_separations(n, neighbors, 4)
@@ -1654,7 +2096,7 @@ class Amoeba(InteratomicPotential):
         return None
 
     # geometry helpers
-    def _frames(self, data: AtomicGraph) -> tuple[Tensor, Tensor]:
+    def _frames(self, data: AtomicGraph, img) -> tuple[Tensor, Tensor]:
         """Rotation matrices ``(N, 3, 3)`` (columns x, y, z in the global
         frame) of every atom's local multipole frame, plus the chirality
         sign ``(N,)`` for frames with a y-defining atom."""
@@ -1666,21 +2108,21 @@ class Amoeba(InteratomicPotential):
         iz = self.frame_z.repeat(B) + starts.repeat_interleave(n)
         ix = self.frame_x.repeat(B) + starts.repeat_interleave(n)
         iy = self.frame_y.repeat(B) + starts.repeat_interleave(n)
-        vz = pair_vectors(data, idx, iz)
-        vx = pair_vectors(data, idx, ix)
-        vy = pair_vectors(data, idx, iy)
+        vz = img(idx, iz)
+        vx = img(idx, ix)
+        vy = img(idx, iy)
         uz, ux, uy = _unit(vz), _unit(vx), _unit(vy)
         is_bis = (ftype == FRAME_BISECTOR)[:, None]
         is_zb = (ftype == FRAME_ZBISECT)[:, None]
         is_3f = (ftype == FRAME_THREEFOLD)[:, None]
         is_zo = (ftype == FRAME_ZONLY)[:, None]
         is_none = (ftype == FRAME_NONE)[:, None]
+        # the axes as rows of an identity made on the device (no host-to-device copy)
+        eye = torch.eye(3, dtype=uz.dtype, device=uz.device)
+        ex, ey, ez = (eye[c].expand_as(uz) for c in range(3))
         zaxis = torch.where(is_bis, uz + ux, torch.where(is_3f, uz + ux + uy, uz))
-        zaxis = _unit(torch.where(is_none, torch.tensor([0.0, 0.0, 1.0], dtype=uz.dtype, device=uz.device)
-                                  .expand_as(uz), zaxis))
+        zaxis = _unit(torch.where(is_none, ez, zaxis))
         xref = torch.where(is_zb, ux + uy, ux)
-        ex = torch.tensor([1.0, 0.0, 0.0], dtype=uz.dtype, device=uz.device).expand_as(uz)
-        ey = torch.tensor([0.0, 1.0, 0.0], dtype=uz.dtype, device=uz.device).expand_as(uz)
         zonly_ref = torch.where((zaxis[:, :1].abs() > 0.866), ey, ex)
         xref = torch.where(is_zo | is_none, zonly_ref, xref)
         xaxis = _unit(xref - (xref * zaxis).sum(-1, keepdim=True) * zaxis)
@@ -1691,7 +2133,8 @@ class Amoeba(InteratomicPotential):
         chir = torch.where(has_y & (side < 0), -torch.ones_like(side), torch.ones_like(side))
         return torch.stack([xaxis, yaxis, zaxis], dim=2), chir
 
-    def _rotated_multipoles(self, data: AtomicGraph, B: int):
+    @region("amoeba.multipoles")
+    def _rotated_multipoles(self, data: AtomicGraph, B: int, img):
         """Global-frame charge, dipole and quadrupole of every atom."""
         row = self.mpole_row.repeat(B).clamp_min(0)
         has = self.has_mpole.repeat(B)
@@ -1699,25 +2142,92 @@ class Amoeba(InteratomicPotential):
         q = torch.where(has, q_rows[row], torch.zeros_like(q_rows[row]))
         d_loc = d_rows[row] * has[:, None].to(d_rows.dtype)
         Q_loc = Q_rows[row] * has[:, None, None].to(Q_rows.dtype)
-        R, chir = self._frames(data)
+        R, chir = self._frames(data, img)
         flip = torch.ones_like(d_loc)
         flip[:, 1] = chir
         d_loc = d_loc * flip
         Qflip = flip[:, :, None] * flip[:, None, :]
         Q_loc = Q_loc * Qflip
-        d = torch.einsum("nab,nb->na", R, d_loc)
-        Q = torch.einsum("nab,nbc,ndc->nad", R, Q_loc, R)
+        d = matvec(R, d_loc)
+        Q = matmul3(matmul3(R, Q_loc), R.transpose(1, 2))
         return q, d, Q
 
     # pair bookkeeping
-    def _pairs(self, data: AtomicGraph):
+    @region("amoeba.pairs")
+    def _pairs(self, data: AtomicGraph, plan: Optional[StepPlan] = None):
         """Unique nonbonded pairs ``(i, k, r_vec, r)`` of the neighbor list
         with their scale factors ``(M, 8)``: vdw, mpole, polar, induce, rep,
-        disp, direct, mutual."""
+        disp, direct, mutual. A recording plan stores the pairs, their image
+        shifts and scale factors; on a plan the vectors come from the
+        positions, and the pairs beyond the cutoff and the padding get zero
+        scale factors (every pair term of a molecule carries one, and those of a
+        cell are cut by their switches or the Ewald ``keep`` in addition)."""
+        if plan is None:
+            src, dst = data.edge_index[0], data.edge_index[1]
+            return self._select_pairs(data, src, dst, data.edge_vectors())
+        if plan.recording:
+            self._record_pairs(data, plan)
+        i, k, shift = plan.pairs
+        r = _plan_vectors(data, i, k, shift)
+        inside = ((r.detach() * r.detach()).sum(-1) < self.cutoff ** 2).to(r.dtype)
+        return i, k, r, plan.scales * inside[:, None]
+
+    def _record_pairs(self, data: AtomicGraph, plan: StepPlan) -> None:
+        """Store the unique pairs of the neighbor list of ``data`` in ``plan``: atoms,
+        image shifts and scale factors, padded to the plan's capacity, and the
+        positions they were found at."""
         src, dst = data.edge_index[0], data.edge_index[1]
-        vec = data.edge_vectors()
-        keep = src < dst
-        i, k, r = src[keep], dst[keep], vec[keep]
+        i, k, _, scales = self._select_pairs(data, src, dst, data.edge_vectors())
+        shift = None
+        if data.cell is not None:
+            shift = data.cell_shifts[(src < dst).nonzero()[:, 0]].to(data.pos.dtype)
+        scales = scales.detach()
+        M = int(i.shape[0])
+        cap = M if plan.capacity is None else int(plan.capacity)
+        if cap < M:
+            raise ValueError(f"the plan holds {cap} pairs, the neighbor list has {M}")
+        if cap > M and M > 0:
+            # the padding repeats the first pair with zero weight
+            fill = torch.zeros(cap - M, dtype=torch.long, device=i.device)
+            i, k = torch.cat([i, i[fill]]), torch.cat([k, k[fill]])
+            shift = None if shift is None else torch.cat([shift, shift[fill]])
+            scales = torch.cat([scales, torch.zeros_like(scales[fill])])
+        if plan.capacity is not None:
+            plan.valid = (torch.arange(int(i.shape[0]), device=i.device) < M).to(scales.dtype)
+        plan.pairs, plan.scales = (i, k, shift), scales
+        plan.reference = data.pos.detach().clone()
+
+    def plan_pairs(self, data: AtomicGraph, plan: StepPlan) -> bool:
+        """Refresh the pair list of ``plan`` from the neighbor list of ``data`` in
+        place, keeping the rest of the plan: a cheap rebuild while the atoms move
+        continuously (an atom wrapped back into the cell changes the image shifts
+        of its bonded vectors too and needs :meth:`plan_step`).
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The batched graph at the current positions, its neighbor list built
+            with ``cutoff + skin``.
+        plan : StepPlan
+            The plan to refresh.
+
+        Returns
+        -------
+        bool
+            Whether the pairs fitted the plan's capacity and were copied; the
+            plan is unchanged otherwise.
+        """
+        src, dst = data.edge_index[0], data.edge_index[1]
+        if plan.capacity is not None and int((src < dst).sum()) > plan.capacity:
+            return False
+        fresh = StepPlan(plan.skin, plan.capacity)
+        self._record_pairs(data, fresh)
+        return plan.update(fresh, bonded=False)
+
+    def _select_pairs(self, data: AtomicGraph, src: Tensor, dst: Tensor, vec: Tensor):
+        """The unique pairs of the neighbor list and their scale factors, decided on the host."""
+        sel = (src < dst).nonzero()[:, 0]
+        i, k, r = src[sel], dst[sel], _take(vec, sel)
         n = int(self.frame_type.shape[0])
         start = data.batch[i] * n
         key = (i - start) * n + (k - start)
@@ -1738,7 +2248,7 @@ class Amoeba(InteratomicPotential):
         return i, k, r, scales
 
     # forward
-    def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
+    def forward(self, data: AtomicGraph, plan: Optional[StepPlan] = None) -> dict[str, Tensor]:
         """Evaluate the energy on a (batched) atomic graph.
 
         Parameters
@@ -1747,6 +2257,10 @@ class Amoeba(InteratomicPotential):
             The batched graph; every structure must be a conformation of
             the bound topology, with the neighbor list built with this
             model's ``cutoff``.
+        plan : StepPlan, optional
+            The host decisions of this structure, from :meth:`plan_step`:
+            the evaluation reads them instead of deciding them again, and
+            takes its pairs from the plan instead of the neighbor list.
 
         Returns
         -------
@@ -1765,11 +2279,16 @@ class Amoeba(InteratomicPotential):
         P = self.ff.params
         ff = self.ff
         s = ff.settings
-        if not bool((data.n_atoms == n).all()):
-            raise ValueError(f"every structure must have the bound topology's {n} atoms "
-                             f"(got {data.n_atoms.tolist()})")
-        if not bool((data.atomic_numbers == self.top_z.repeat(B)).all()):
-            raise ValueError("atomic numbers do not match the bound topology's element sequence")
+        if plan is None or plan.recording:
+            if not bool((data.n_atoms == n).all()):
+                raise ValueError(f"every structure must have the bound topology's {n} atoms "
+                                 f"(got {data.n_atoms.tolist()})")
+            if not bool((data.atomic_numbers == self.top_z.repeat(B)).all()):
+                raise ValueError("atomic numbers do not match the bound topology's element sequence")
+        else:
+            # the solves of this evaluation and of its backward pass report here
+            plan.converged.fill_(True)
+        img = _Images(data, plan)
         dtype = P["bond_k"].dtype
         starts = torch.arange(B, device=device) * n
         cls_idx = self.top_class.repeat(B)
@@ -1794,7 +2313,7 @@ class Amoeba(InteratomicPotential):
         # bonds: K dr^2 (1 + c3 dr + c4 dr^2)
         bi = expand(self.bond_index)
         bt = tile(self.bond_type)
-        bvec = pair_vectors(data, bi[0], bi[1])
+        bvec = img(bi[0], bi[1])
         br = torch.sqrt((bvec * bvec).sum(1) + TINY)
         dr = br - P["bond_r0"][bt]
         e_bond = P["bond_k"][bt] * dr * dr * (1.0 + float(s["bond-cubic"]) * dr + float(s["bond-quartic"]) * dr * dr)
@@ -1804,12 +2323,12 @@ class Amoeba(InteratomicPotential):
         ai = expand(self.angle_index)
         at = tile(self.angle_type)
         aenv = tile(self.angle_env)
-        u = pair_vectors(data, ai[1], ai[0])
-        v = pair_vectors(data, ai[1], ai[2])
+        u = img(ai[1], ai[0])
+        v = img(ai[1], ai[2])
         theta_plain = _angle(u, v)
-        if bool(self.angle_inplane.any()):
+        if self._inplane_any:
             fourth = expand(self.angle_fourth.clamp_min(0).unsqueeze(0))[0]
-            w = pair_vectors(data, ai[1], fourth)          # D - B
+            w = img(ai[1], fourth)          # D - B
             ad = u - w                                     # A - D
             cd = v - w                                     # C - D
             nrm = torch.cross(ad, cd, dim=1)
@@ -1834,8 +2353,8 @@ class Amoeba(InteratomicPotential):
             sbt = tile(self.strbnd_type)
             flip = tile(self.strbnd_flip)
             a_sel = ai[:, sbi]
-            r1 = torch.sqrt((pair_vectors(data, a_sel[1], a_sel[0]) ** 2).sum(1) + TINY)
-            r2 = torch.sqrt((pair_vectors(data, a_sel[1], a_sel[2]) ** 2).sum(1) + TINY)
+            r1 = torch.sqrt((img(a_sel[1], a_sel[0]) ** 2).sum(1) + TINY)
+            r2 = torch.sqrt((img(a_sel[1], a_sel[2]) ** 2).sum(1) + TINY)
             k = P["strbnd_k"][sbt]
             k1 = torch.where(flip, k[:, 1], k[:, 0])
             k2 = torch.where(flip, k[:, 0], k[:, 1])
@@ -1852,7 +2371,7 @@ class Amoeba(InteratomicPotential):
             ubi = expand_angles(self.urey_angle.unsqueeze(0))[0]
             ubt = tile(self.urey_type)
             a_sel = ai[:, ubi]
-            rv = pair_vectors(data, a_sel[0], a_sel[2])
+            rv = img(a_sel[0], a_sel[2])
             rr = torch.sqrt((rv * rv).sum(1) + TINY)
             e_ub = P["urey_k"][ubt] * (rr - P["urey_r0"][ubt]) ** 2
             out_terms["e_urey"] = scatter_sum(e_ub, a_sel[1], N)
@@ -1864,9 +2383,9 @@ class Amoeba(InteratomicPotential):
             oi = expand(self.opbend_index)
             ot = tile(self.opbend_type)
             d_, b_, a_, c_ = oi[0], oi[1], oi[2], oi[3]
-            ab = pair_vectors(data, b_, a_)
-            cb = pair_vectors(data, b_, c_)
-            db = pair_vectors(data, b_, d_)
+            ab = img(b_, a_)
+            cb = img(b_, c_)
+            db = img(b_, d_)
             ee = (db * torch.cross(ab, cb, dim=1)).sum(1)
             if str(s["opbendtype"]).upper().startswith("ALL"):
                 ad = ab - db
@@ -1890,8 +2409,8 @@ class Amoeba(InteratomicPotential):
         if self.torsion_type.numel():
             di = expand(self.torsion_index)
             dtp = tile(self.torsion_type)
-            c1, s1 = dihedral_cos_sin(data, di)
-            nmax = int(ff.torsion_n.max())
+            c1, s1 = dihedral_cos_sin(data, di, img)
+            nmax = ff.torsion_nmax
             cs, ss = [c1], [s1]
             for _ in range(1, nmax):
                 cs.append(cs[-1] * c1 - ss[-1] * s1)
@@ -1914,14 +2433,14 @@ class Amoeba(InteratomicPotential):
             a_, b_, c_, d_, e_, g_ = pi_
             pc = data.pos[c_].to(dtype)
             pd = data.pos[d_].to(dtype)
-            ad = pair_vectors(data, d_, a_)
-            bd = pair_vectors(data, d_, b_)
-            ec = pair_vectors(data, c_, e_)
-            gc = pair_vectors(data, c_, g_)
+            ad = img(d_, a_)
+            bd = img(d_, b_)
+            ec = img(c_, e_)
+            gc = img(c_, g_)
             p_site = pc + torch.cross(ad, bd, dim=1)
             q_site = pd + torch.cross(ec, gc, dim=1)
             b1 = pc - p_site
-            b2 = pair_vectors(data, c_, d_)
+            b2 = img(c_, d_)
             b3 = q_site - pd
             n1 = torch.cross(b1, b2, dim=1)
             n2 = torch.cross(b2, b3, dim=1)
@@ -1937,8 +2456,8 @@ class Amoeba(InteratomicPotential):
             ti = expand(self.tortor_index)
             ttt = tile(self.tortor_type)
             rev = tile(self.tortor_reverse)
-            c_a, s_a = dihedral_cos_sin(data, ti[:4])
-            c_b, s_b = dihedral_cos_sin(data, ti[1:5])
+            c_a, s_a = dihedral_cos_sin(data, ti[:4], img)
+            c_b, s_b = dihedral_cos_sin(data, ti[1:5], img)
             phi_a = torch.atan2(s_a, c_a) / DEG
             phi_b = torch.atan2(s_b, c_b) / DEG
             # the grid's first angle is the torsion of the chain's last four atoms
@@ -1950,25 +2469,27 @@ class Amoeba(InteratomicPotential):
             y = -torch.where(rev, phi_b, phi_a)
             e_tt = torch.zeros_like(x)
             for m in range(len(ff.tortor_keys)):
-                sel = ttt == m
-                if not bool(sel.any()):
+                if m not in self._tortor_maps:
                     continue
+                sel = ttt == m
                 e_tt = e_tt + torch.where(sel, self._tortor_energy(m, x, y), torch.zeros_like(x))
             out_terms["e_tortor"] = scatter_sum(e_tt, ti[2], N)
         else:
             out_terms["e_tortor"] = zeros_n
 
         # permanent multipoles (global frame) and the charge flux
-        q_perm, d_perm, Q_perm = self._rotated_multipoles(data, B)
+        q_perm, d_perm, Q_perm = self._rotated_multipoles(data, B, img)
         dq = self._charge_flux(data, B, br, bt, bi, theta_plain, theta0, ai, N) if self._has_cflux() else None
         if dq is not None:
             q_perm = q_perm + dq
 
         # nonbonded pairs
-        i_, k_, r_vec, scales = self._pairs(data)
+        i_, k_, r_vec, scales = self._pairs(data, plan)
         R = torch.sqrt((r_vec * r_vec).sum(1) + TINY)
-        ew = self._ewald_setup(data, i_, R)
-        nb = self._nonbonded(data, i_, k_, r_vec, R, scales, q_perm, d_perm, Q_perm, cls_idx, typ_idx, B, N, ew)
+        ew = self._ewald_setup(data, i_, R, plan)
+        with fused(self._fused_active(R)):
+            nb = self._nonbonded(data, i_, k_, r_vec, R, scales, q_perm, d_perm, Q_perm, cls_idx, typ_idx, B, N, ew,
+                                 img, plan)
         out_terms.update(nb["terms"])
 
         e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
@@ -2069,7 +2590,7 @@ class Amoeba(InteratomicPotential):
 
         return bicubic_interpolate(corners(f), corners(fx), corners(fy), corners(fxy), x, y, x1, x2, y1, y2)
 
-    def _vdw_sites(self, data: AtomicGraph, B: int) -> Tensor:
+    def _vdw_sites(self, data: AtomicGraph, B: int, img) -> Tensor:
         """Positions of the van der Waals sites (hydrogens reduced along their bond)."""
         n = int(self.top_type.shape[0])
         starts = torch.arange(B, device=data.pos.device) * n
@@ -2077,8 +2598,66 @@ class Amoeba(InteratomicPotential):
         parent = self.vdw_parent.repeat(B) + starts.repeat_interleave(n)
         red = self.vdw_red.repeat(B)
         pos = data.pos
-        vec = pair_vectors(data, parent, idx)         # H - X
+        vec = img(parent, idx)                        # H - X
         return pos[parent].to(vec.dtype) + red[:, None] * vec
+
+    def plan_step(self, data: AtomicGraph, skin: float = 0.0, capacity: Optional[int] = None) -> StepPlan:
+        """Record the host decisions of an evaluation of ``data`` for later
+        evaluations of the same structure as it moves (see :class:`StepPlan`);
+        the recording evaluation itself runs without gradients and leaves the
+        dipole predictor alone.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The batched graph, its neighbor list built with ``cutoff + skin``.
+        skin : float, optional
+            The margin of the neighbor list beyond the model's cutoff in
+            Angstrom, by default 0 (the plan then holds at these positions only).
+        capacity : int, optional
+            The number of pairs the plan holds, padded beyond the unique
+            pairs of the neighbor list; by default exactly those.
+
+        Returns
+        -------
+        StepPlan
+            The plan, for ``forward(data, plan)``.
+
+        Raises
+        ------
+        ValueError
+            If the neighbor list has more unique pairs than ``capacity``.
+        """
+        plan = StepPlan(skin, capacity)
+        with torch.no_grad():
+            self.forward(data, plan)
+        plan.recording = False
+        plan.converged = torch.ones((), dtype=torch.bool, device=data.pos.device)
+        return plan
+
+    def set_use_fast(self, use_fast: Union[bool, str]) -> "Amoeba":
+        """Set when the pair arithmetic runs compiled (see ``use_fast`` of the class).
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``True``, ``False`` or ``"auto"``.
+
+        Returns
+        -------
+        Amoeba
+            The model.
+        """
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    def _fused_active(self, R: Tensor) -> bool:
+        """Whether this evaluation compiles its pair arithmetic."""
+        if not self.use_fast or self.training or not R.is_cuda:
+            return False
+        if isinstance(self.use_fast, str):
+            return FAST_POLICY.decide(R.device, R.dtype, int(R.shape[0]))
+        return True
 
     def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
         """Switch the induced-dipole predictor on (``"aspc"``, ``"gear"``,
@@ -2099,8 +2678,9 @@ class Amoeba(InteratomicPotential):
             # the adjoint of the backward solve changes as smoothly as the dipoles
             self.adjoint_predictor = DipolePredictor(str(kind).lower(), history)
 
+    @region("amoeba.induction")
     def _induced(self, i_, k_, r_vec, R, field_d, field_p, D1, D2, N, B, alpha, data, ew,
-                 x0: Optional[Tensor] = None):
+                 x0: Optional[Tensor] = None, plan: Optional[StepPlan] = None):
         """Solve the mutual induction and return ``(mu, e_polar_node)``.
 
         ``field_d`` / ``field_p`` are the direct- and polar-scaled permanent
@@ -2113,21 +2693,30 @@ class Amoeba(InteratomicPotential):
         of the iterative solve; without it the model's ``dipole_guess`` (used
         once) or the predictor's extrapolation is tried, and the solve starts
         from whichever of the guess and the direct dipoles has the smaller
-        residual.
+        residual. A plan supplies the count of polarizable atoms, and its
+        recording evaluation leaves the predictor alone.
         """
         n = int(self.top_type.shape[0])
         polar = alpha > 0
         mu_dir = alpha[:, None] * field_d
-        if self.polarization == "direct" or not bool(polar.any()):
+        if plan is not None and plan.replaying():
+            has_polar, n_polar = plan.has_polar, plan.n_polar
+        else:
+            n_polar = int(polar.sum())
+            has_polar = n_polar > 0
+            if plan is not None:
+                plan.has_polar, plan.n_polar = has_polar, n_polar
+        if self.polarization == "direct" or not has_polar:
             mu = mu_dir
         else:
-            T = dipole_field_tensor(r_vec, D1, D2)                        # (M, 3, 3)
             if self._use_dense(n, B, ew):
+                T = dipole_field_tensor(r_vec, D1, D2)                    # (M, 3, 3)
                 A = torch.zeros(B, n, n, 3, 3, dtype=R.dtype, device=R.device)
                 bi = i_ // n
                 li, lk = i_ % n, k_ % n
-                A[bi, li, lk] = -T
-                A[bi, lk, li] = -T.transpose(1, 2)
+                # accumulated: the padding of a plan repeats a pair (with zero weight)
+                A.index_put_((bi, li, lk), -T, accumulate=True)
+                A.index_put_((bi, lk, li), -T.transpose(1, 2), accumulate=True)
                 inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.full_like(alpha, 1.0))
                 eye = torch.eye(3, dtype=R.dtype, device=R.device)
                 diag = inv_alpha.view(B, n)[:, :, None, None] * eye
@@ -2135,7 +2724,8 @@ class Amoeba(InteratomicPotential):
                 A[:, ar, ar] = diag
                 Afull = A.permute(0, 1, 3, 2, 4).reshape(B, 3 * n, 3 * n)
                 rhs = (field_d * polar[:, None].to(R.dtype)).reshape(B, 3 * n, 1)
-                mu = torch.linalg.solve(Afull, rhs).reshape(N, 3)
+                # solve_ex leaves the error flag on the device instead of reading it
+                mu = torch.linalg.solve_ex(Afull, rhs)[0].reshape(N, 3)
                 mu = mu * polar[:, None].to(R.dtype)
                 if self.keep_intermediates:
                     self._induction_matrix = Afull.detach()
@@ -2146,16 +2736,28 @@ class Amoeba(InteratomicPotential):
                         else torch.zeros(B, 3, 3, dtype=dtype, device=R.device))
                 op = _MutualField(i_, k_, N, polar, ew, self.polar_eps, self.max_iter, pos, cell)
                 op.stats, op.adjoints = self.solver_stats, self._adjoints
+                op.n_polar = max(n_polar, 1)
+                # the statistics read the device; evaluations on a plan do without
+                op.collect_stats = plan is None
+                if plan is not None and plan.replaying():
+                    op.fixed, op.converged = plan.solve_iterations, plan.converged
+                if self.preconditioner != "diagonal":
+                    shift = (torch.arange(B, device=R.device) * self.pc_blocks).repeat_interleave(n)
+                    op.precond = _Preconditioner(self.preconditioner, alpha, polar, r_vec, D1, D2, i_, k_, R,
+                                                 self.pc_block.repeat(B) + shift, self.pc_slot.repeat(B),
+                                                 B * self.pc_blocks, self.pc_size, self.precond_cutoff, N)
                 op.adjoint_predictor = self.adjoint_predictor if (self.predictor is not None
                                                                   and not self.training) else None
-                predict = self.predictor is not None and not self.training
+                predict = (self.predictor is not None and not self.training
+                           and not (plan is not None and plan.recording))
                 if x0 is None and self.dipole_guess is not None:
                     x0, self.dipole_guess = self.dipole_guess, None
                 if x0 is None and predict:
                     x0 = self.predictor.predict(field_d)
                 if x0 is not None and x0.shape == field_d.shape:
                     op.guess = x0.detach().to(device=field_d.device, dtype=dtype)
-                mu = _ImplicitInduction.apply(field_d * polar[:, None].to(dtype), alpha, T, pos, cell, op)
+                mu = _ImplicitInduction.apply(field_d * polar[:, None].to(dtype), alpha, r_vec, D1, D2, pos, cell,
+                                              op)
                 mu = mu * polar[:, None].to(dtype)
                 if predict:
                     self.predictor.push(mu.detach())
@@ -2175,19 +2777,16 @@ class Amoeba(InteratomicPotential):
         return ew is None and n <= _DENSE_ATOMS and B * (3 * n) ** 2 <= _DENSE_ENTRIES
 
     # Ewald sums of periodic cells
-    def _ewald_setup(self, data: AtomicGraph, i_: Tensor, R: Tensor):
-        """Ewald parameters of the batch, or ``None`` when no structure is a
-        periodic cell (or Ewald is off)."""
-        if self.ewald is False or data.cell is None:
-            return None
+    def _ewald_layout(self, data: AtomicGraph, dtype: torch.dtype) -> Optional[dict]:
+        """The host decisions of the Ewald sums of a batch: which structures are
+        cells, their meshes and slab axes, the cutoffs and coefficients; ``None``
+        when no structure is a periodic cell (or Ewald is off)."""
         B = data.num_graphs
-        dtype, device = R.dtype, R.device
         cells = data.cell.to(dtype)
         periodic = cell_volume(cells.detach()) > 1e-8
-        n_pbc = torch.full((B,), 3, dtype=torch.long, device=device)
+        n_pbc = torch.full((B,), 3, dtype=torch.long, device=cells.device)
         if data.pbc is not None:
-            pbc = data.pbc.to(device)
-            n_pbc = pbc.sum(-1)
+            n_pbc = data.pbc.to(cells.device).sum(-1)
             if bool((periodic & (n_pbc == 1)).any()):
                 raise ValueError("Ewald sums need two (slab) or three periodic axes")
             periodic = periodic & (n_pbc >= 2)
@@ -2198,14 +2797,11 @@ class Amoeba(InteratomicPotential):
         rc = self.ewald_cutoff if self.ewald_cutoff is not None else min(7.0, self.cutoff)
         if rc > self.cutoff + 1e-9:
             raise ValueError(f"ewald_cutoff {rc} exceeds the neighbor cutoff {self.cutoff}")
-        alpha_e = self.ewald_alpha if self.ewald_alpha is not None else ewald_coefficient(rc)
-        alpha_p = self.pewald_alpha if self.pewald_alpha is not None else alpha_e
         rc_d = self.dispersion_cutoff if self.dispersion_cutoff is not None else rc
         if rc_d > self.cutoff + 1e-9:
             raise ValueError(f"dispersion_cutoff {rc_d} exceeds the neighbor cutoff {self.cutoff}")
-        alpha_d = self.dewald_alpha if self.dewald_alpha is not None else ewald_coefficient(rc_d)
+        alpha_e = self.ewald_alpha if self.ewald_alpha is not None else ewald_coefficient(rc)
         # the per-structure decisions are made on host copies (one transfer, no per-structure sync)
-        n = int(self.top_type.shape[0])
         lengths = torch.linalg.norm(cells.detach().cpu(), dim=-1).tolist()
         periodic_host = periodic.cpu().tolist()
         n_pbc_host = n_pbc.cpu().tolist()
@@ -2214,37 +2810,77 @@ class Amoeba(InteratomicPotential):
         for b in range(B):
             if not periodic_host[b]:
                 continue
-            idx = torch.arange(b * n, (b + 1) * n, device=device)
             grid = list(self.pme_grid) if self.pme_grid is not None else pme_grid_size(lengths[b])
             dgrid = (list(self.dpme_grid) if self.dpme_grid is not None
                      else pme_grid_size(lengths[b], density=0.8))
+            # a slab: the free axis, whose normal enters the Yeh-Berkowitz correction
+            free = int((~pbc_host[b]).nonzero()[0, 0]) if int(n_pbc_host[b]) == 2 else None
+            structures.append((b, grid, dgrid, free))
+        return {"structures": structures, "rc": rc, "rc_d": rc_d, "alpha_e": alpha_e,
+                "alpha_p": self.pewald_alpha if self.pewald_alpha is not None else alpha_e,
+                "alpha_d": self.dewald_alpha if self.dewald_alpha is not None else ewald_coefficient(rc_d)}
+
+    @region("amoeba.ewald_setup")
+    def _ewald_setup(self, data: AtomicGraph, i_: Tensor, R: Tensor, plan: Optional[StepPlan] = None):
+        """Ewald parameters of the batch, or ``None`` when no structure is a
+        periodic cell (or Ewald is off). The host decisions come from the plan
+        when it has them (:meth:`_ewald_layout`)."""
+        if self.ewald is False or data.cell is None:
+            return None
+        dtype, device = R.dtype, R.device
+        if plan is not None and plan.replaying():
+            layout = plan.ewald
+        else:
+            layout = self._ewald_layout(data, dtype)
+            if plan is not None:
+                plan.ewald = layout
+        if layout is None:
+            return None
+        rc, rc_d = layout["rc"], layout["rc_d"]
+        alpha_e, alpha_p, alpha_d = layout["alpha_e"], layout["alpha_p"], layout["alpha_d"]
+        cells = data.cell.to(dtype)
+        periodic = cell_volume(cells.detach()) > 1e-8
+        if data.pbc is not None:
+            periodic = periodic & (data.pbc.to(device).sum(-1) >= 2)
+        n = int(self.top_type.shape[0])
+        structures = []
+        for b, grid, dgrid, free in layout["structures"]:
+            idx = torch.arange(b * n, (b + 1) * n, device=device)
             normal = None
-            if int(n_pbc_host[b]) == 2:
-                # a slab: the unit normal of the periodic plane, for the Yeh-Berkowitz correction
-                free = int((~pbc_host[b]).nonzero()[0, 0])
+            if free is not None:
                 a1, a2 = cells[b][(free + 1) % 3], cells[b][(free + 2) % 3]
                 normal = torch.linalg.cross(a1, a2)
                 normal = normal / torch.linalg.norm(normal)
             structures.append((b, idx, grid, dgrid, normal))
 
         def grouped(slot: int) -> list:
-            # structures sharing a mesh are summed together, each on its own copy of the mesh
-            members: dict = {}
-            for j, st in enumerate(structures):
-                members.setdefault(tuple(st[slot]), []).append(j)
+            # structures sharing a mesh are summed together, each on its own copy of the mesh; the
+            # membership and its index tensors are fixed for a structure and kept in the plan
+            key = "groups" if slot == 2 else "dgroups"
+            members = None if plan is None or plan.recording else layout.get(key)
+            if members is None:
+                by_grid: dict = {}
+                for j, st in enumerate(structures):
+                    by_grid.setdefault(tuple(st[slot]), []).append(j)
+                members = [(list(grid), js,
+                            torch.tensor([structures[j][0] for j in js], dtype=torch.long, device=device),
+                            torch.cat([structures[j][1] for j in js]),
+                            torch.arange(len(js), device=device).repeat_interleave(n))
+                           for grid, js in by_grid.items()]
+                if plan is not None:
+                    layout[key] = members
             out = []
-            for grid, js in members.items():
+            for grid, js, bs, idx, batch in members:
                 normals = None
                 if any(structures[j][4] is not None for j in js):
                     normals = torch.stack([structures[j][4] if structures[j][4] is not None
                                            else torch.zeros(3, dtype=dtype, device=device) for j in js])
-                out.append({"bs": torch.tensor([structures[j][0] for j in js], dtype=torch.long, device=device),
-                            "idx": torch.cat([structures[j][1] for j in js]),
-                            "batch": torch.arange(len(js), device=device).repeat_interleave(n),
-                            "grid": list(grid), "normals": normals})
+                out.append({"bs": bs, "idx": idx, "batch": batch, "grid": list(grid), "normals": normals})
             return out
         pair_periodic = periodic[data.batch[i_]]
         ones = torch.ones_like(R)
+        # the padding of a plan's pair list is kept out of the Ewald sums too
+        valid = ones if plan is None or plan.valid is None else plan.valid
         pf = pair_periodic.to(dtype)
         summary = {"alpha": alpha_e, "pewald_alpha": alpha_p, "dewald_alpha": alpha_d, "cutoff": rc,
                    "dispersion_cutoff": rc_d, "grids": [(b, grid, dgrid) for b, _, grid, dgrid, _ in structures],
@@ -2254,8 +2890,8 @@ class Amoeba(InteratomicPotential):
                 "structures": structures, "cells": cells, "pos": data.pos.to(dtype),
                 "groups": grouped(2), "dgroups": grouped(3), "plans": {},
                 "alpha_e": alpha_e * pf, "alpha_p": alpha_p * pf, "alpha_d": alpha_d * pf,
-                "keep": torch.where(pair_periodic, (R < rc).to(dtype), ones),
-                "keep_d": torch.where(pair_periodic, (R < rc_d).to(dtype), ones),
+                "keep": torch.where(pair_periodic, (R < rc).to(dtype), ones) * valid,
+                "keep_d": torch.where(pair_periodic, (R < rc_d).to(dtype), ones) * valid,
                 "alpha_e_value": alpha_e, "alpha_p_value": alpha_p, "alpha_d_value": alpha_d,
                 "order": self.pme_order, "porder": self.ppme_order or self.pme_order, "dorder": self.dpme_order,
                 "summary": summary}
@@ -2277,6 +2913,7 @@ class Amoeba(InteratomicPotential):
             sw = torch.where(pair_periodic, sw, torch.ones_like(sw))
         return sw
 
+    @region("amoeba.mesh_energy")
     def _reciprocal_energy(self, data: AtomicGraph, ew, q: Tensor, d: Tensor, Q: Tensor) -> Tensor:
         """Per-atom mesh and self energies of the permanent multipoles, ``e^2 / A``."""
         pos = ew["pos"]
@@ -2284,7 +2921,7 @@ class Amoeba(InteratomicPotential):
         ae = ew["alpha_e_value"]
         for g, plan in _mesh_plans(ew, "m", ew["order"]):
             idx, b = g["idx"], g["batch"]
-            qi, di, Qi = q[idx], d[idx], Q[idx]
+            qi, di, Qi = _take(q, idx), _take(d, idx), _take(Q, idx)
             phi, dphi, d2phi = plan.potential(qi, di, Qi, ae, hessian=True)
             e = 0.5 * (qi * phi + (di * dphi).sum(-1) + (Qi * d2phi).sum((-1, -2)))
             e = e + multipole_self_energy(qi, di, Qi, torch.full_like(qi, ae))
@@ -2303,6 +2940,7 @@ class Amoeba(InteratomicPotential):
             out = out.index_add(0, idx, e)
         return out
 
+    @region("amoeba.mesh_field")
     def _reciprocal_field(self, data: AtomicGraph, ew, q: Tensor, d: Tensor, Q: Tensor) -> Tensor:
         """Mesh field of the permanent multipoles at every atom, self field included."""
         pos = ew["pos"]
@@ -2311,8 +2949,8 @@ class Amoeba(InteratomicPotential):
         coef = self_field_coefficient(ap)
         for g, plan in _mesh_plans(ew, "m", ew["porder"]):
             idx, b = g["idx"], g["batch"]
-            qi, di = q[idx], d[idx]
-            _, dphi, _ = plan.potential(qi, di, Q[idx], ap, hessian=False)
+            qi, di = _take(q, idx), _take(d, idx)
+            _, dphi, _ = plan.potential(qi, di, _take(Q, idx), ap, hessian=False)
             field = -dphi + coef * di
             if self.mesh_self:
                 s2 = plan.self_moments(ap, "coulomb", max_rank=2)[1]
@@ -2324,6 +2962,7 @@ class Amoeba(InteratomicPotential):
             out = out.index_add(0, idx, field)
         return out
 
+    @region("hippo.mesh_dispersion")
     def _reciprocal_dispersion(self, data: AtomicGraph, ew, c: Tensor) -> Tensor:
         """Per-atom mesh (and self) energies of the ``-c_i c_j / R^6`` sum."""
         out = torch.zeros_like(c)
@@ -2336,28 +2975,6 @@ class Amoeba(InteratomicPotential):
                 e = e + s0[g["batch"]] * c[idx] * c[idx]
             out = out.index_add(0, idx, e)
         return out
-
-    def _ewald_fields(self, data, ew, i_, k_, r_vec, R, scales, q, d, Q, f_damp_k, f_damp_i, D1m, D2m,
-                      u_scale, N):
-        """Direct- and polar-scaled permanent fields and the mutual ladder of a
-        batch with cells: the real-space Ewald field of the total multipoles
-        minus their bare field, plus the scaled damped field of the vacuum
-        model, plus the mesh and self fields."""
-        keep = ew["keep"]
-        Dc = coulomb_ladder(R, 3)
-        Dp = ewald_ladder(R, ew["alpha_p"], 3)
-        Dew = [(a - c) * keep for a, c in zip(Dp, Dc)]
-        f_ew_k = multipole_field(q[i_], d[i_], Q[i_], r_vec, Dew, at_k=True)
-        f_ew_i = multipole_field(q[k_], d[k_], Q[k_], r_vec, Dew, at_k=False)
-        kp = keep[:, None]
-        field_d = (scatter_sum(f_ew_k + f_damp_k * (scales[:, 6:7] * kp), k_, N)
-                   + scatter_sum(f_ew_i + f_damp_i * (scales[:, 6:7] * kp), i_, N))
-        field_p = (scatter_sum(f_ew_k + f_damp_k * (scales[:, 2:3] * kp), k_, N)
-                   + scatter_sum(f_ew_i + f_damp_i * (scales[:, 2:3] * kp), i_, N))
-        rec = self._reciprocal_field(data, ew, q, d, Q)
-        D1u = (Dp[1] - Dc[1] + D1m * u_scale) * keep
-        D2u = (Dp[2] - Dc[2] + D2m * u_scale) * keep
-        return field_d + rec, field_p + rec, D1u, D2u
 
     def molecular_polarizability(self, data: AtomicGraph) -> Tensor:
         """Static dipole polarizability of every structure from the induction model.
@@ -2400,19 +3017,24 @@ class Amoeba(InteratomicPotential):
             self.keep_intermediates = keep
             self._force_dense = False
 
-    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew) -> dict:
+    @region("amoeba.nonbonded")
+    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew, img=None,
+                   plan=None) -> dict:
         """AMOEBA nonbonded terms: buffered 14-7, permanent multipoles, Thole induction."""
         P = self.ff.params
         s = self.ff.settings
         terms: dict[str, Tensor] = {}
         ci, ck = cls_idx[i_], cls_idx[k_]
+        # every per-atom quantity is gathered once per side of the pairs
+        q_i, q_k, d_i, d_k, Q_i, Q_k = (_take(t, idx) for t in (q, d, Q) for idx in (i_, k_))
         per = None if ew is None else ew["pair_periodic"]
         # van der Waals between the reduced sites
-        sites = self._vdw_sites(data, B)
-        vvec = r_vec + (sites[k_] - data.pos[k_].to(r_vec.dtype)) - (sites[i_] - data.pos[i_].to(r_vec.dtype))
+        sites = self._vdw_sites(data, B, img)
+        offset = sites - data.pos.to(r_vec.dtype)
+        vvec = r_vec + _take(offset, k_) - _take(offset, i_)
         rv = torch.sqrt((vvec * vvec).sum(1) + TINY)
-        rmin_i, rmin_k = P["vdw_rmin"][ci], P["vdw_rmin"][ck]
-        eps_i, eps_k = P["vdw_eps"][ci], P["vdw_eps"][ck]
+        rmin_i, rmin_k = _take(P["vdw_rmin"], ci), _take(P["vdw_rmin"], ck)
+        eps_i, eps_k = _take(P["vdw_eps"], ci), _take(P["vdw_eps"], ck)
         rule = str(s["radiusrule"]).upper()
         if rule.startswith("CUBIC"):
             rmin = (rmin_i ** 3 + rmin_k ** 3) / (rmin_i ** 2 + rmin_k ** 2 + TINY)
@@ -2428,16 +3050,13 @@ class Amoeba(InteratomicPotential):
             eps = 0.5 * (eps_i + eps_k)
         else:
             eps = torch.sqrt((eps_i * eps_k).clamp_min(0.0))
-        pidx = self.ff.vdw_pair_index[ci, ck]
-        has_pair = pidx >= 0
-        if bool(has_pair.any()):
+        if self.ff.vdw_pair_keys:
+            # pair-specific values where the library has them (decided on the host, no synchronization)
+            pidx = self.ff.vdw_pair_index[ci, ck]
+            has_pair = pidx >= 0
             rmin = torch.where(has_pair, P["vdw_pair_rmin"][pidx.clamp_min(0)], rmin)
             eps = torch.where(has_pair, P["vdw_pair_eps"][pidx.clamp_min(0)], eps)
-        delta = float(s["delta-halgren"])
-        gamma = float(s["gamma-halgren"])
-        rho = rv / rmin
-        rho7 = rho ** 7
-        e_vdw = eps * ((1.0 + delta) / (rho + delta)) ** 7 * ((1.0 + gamma) / (rho7 + gamma) - 2.0)
+        e_vdw = buffered_14_7(rv, rmin, eps, float(s["delta-halgren"]), float(s["gamma-halgren"]))
         e_vdw = e_vdw * scales[:, 0]
         e_vdw_raw = e_vdw
         sw = self._switch(rv, per, self.vdw_cutoff, self.vdw_taper)
@@ -2445,39 +3064,33 @@ class Amoeba(InteratomicPotential):
             e_vdw = e_vdw * sw
         terms["e_vdw"] = scatter_sum(0.5 * e_vdw, i_, N) + scatter_sum(0.5 * e_vdw, k_, N)
 
-        # permanent multipole interactions: the Coulomb ladder for molecules; for cells
-        # the real-space Ewald ladder with the excluded fraction of the bare interaction
-        # removed, plus the mesh and self terms
-        Dc = coulomb_ladder(R, 4)
-        if ew is None:
-            e_mp = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec, Dc) * scales[:, 1] * COULOMB
-        else:
-            keep = ew["keep"]
-            De = ewald_ladder(R, ew["alpha_e"], 4)
-            Dm = [(a - (1.0 - scales[:, 1]) * c) * keep for a, c in zip(De, Dc)]
-            e_mp = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec, Dm) * COULOMB
-        e_node = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        # permanent multipoles and the real-space fields of the induction, as one function of the
+        # pairs: the Coulomb ladder for molecules; for cells the real-space Ewald ladder with the
+        # excluded fraction of the bare interaction removed, plus the mesh and self terms
+        polar = self.polarization != "none"
+        alpha = P["polarizability"][typ_idx] if polar else None
+        thole = None
+        if polar:
+            th = P["thole"][typ_idx]
+            thole = (_take(alpha, i_), _take(alpha, k_), _take(th, i_), _take(th, k_))
+        pb = amoeba_pair_block(R, r_vec, scales, q_i, q_k, d_i, d_k, Q_i, Q_k, i_, k_, N,
+                               None if ew is None else ew["keep"], None if ew is None else ew["alpha_e"],
+                               None if ew is None else ew["alpha_p"], thole)
+        e_mp = pb["e_mp"]
+        e_node = pb["e_mp_node"]
         if ew is not None:
             e_node = e_node + self._reciprocal_energy(data, ew, q, d, Q) * COULOMB
         terms["e_multipole"] = e_node
 
         # induction with Thole damping
         mu = torch.zeros_like(d)
-        if self.polarization != "none":
-            alpha = P["polarizability"][typ_idx]
-            thole = P["thole"][typ_idx]
-            Dt = thole_ladder(R, alpha[i_], alpha[k_], thole[i_], thole[k_], 3)
-            u_scale = scales[:, 7] * scales[:, 3]
-            f_at_k = multipole_field(q[i_], d[i_], Q[i_], r_vec, Dt, at_k=True)
-            f_at_i = multipole_field(q[k_], d[k_], Q[k_], r_vec, Dt, at_k=False)
-            if ew is None:
-                field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
-                field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
-                D1u, D2u = Dt[1] * u_scale, Dt[2] * u_scale
-            else:
-                field_d, field_p, D1u, D2u = self._ewald_fields(data, ew, i_, k_, r_vec, R, scales, q, d, Q,
-                                                                f_at_k, f_at_i, Dt[1], Dt[2], u_scale, N)
-            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew)
+        if polar:
+            field_d, field_p, D1u, D2u = pb["fields"]
+            if ew is not None:
+                rec = self._reciprocal_field(data, ew, q, d, Q)
+                field_d, field_p = field_d + rec, field_p + rec
+            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew,
+                                      plan=plan)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
@@ -2568,164 +3181,63 @@ class Hippo(Amoeba):
     nonbonded = "hippo"
     default_library = "hippo-water-2021"
 
-    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew) -> dict:
+    @region("hippo.nonbonded")
+    def _nonbonded(self, data, i_, k_, r_vec, R, scales, q, d, Q, cls_idx, typ_idx, B, N, ew, img=None,
+                   plan=None) -> dict:
         P = self.ff.params
         terms: dict[str, Tensor] = {}
         ci, ck = cls_idx[i_], cls_idx[k_]
+        # every per-atom quantity is gathered once per side of the pairs
+        q_i, q_k, d_i, d_k, Q_i, Q_k = (_take(t, idx) for t in (q, d, Q) for idx in (i_, k_))
         per = None if ew is None else ew["pair_periodic"]
-        core_i, core_k = P["chgpen_core"][ci], P["chgpen_core"][ck]
-        zi, zk = P["chgpen_alpha"][ci], P["chgpen_alpha"][ck]
-        val_i = q[i_] - core_i
-        val_k = q[k_] - core_k
-        zero3 = torch.zeros_like(d[i_])
-        zeroQ = torch.zeros_like(Q[i_])
-        zero = torch.zeros_like(R)
-
-        # permanent electrostatics: core-core, core-valence (one-center damping), valence-valence;
-        # in cells the real-space Ewald interaction of the total multipoles minus their bare
-        # interaction is added and the mesh and self terms complete the sum
-        Dc = coulomb_ladder(R, 4)
-        # valence of i seen by core k, and of k seen by core i
-        D_ki = derivative_ladder(core_valence_kernel(zi.double(), "i"), R, zi, zk, 3) + [zero]
-        D_ik = derivative_ladder(core_valence_kernel(zk.double(), "j"), R, zi, zk, 3) + [zero]
-        D_ov = self._overlap_ladder(R, zi, zk, 4)
-        e_cc = core_i * core_k * Dc[0]
-        e_ck = multipole_energy(val_i, d[i_], Q[i_], core_k, zero3, zeroQ, r_vec, D_ki)
-        e_ik = multipole_energy(core_i, zero3, zeroQ, val_k, d[k_], Q[k_], r_vec, D_ik)
-        e_vv = multipole_energy(val_i, d[i_], Q[i_], val_k, d[k_], Q[k_], r_vec, D_ov)
-        e_damped = (e_cc + e_ck + e_ik + e_vv) * scales[:, 1]
-        if ew is None:
-            e_mp = e_damped * COULOMB
-        else:
-            keep = ew["keep"]
-            De = ewald_ladder(R, ew["alpha_e"], 4)
-            e_full = multipole_energy(q[i_], d[i_], Q[i_], q[k_], d[k_], Q[k_], r_vec,
-                                      [(a - c) * keep for a, c in zip(De, Dc)])
-            e_mp = (e_full + e_damped * keep) * COULOMB
-        e_node = scatter_sum(0.5 * e_mp, i_, N) + scatter_sum(0.5 * e_mp, k_, N)
+        params = {}
+        for key, name in (("core", "chgpen_core"), ("zeta", "chgpen_alpha"), ("rep_k", "rep_k"),
+                          ("rep_alpha", "rep_alpha"), ("rep_valence", "rep_valence"), ("disp_alpha", "disp_alpha"),
+                          ("disp_c6", "disp_c6"), ("chgtrn_eps", "chgtrn_eps"), ("chgtrn_alpha", "chgtrn_alpha")):
+            params[key + "_i"], params[key + "_k"] = _take(P[name], ci), _take(P[name], ck)
+        switches = {"repulsion": self._switch(R, per, self.repulsion_cutoff, None),
+                    "dispersion": None if ew is not None else self._switch(R, per, self.dispersion_cutoff, None),
+                    "chgtrn": self._switch(R, per, self.chgtrn_cutoff, None)}
+        polar = self.polarization != "none"
+        # one compiled block wins on small systems; on large ones its backward recomputes the
+        # exponential ladders, and the block runs with its parts compiled one by one instead
+        block = hippo_pair_block if int(R.shape[0]) < _HIPPO_BLOCK_PAIRS else hippo_pair_block.__wrapped__
+        pb = block(R, r_vec, scales, q_i, q_k, d_i, d_k, Q_i, Q_k, i_, k_, N, params,
+                              None if ew is None else ew["keep"], None if ew is None else ew["alpha_e"],
+                              None if ew is None else ew["alpha_p"], None if ew is None else ew["alpha_d"],
+                              None if ew is None else ew["keep_d"], switches, polar)
+        e_mp, e_rep, e_disp, e_ct = pb["e_mp"], pb["e_rep"], pb["e_disp"], pb["e_ct"]
+        e_node, e_dnode = pb["e_mp_node"], pb["e_disp_node"]
         if ew is not None:
             e_node = e_node + self._reciprocal_energy(data, ew, q, d, Q) * COULOMB
-        terms["e_multipole"] = e_node
-
-        # Pauli repulsion: K_i K_j S^2_total / R. The multipole expansion acts on the
-        # squared overlap S^2 of the valence densities (its derivative ladder), the
-        # 1/R stays outside, and the valence electron density carries the valence
-        # electron count as its monopole with dipoles and quadrupoles of the opposite
-        # sign to those of the total charge distribution
-        rk_i, rk_k = P["rep_k"][ci], P["rep_k"][ck]
-        ra_i, ra_k = P["rep_alpha"][ci], P["rep_alpha"][ck]
-        D_rep = self._repulsion_ladder(R, ra_i, ra_k, 4)
-        e_rep = rk_i * rk_k * multipole_energy(P["rep_valence"][ci], -d[i_], -Q[i_], P["rep_valence"][ck],
-                                               -d[k_], -Q[k_], r_vec, D_rep) / R * scales[:, 4]
-        sw = self._switch(R, per, self.repulsion_cutoff, None)
-        if sw is not None:
-            e_rep = e_rep * sw
-        terms["e_repulsion"] = scatter_sum(0.5 * e_rep, i_, N) + scatter_sum(0.5 * e_rep, k_, N)
-
-        # damped dispersion: -C6_i C6_k / R^6 [ (3 lambda_5 - lambda_3) / 2 ]^2; in cells the
-        # Ewald real-space share replaces the bare 1/R^6 and the mesh adds the rest
-        da_i, da_k = P["disp_alpha"][ci], P["disp_alpha"][ck]
-        D_d = self._overlap_ladder(R, da_i, da_k, 2)
-        lam3 = -D_d[1] * R ** 3
-        lam5 = D_d[2] * R ** 5 / 3.0
-        fdamp = 0.5 * (3.0 * lam5 - lam3)
-        c6 = P["disp_c6"][ci] * P["disp_c6"][ck]
-        if ew is None:
-            e_disp = -c6 / R ** 6 * fdamp * fdamp * scales[:, 5]
-            sw = self._switch(R, per, self.dispersion_cutoff, None)
-            if sw is not None:
-                e_disp = e_disp * sw
-        else:
-            g = dispersion_real_kernel(R, ew["alpha_d"])
-            e_disp = -c6 / R ** 6 * (scales[:, 5] * fdamp * fdamp - 1.0 + g) * ew["keep_d"]
-        e_dnode = scatter_sum(0.5 * e_disp, i_, N) + scatter_sum(0.5 * e_disp, k_, N)
-        if ew is not None:
             e_dnode = e_dnode + self._reciprocal_dispersion(data, ew, P["disp_c6"][cls_idx])
+        terms["e_multipole"] = e_node
+        terms["e_repulsion"] = pb["e_rep_node"]
         terms["e_dispersion"] = e_dnode
+        terms["e_chgtrn"] = pb["e_ct_node"]
 
-        # charge transfer: -(eps_i e^-eta_k R + eps_k e^-eta_i R); a zero eta switches a term off
-        eps_i, eps_k = P["chgtrn_eps"][ci], P["chgtrn_eps"][ck]
-        eta_i, eta_k = P["chgtrn_alpha"][ci], P["chgtrn_alpha"][ck]
-        t1 = torch.where(eta_k > 0, eps_i * torch.exp(-eta_k * R), zero)
-        t2 = torch.where(eta_i > 0, eps_k * torch.exp(-eta_i * R), zero)
-        e_ct = -(t1 + t2) * scales[:, 1]
-        sw = self._switch(R, per, self.chgtrn_cutoff, None)
-        if sw is not None:
-            e_ct = e_ct * sw
-        terms["e_chgtrn"] = scatter_sum(0.5 * e_ct, i_, N) + scatter_sum(0.5 * e_ct, k_, N)
-
-        # induction: permanent field with one-center damping (the source atom's
-        # exponent), mutual induction with the two-center overlap damping
         mu = torch.zeros_like(d)
-        if self.polarization != "none":
+        if polar:
             alpha = P["polarizability"][typ_idx]
-            # field at k from atom i: core (Coulomb) + valence (damped by zeta_i)
-            f_core_k = multipole_field(core_i, zero3, zeroQ, r_vec, Dc, at_k=True)
-            f_val_k = multipole_field(val_i, d[i_], Q[i_], r_vec, D_ki, at_k=True)
-            f_core_i = multipole_field(core_k, zero3, zeroQ, r_vec, Dc, at_k=False)
-            f_val_i = multipole_field(val_k, d[k_], Q[k_], r_vec, D_ik, at_k=False)
-            f_at_k = f_core_k + f_val_k
-            f_at_i = f_core_i + f_val_i
-            D_mut = self._overlap_ladder(R, zi, zk, 2)
-            u_scale = scales[:, 7] * scales[:, 3]
-            if ew is None:
-                field_d = scatter_sum(f_at_k * scales[:, 6:7], k_, N) + scatter_sum(f_at_i * scales[:, 6:7], i_, N)
-                field_p = scatter_sum(f_at_k * scales[:, 2:3], k_, N) + scatter_sum(f_at_i * scales[:, 2:3], i_, N)
-                D1u, D2u = D_mut[1] * u_scale, D_mut[2] * u_scale
-            else:
-                field_d, field_p, D1u, D2u = self._ewald_fields(data, ew, i_, k_, r_vec, R, scales, q, d, Q,
-                                                                f_at_k, f_at_i, D_mut[1], D_mut[2], u_scale, N)
-            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew)
+            field_d, field_p, D1u, D2u = pb["fields"]
+            if ew is not None:
+                rec = self._reciprocal_field(data, ew, q, d, Q)
+                field_d, field_p = field_d + rec, field_p + rec
+            mu, e_pol = self._induced(i_, k_, r_vec, R, field_d, field_p, D1u, D2u, N, B, alpha, data, ew,
+                                      plan=plan)
             terms["e_polar"] = e_pol
         else:
             terms["e_polar"] = torch.zeros(N, dtype=R.dtype, device=R.device)
         return {"terms": terms, "induced": mu,
                 "extra": {"e_mpole_pair": e_mp, "e_rep_pair": e_rep, "e_disp_pair": e_disp, "e_ct_pair": e_ct}}
 
-    @staticmethod
-    def _split_equal(zi: Tensor, zk: Tensor):
-        eq = (zi - zk).abs() <= 1e-9 * torch.maximum(zi.abs(), zk.abs())
-        return eq
-
-    def _overlap_ladder(self, R, zi, zk, order):
-        """Ladder of the two-center Coulomb kernel, with the closed form of
-        equal exponents where the two agree."""
-        return self._two_center(R, zi, zk, order, overlap_coulomb_kernel)
-
-    def _repulsion_ladder(self, R, zi, zk, order):
-        """Ladder of the squared overlap of the two Slater densities."""
-        def squared(a, b, equal):
-            S = slater_overlap(a, b, equal)
-            return S * S
-        return self._two_center(R, zi, zk, order, squared)
-
-    def _two_center(self, R, zi, zk, order, kernel):
-        eq = self._split_equal(zi, zk)
-        if R.is_cuda:
-            # both forms on every pair, selected without a host synchronization; the
-            # unequal form sees a distinct stand-in exponent where the two agree
-            zi64, zk64 = zi.double(), zk.double()
-            zk_un = torch.where(eq, 1.5 * zi64 + 1.0, zk64)
-            same = derivative_ladder(kernel(zi64, zk64, True), R, zi64, zk64, order)
-            diff = derivative_ladder(kernel(zi64, zk_un, False), R, zi64, zk_un, order)
-            return [torch.where(eq, a, b) for a, b in zip(same, diff)]
-        out = [torch.zeros_like(R) for _ in range(order + 1)]
-        for mask, equal in ((eq, True), (~eq, False)):
-            if not bool(mask.any()):
-                continue
-            Rm, zim, zkm = R[mask], zi[mask].double(), zk[mask].double()
-            vals = derivative_ladder(kernel(zim, zkm, equal), Rm, zim, zkm, order)
-            rows = mask.nonzero()[:, 0]
-            for n in range(order + 1):
-                out[n] = out[n].index_put((rows,), vals[n])
-        return out
-
 
 # the periodic and solver options of the constructor, also read by from_config
 _OPTION_KEYS = ("ewald", "ewald_alpha", "pewald_alpha", "dewald_alpha", "ewald_cutoff", "pme_grid", "pme_order",
                 "ppme_order", "dpme_grid", "dpme_order", "vdw_cutoff", "vdw_taper", "taper", "repulsion_cutoff",
                 "chgtrn_cutoff", "dispersion_cutoff", "polar_eps", "mesh_self", "solver", "max_iter",
-                "predictor", "predictor_history", "conserve_charge", "symmetry_mask")
+                "predictor", "predictor_history", "preconditioner", "precond_cutoff", "conserve_charge",
+                "symmetry_mask", "use_fast")
 
 
 def _grid_option(value) -> Optional[list]:
@@ -2816,7 +3328,13 @@ class DipolePredictor:
         if self._sets and (self._sets[0].shape != mu.shape or self._sets[0].dtype != mu.dtype
                            or self._sets[0].device != mu.device):
             self.reset()
-        self._sets = [mu.detach()] + self._sets[:self.history - 1]
+        if len(self._sets) == self.history:
+            # a full history shifts in place, so a recorded CUDA graph advances it on replay
+            for j in range(self.history - 1, 0, -1):
+                self._sets[j].copy_(self._sets[j - 1])
+            self._sets[0].copy_(mu.detach())
+        else:
+            self._sets = [mu.detach().clone()] + self._sets
 
     def predict(self, like: Tensor) -> Optional[Tensor]:
         """The extrapolated dipoles, or ``None`` without a compatible history.
@@ -2841,9 +3359,97 @@ class DipolePredictor:
         return out
 
 
+#: ``use_fast="auto"``: the minimum number of pairs per GPU model and precision for the fused
+#: pair arithmetic; it is faster at every size measured, so it runs on every GPU
+FAST_POLICY = AutoPolicy()
+
+# pairs from which the solver's real-space product runs compiled under use_fast (measured on an
+# A30: a loss of 5-9 % at about 5e4 pairs, a gain of 3-22 % from about 4e5)
+_FUSED_SOLVE_PAIRS = 200_000
+# pairs up to which the HIPPO pair terms run as one compiled block (A30: 8-27 % faster up to about
+# 1.6e5 pairs, 5-6 % slower from 4e5)
+_HIPPO_BLOCK_PAIRS = 200_000
+
 # the direct solve: molecules up to this size, and batches up to this many matrix entries
 _DENSE_ATOMS = 1000
 _DENSE_ENTRIES = 30_000_000
+# molecules up to this size are blocks of the block-Jacobi preconditioner
+_BLOCK_ATOMS = 32
+
+
+class _Preconditioner:
+    """Approximate inverses of the induced-dipole matrix ``A = 1/alpha - T``.
+
+    ``"block"`` inverts the real-space blocks of whole molecules (or of
+    polarization groups): ``B`` holds ``1/alpha`` on the diagonal and ``-T``
+    of the pairs inside a block, every block is factorized by Cholesky once
+    per evaluation and inverted (a block that is not positive definite falls
+    back to its diagonal). ``"neumann"`` adds the first term of the Neumann
+    series of the remaining near-field pairs, ``M^-1 = B^-1 + B^-1 T_near
+    B^-1``, with ``B`` the blocks or the diagonal; it is symmetric, and
+    positive definite as long as the near field is weaker than the blocks,
+    which the solver checks. Everything is built from detached tensors: the
+    preconditioner changes the iterations, not the solution or its gradient.
+    """
+
+    KINDS = ("diagonal", "block", "neumann", "block-neumann")
+
+    def __init__(self, kind: str, alpha: Tensor, polar: Tensor, r: Tensor, D1: Tensor, D2: Tensor, i_: Tensor,
+                 k_: Tensor, R: Tensor, block: Tensor, slot: Tensor, n_blocks: int, size: int, cutoff: float,
+                 N: int):
+        with torch.no_grad():
+            r, D1, D2 = r.detach(), D1.detach(), D2.detach()
+            dtype, device = r.dtype, r.device
+            self.N = N
+            self.mask = polar[:, None].to(dtype)
+            self.diag = alpha.detach()[:, None] * self.mask
+            pair_ok = polar[i_] & polar[k_]
+            self.binv = None
+            same = torch.zeros_like(pair_ok)
+            if kind in ("block", "block-neumann") and size > 1:
+                same = pair_ok & (block[i_] == block[k_])
+                s = int(size)
+                Ab = torch.zeros(n_blocks, s, s, 3, 3, dtype=dtype, device=device)
+                g, a, b = block[i_][same], slot[i_][same], slot[k_][same]
+                t = dipole_field_tensor(r[same], D1[same], D2[same])
+                Ab.index_put_((g, a, b), -t, accumulate=True)
+                Ab.index_put_((g, b, a), -t.transpose(1, 2), accumulate=True)
+                inv_alpha = torch.where(polar, 1.0 / alpha.detach().clamp_min(1e-30), torch.ones_like(alpha))
+                eye = torch.eye(3, dtype=dtype, device=device)
+                occupied = torch.zeros(n_blocks, s, dtype=torch.bool, device=device)
+                occupied[block, slot] = True
+                Ab[block, slot, slot] = Ab[block, slot, slot] + inv_alpha[:, None, None] * eye
+                pad = (~occupied).nonzero()
+                Ab[pad[:, 0], pad[:, 1], pad[:, 1]] = eye
+                full = Ab.permute(0, 1, 3, 2, 4).reshape(n_blocks, 3 * s, 3 * s)
+                factor, info = torch.linalg.cholesky_ex(full)
+                binv = torch.cholesky_inverse(factor)
+                failed = info != 0
+                if bool(failed.any()):
+                    d = torch.diagonal(full[failed], dim1=1, dim2=2)
+                    binv[failed] = torch.diag_embed(1.0 / d)
+                self.binv, self.block, self.slot, self.n_blocks, self.size = binv, block, slot, n_blocks, s
+            self.near = None
+            if kind in ("neumann", "block-neumann"):
+                near = pair_ok & ~same & (R.detach() < cutoff)
+                self.near = (i_[near], k_[near], r[near], D1[near], D2[near])
+
+    def _blocks(self, r: Tensor) -> Tensor:
+        if self.binv is None:
+            return self.diag * r
+        rb = torch.zeros(self.n_blocks, self.size, 3, dtype=r.dtype, device=r.device)
+        rb[self.block, self.slot] = r
+        zb = torch.bmm(self.binv, rb.reshape(self.n_blocks, 3 * self.size, 1)).reshape(self.n_blocks, self.size, 3)
+        return zb[self.block, self.slot] * self.mask
+
+    def __call__(self, r: Tensor) -> Tensor:
+        z = self._blocks(r)
+        if self.near is not None:
+            i, k, r, D1, D2 = self.near
+            f = scatter_sum(dipole_field(z[i], r, D1, D2), k, self.N) + scatter_sum(dipole_field(z[k], r, D1, D2), i,
+                                                                                  self.N)
+            z = z + self._blocks(f * self.mask)
+        return z
 
 
 def _mesh_plans(ew, kind: str, order: int, pos: Optional[Tensor] = None, cells: Optional[Tensor] = None) -> list:
@@ -2856,19 +3462,21 @@ def _mesh_plans(ew, kind: str, order: int, pos: Optional[Tensor] = None, cells: 
     if pos is None:
         key = (kind, int(order))
         if key not in ew["plans"]:
-            ew["plans"][key] = [MeshPlan(ew["pos"][g["idx"]], ew["cells"][g["bs"]], g["batch"], g["grid"], order)
+            ew["plans"][key] = [MeshPlan(_take(ew["pos"], g["idx"]), _take(ew["cells"], g["bs"]), g["batch"],
+                                         g["grid"], order)
                                 for g in groups]
         return list(zip(groups, ew["plans"][key]))
-    return [(g, MeshPlan(pos[g["idx"]], cells[g["bs"]], g["batch"], g["grid"], order)) for g in groups]
+    return [(g, MeshPlan(_take(pos, g["idx"]), _take(cells, g["bs"]), g["batch"], g["grid"], order)) for g in groups]
 
 
 # the iterative induced-dipole solve of large molecules and periodic cells
 class _MutualField:
     """The field of a set of induced dipoles at every atom: the real-space
-    pairs through their mutual tensors ``T`` (:meth:`real`) and, in cells,
+    pairs through their mutual ladders ``(r, D1, D2)`` (:meth:`real`, matrix
+    free, :func:`dipole_field`) and, in cells,
     the mesh field plus the self field and, for slabs, the Yeh-Berkowitz
-    field (:meth:`mesh`). The two parts depend on disjoint inputs (``T``;
-    the positions and cells), which keeps the products of the implicit
+    field (:meth:`mesh`). The two parts depend on disjoint inputs (the
+    ladders; the positions and cells), which keeps the products of the implicit
     backward pass exact. The mesh part runs on the evaluation's shared mesh
     plans, built from ``pos`` and ``cell``, so the solve and its adjoint
     redo none of the spline or influence-function setup."""
@@ -2876,6 +3484,14 @@ class _MutualField:
     def __init__(self, i_: Tensor, k_: Tensor, N: int, polar: Tensor, ew, tol: float, max_iter: int,
                  pos: Tensor, cell: Tensor):
         self.i, self.k, self.N = i_, k_, N
+        # one gather and one scatter per product: both directions of every pair at once
+        self.ik, self.ki = torch.cat([i_, k_]), torch.cat([k_, i_])
+        # the real-space product runs compiled when the evaluation is fused and has enough pairs
+        # to repay the fixed cost of a compiled call on every iteration, in the forward solve and
+        # in the adjoint solve of the backward pass alike
+        self.fused = fused_active() and int(i_.shape[0]) >= _FUSED_SOLVE_PAIRS
+        # the mesh field's stencil arithmetic, compiled whenever the evaluation is fused
+        self.fused_mesh = fused_active()
         self.polar = polar
         self.tol, self.max_iter = tol, max_iter
         self.ew = ew
@@ -2885,6 +3501,12 @@ class _MutualField:
         self.order = 0 if ew is None else ew["porder"]
         self.mesh_self = False if ew is None else bool(ew["mesh_self"])
         self.guess: Optional[Tensor] = None
+        self.precond: Optional["_Preconditioner"] = None
+        self.n_polar: Optional[int] = None
+        # solves of fixed length per phase, and their convergence on the device (a plan's)
+        self.fixed: Optional[dict] = None
+        self.converged: Optional[Tensor] = None
+        self.collect_stats = True
         self.phase = "forward"
         self.stats: dict = {}
         self.adjoints: dict = {}
@@ -2893,9 +3515,10 @@ class _MutualField:
         # outside the no-grad solve, if no earlier term has
         self.plans()
 
-    def real(self, mu: Tensor, T: Tensor) -> Tensor:
-        return (scatter_sum(torch.einsum("mab,mb->ma", T, mu[self.i]), self.k, self.N)
-                + scatter_sum(torch.einsum("mab,mb->ma", T, mu[self.k]), self.i, self.N))
+    def real(self, mu: Tensor, pair) -> Tensor:
+        r, D1, D2 = pair
+        with fused(self.fused):
+            return mutual_field_real(mu, r, D1, D2, self.ik, self.ki, self.N)
 
     def plans(self, pos: Optional[Tensor] = None, cell: Optional[Tensor] = None) -> list:
         """The mesh plans: the evaluation's shared ones, or new ones on ``pos`` and ``cell``."""
@@ -2906,11 +3529,15 @@ class _MutualField:
     def mesh(self, mu: Tensor, plans: Optional[list] = None) -> Optional[Tensor]:
         if not self.structures:
             return None
+        with fused(self.fused_mesh):
+            return self._mesh(mu, plans)
+
+    def _mesh(self, mu: Tensor, plans: Optional[list]) -> Tensor:
         f = torch.zeros_like(mu)
         coef = self_field_coefficient(self.alpha_p)
         for g, plan in (self.plans() if plans is None else plans):
             idx, b = g["idx"], g["batch"]
-            m = mu[idx]
+            m = _take(mu, idx)
             _, dphi, _ = plan.potential(None, m, None, self.alpha_p, hessian=False)
             field = -dphi + coef * m
             if self.mesh_self:
@@ -2923,43 +3550,64 @@ class _MutualField:
             f = f.index_add(0, idx, field)
         return f
 
-    def __call__(self, mu: Tensor, T: Tensor) -> Tensor:
-        f = self.real(mu, T)
+    def __call__(self, mu: Tensor, pair) -> Tensor:
+        f = self.real(mu, pair)
         g = self.mesh(mu)
         return f if g is None else f + g
 
 
+@region("amoeba.pcg")
 def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_iter: int,
-         x0: Optional[Tensor] = None) -> tuple[Tensor, int, bool]:
+         x0: Optional[Tensor] = None, precond=None, n_polar: Optional[int] = None,
+         fixed: Optional[int] = None) -> tuple[Tensor, int, Tensor, Optional[Tensor]]:
     """Preconditioned conjugate gradients for ``(1/alpha - T) mu = rhs`` on the
-    polarizable atoms, preconditioned by ``alpha``, converged when the rms
-    change of the dipoles per iteration drops below ``tol`` Debye.
+    polarizable atoms, converged when the rms change of the dipoles per
+    iteration drops below ``tol`` Debye.
 
-    The solve starts from the direct dipoles ``alpha rhs`` or from ``x0``,
+    ``precond`` applies ``M^-1`` (:class:`_Preconditioner`); by default the
+    polarizabilities. The solve starts from ``M^-1 rhs`` or from ``x0``,
     whichever has the smaller residual, so a poor guess costs one operator
     application and never more iterations. One host synchronization per
-    iteration (the convergence test). Returns the dipoles, the number of
-    iterations and whether the guess was used.
+    iteration (the convergence test, which also checks that ``r . M^-1 r``
+    stays positive; if a preconditioner ever loses definiteness the solve
+    restarts from the current dipoles with the diagonal one). Returns the
+    dipoles, the number of iterations, whether the guess was used (on the
+    device) and, for a solve of ``fixed`` length, whether it converged (on
+    the device; otherwise ``None``). ``n_polar``, the count of polarizable
+    atoms, saves reading it.
+
+    A solve of ``fixed`` length runs that many iterations and reads nothing
+    from the device: once converged, the iterate stops changing, so with
+    enough iterations it returns the dipoles of the tested solve.
     """
     mask = polar[:, None].to(rhs.dtype)
-    n_polar = max(int(polar.sum()), 1)
+    n_polar = max(int(polar.sum()), 1) if n_polar is None else n_polar
     inv_alpha = torch.where(polar, 1.0 / alpha.clamp_min(1e-30), torch.zeros_like(alpha))[:, None]
     diag = alpha[:, None] * mask
+
+    def diagonal(v):
+        return diag * v
+
+    precond = diagonal if precond is None else precond
 
     def apply(v):
         return (v * inv_alpha - field_of(v)) * mask
 
-    x = diag * rhs
+    x = precond(rhs * mask)
     r = rhs * mask - apply(x)
-    used = False
+    used = torch.zeros((), dtype=torch.bool, device=rhs.device)
     if x0 is not None:
         xg = x0 * mask
         rg = rhs * mask - apply(xg)
-        if float((rg * rg).sum()) < float((r * r).sum()):
-            x, r, used = xg, rg, True
-    z = diag * r
+        # the start with the smaller residual, chosen on the device
+        used = (rg * rg).sum() < (r * r).sum()
+        x, r = torch.where(used, xg, x), torch.where(used, rg, r)
+    z = precond(r)
     p = z
     rz = (r * z).sum()
+    if fixed is not None:
+        x, iterations, converged = _pcg_fixed(x, r, z, p, rz, apply, precond, tol, n_polar, fixed)
+        return x, iterations, used, converged
     iterations = 0
     for _ in range(max_iter):
         iterations += 1
@@ -2971,16 +3619,46 @@ def _pcg(rhs: Tensor, alpha: Tensor, field_of, polar: Tensor, tol: float, max_it
         step = a * p
         x = x + step
         r = r - a * ap
-        if math.sqrt(float((step * step).sum()) / n_polar) * _DEBYE < tol:
-            break
-        z = diag * r
+        z = precond(r)
         rz_new = (r * z).sum()
+        change, curvature = torch.stack([(step * step).sum(), rz_new]).tolist()
+        if math.sqrt(change / n_polar) * _DEBYE < tol:
+            break
+        if curvature <= 0.0 and precond is not diagonal:
+            precond = diagonal
+            z = diag * r
+            p = z
+            rz = (r * z).sum()
+            continue
         p = z + (rz_new / torch.where(rz != 0, rz, torch.ones_like(rz))) * p
         rz = rz_new
     else:
         warnings.warn(f"the induced dipoles did not converge to {tol} Debye in {max_iter} iterations",
                       stacklevel=2)
-    return x, iterations, used
+    return x, iterations, used, None
+
+
+def _pcg_fixed(x, r, z, p, rz, apply, precond, tol: float, n_polar: int, length: int):
+    """The iterations of :func:`_pcg` for a solve of fixed length: every update
+    is taken while the solve has not converged, the test on the device."""
+    # the convergence test of _pcg, squared: rms change per atom below tol Debye
+    bound = (tol / _DEBYE) ** 2 * n_polar
+    done = torch.zeros((), dtype=torch.bool, device=x.device)
+    for _ in range(length):
+        ap = apply(p)
+        denom = (p * ap).sum()
+        a = torch.where(denom != 0, rz / torch.where(denom != 0, denom, torch.ones_like(denom)),
+                        torch.zeros_like(denom))
+        step = a * p
+        x = torch.where(done, x, x + step)
+        r = torch.where(done, r, r - a * ap)
+        z = precond(r)
+        rz_new = (r * z).sum()
+        now = done | ((step * step).sum() < bound)
+        p = torch.where(now, p, z + (rz_new / torch.where(rz != 0, rz, torch.ones_like(rz))) * p)
+        rz = torch.where(now, rz, rz_new)
+        done = now
+    return x, length, done.clone()
 
 
 class _ImplicitInduction(torch.autograd.Function):
@@ -2988,8 +3666,9 @@ class _ImplicitInduction(torch.autograd.Function):
     the converged dipoles through the adjoint system (the same solve on the
     incoming gradient): neither the iterations nor a dense matrix are stored.
     The backward pass forms ``lambda^T (dA/dtheta) mu`` explicitly: the
-    real-space part is the outer product of the adjoint and the dipoles on
-    every pair, the mesh part the position and cell derivatives of
+    real-space part is the derivative of ``lambda . T mu`` on every pair with
+    respect to its ladders and its vector (``T = D_2 r r^T + D_1 I``), the
+    mesh part the position and cell derivatives of
     ``lambda . mesh(mu)`` with both vectors held fixed, taken through the
     evaluation's shared mesh plans. For a second derivative the dipoles and
     the adjoint are recomputed as differentiable solves and the bilinear
@@ -2999,23 +3678,29 @@ class _ImplicitInduction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, rhs, alpha, T, pos, cell, op):
+    def forward(ctx, rhs, alpha, r, D1, D2, pos, cell, op):
         with torch.no_grad():
-            mu, iterations, used = _pcg(rhs, alpha, lambda v: op(v, T), op.polar, op.tol, op.max_iter, op.guess)
+            pair = (r.detach(), D1.detach(), D2.detach())
+            fixed = None if op.fixed is None else op.fixed.get(op.phase)
+            mu, iterations, used, converged = _pcg(rhs, alpha, lambda v: op(v, pair), op.polar, op.tol, op.max_iter,
+                                                   op.guess, op.precond, op.n_polar, fixed)
+            if converged is not None and op.converged is not None:
+                op.converged.logical_and_(converged)
         op.stats[op.phase] = iterations
-        op.stats[op.phase + "_guess"] = used
-        if op.guess is not None:
+        if op.collect_stats:
+            op.stats[op.phase + "_guess"] = bool(used)
+        if op.guess is not None and op.collect_stats:
             # how far the guess was from the solution, rms over the polarizable atoms in Debye
             m = op.polar[:, None].to(mu.dtype)
             op.stats[op.phase + "_guess_error"] = float(
-                ((op.guess * m - mu) ** 2).sum() / max(int(op.polar.sum()), 1)) ** 0.5 * _DEBYE
+                ((op.guess * m - mu) ** 2).sum() / op.n_polar) ** 0.5 * _DEBYE
         ctx.op = op
-        ctx.save_for_backward(mu, rhs, alpha, T, pos, cell)
+        ctx.save_for_backward(mu, rhs, alpha, r, D1, D2, pos, cell)
         return mu
 
     @staticmethod
     def backward(ctx, grad_mu):
-        mu, rhs, alpha, T, pos, cell = ctx.saved_tensors
+        mu, rhs, alpha, r, D1, D2, pos, cell = ctx.saved_tensors
         op = ctx.op
         mask = op.polar[:, None].to(mu.dtype)
         create_graph = torch.is_grad_enabled()
@@ -3023,22 +3708,34 @@ class _ImplicitInduction(torch.autograd.Function):
         if create_graph:
             # the differentiable recompute starts from the converged dipoles
             op.guess, op.phase = mu.detach(), "recompute"
-            mu = _ImplicitInduction.apply(rhs, alpha, T, pos, cell, op)
+            mu = _ImplicitInduction.apply(rhs, alpha, r, D1, D2, pos, cell, op)
         # the adjoint starts from the last adjoint of this shape (molecular dynamics steps,
         # repeated training batches), when that is closer than the direct start
         key = (tuple(grad_mu.shape), grad_mu.dtype, str(grad_mu.device), create_graph)
         predictor = op.adjoint_predictor if not create_graph else None
         start = predictor.predict(grad_mu) if predictor is not None else None
         op.guess, op.phase = (start if start is not None else op.adjoints.get(key)), "adjoint"
-        lam = _ImplicitInduction.apply(grad_mu * mask, alpha, T, pos, cell, op)
-        op.adjoints[key] = lam.detach()
+        lam = _ImplicitInduction.apply(grad_mu * mask, alpha, r, D1, D2, pos, cell, op)
+        # updated in place, so a recorded graph refreshes it on replay
+        last = op.adjoints.get(key)
+        if last is None:
+            op.adjoints[key] = lam.detach().clone()
+        else:
+            last.copy_(lam.detach())
         if predictor is not None:
             predictor.push(lam.detach())
         op.guess, op.phase = guess, phase
-        grad_T = grad_pos = grad_cell = None
-        if T.requires_grad:
-            # d/dT of lam . (T mu[i] at k, T mu[k] at i) summed over the pairs
-            grad_T = lam[op.k][:, :, None] * mu[op.i][:, None, :] + lam[op.i][:, :, None] * mu[op.k][:, None, :]
+        grad_r = grad_D1 = grad_D2 = grad_pos = grad_cell = None
+        if any(ctx.needs_input_grad[2:5]):
+            # lam . T mu summed over both directions of the pairs: D1 (l . m) + D2 (r . l)(r . m)
+            m, l_ = mu[op.ik].view(2, -1, 3), lam[op.ki].view(2, -1, 3)
+            rm, rl = (r * m).sum(-1), (r * l_).sum(-1)
+            if ctx.needs_input_grad[2]:
+                grad_r = D2[:, None] * (rm[..., None] * l_ + rl[..., None] * m).sum(0)
+            if ctx.needs_input_grad[3]:
+                grad_D1 = (l_ * m).sum((0, 2))
+            if ctx.needs_input_grad[4]:
+                grad_D2 = (rm * rl).sum(0)
         if op.structures and (pos.requires_grad or cell.requires_grad):
             mu_d, lam_d = mu.detach(), lam.detach()
             with torch.enable_grad():
@@ -3065,7 +3762,7 @@ class _ImplicitInduction(torch.autograd.Function):
             grad_pos, grad_cell = found.get(id(op.pos)), found.get(id(op.cell))
         a2 = torch.where(op.polar, alpha * alpha, torch.ones_like(alpha))
         grad_alpha = torch.where(op.polar, (lam * mu).sum(1) / a2, torch.zeros_like(alpha))
-        return lam, grad_alpha, grad_T, grad_pos, grad_cell, None
+        return lam, grad_alpha, grad_r, grad_D1, grad_D2, grad_pos, grad_cell, None
 
 
 # small helpers
@@ -3111,4 +3808,5 @@ def _opbend_key(lib: AmoebaLibrary, d: str, b: str, a: str, c: str) -> str:
 __all__ = ["Amoeba", "Hippo", "AmoebaForceField", "COULOMB", "COULOMB_KCAL", "RadialSeries",
            "multipole_energy", "multipole_field", "thole_ladder", "coulomb_ladder",
            "core_valence_kernel", "overlap_coulomb_kernel", "slater_overlap", "derivative_ladder",
-           "tortor_spline_tables", "bicubic_interpolate", "ewald_ladder", "multipole_pme", "DipolePredictor"]
+           "tortor_spline_tables", "bicubic_interpolate", "ewald_ladder", "multipole_pme", "DipolePredictor",
+           "StepPlan"]

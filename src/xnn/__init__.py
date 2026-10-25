@@ -17,7 +17,7 @@ Organized by model family, with everything shared factored into ``common``:
     dnn/     dense neural networks (HDNNP / ANI / PhysNet)
     ffnn/    learnable classical force fields (ReaxFF / ReaxFF-nn / OPLS / DREIDING / AMBER / CHARMM)
     sqmnn/   semiempirical quantum chemistry (PM3 / PM6 / PM6-ORG / PM7)
-    trfnn/   graph transformers (ET) and the shared edge attention
+    trfnn/   graph transformers (ET, Equiformer, EquiformerV2) and the shared edge attention
     hybnn/   GNN + transformer potentials with a physics energy split (BAMBOO, SpookyNet)
 
 Importing a family package registers its models, e.g.:
@@ -27,7 +27,7 @@ Importing a family package registers its models, e.g.:
 """
 # importing the family packages registers their models by name; the hybrid
 # family (BAMBOO, SpookyNet), the classical force fields (ffnn), the semiempirical
-# methods (sqmnn) and the trfnn family (ET) need no e3nn
+# methods (sqmnn) and ET need no e3nn; the Equiformers register only when e3nn is available
 # the GNN family registers SchNet, DimeNet, GemNet, PaiNN and TensorNet unconditionally and its
 # equivariant models (NequIP/MACE/Allegro/CACE/AIMNet2) only when e3nn
 # is available (it warns otherwise, see gnn/models/__init__.py)

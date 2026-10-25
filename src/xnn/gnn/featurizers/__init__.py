@@ -1,9 +1,9 @@
+from xnn.common.featurizers import BesselRBF, PolynomialCutoff
+
 from .cartesian import CartesianAngularBasis
-from .cutoff import PolynomialCutoff
 from .radial import (
     DISTANCE_TRANSFORMS,
     AgnesiDistanceTransform,
-    BesselRBF,
     IdentityDistanceTransform,
     SoftDistanceTransform,
 )

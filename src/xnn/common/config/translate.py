@@ -233,6 +233,23 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "max_z": "n_elements",
         "equivariance_invariance_group": "equivariance_group",
     },
+    # Equiformer (atomicarchitects/equiformer) constructor spellings; key names only
+    "equiformer": {
+        "num_layers": "n_interactions",
+        "max_radius": "cutoff",
+        "number_of_basis": "n_rbf",
+        "basis_type": "radial_basis",
+        "fc_neurons": "radial_hidden",
+    },
+    # EquiformerV2 (fairchem equiformer_v2) yaml and constructor spellings
+    "equiformer_v2": {
+        "sphere_channels": "n_features",
+        "num_layers": "n_interactions",
+        "max_radius": "cutoff",
+        "lmax_list": "l_max",
+        "mmax_list": "m_max",
+        "max_num_elements": "n_elements",
+    },
     # BAMBOO (bytedance/bamboo) nn_params / gnn_params spellings
     "bamboo": {
         "rcut": "cutoff",

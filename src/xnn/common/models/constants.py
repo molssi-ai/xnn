@@ -1,4 +1,4 @@
-"""Constants of the GNN potentials that stay exact in float64.
+"""Model constants that stay exact in float64.
 
 Some values of a model are fixed by its configuration but computed when a block
 is built, in the default dtype of that moment, and kept as buffers (so most are
@@ -8,10 +8,10 @@ energy scale and shift. A model built in float32 and cast to float64, or loaded
 from a float32 checkpoint, would carry them float32-rounded, which caps its
 float64 agreement with an exact evaluation (near 1e-10 for the coupling tensors,
 1e-7 for the radial frequencies). :func:`exact_float64_constants` rebuilds every
-float64 one exactly as a float64 build would make it, and
-:class:`~xnn.gnn.models.base.GNNPotential` calls it after every cast and every
-``load_state_dict``. Float32 values are left as built: their rounding is below
-float32 arithmetic.
+float64 one exactly as a float64 build would make it, and the equivariant models
+(:class:`~xnn.gnn.models.base.GNNPotential`, the Equiformers) call it after
+every cast and every ``load_state_dict``. Float32 values are left as built:
+their rounding is below float32 arithmetic.
 """
 from __future__ import annotations
 
@@ -94,8 +94,6 @@ def exact_float64_constants(module: nn.Module) -> int:
     int
         The number of tensors whose values changed.
     """
-    from e3nn import o3
-
     changed = 0
     for mod in module.modules():
         if isinstance(mod, torch.jit.ScriptModule):
@@ -113,6 +111,7 @@ def exact_float64_constants(module: nn.Module) -> int:
             match = _W3J_BUFFER.fullmatch(name)
             if match is None or buf.dtype != torch.float64:
                 continue
+            from e3nn import o3
             exact = o3.wigner_3j(*(int(l) for l in match.groups()), dtype=torch.float64)
             if restore_exact(buf, exact):
                 changed += 1

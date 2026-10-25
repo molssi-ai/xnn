@@ -16,7 +16,8 @@ __all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "GemNet", "Pai
 # import time (it loads its Wigner constants with torch.load) and can fail in
 # other ways
 try:
-    from ..constants import exact_float64_constants
+    from xnn.common.models.constants import exact_float64_constants
+
     from .aimnet2 import AIMNet2
     from .aimnet2_foundation import FOUNDATION_MODELS as AIMNET2_FOUNDATION_MODELS
     from .aimnet2_foundation import from_aimnet_artifact

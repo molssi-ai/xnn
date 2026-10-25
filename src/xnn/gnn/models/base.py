@@ -22,8 +22,8 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.constants import exact_float64_constants
 
-from ..constants import exact_float64_constants
 from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .blocks import species_irreps
 

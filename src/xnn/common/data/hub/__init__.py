@@ -29,6 +29,7 @@ from . import (
     hdnnp4g,  # noqa: F401
     lode_dimers,  # noqa: F401
     noncovalent,  # noqa: F401
+    oc20,  # noqa: F401
     qm7,  # noqa: F401
     qm9,  # noqa: F401
     rmd17,  # noqa: F401

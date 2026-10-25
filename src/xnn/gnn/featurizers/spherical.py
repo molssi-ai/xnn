@@ -15,10 +15,7 @@ import torch
 from torch import Tensor
 
 from xnn.common.data import AtomicGraph
-from xnn.common.featurizers import Featurizer, GaussianRBF
-
-from .cutoff import PolynomialCutoff
-from .radial import BesselRBF
+from xnn.common.featurizers import BesselRBF, Featurizer, GaussianRBF, PolynomialCutoff
 
 try:
     from e3nn import o3

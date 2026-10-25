@@ -47,11 +47,11 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
+from xnn.common.models.constants import register_constant, restore_exact
 from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 
-from ..constants import register_constant, restore_exact
 from ..fast import ConvTensorProduct, _cueq
 from ..fast import symmetric_contraction as _fast_sc
 from ..featurizers import DISTANCE_TRANSFORMS
@@ -339,7 +339,7 @@ class _Contraction(nn.Module):
         in float32 and cast, or loaded from a float32 checkpoint, carries it
         float32-rounded. A basis that differs by more than rounding (a
         foundation checkpoint's own) is kept. See
-        :func:`~xnn.gnn.constants.exact_float64_constants`.
+        :func:`~xnn.common.models.constants.exact_float64_constants`.
 
         Returns
         -------
