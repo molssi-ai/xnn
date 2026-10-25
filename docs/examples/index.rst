@@ -496,6 +496,8 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/gnn/painn/painn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/trfnn/et/torchmdnet_verification>
+   Equiformer, block by block: the authors' implementation in float64 and float32, and the speed of a training step <nb/fidelity_checks/trfnn/equiformer/equiformer_verification>
+   EquiformerV2 against fairchem: every variant, Wigner matrices, sphere grids, SO(2) convolutions, speed and memory <nb/fidelity_checks/trfnn/equiformer_v2/fairchem_verification>
    GMTKN55 against the paper and the maintainers' repository: counts, averages, PBEh-3c and WTMAD-2 <nb/fidelity_checks/common/data/gmtkn55_verification>
    HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/dnn/hdnnp/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/dnn/ani/ani_verification>

@@ -717,7 +717,10 @@ and torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
 multipoles in local frames and Thole-damped mutual induction. HIPPO keeps the
 valence terms and multipoles and replaces the intermolecular terms by charge
 penetration, density-damped induction, Pauli repulsion, damped dispersion,
-charge transfer and charge flux.
+charge transfer and charge flux. A library with ``exchpol`` parameters adds
+the exchange polarization of `Chung et al., J. Phys. Chem. B 126, 7579
+(2022) <https://doi.org/10.1021/acs.jpcb.2c04237>`_: the overlap with each
+neighbor shrinks an atom's polarizability along the pair.
 
 Molecules
 ---------
@@ -759,6 +762,8 @@ charge-transfer terms are switched off smoothly before their cutoff.
 
 The defaults follow Tinker. The Ewald coefficient comes from the real-space
 cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. The
+mesh sums use the least-squares spline moduli, as Tinker does, so the
+energies match Tinker's at the same keys even on a coarse mesh. The
 options are ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` for the
 three coefficients, ``pme_grid`` and ``pme_order`` for the mesh,
 ``vdw_cutoff``, ``repulsion_cutoff``, ``chgtrn_cutoff`` and
@@ -768,9 +773,9 @@ Waals cutoff, because the hydrogen sites of that term sit inside their atoms.
 ``polar_eps`` sets the convergence of the induced dipoles in Debye.
 ``mesh_self=True`` removes the spurious mesh self-interaction of every
 multipole (its position average) from the energies, the polarizing field
-and the dispersion sum. It brings the induction, the dispersion and the
-pressure of a coarse mesh closer to the converged values, at the price of
-no longer matching Tinker's plain sums at the same keys.
+and the dispersion sum. It brings the dispersion and the permanent
+multipoles of a coarse mesh closer to the converged values, at the price of
+no longer matching Tinker at the same keys.
 ``ewald=False`` truncates a cell at the cutoff instead. A slab with two
 periodic axes is summed on its cell with the Yeh-Berkowitz correction, so
 leave a vacuum gap of at least the slab thickness along the free axis.
@@ -781,7 +786,8 @@ Training and files
 (``bond``, ``angle``, ``strbnd``, ``urey``, ``opbend``, ``torsion``,
 ``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
 ``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
-(``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``cflux``) and
+(``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``exchpol``,
+``cflux``) and
 ``atom_ref``. While the multipoles train, every molecule keeps its total
 charge (``conserve_charge``), components the library leaves zero by the
 symmetry of the local frame stay zero (``symmetry_mask``), and the
