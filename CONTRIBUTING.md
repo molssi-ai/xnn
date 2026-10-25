@@ -92,7 +92,7 @@ use the **Numerical discrepancy** form and include:
 - the reference: the upstream package and its exact version, or the paper and the equation,
   table or figure;
 - a script that computes the same quantity with both, on the same structure and the same
-  weights (for a faithful model, the weights transplanted from the reference);
+  weights (the weights transplanted from the reference where it has any);
 - both numbers, their difference, the precision (float32 or float64) and the device.
 
 Differences at the level of float32 round-off (about 1e-6 relative) are expected in float32;
@@ -161,10 +161,10 @@ Read `docs/developer_guide/extending.rst` first. A new model needs:
 
 1. the module in its family package, registered with `@register_model`, and
    `configs/model/<name>.yaml`;
-2. a stated fidelity target: a **faithful** implementation reproduces a reference code under
-   transplanted weights; a **clean-room** implementation reproduces the paper's equations and
-   published numbers;
-3. the tests listed under [Tests](#tests), including the parity test against the reference;
+2. its fidelity reference, reproduced to float64 and float32 round-off whatever the implementation
+   method: the upstream code under transplanted weights, the reference program, or, where neither
+   exists, the paper's equations and published numbers;
+3. the tests listed under [Tests](#tests), including the fidelity test against the reference;
 4. its row in the model tables of `README.md` and the documentation;
 5. if it is user-facing, a short example under `notebooks/examples/<family>/<model>/`, and its fidelity check under `notebooks/fidelity_checks/<family>/<model>/`.
 
@@ -185,9 +185,9 @@ Every new model gets at least:
 - invariance of the energy and equivariance of the forces under rotation and translation;
 - periodic stress, and forces against finite differences;
 - script-versus-eager parity if the model exports to TorchScript;
-- parity with the reference: the upstream code under transplanted weights for a faithful
-  model, guarded by an import check; an independent implementation of the paper's equations
-  for a clean-room one.
+- fidelity to the reference to round-off: the upstream code under transplanted weights (guarded
+  by an import check), the reference program, or an independent implementation of the paper's
+  equations where neither exists.
 
 Every bug fix gets a test that fails before the fix and passes after it.
 
@@ -248,7 +248,7 @@ branch before merging.
 xnn is released under the MIT license, and contributions are accepted under it.
 
 - **Do not copy code from other projects**, whatever their license. Implement from the paper
-  and from the documented behaviour, and prove fidelity with parity tests against the
+  and from the documented behaviour, and prove it with fidelity tests against the
   reference implementation installed as a test dependency. Upstream code may be imported in
   tests; it is not vendored.
 - **Do not read or consult implementations under copyleft licenses (GPL, AGPL, LGPL)** while
