@@ -734,6 +734,57 @@ def test_d_equals_p_uses_the_polar_scales_for_the_direct_field():
     assert -5.0 < e_dp * EV_TO_KCAL < 0.0           # bounded, no runaway dipoles
 
 
+# the water values of Chung et al. (2022, Table 1) on the HIPPO water dimer, and Tinker's energies
+# (kcal/mol) and forces of the first four atoms (kcal/mol/A) in mutual and direct polarization
+EXCHPOL = {"OW": {"spring": 6.238, "size": 0.255, "damp": 1.586, "use": True},
+           "HW": {"spring": 9.273, "size": 0.001, "damp": 5.685, "use": True}}
+TINKER_EXCHPOL = {
+    "mutual": ({"e_polar": -0.93048599, "energy": -4.86641126},
+               [[-1.45183399, 0.0, 2.30824788], [-0.27202215, 0.0, -0.1958421],
+                [1.98009888, 0.0, -2.12134428], [-0.39776186, 0.0, 1.43423385]]),
+    "direct": ({"e_polar": -0.76842226, "energy": -4.70434753},
+               [[-1.40757799, 0.0, 2.30352805], [-0.313485, 0.0, -0.2633486],
+                [2.28036015, 0.0, -2.46989686], [-0.7139203, 0.0, 1.8323153]])}
+
+
+def _exchpol_library(**use):
+    lib = copy.deepcopy(builtin_amoeba("hippo-water-2021"))
+    lib.exchpol = {c: dict(v, use=use.get(c, True)) for c, v in EXCHPOL.items()}
+    return lib
+
+
+@pytest.mark.parametrize("mode", ["mutual", "direct"])
+def test_exchange_polarization_matches_tinker(mode):
+    """The exchange polarization of the water dimer matches Tinker's energies and forces."""
+    refs, forces = TINKER_EXCHPOL[mode]
+    model = Hippo(_exchpol_library(), _top(), cutoff=30.0, polarization=mode, polar_eps=1e-10)
+    out = ForceStressOutput(model)(_graph(DIMER1))
+    for k, ref in refs.items():
+        assert float(out[k]) / KCAL_TO_EV == pytest.approx(ref, abs=1e-6), k
+    assert np.abs(out["forces"].detach().numpy()[:4] / KCAL_TO_EV - np.array(forces)).max() < 1e-6
+
+
+def test_exchange_polarization_without_a_used_class_is_off():
+    """A pair takes part only when one of its classes is used, so none used leaves the plain induction."""
+    plain = Hippo(builtin_amoeba("hippo-water-2021"), _top(), cutoff=30.0)(_graph(DIMER1))
+    unused = Hippo(_exchpol_library(OW=False, HW=False), _top(), cutoff=30.0)(_graph(DIMER1))
+    damped = Hippo(_exchpol_library(), _top(), cutoff=30.0)(_graph(DIMER1))
+    assert float(unused["e_polar"]) == pytest.approx(float(plain["e_polar"]), abs=1e-12)
+    assert float(damped["e_polar"]) > float(plain["e_polar"]) + 1e-4
+
+
+def test_exchange_polarization_trains_and_round_trips_through_tinker_files(tmp_path):
+    """The exchpol group trains, and the library's exchpol lines survive a Tinker file."""
+    model = Hippo(_exchpol_library(HW=False), _top(), cutoff=30.0, trainable="exchpol")
+    model(_graph(DIMER1))["energy"].sum().backward()
+    for name in ("expol_spring", "expol_size", "expol_damp"):
+        assert float(model.ff.params[name].grad.abs().sum()) > 0, name
+    write_tinker_prm(model.export_library(), tmp_path / "water.prm", keep_numbers=False)
+    back = read_tinker_prm(tmp_path / "water.prm")
+    assert sorted(v["use"] for v in back.exchpol.values()) == [False, True]
+    assert {round(v["spring"], 6) for v in back.exchpol.values()} == {6.238, 9.273}
+
+
 def test_polarization_setting_of_the_library_is_the_default():
     """The file's polarization keyword sets the model's mode; the constructor argument overrides it."""
     lib = builtin_amoeba("hippo-water-2021")
@@ -790,6 +841,44 @@ def test_tinker_prm_and_xyz_round_trip(tmp_path):
     # a model from a Tinker file read back through its integer labels
     model2 = Amoeba(back, MolecularTopology.from_bonds(["1", "2", "2", "1", "2", "2"], BONDS), cutoff=30.0)
     assert float(model2(_graph(DIMER1))["energy"]) == pytest.approx(e_b, abs=1e-9)
+
+
+NUMBERED_PRM = """
+forcefield              AMOEBA-WATER
+atom         36   71    O    "water O"    8    15.999    2
+atom         37   72    H    "water H"    1     1.008    1
+vdw          71    3.405   0.110
+vdw          72    2.655   0.0135   0.91
+bond         71   72    529.6   0.9572
+angle        72   71   72    34.05   108.5
+multipole    36  -37  -37    -0.51966
+                              0.0  0.0  0.14279
+                              0.37928
+                              0.0  -0.41809
+                              0.0  0.0  0.03881
+multipole    37   36   37     0.25983
+                             -0.03859  0.0  -0.05818
+                             -0.03673
+                              0.0  -0.10739
+                             -0.00203  0.0  0.14412
+polarize     36    0.837   0.39   37
+polarize     37    0.496   0.39   36
+"""
+
+
+def test_tinker_prm_keeps_its_own_numbers_on_request(tmp_path):
+    """A library read from a Tinker file is written back with its own type and class numbers."""
+    (tmp_path / "numbered.prm").write_text(NUMBERED_PRM)
+    lib = read_tinker_prm(tmp_path / "numbered.prm")
+    maps = write_tinker_prm(lib, tmp_path / "kept.prm", keep_numbers=True)
+    assert maps == {"types": {"36": 36, "37": 37}, "classes": {"71": 71, "72": 72}}
+    again = read_tinker_prm(tmp_path / "kept.prm")
+    assert again.atom_types == lib.atom_types and again.multipoles == lib.multipoles
+    assert again.polarize == lib.polarize and again.vdw_types == lib.vdw_types
+    assert again.bond("36", "37") == lib.bond("36", "37")
+    assert write_tinker_prm(lib, tmp_path / "renumbered.prm")["types"] == {"36": 1, "37": 2}
+    with pytest.raises(ValueError, match="not an integer"):
+        write_tinker_prm(builtin_amoeba("amoeba-water-2003"), tmp_path / "bad.prm", keep_numbers=True)
 
 
 def test_from_config_and_key_translation(tmp_path):
