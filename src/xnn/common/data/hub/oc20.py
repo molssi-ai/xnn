@@ -34,7 +34,7 @@ from ._download import download_file
 from .base import DatasetBuilder, register_dataset
 
 _URL = "https://dl.fbaipublicfiles.com/opencatalystproject/data/s2ef_train_200K.tar"
-_MD5 = None
+_MD5 = "f8d0909c2623a393148435dede7d3a46"
 _PROPERTIES = "species:S:1:pos:R:3:move_mask:L:1:tags:I:1:forces:R:3"
 _LATTICE = re.compile(r'Lattice="([^"]+)"')
 _ENERGY = re.compile(r'(?<![\w])energy=(\S+)')
