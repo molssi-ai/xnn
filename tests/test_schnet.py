@@ -69,7 +69,7 @@ def test_paper_defaults():
     assert m.rbf.centers.shape == (301,)
     assert abs(float(m.rbf.centers[1] - m.rbf.centers[0]) - 0.1) < 1e-6
     assert m.rbf.gamma == 10.0
-    assert all(b.cfconv.cutoff_fn is None for b in m.interactions)
+    assert m.cutoff_fn is None
 
 
 def test_invalid_cutoff_fn():
@@ -118,8 +118,8 @@ def _reference_energy(model, Z, pos):
                 e = torch.exp(-model.rbf.gamma * (r - mu) ** 2)
                 fn = block.cfconv.filter_net
                 W = ssp(dense(fn[2], ssp(dense(fn[0], e))))       # 2 dense+ssp
-                if block.cfconv.cutoff_fn is not None:
-                    rc = block.cfconv.cutoff_fn.cutoff
+                if model.cutoff_fn is not None:
+                    rc = model.cutoff_fn.cutoff
                     W = W * (0.5 * (math.cos(math.pi * float(r) / rc) + 1.0)
                              * (float(r) < rc))
                 conv[i] = conv[i] + xw[j] * W
@@ -299,7 +299,7 @@ def test_from_config_extras():
                   "atomic_energies": [-13.6, -1030.0, -2043.0]}}})
     m = build_model(cfg.model)
     assert m.rbf.gamma == 4.0
-    assert all(b.cfconv.cutoff_fn is not None for b in m.interactions)
+    assert m.cutoff_fn is not None
     assert float(m.energy_shift) == -1.5
     assert float(m.energy_scale) == pytest.approx(0.2)
     assert float(m.atom_ref.weight[6, 0]) == pytest.approx(-1030.0)
@@ -313,3 +313,101 @@ def test_schnetpack_key_translation():
     assert cfg.model.n_rbf == 30
     assert cfg.model.cutoff == 4.5
     assert cfg.data.cutoff == 4.5
+
+
+def _fidelity(dtype):
+    pytest.importorskip("schnetpack")
+    import os
+    import subprocess
+    import sys
+    script = os.path.join(os.path.dirname(__file__), "schnet_fidelity.py")
+    res = subprocess.run([sys.executable, script, dtype], capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    return float(res.stdout.strip().splitlines()[-1])
+
+
+def test_fidelity_vs_schnetpack_float64():
+    """Transplanted weights give the schnetpack energies and forces at the float64 floor."""
+    assert _fidelity("float64") < 1e-12
+
+
+def test_fidelity_vs_schnetpack_float32():
+    """The same in float32, at float32 round-off."""
+    assert _fidelity("float32") < 1e-5
+
+
+def test_float64_centers_exact_after_cast_and_load():
+    """A float32 build cast to float64, or a float32 checkpoint, keeps exact float64 centers."""
+    exact = torch.linspace(0.0, 30.0, 301, dtype=torch.float64)
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        m32 = SchNet()
+    finally:
+        torch.set_default_dtype(old)
+    assert torch.equal(m32.double().rbf.centers, exact)
+    m64 = SchNet()
+    m64.load_state_dict(SchNet().float().state_dict())
+    assert torch.equal(m64.rbf.centers, exact)
+    assert m64.rbf.gamma == 10.0
+
+
+# fast path (fused continuous-filter convolution)
+
+def test_fast_path_eligibility(monkeypatch):
+    """The fused convolution needs a power-of-two width and plain dense filter layers."""
+    import xnn.gnn.fast.schnet as fast
+    from xnn.common.finetune import inject_lora
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    cuda = torch.device("cuda")
+    m = SchNet(n_features=64, n_interactions=2, n_rbf=10, cutoff=5.0)
+    assert m.interactions[0].cfconv.fast_supported(cuda, torch.float32)
+    odd = SchNet(n_features=48, n_interactions=2, n_rbf=10, cutoff=5.0)
+    assert not odd.interactions[0].cfconv.fast_supported(cuda, torch.float32)
+    inject_lora(m, rank=2)
+    assert not m.interactions[0].cfconv.fast_supported(cuda, torch.float32)
+
+
+def _fast_batch(dtype):
+    from xnn.common.data import collate
+    graphs = [_graph(n=14, cutoff=5.0, seed=1, periodic=True), _graph(n=9, cutoff=5.0, seed=2)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("cutoff_fn", [None, "cosine"])
+def test_fast_path_parity(dtype, cutoff_fn):
+    """The fused convolution gives the reference energies, forces and stress."""
+    pytest.importorskip("triton")
+    torch.manual_seed(0)
+    model = SchNet(n_features=64, n_interactions=3, n_rbf=50, cutoff=5.0, cutoff_fn=cutoff_fn)
+    with torch.no_grad():
+        torch.nn.init.normal_(model.readout[-1].weight, std=0.3)
+    model = model.to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(b.cfconv.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces", "stress")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_path_off_in_training():
+    """A training-mode evaluation (force training) runs the reference convolution."""
+    pytest.importorskip("triton")
+    model = SchNet(n_features=64, n_interactions=2, n_rbf=20, cutoff=5.0).to("cuda").train()
+    model.set_use_fast(True)
+    out = ForceStressOutput(model).train()(_fast_batch(torch.float64))
+    assert not any(b.cfconv.fast_active for b in model.interactions)
+    out["forces"].pow(2).sum().backward()
+    assert model.interactions[0].cfconv.filter_net[0].weight.grad is not None
