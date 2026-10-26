@@ -13,8 +13,7 @@ A faithful implementation of the architecture described in the manuscripts
 It is built directly from the papers' equations on the xnn abstractions
 (:class:`~xnn.common.featurizers.GaussianRBF`,
 :func:`~xnn.common.models.ops.scatter_sum`,
-:func:`~xnn.common.models.ops.shifted_softplus`, ...); nothing is taken from
-the schnetpack code base.
+:func:`~xnn.common.models.ops.shifted_softplus`, ...).
 
 Architecture (NIPS paper section 4, Fig. 2):
 
@@ -69,13 +68,16 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, GaussianRBF
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.constants import (exact_constants_after_load, exact_float64_constants,
+                                         register_constant)
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import ShiftedSoftplus, scatter_sum, shifted_softplus
 from xnn.common.models.registry import register_model
 
 _MAX_Z = 100
 
 
-class _CFConv(nn.Module):
+class _CFConv(nn.Module, FastPathModule):
     """Continuous-filter convolution (NIPS paper eq 2 and Fig. 2, right).
 
     Each neighbor's features are gated element-wise by a filter generated
@@ -92,22 +94,30 @@ class _CFConv(nn.Module):
         filter dimension equal to ``F``).
     n_rbf : int
         Number of radial basis functions expanding the distances.
-    cutoff_fn : CosineCutoff or None
-        Optional smooth envelope multiplying the filter (off in the paper;
-        see the module docstring).
+
+    Notes
+    -----
+    A fused GPU implementation (:mod:`xnn.gnn.fast.schnet`) evaluates the same
+    block when :attr:`fast_active` is set (see :meth:`SchNet.set_use_fast`).
     """
 
-    def __init__(self, n_features: int, n_rbf: int,
-                 cutoff_fn: Optional[CosineCutoff] = None):
+    def __init__(self, n_features: int, n_rbf: int):
         super().__init__()
         self.filter_net = nn.Sequential(
             nn.Linear(n_rbf, n_features), ShiftedSoftplus(),
             nn.Linear(n_features, n_features), ShiftedSoftplus(),
         )
-        self.cutoff_fn = cutoff_fn
+        self.fast_active = False
 
-    def forward(self, x: Tensor, edge_index: Tensor, r: Tensor,
-                rbf: Tensor) -> Tensor:
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device``, a power-of-two feature width and plain dense layers."""
+        from xnn.gnn.fast.schnet import supported
+        n = self.filter_net[2].out_features
+        plain = all(type(self.filter_net[k]) is nn.Linear for k in (0, 2))
+        return plain and 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
+
+    def forward(self, x: Tensor, edge_index: Tensor, rbf: Tensor,
+                envelope: Optional[Tensor]) -> Tensor:
         """Apply one continuous-filter convolution.
 
         Parameters
@@ -117,10 +127,10 @@ class _CFConv(nn.Module):
         edge_index : Tensor
             Edge index of shape ``(2, E)``; row 0 is the source (neighbor
             ``j``) and row 1 the destination (center ``i``) of each edge.
-        r : Tensor
-            Interatomic distances per edge, shape ``(E,)``.
         rbf : Tensor
-            Radial basis expansion of ``r``, shape ``(E, n_rbf)``.
+            Radial basis expansion of the distances, shape ``(E, n_rbf)``.
+        envelope : Tensor or None
+            Optional smooth filter envelope per edge, shape ``(E,)``.
 
         Returns
         -------
@@ -128,11 +138,21 @@ class _CFConv(nn.Module):
             Convolved per-atom features ``sum_j x_j o W(r_ij)``, shape
             ``(N, F)``.
         """
+        if self.fast_active and not self.training and not torch.jit.is_scripting():
+            return self._forward_fast(x, edge_index, rbf, envelope)
         src, dst = edge_index[0], edge_index[1]
         W = self.filter_net(rbf)                                # (E, F)
-        if self.cutoff_fn is not None:
-            W = W * self.cutoff_fn(r).unsqueeze(-1)
+        if envelope is not None:
+            W = W * envelope.unsqueeze(-1)
         return scatter_sum(x[src] * W, dst, x.shape[0])
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor, edge_index: Tensor, rbf: Tensor,
+                      envelope: Optional[Tensor]) -> Tensor:
+        from xnn.gnn.fast.schnet_kernels import cfconv
+        first, second = self.filter_net[0], self.filter_net[2]
+        return cfconv(x, rbf, envelope, first.weight, first.bias, second.weight, second.bias,
+                      edge_index)
 
 
 class _Interaction(nn.Module):
@@ -151,20 +171,17 @@ class _Interaction(nn.Module):
         Feature width ``F``.
     n_rbf : int
         Number of radial basis functions feeding the filter network.
-    cutoff_fn : CosineCutoff or None
-        Optional smooth filter envelope, passed to :class:`_CFConv`.
     """
 
-    def __init__(self, n_features: int, n_rbf: int,
-                 cutoff_fn: Optional[CosineCutoff] = None):
+    def __init__(self, n_features: int, n_rbf: int):
         super().__init__()
         self.lin_in = nn.Linear(n_features, n_features)
-        self.cfconv = _CFConv(n_features, n_rbf, cutoff_fn)
+        self.cfconv = _CFConv(n_features, n_rbf)
         self.lin_mid = nn.Linear(n_features, n_features)
         self.lin_out = nn.Linear(n_features, n_features)
 
-    def forward(self, x: Tensor, edge_index: Tensor, r: Tensor,
-                rbf: Tensor) -> Tensor:
+    def forward(self, x: Tensor, edge_index: Tensor, rbf: Tensor,
+                envelope: Optional[Tensor]) -> Tensor:
         """Compute the interaction residual ``v`` for every atom.
 
         Parameters
@@ -173,17 +190,17 @@ class _Interaction(nn.Module):
             Per-atom features, shape ``(N, F)``.
         edge_index : Tensor
             Edge index of shape ``(2, E)``.
-        r : Tensor
-            Interatomic distances per edge, shape ``(E,)``.
         rbf : Tensor
-            Radial basis expansion of ``r``, shape ``(E, n_rbf)``.
+            Radial basis expansion of the distances, shape ``(E, n_rbf)``.
+        envelope : Tensor or None
+            Optional smooth filter envelope per edge, shape ``(E,)``.
 
         Returns
         -------
         Tensor
             The residual ``v``, shape ``(N, F)`` (add it to ``x`` outside).
         """
-        v = self.cfconv(self.lin_in(x), edge_index, r, rbf)
+        v = self.cfconv(self.lin_in(x), edge_index, rbf, envelope)
         return self.lin_out(shifted_softplus(self.lin_mid(v)))
 
 
@@ -258,6 +275,8 @@ class SchNet(InteratomicPotential):
         Gaussian radial basis expansion of interatomic distances.
     interactions : torch.nn.ModuleList
         Stack of :class:`_Interaction` blocks.
+    cutoff_fn : CosineCutoff or None
+        The filter envelope, or ``None`` for the paper's unmodulated filter.
     readout : torch.nn.Sequential
         Atom-wise MLP (``F -> F/2 -> 1``) mapping final features to the
         unstandardized per-atom energy ``E^hat_i``; its last layer is
@@ -286,15 +305,20 @@ class SchNet(InteratomicPotential):
             self.species = [int(z) for z in species]
         self.node_feature_dim = n_features  # invariant features (for e.g. LES)
         self.embedding = nn.Embedding(_MAX_Z, n_features)
+        if gamma is None and n_rbf > 1:   # the width of the center spacing
+            gamma = 0.5 * ((n_rbf - 1) / cutoff) ** 2
         self.rbf = GaussianRBF(n_rbf, cutoff, gamma=gamma)
+        # the paper's grid, kept exact in float64 through casts and loads
+        register_constant(self.rbf, "centers",
+                          torch.linspace(0.0, cutoff, n_rbf, dtype=torch.float64))
         self.interactions = nn.ModuleList([
-            _Interaction(
-                n_features, n_rbf,
-                CosineCutoff(cutoff) if cutoff_fn == "cosine" else None)
+            _Interaction(n_features, n_rbf)
             for _ in range(n_interactions)
         ])
+        self.cutoff_fn = CosineCutoff(cutoff) if cutoff_fn == "cosine" else None
         self.readout = nn.Sequential(
-            nn.Linear(n_features, n_features // 2), ShiftedSoftplus(),
+            nn.Linear(n_features, n_features // 2),
+            ShiftedSoftplus(),
             nn.Linear(n_features // 2, 1),
         )
         # zero-init the output head (DTNN convention): the initial prediction
@@ -316,6 +340,56 @@ class SchNet(InteratomicPotential):
                 raise ValueError(
                     "species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
+        # the Gaussian centers stay exact in float64 through loads and casts
+        self.register_load_state_dict_post_hook(exact_constants_after_load)
+        # the fused convolution (see set_use_fast); "auto" takes it where measured faster
+        self.use_fast = "auto"
+
+    def _apply(self, fn, recurse=True):
+        out = super()._apply(fn, recurse)
+        exact_float64_constants(self)
+        return out
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "SchNet":
+        """Choose the implementation of the continuous-filter convolutions.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.schnet` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the measured size
+            threshold); ``True``: wherever they are available; ``False``:
+            always the reference implementation. Evaluations in training mode
+            always use the reference, which is twice differentiable and
+            differentiates the weights. In float32 the kernels agree with the
+            reference to about 1e-6 relative, in float64 to about 1e-14.
+
+        Returns
+        -------
+        SchNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused convolutions on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.schnet import AUTO_POLICY
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        if self.training:
+            for block in blocks:
+                block.fast_active = False
+            return
+        like = self.embedding.weight
+        select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:
@@ -387,8 +461,11 @@ class SchNet(InteratomicPotential):
         x = self.embedding(atomic_numbers)
         r = torch.linalg.norm(edge_vec, dim=-1)
         rbf = self.rbf(r)
+        envelope: Optional[Tensor] = None
+        if self.cutoff_fn is not None:
+            envelope = self.cutoff_fn(r)
         for block in self.interactions:
-            x = x + block(x, edge_index, r, rbf)     # x^{l+1} = x^l + v^l
+            x = x + block(x, edge_index, rbf, envelope)    # x^{l+1} = x^l + v^l
         node_energy = (self.energy_scale * self.readout(x).squeeze(-1)
                        + self.energy_shift
                        + self.atom_ref(atomic_numbers).squeeze(-1))
@@ -420,6 +497,7 @@ class SchNet(InteratomicPotential):
             pooling of Fig. 2) and ``"node_features"`` (invariant per-atom
             features, shape ``(N, node_feature_dim)``).
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         energy = self.aggregate_energy(node_energy, data)

@@ -121,3 +121,12 @@ def exact_float64_constants(module: nn.Module) -> int:
             if isinstance(kernels, dict):
                 kernels.clear()
     return changed
+
+
+def exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
+    """``load_state_dict`` post-hook: a float32 checkpoint brings rounded constants.
+
+    Register it with ``module.register_load_state_dict_post_hook``; it calls
+    :func:`exact_float64_constants` on ``module``.
+    """
+    exact_float64_constants(module)

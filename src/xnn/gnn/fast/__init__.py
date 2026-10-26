@@ -4,7 +4,8 @@
 symmetric contraction of MACE have a fused GPU implementation next to their
 reference one; :class:`~xnn.common.models.fast.FastPathModule` explains the
 contract and ``use_fast`` the choice. :data:`AUTO_POLICY` holds the measured
-size above which ``use_fast="auto"`` takes the kernels.
+size above which ``use_fast="auto"`` takes the kernels. The fused continuous-filter
+convolution of SchNet (Triton kernels) lives in :mod:`xnn.gnn.fast.schnet`.
 """
 from xnn.common.models.fast import AutoPolicy
 

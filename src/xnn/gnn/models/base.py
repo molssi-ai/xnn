@@ -22,15 +22,10 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.constants import exact_float64_constants
+from xnn.common.models.constants import exact_constants_after_load, exact_float64_constants
 
 from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .blocks import species_irreps
-
-
-def _exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
-    """``load_state_dict`` post-hook: a float32 checkpoint brings rounded constants."""
-    exact_float64_constants(module)
 
 
 class GNNPotential(InteratomicPotential):
@@ -74,7 +69,7 @@ class GNNPotential(InteratomicPotential):
         self.atom_ref = nn.Embedding(200, 1)
         nn.init.zeros_(self.atom_ref.weight)
         # float64 constants stay exact through loads and casts
-        self.register_load_state_dict_post_hook(_exact_constants_after_load)
+        self.register_load_state_dict_post_hook(exact_constants_after_load)
 
     def _apply(self, fn, recurse=True):
         out = super()._apply(fn, recurse)
