@@ -246,10 +246,15 @@ def spline_moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch
     """``B(m) = prod_i |b_i(m_i)|^2`` over the mesh (paper eq 4.7), ``(K_1, K_2, K_3)``:
     the Euler exponential-spline moduli, or with ``least_squares`` those of
     :func:`least_squares_moduli`."""
-    axis = least_squares_moduli if least_squares else bspline_moduli
-    return (axis(mesh[0], order, dtype, device)[:, None, None]
-            * axis(mesh[1], order, dtype, device)[None, :, None]
-            * axis(mesh[2], order, dtype, device)[None, None, :])
+    if least_squares:
+        b1 = least_squares_moduli(mesh[0], order, dtype, device)
+        b2 = least_squares_moduli(mesh[1], order, dtype, device)
+        b3 = least_squares_moduli(mesh[2], order, dtype, device)
+    else:
+        b1 = bspline_moduli(mesh[0], order, dtype, device)
+        b2 = bspline_moduli(mesh[1], order, dtype, device)
+        b3 = bspline_moduli(mesh[2], order, dtype, device)
+    return b1[:, None, None] * b2[None, :, None] * b3[None, None, :]
 
 
 def pme_weighted_sum(charges: Tensor, pos: Tensor, cell: Tensor, mesh: List[int], order: int,
