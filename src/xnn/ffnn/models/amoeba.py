@@ -616,22 +616,23 @@ def two_center(R: Tensor, zi: Tensor, zk: Tensor, order: int, kernel) -> list[Te
     """The ladder of a two-center kernel (:func:`overlap_coulomb_kernel` or
     :func:`squared_overlap`), with its series in the exponent difference where
     ``|zeta_i - zeta_k| R`` is small (equal exponents included) and its closed
-    form elsewhere: on a GPU both forms on every pair
-    (:func:`two_center_ladder`), on a CPU each form on its own pairs."""
-    if R.is_cuda:
+    form elsewhere. Each form runs on its own pairs, which takes a host
+    synchronization; on a GPU inside the fused path, a compiled region or a
+    CUDA-graph capture both forms run on every pair instead
+    (:func:`two_center_ladder`)."""
+    if R.is_cuda and (fused_active() or torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing()):
         return two_center_ladder(R, zi, zk, order, kernel)
     near_pairs = _near_pairs(R, zi, zk)
-    out = [torch.zeros_like(R) for _ in range(order + 1)]
-    for mask, near in ((near_pairs, True), (~near_pairs, False)):
-        if not bool(mask.any()):
-            continue
-        Rm, zim, zkm = R[mask], zi[mask].double(), zk[mask].double()
-        vals = (_near_ladder(kernel, Rm, zim, zkm, order) if near
-                else derivative_ladder(kernel(zim, zkm, False), Rm, zim, zkm, order))
-        rows = mask.nonzero()[:, 0]
-        for n in range(order + 1):
-            out[n] = out[n].index_put((rows,), vals[n])
-    return out
+    # the near pairs first; an empty side still runs, so its device tables exist before any graph capture
+    perm = torch.argsort((~near_pairs).to(torch.int8), stable=True)
+    n_near = int(near_pairs.sum())
+    inverse = torch.empty_like(perm).scatter_(0, perm, torch.arange(perm.shape[0], device=perm.device))
+    Rp, zip_, zkp = R.index_select(0, perm), zi.double().index_select(0, perm), zk.double().index_select(0, perm)
+    near = _near_ladder(kernel, Rp[:n_near], zip_[:n_near], zkp[:n_near], order)
+    zi_far, zk_far = zip_[n_near:], zkp[n_near:]
+    far = derivative_ladder(kernel(zi_far, zk_far, False), Rp[n_near:], zi_far, zk_far, order)
+    values = torch.stack([torch.cat([a, b]) for a, b in zip(near, far)]).index_select(1, inverse)
+    return [values[n] for n in range(order + 1)]
 
 
 def _real_space_fields(f_at_k, f_at_i, D1m, D2m, scales, i_, k_, N: int, r_vec, R, q_i, q_k, d_i, d_k, Q_i, Q_k,
