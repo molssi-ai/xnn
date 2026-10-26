@@ -1,6 +1,6 @@
-"""Parity of the xnn ET and TensorNet with the reference code (torchmd/torchmd-net).
+"""Fidelity of the xnn ET and TensorNet to the reference code (torchmd/torchmd-net).
 
-    python torchmdnet_parity.py <path to a torchmd-net checkout> et|tensornet [float64|float32]
+    python torchmdnet_fidelity.py <path to a torchmd-net checkout> et|tensornet [float64|float32]
 
 Builds randomly initialized xnn models, transplants their weights into the
 reference modules (``TorchMD_ET`` / ``TensorNet`` with the ``EquivariantScalar``
@@ -36,7 +36,7 @@ def setup(upstream_path):
     ops = types.ModuleType("torchmdnet.extensions.ops")
 
     def get_neighbor_pairs_kernel(*args, **kwargs):
-        raise NotImplementedError("the parity harness replaces the neighbor search")
+        raise NotImplementedError("the fidelity harness replaces the neighbor search")
 
     ops.get_neighbor_pairs_kernel = get_neighbor_pairs_kernel
     sys.modules["torchmdnet.extensions.ops"] = ops

@@ -15,7 +15,11 @@ The periodic electrostatics of the AMOEBA / HIPPO models (``amoeba.py``):
   field and the field gradient are interpolated back onto the atoms with
   the same splines, so that the reciprocal energy is ``1/2 sum_i [q_i phi +
   d_i . grad phi + Q_i : grad grad phi]`` and the reciprocal field drives
-  the induced dipoles (:func:`multipole_pme`);
+  the induced dipoles (:func:`multipole_pme`); the influence function
+  carries the least-squares spline moduli
+  (:func:`~xnn.common.models.pme.least_squares_moduli`) rather than the
+  Euler exponential-spline ones of the paper, which at coarse meshes
+  leaves a far smaller mean error in the energies and reproduces Tinker's;
 * the self-interaction terms of Gaussian-smeared multipoles, half the
   interaction of a multipole with its own smeared kernel ``erf(alpha R) / R``
   at zero separation, ``-alpha / sqrt(pi) [q^2 + 2 alpha^2 / 3 |d|^2 +
@@ -44,6 +48,9 @@ through the reciprocal vectors, the volume and the fractional coordinates.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import math
 from typing import List, Optional, Sequence, Tuple
 
@@ -54,6 +61,69 @@ from xnn.common.models.ops import cell_volume
 from xnn.common.models.pme import bspline_weights, mesh_wavevectors, spline_moduli
 
 SQRT_PI = math.sqrt(math.pi)
+
+
+def region(name: str):
+    """Mark a function as a named region of the PyTorch profiler, which also
+    becomes an NVTX range in Nsight timelines under
+    ``torch.autograd.profiler.emit_nvtx``; it costs a few microseconds per
+    call when no profiler runs."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def inner(*args, **kwargs):
+            if torch.compiler.is_compiling():
+                return fn(*args, **kwargs)
+            with torch.profiler.record_function(name):
+                return fn(*args, **kwargs)
+        return inner
+    return wrap
+
+
+_FUSED = contextvars.ContextVar("amoeba_fused", default=False)
+
+
+@contextlib.contextmanager
+def fused(active: bool):
+    """Evaluate the :func:`fusable` functions called inside compiled (or not).
+
+    Parameters
+    ----------
+    active : bool
+        Whether they run compiled.
+    """
+    token = _FUSED.set(bool(active))
+    try:
+        yield
+    finally:
+        _FUSED.reset(token)
+
+
+def fused_active() -> bool:
+    """Whether the :func:`fusable` functions run compiled here (inside :func:`fused`)."""
+    return _FUSED.get()
+
+
+def fusable(fn):
+    """Mark a pure function of per-pair tensors for the fused path.
+
+    Inside :func:`fused` it runs through ``torch.compile`` with dynamic sizes,
+    which turns its chain of small elementwise operations into a few generated
+    kernels in the forward and in the backward pass. The first fused call runs
+    eagerly, so evaluations that happen once never pay for the compilation.
+    A compiled function has no double backward: the fused path serves
+    evaluations with first derivatives (molecular dynamics, inference).
+    """
+    state: dict = {}
+
+    @functools.wraps(fn)
+    def inner(*args, **kwargs):
+        if torch.compiler.is_compiling() or not _FUSED.get():
+            return fn(*args, **kwargs)
+        if "compiled" not in state:
+            state["compiled"] = torch.compile(fn, dynamic=True)
+            return fn(*args, **kwargs)
+        return state["compiled"](*args, **kwargs)
+    return inner
 
 
 # defaults
@@ -97,6 +167,28 @@ def _fft_friendly(n: int) -> bool:
     return n == 1
 
 
+def fft_mesh_size(n: int, minimum: int = 16) -> int:
+    """The smallest even size of at least ``n`` and ``minimum`` whose prime
+    factors are 2, 3 and 5 (Tinker rounds a requested mesh up the same way).
+
+    Parameters
+    ----------
+    n : int
+        The requested number of mesh points along one axis.
+    minimum : int, optional
+        The smallest mesh, by default 16.
+
+    Returns
+    -------
+    int
+        The mesh size.
+    """
+    n = max(int(n), int(minimum))
+    while not _fft_friendly(n):
+        n += 1
+    return n
+
+
 def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int = 16) -> List[int]:
     """Mesh dimensions from the cell lengths: at least ``density`` points per
     Angstrom along each axis, rounded up to an even size whose prime factors
@@ -116,17 +208,12 @@ def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int =
     list of int
         ``(K_1, K_2, K_3)``.
     """
-    out = []
-    for length in lengths:
-        n = max(minimum, int(math.ceil(float(length) * density - 1e-8)))
-        while not _fft_friendly(n):
-            n += 1
-        out.append(n)
-    return out
+    return [fft_mesh_size(math.ceil(float(length) * density - 1e-8), minimum) for length in lengths]
 
 
 # switching and the real-space ladder
 
+@fusable
 def switching(R: Tensor, taper: float, cutoff: float) -> Tensor:
     """The C2 switch ``S(R)``: one below ``taper``, zero beyond ``cutoff``,
     ``1 - 10 x^3 + 15 x^4 - 6 x^5`` with ``x = (R - taper) / (cutoff - taper)``
@@ -152,6 +239,7 @@ def switching(R: Tensor, taper: float, cutoff: float) -> Tensor:
     return 1.0 - x3 * (10.0 - 15.0 * x + 6.0 * x * x)
 
 
+@fusable
 def ewald_ladder(R: Tensor, alpha: Tensor, order: int) -> List[Tensor]:
     """The ladder ``D_n = (1/R d/dR)^n [erfc(alpha R) / R]`` for ``n`` from 0 to ``order``.
 
@@ -214,25 +302,24 @@ def bspline_with_derivatives(t: Tensor, order: int) -> Tuple[Tensor, Tensor, Ten
     return w, dw, d2w
 
 
-def _mesh_setup(pos: Tensor, cell: Tensor, mesh: List[int], order: int):
-    """Flat mesh indices ``(N, p^3)`` of every atom and the per-axis spline
-    weights and derivatives ``(N, 3, p)`` in the scaled fractional
-    coordinate, plus the Jacobian ``J[beta, a] = K_a (cell^-1)[beta, a]``
-    of that coordinate with respect to the Cartesian position."""
-    dtype, device = pos.dtype, pos.device
-    n = pos.shape[0]
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    sizes = torch.tensor([k1, k2, k3], dtype=dtype, device=device)
-    inv = torch.linalg.inv(cell)
-    u = (pos @ inv) * sizes
-    base = torch.floor(u)
-    w, dw, d2w = bspline_with_derivatives(u - base, order)                 # (N, 3, p)
-    offsets = torch.arange(order, dtype=dtype, device=device)
-    index = (base[:, :, None] - offsets).remainder(sizes[:, None]).to(torch.long)
-    flat = (index[:, 0, :, None, None] * (k2 * k3) + index[:, 1, None, :, None] * k3
-            + index[:, 2, None, None, :]).reshape(n, -1)
-    jac = inv * sizes[None, :]                                             # (3, 3): J[beta, a]
-    return flat, w, dw, d2w, jac
+def matvec(A: Tensor, v: Tensor) -> Tensor:
+    """``A v`` for stacks of ``3 x 3`` matrices ``(M, 3, 3)`` and vectors ``(M, 3)``.
+
+    An elementwise product and sum: ``einsum`` would map it to a batched
+    matrix-vector product, which the GPU libraries run as many launches of
+    tiny problems far below the memory bandwidth.
+    """
+    return (A * v[:, None, :]).sum(-1)
+
+
+def vecmat(v: Tensor, A: Tensor) -> Tensor:
+    """``v^T A`` for stacks of vectors ``(M, 3)`` and matrices ``(M, 3, 3)``, as ``matvec``."""
+    return (v[:, :, None] * A).sum(-2)
+
+
+def matmul3(A: Tensor, B: Tensor) -> Tensor:
+    """``A B`` for stacks of ``3 x 3`` matrices ``(M, 3, 3)``, as ``matvec``."""
+    return (A[:, :, :, None] * B[:, None, :, :]).sum(-2)
 
 
 def _outer3(a: Tensor, b: Tensor, c: Tensor) -> Tensor:
@@ -240,33 +327,83 @@ def _outer3(a: Tensor, b: Tensor, c: Tensor) -> Tensor:
     return (a[:, :, None, None] * b[:, None, :, None] * c[:, None, None, :])
 
 
-def _derivative_stencils(w: Tensor, dw: Tensor, d2w: Tensor) -> dict:
-    """The 3D spline weights of an atom and their first and second
-    derivatives with respect to the scaled fractional coordinates, each
-    ``(N, p^3)``: keys ``"0"``, ``"a"`` and ``"ab"`` for axes ``a <= b``."""
+@fusable
+def first_stencils(w: Tensor, dw: Tensor) -> dict:
+    """The 3D spline weights ``"0"`` and their first derivatives ``"a_"``, each
+    ``(N, p^3)``, from the per-axis weights and derivatives ``(N, 3, p)``."""
+    n = w.shape[0]
     wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
     dx, dy, dz = dw[:, 0], dw[:, 1], dw[:, 2]
+    return {key: _outer3(a, b, c).reshape(n, -1) for key, (a, b, c) in
+            {"0": (wx, wy, wz), "0_": (dx, wy, wz), "1_": (wx, dy, wz), "2_": (wx, wy, dz)}.items()}
+
+
+@fusable
+def second_stencils(w: Tensor, dw: Tensor, d2w: Tensor) -> dict:
+    """The second derivatives ``"ab"`` of the 3D spline weights, each ``(N, p^3)``."""
     n = w.shape[0]
-    st = {
-        "0": _outer3(wx, wy, wz),
-        "0_": _outer3(dx, wy, wz), "1_": _outer3(wx, dy, wz), "2_": _outer3(wx, wy, dz),
-        "00": _outer3(d2w[:, 0], wy, wz), "11": _outer3(wx, d2w[:, 1], wz), "22": _outer3(wx, wy, d2w[:, 2]),
-        "01": _outer3(dx, dy, wz), "02": _outer3(dx, wy, dz), "12": _outer3(wx, dy, dz),
-    }
-    return {k: v.reshape(n, -1) for k, v in st.items()}
+    wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
+    dx, dy, dz = dw[:, 0], dw[:, 1], dw[:, 2]
+    return {key: _outer3(a, b, c).reshape(n, -1) for key, (a, b, c) in
+            {"00": (d2w[:, 0], wy, wz), "11": (wx, d2w[:, 1], wz), "22": (wx, wy, d2w[:, 2]),
+             "01": (dx, dy, wz), "02": (dx, wy, dz), "12": (wx, dy, dz)}.items()}
 
 
-def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str) -> Tensor:
+@fusable
+def stencil_coefficients(q: Optional[Tensor], d: Optional[Tensor], Q: Optional[Tensor], jac: Tensor,
+                         st: dict) -> Tensor:
+    """The mesh coefficients ``(N, p^3)`` of multipoles ``q``, ``d``, ``Q`` (any of
+    which may be ``None``) on the stencils ``st`` of their atoms; ``jac`` maps
+    Cartesian to fractional mesh derivatives."""
+    coeff = None
+    if q is not None:
+        coeff = q[:, None] * st["0"]
+    if d is not None:
+        df = vecmat(d, jac)                                               # d^f_a = sum_beta d_beta J[beta, a]
+        term = df[:, 0:1] * st["0_"] + df[:, 1:2] * st["1_"] + df[:, 2:3] * st["2_"]
+        coeff = term if coeff is None else coeff + term
+    if Q is not None:
+        Qf = matmul3(matmul3(jac.transpose(1, 2), Q), jac)                # J^T Q J
+        term = (Qf[:, 0, 0, None] * st["00"] + Qf[:, 1, 1, None] * st["11"] + Qf[:, 2, 2, None] * st["22"]
+                + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"]
+                         + Qf[:, 1, 2, None] * st["12"]))
+        coeff = term if coeff is None else coeff + term
+    return coeff
+
+
+@fusable
+def stencil_potential(at: Tensor, jac: Tensor, st: dict, hessian: bool):
+    """The potential ``(N,)``, its Cartesian gradient ``(N, 3)`` and, with
+    ``hessian``, its Hessian ``(N, 3, 3)`` at the atoms, from the mesh
+    potential ``at`` ``(N, p^3)`` at their stencil points."""
+    phi = (at * st["0"]).sum(-1)
+    dphi_f = torch.stack([(at * st["0_"]).sum(-1), (at * st["1_"]).sum(-1), (at * st["2_"]).sum(-1)], dim=1)
+    dphi = matvec(jac, dphi_f)                                            # grad_beta = sum_a J[beta, a] d_a
+    if not hessian:
+        return phi, dphi, None
+    h00 = (at * st["00"]).sum(-1)
+    h11 = (at * st["11"]).sum(-1)
+    h22 = (at * st["22"]).sum(-1)
+    h01 = (at * st["01"]).sum(-1)
+    h02 = (at * st["02"]).sum(-1)
+    h12 = (at * st["12"]).sum(-1)
+    h = torch.stack([torch.stack([h00, h01, h02], -1), torch.stack([h01, h11, h12], -1),
+                     torch.stack([h02, h12, h22], -1)], -2)
+    return phi, dphi, matmul3(matmul3(jac, h), jac.transpose(1, 2))   # J h J^T
+
+
+def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str, bare: bool = False) -> Tensor:
     """The mesh influence function in FFT order: for ``kind="coulomb"``
     ``K^3 / (pi V) exp(-pi^2 m^2 / alpha^2) / m^2 B(m)`` (zero at ``m = 0``), for
     ``kind="r6"`` ``K^3 / V pi^(3/2) alpha^3 / 3 f(b) B(m)`` with
     ``f(b) = (1 - 2 b^2) e^{-b^2} + 2 b^3 sqrt(pi) erfc(b)``, ``b = k / (2 alpha)``
-    (``f(0) = 1``)."""
+    (``f(0) = 1``) and ``B(m)`` the least-squares spline moduli (one with
+    ``bare``, the exact reciprocal kernel)."""
     dtype, device = cell.dtype, cell.device
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     volume = cell_volume(cell)
     _, k2sq = mesh_wavevectors(cell, mesh)
-    moduli = spline_moduli(mesh, order, dtype, device)
+    moduli = 1.0 if bare else _moduli(mesh, order, dtype, device)
     scale = (k1 * k2 * k3) / volume
     if kind == "coulomb":
         m2 = k2sq / (4.0 * math.pi * math.pi)
@@ -278,6 +415,177 @@ def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: st
     return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
 
 
+_MODULI_CACHE: dict = {}
+
+
+def _moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device) -> Tensor:
+    """The least-squares spline moduli of a mesh, cached (they depend on the mesh and the order only)."""
+    key = (tuple(mesh), order, dtype, str(device))
+    if key not in _MODULI_CACHE:
+        if len(_MODULI_CACHE) > 64:
+            _MODULI_CACHE.clear()
+        _MODULI_CACHE[key] = spline_moduli(list(mesh), order, dtype, device, least_squares=True)
+    return _MODULI_CACHE[key]
+
+
+def _mesh_sizes(mesh: List[int], dtype: torch.dtype, device: torch.device) -> Tensor:
+    """The mesh dimensions as a tensor, cached: a new one is a copy from the host
+    at every evaluation, which a CUDA graph cannot record."""
+    key = ("sizes", tuple(mesh), dtype, str(device))
+    if key not in _MODULI_CACHE:
+        if len(_MODULI_CACHE) > 64:
+            _MODULI_CACHE.clear()
+        _MODULI_CACHE[key] = torch.tensor(list(mesh), dtype=dtype, device=device)
+    return _MODULI_CACHE[key]
+
+
+class MeshPlan:
+    """The fixed particle-mesh data of a group of periodic structures on one mesh.
+
+    The spline weights, their derivative stencils and the Jacobian of the
+    scaled fractional coordinates depend on the positions and the cells
+    only; the influence functions on the cells, the mesh, the spline order
+    and the Ewald coefficient. A plan computes each of them once, so the
+    permanent multipole terms, every iteration of the induced-dipole solve
+    and the adjoint solve of the backward pass share them. The structures
+    of a group sit side by side, each on its own mesh, and one batched real
+    FFT serves them all. Everything stays differentiable with respect to the
+    positions and the cells.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Positions ``(N, 3)`` of the atoms of the group.
+    cells : Tensor
+        Lattice vectors as rows ``(G, 3, 3)``, one per structure.
+    batch : Tensor
+        Structure of every atom ``(N,)``, from zero to ``G - 1``.
+    mesh : list of int
+        Mesh dimensions ``(K_1, K_2, K_3)``, shared by the structures.
+    order : int
+        B-spline order.
+    """
+
+    @region("mesh.plan")
+    def __init__(self, pos: Tensor, cells: Tensor, batch: Tensor, mesh: List[int], order: int):
+        dtype, device = pos.dtype, pos.device
+        self.mesh = [int(mesh[0]), int(mesh[1]), int(mesh[2])]
+        self.order = int(order)
+        self.cells = cells
+        self.batch = batch
+        self.groups = int(cells.shape[0])
+        k1, k2, k3 = self.mesh
+        sizes = _mesh_sizes(self.mesh, dtype, device)
+        inv = torch.linalg.inv_ex(cells)[0]                                       # (G, 3, 3)
+        # gathers by index_select: their backward adds atomically, without sorting the indices
+        inv_n = inv.index_select(0, batch)
+        u = vecmat(pos, inv_n) * sizes
+        base = torch.floor(u)
+        self._splines = bspline_with_derivatives(u - base, self.order)      # (N, 3, p) each
+        offsets = torch.arange(self.order, dtype=dtype, device=device)
+        index = (base[:, :, None] - offsets).remainder(sizes[:, None]).to(torch.long)
+        n = pos.shape[0]
+        self.flat = (batch[:, None, None, None] * (k1 * k2 * k3) + index[:, 0, :, None, None] * (k2 * k3)
+                     + index[:, 1, None, :, None] * k3 + index[:, 2, None, None, :]).reshape(n, -1)
+        self.jac = inv_n * sizes                                            # (N, 3, 3): J[n, beta, a]
+        self.inv = inv
+        self.volume = cell_volume(cells)
+        self._stencils: dict = {}
+        self._influence: dict = {}
+        self._self: dict = {}
+
+    def stencils(self, second: bool = False) -> dict:
+        """The 3D spline weights ``"0"``, their first derivatives ``"a_"`` and, with
+        ``second``, the second derivatives ``"ab"``, each ``(N, p^3)``."""
+        w, dw, d2w = self._splines
+        st = self._stencils
+        if "0" not in st:
+            st.update(first_stencils(w, dw))
+        if second and "00" not in st:
+            st.update(second_stencils(w, dw, d2w))
+        return st
+
+    def influence(self, alpha: float, kind: str) -> Tensor:
+        """The influence function of every structure on the half spectrum of the
+        real FFT, ``(G, K_1, K_2, K_3 // 2 + 1)`` (see :func:`_influence`)."""
+        key = (float(alpha), kind)
+        if key not in self._influence:
+            dtype, device = self.cells.dtype, self.cells.device
+            k1, k2, k3 = self.mesh
+            h3 = k3 // 2 + 1
+            axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
+            axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
+            moduli = _moduli(self.mesh, self.order, dtype, device)[:, :, :h3]
+            scale = ((k1 * k2 * k3) / self.volume)[:, None, None, None]
+
+            def kernel(frequencies):
+                grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
+                miller = torch.stack(grid, dim=-1)                            # (K1, K2, H3, 3)
+                kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, self.inv)
+                k2sq = (kvec * kvec).sum(-1)                                   # (G, K1, K2, H3)
+                if kind == "coulomb":
+                    m2 = k2sq / (4.0 * math.pi * math.pi)
+                    safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
+                    g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
+                    return torch.where(m2 > 0, g, torch.zeros_like(g))
+                b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
+                f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
+                return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
+
+            g = kernel(axes)
+            # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
+            # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
+            # the full complex transform applies through its real part
+            flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
+                       for a, k in zip(axes, (k1, k2, k3))]
+            if any(k % 2 == 0 for k in (k1, k2, k3)):
+                g = 0.5 * (g + kernel(flipped))
+            self._influence[key] = g
+        return self._influence[key]
+
+    @region("mesh.convolve")
+    def convolve(self, coeff: Tensor, influence: Tensor) -> Tensor:
+        """Spread the stencil coefficients ``(N, p^3)`` onto the meshes, apply the
+        influence function and return the mesh potential at the stencil points."""
+        k1, k2, k3 = self.mesh
+        grid = torch.zeros(self.groups * k1 * k2 * k3, dtype=coeff.dtype, device=coeff.device)
+        grid = grid.index_add(0, self.flat.reshape(-1), coeff.reshape(-1))
+        spectrum = torch.fft.rfftn(grid.view(self.groups, k1, k2, k3), dim=(1, 2, 3))
+        potential = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3)).reshape(-1)
+        return potential.index_select(0, self.flat.reshape(-1)).view(self.flat.shape)
+
+    @region("mesh.potential")
+    def potential(self, q: Optional[Tensor], d: Optional[Tensor], Q: Optional[Tensor], alpha: float,
+                  hessian: bool = True) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+        """The mesh potential, its gradient and (with ``hessian``) its Hessian at the
+        atoms of the group, for multipoles ``q``, ``d``, ``Q`` (any of which may be
+        ``None``); see :func:`multipole_pme`."""
+        st = self.stencils(second=hessian or Q is not None)
+        coeff = stencil_coefficients(q, d, Q, self.jac, st)
+        at = self.convolve(coeff, self.influence(alpha, "coulomb"))
+        return stencil_potential(at, self.jac, st, hessian)
+
+    @region("mesh.dispersion")
+    def dispersion(self, c: Tensor, alpha: float) -> Tensor:
+        """Per-atom reciprocal energies of the ``-c_i c_j / R^6`` sum, self term
+        included (see :func:`dispersion_pme`)."""
+        w0 = self.stencils()["0"]
+        at = self.convolve(c[:, None] * w0, self.influence(alpha, "r6"))
+        phi6 = (at * w0).sum(-1)
+        return -(0.5 * c * phi6 - alpha ** 6 / 12.0 * c * c)
+
+    def self_moments(self, alpha: float, kind: str, max_rank: int = 4):
+        """:func:`mesh_self_moments` of every structure, stacked: ``(G,)``,
+        ``(G, 3, 3)`` and ``(G, 3, 3, 3, 3)`` (``None`` beyond ``max_rank``)."""
+        key = (float(alpha), kind, int(max_rank))
+        if key not in self._self:
+            per = [mesh_self_moments(self.cells[g], alpha, self.mesh, self.order, kind, max_rank)
+                   for g in range(self.groups)]
+            self._self[key] = tuple(None if per[0][r] is None else torch.stack([m[r] for m in per])
+                                    for r in range(3))
+        return self._self[key]
+
+
 def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, alpha: float,
                   mesh: List[int], order: int, hessian: bool = True
                   ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
@@ -287,7 +595,8 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
     The sources ``q_k delta - d_k . grad delta + Q_k : grad grad delta`` are
     spread as ``q_k W + d_k . grad_k W + Q_k : grad_k grad_k W`` (``W`` the
     spline weight, differentiated with respect to the atom position); the
-    potential is interpolated back with the same weights.
+    potential is interpolated back with the same weights. A one-structure
+    :class:`MeshPlan`; use a plan directly to reuse the setup.
 
     Parameters
     ----------
@@ -296,7 +605,7 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
     d : Tensor
         Dipoles ``(N, 3)`` in e Angstrom.
     Q : Tensor
-        Quadrupoles ``(N, 3, 3)`` (traceless, divided by three).
+        Quadrupoles ``(N, 3, 3)`` (traceless, divided by three), or ``None``.
     pos : Tensor
         Positions ``(N, 3)``.
     cell : Tensor
@@ -317,44 +626,9 @@ def multipole_pme(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor, al
         ``(N, 3, 3)`` (``None`` without ``hessian``), in ``e / Angstrom``
         and its derivatives (multiply by the Coulomb constant).
     """
-    n = pos.shape[0]
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    flat, w, dw, d2w, jac = _mesh_setup(pos, cell, mesh, order)
-    st = _derivative_stencils(w, dw, d2w)
-    # fractional dipoles and quadrupoles: d^f_a = sum_beta d_beta J[beta, a]
-    df = d @ jac                                                           # (N, 3)
-    Qf = jac.t() @ Q @ jac if Q is not None else None                     # (N, 3, 3)
-    coeff = q[:, None] * st["0"]
-    coeff = coeff + df[:, 0:1] * st["0_"] + df[:, 1:2] * st["1_"] + df[:, 2:3] * st["2_"]
-    if Qf is not None:
-        coeff = coeff + (Qf[:, 0, 0, None] * st["00"] + Qf[:, 1, 1, None] * st["11"] + Qf[:, 2, 2, None] * st["22"]
-                         + 2.0 * (Qf[:, 0, 1, None] * st["01"] + Qf[:, 0, 2, None] * st["02"]
-                                  + Qf[:, 1, 2, None] * st["12"]))
-    grid = torch.zeros(k1 * k2 * k3, dtype=pos.dtype, device=pos.device)
-    grid = grid.index_add(0, flat.reshape(-1), coeff.reshape(-1))
-    influence = _influence(cell, alpha, mesh, order, "coulomb")
-    potential = torch.real(torch.fft.ifftn(torch.fft.fftn(grid.view(k1, k2, k3)) * influence)).reshape(-1)
-    at = potential[flat]                                                   # (N, p^3)
-    phi = (at * st["0"]).sum(-1)
-    dphi_f = torch.stack([(at * st["0_"]).sum(-1), (at * st["1_"]).sum(-1), (at * st["2_"]).sum(-1)], dim=1)
-    dphi = dphi_f @ jac.t()                                                # grad_beta = sum_a J[beta, a] d_a
-    if not hessian:
-        return phi, dphi, None
-    h = torch.zeros(n, 3, 3, dtype=pos.dtype, device=pos.device)
-    h[:, 0, 0] = (at * st["00"]).sum(-1)
-    h[:, 1, 1] = (at * st["11"]).sum(-1)
-    h[:, 2, 2] = (at * st["22"]).sum(-1)
-    h01 = (at * st["01"]).sum(-1)
-    h02 = (at * st["02"]).sum(-1)
-    h12 = (at * st["12"]).sum(-1)
-    h[:, 0, 1] = h01
-    h[:, 1, 0] = h01
-    h[:, 0, 2] = h02
-    h[:, 2, 0] = h02
-    h[:, 1, 2] = h12
-    h[:, 2, 1] = h12
-    d2phi = jac @ h @ jac.t()
-    return phi, dphi, d2phi
+    batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
+    plan = MeshPlan(pos, cell[None], batch, mesh, order)
+    return plan.potential(q, d, Q, alpha, hessian=hessian)
 
 
 def multipole_reciprocal_energy(q: Tensor, d: Tensor, Q: Tensor, pos: Tensor, cell: Tensor,
@@ -431,8 +705,8 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     (the alias sums of the squared spline transform minus the exact term).
     They vanish as the mesh is refined. Subtracting the spurious part
     removes the mean discretisation error of the self-interaction from the
-    energy, the field and the dispersion sum (Ballenegger, Cerutti, Holm
-    and Lenz, J. Chem. Phys. 134, 162101, 2011).
+    energy, the field and the dispersion sum (Ballenegger, Cerda and Holm,
+    Comput. Phys. Commun. 182, 1919, 2011).
 
     Parameters
     ----------
@@ -460,7 +734,7 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     g = _influence(cell, alpha, mesh, order, kind) / (k1 * k2 * k3)
     # the exact reciprocal self term carries the bare kernel, without the spline moduli of the mesh sum
-    g0 = g / spline_moduli(mesh, order, dtype, device)
+    g0 = _influence(cell, alpha, mesh, order, kind, bare=True) / (k1 * k2 * k3)
     mu = [_alias_moments(k, order, dtype, device) for k in (k1, k2, k3)]
     freq = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2, k3)]
     cache: dict = {}
@@ -478,7 +752,7 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     s0 = weighted(())
     if kind == "r6" or max_rank < 2:
         return s0, None, None
-    inv = torch.linalg.inv(cell)                     # k_x = 2 pi sum_a inv[x, a] f_a
+    inv = torch.linalg.inv_ex(cell)[0]                     # k_x = 2 pi sum_a inv[x, a] f_a
     two_pi = 2.0 * math.pi
     s2 = torch.stack([weighted((a, b)) for a in range(3) for b in range(3)]).reshape(3, 3) * two_pi ** 2
     s2c = torch.einsum("ab,xa,yb->xy", s2, inv, inv)
@@ -540,17 +814,11 @@ def dispersion_pme(c: Tensor, pos: Tensor, cell: Tensor, alpha: float, mesh: Lis
     Tensor
         ``(N,)`` in the units of ``c_i c_j / R^6``.
     """
-    k1, k2, k3 = mesh[0], mesh[1], mesh[2]
-    flat, w, _, _, _ = _mesh_setup(pos, cell, mesh, order)
-    w3 = _outer3(w[:, 0], w[:, 1], w[:, 2]).reshape(pos.shape[0], -1)
-    grid = torch.zeros(k1 * k2 * k3, dtype=pos.dtype, device=pos.device)
-    grid = grid.index_add(0, flat.reshape(-1), (c[:, None] * w3).reshape(-1))
-    influence = _influence(cell, alpha, mesh, order, "r6")
-    potential = torch.real(torch.fft.ifftn(torch.fft.fftn(grid.view(k1, k2, k3)) * influence)).reshape(-1)
-    phi6 = (potential[flat] * w3).sum(-1)
-    return -(0.5 * c * phi6 - alpha ** 6 / 12.0 * c * c)
+    batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
+    return MeshPlan(pos, cell[None], batch, mesh, order).dispersion(c, alpha)
 
 
+@fusable
 def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
     """``g(alpha R) = e^{-x^2} (1 + x^2 + x^4 / 2)``, the real-space share of
     ``1 / R^6`` (one for a zero ``alpha``).
@@ -571,7 +839,8 @@ def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
     return torch.exp(-x2) * (1.0 + x2 + 0.5 * x2 * x2)
 
 
-__all__ = ["ewald_coefficient", "pme_grid_size", "switching", "ewald_ladder",
+__all__ = ["fused", "fused_active", "fusable", "matvec", "vecmat", "matmul3", "ewald_coefficient", "fft_mesh_size",
+           "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
-           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy"]
+           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "MeshPlan"]

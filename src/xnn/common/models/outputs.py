@@ -13,6 +13,8 @@ convention and is what ASE/LAMMPS expect.
 """
 from __future__ import annotations
 
+from typing import Any, Optional
+
 import torch
 from torch import Tensor, nn
 
@@ -70,13 +72,16 @@ class ForceStressOutput(nn.Module):
         self.compute_stress = compute_stress
         self.cutoff = getattr(model, "cutoff", None)
 
-    def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
+    def forward(self, data: AtomicGraph, plan: Optional[Any] = None) -> dict[str, Tensor]:
         """Run the wrapped model and add forces and stress via autograd.
 
         Parameters
         ----------
         data : AtomicGraph
             The batched atomic graph to evaluate.
+        plan : optional
+            A step plan of the wrapped model (see
+            :class:`~xnn.ffnn.models.StepPlan`), passed on to its forward.
 
         Returns
         -------
@@ -126,7 +131,7 @@ class ForceStressOutput(nn.Module):
         if self.compute_forces:
             data.pos.requires_grad_(True)
 
-        out = self.model(data)
+        out = self.model(data) if plan is None else self.model(data, plan)
         energy = out["energy"]
         # a model that predicts forces directly (GemNet-dT/dQ) returns them itself
         direct = "forces" in out

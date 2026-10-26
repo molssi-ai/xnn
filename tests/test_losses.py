@@ -11,7 +11,7 @@ from xnn.common.train import weighted_loss
 def _pinned_dtype():
     """Pin the default dtype, and restore whatever the session had.
 
-    Other test modules set a global default dtype (the D4 parity tests run in
+    Other test modules set a global default dtype (the D4 fidelity tests run in
     float64), and the values compared here are dtype-sensitive, so a module
     that inherits the ambient dtype passes alone and fails in a full run.
     """

@@ -45,10 +45,10 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
+from xnn.common.models.constants import register_constant, restore_exact
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 
-from ..constants import register_constant, restore_exact
 from .base import EquivariantGNN
 from .blocks import tp_path_exists
 
@@ -73,7 +73,7 @@ class _ChannelWeighter(nn.Module):
     alpha : float, optional
         Constant folded into the weights (the env-sum normalization), a
         floating buffer that follows the module dtype (exact in float64, see
-        :func:`~xnn.gnn.constants.register_constant`).
+        :func:`~xnn.common.models.constants.register_constant`).
     """
 
     weight_numel: Final[int]
@@ -164,7 +164,7 @@ class _Contracter(nn.Module):
 
     def exact_constants(self) -> bool:
         """Rebuild a float64 block tensor exactly from the irreps (see
-        :func:`~xnn.gnn.constants.exact_float64_constants`); whether it changed."""
+        :func:`~xnn.common.models.constants.exact_float64_constants`); whether it changed."""
         if self._w3j.dtype != torch.float64 or "_blocks" not in self.__dict__:
             return False
         return restore_exact(self._w3j, self._block_w3j(torch.float64))

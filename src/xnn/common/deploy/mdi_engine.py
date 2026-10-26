@@ -50,6 +50,7 @@ import torch
 
 from ..data import structure_to_graph
 from ..models.hub.checkpoint import float_dtype
+from .step_graph import StepGraph, plan_core
 
 try:
     import mdi
@@ -107,6 +108,20 @@ class MDIEngine:
         :attr:`~xnn.common.data.AtomicGraph.total_charge` (D4's EEQ charges
         and charge-aware models such as PhysNet use it). Defaults to 0; a
         driver can change it at run time with ``>TOTCHARGE``.
+    dipole_predictor : str or None, optional
+        For polarizable models (AMOEBA, HIPPO): the scheme that predicts each
+        step's induced dipoles from the last steps as the start of the
+        solve, ``"aspc"`` (default), ``"gear"``, ``"previous"`` or ``None``
+        (see :class:`~xnn.ffnn.models.DipolePredictor`). The dipoles are
+        converged to the model's tolerance either way. Other models ignore it.
+    step_graph : bool or str, optional
+        For models with step plans (AMOEBA, HIPPO): evaluate the steps on a
+        plan with a Verlet pair list and, on a GPU, replay them as one CUDA
+        graph (see :class:`~xnn.common.deploy.step_graph.StepGraph`).
+        ``"auto"`` (default) does so on a GPU, ``True`` also on the CPU,
+        ``False`` never. Other models ignore it.
+    skin : float, optional
+        The margin of the Verlet pair list in angstrom, by default 1.
 
     Attributes
     ----------
@@ -128,14 +143,33 @@ class MDIEngine:
     """
 
     def __init__(self, model: torch.nn.Module, cutoff: float,
-                 device: str = "cpu", total_charge: float = 0.0):
+                 device: str = "cpu", total_charge: float = 0.0,
+                 dipole_predictor: str | None = "aspc", step_graph: bool | str = "auto",
+                 skin: float = 1.0):
         self.device = torch.device(device)
         self.model = model.to(self.device).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
+        # the engine persists over the run, so the induced dipoles of a polarizable model
+        # are predicted from the last steps
+        self.dipole_predictor = dipole_predictor
+        for module in self.model.modules():
+            if hasattr(module, "set_dipole_predictor"):
+                module.set_dipole_predictor(dipole_predictor)
         self.cutoff = float(cutoff)
         self.total_charge = float(total_charge)
         self.dtype = float_dtype(model)
+        self.steps = None
+        if step_graph not in (True, False, "auto"):
+            raise ValueError(f"step_graph must be True, False or 'auto' (got {step_graph!r})")
+        if step_graph == "auto":
+            # replaying the step pays on a GPU at every size measured; the CPU keeps the plain step
+            step_graph = self.device.type == "cuda" and plan_core(self.model) is not None
+        if step_graph:
+            if plan_core(self.model) is None:
+                logger.info("the model records no step plans: the steps are evaluated as usual")
+            else:
+                self.steps = StepGraph(self.model, self.cutoff, skin=skin, compute_dtype=self.dtype)
 
         # system state, set by driver commands (MDI atomic units)
         self.natoms: int | None = None
@@ -165,7 +199,10 @@ class MDIEngine:
                         eeq_reuse: bool = False,
                         cache_dir: str | None = None,
                         use_fast: bool | str = "auto",
-                        head: str | None = None) -> "MDIEngine":
+                        head: str | None = None,
+                        dipole_predictor: str | None = "aspc",
+                        step_graph: bool | str = "auto",
+                        skin: float = 1.0) -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -224,6 +261,13 @@ class MDIEngine:
             or the reference implementation (see :mod:`xnn.common.models.fast`).
         head : str, optional
             The head of a multi-head (replay fine-tuned) checkpoint to serve.
+        dipole_predictor : str or None, optional
+            The induced-dipole predictor of polarizable models (see the class).
+        step_graph : bool or str, optional
+            Steps on a plan, replayed as a CUDA graph; ``"auto"`` (default) on
+            a GPU (see the class).
+        skin : float, optional
+            The margin of the Verlet pair list in angstrom (see the class).
 
         Returns
         -------
@@ -246,7 +290,8 @@ class MDIEngine:
         logger.info("Loaded %s checkpoint %s (cutoff=%.3f A, %s, total charge %g)",
                     cfg.model.name, path, cutoff,
                     str(float_dtype(model)).replace("torch.", ""), total_charge)
-        return cls(model, cutoff=cutoff, device=device, total_charge=total_charge)
+        return cls(model, cutoff=cutoff, device=device, total_charge=total_charge,
+                   dipole_predictor=dipole_predictor, step_graph=step_graph, skin=skin)
 
     # evaluation
 
@@ -291,12 +336,18 @@ class MDIEngine:
                     if self.cell_bohr is not None else None),
             "total_charge": self.total_charge,
         }
-        graph = structure_to_graph(struct, self.cutoff, device=self.device)
-        graph.compute_dtype = self.dtype
-        self._sync()
-        t_graph = time.perf_counter()
-
-        out = self.model(graph)
+        if self.steps is not None:
+            # the step plan keeps its own pair list
+            t_graph = t0
+            out = self.steps(struct)
+            n_edges = 2 * self.steps.plan.capacity
+        else:
+            graph = structure_to_graph(struct, self.cutoff, device=self.device)
+            graph.compute_dtype = self.dtype
+            n_edges = int(graph.edge_index.shape[1])
+            self._sync()
+            t_graph = time.perf_counter()
+            out = self.model(graph)
         self._sync()
         t_model = time.perf_counter()
 
@@ -319,7 +370,7 @@ class MDIEngine:
         self._t_model += t_model - t_graph
         self._t_extract += t_end - t_model
         self._t_total += t_end - t0
-        self._n_edges = int(graph.edge_index.shape[1])
+        self._n_edges = n_edges
 
         if self._n_calc % 100 == 0:
             n = self._n_calc
@@ -409,11 +460,15 @@ class MDIEngine:
 
             elif command == ">NATOMS":
                 self.natoms = mdi.MDI_Recv(1, mdi.MDI_INT, comm)
+                if self.steps is not None:
+                    self.steps.reset()
 
             elif command == ">ELEMENTS":
                 elements = mdi.MDI_Recv(self.natoms, mdi.MDI_INT, comm)
                 self.atomic_numbers = np.array(elements, dtype=np.int64)
                 self._needs_calculation = True
+                if self.steps is not None:
+                    self.steps.reset()
                 logger.info("received %d atoms, elements %s", self.natoms,
                             sorted(set(self.atomic_numbers.tolist())))
 
@@ -538,11 +593,20 @@ def main(argv=None) -> None:
                    help="carry the large-regime D4 EEQ solve over between steps "
                         "(MD, optimization); results agree with the fresh solve "
                         "to the solver tolerance")
+    p.add_argument("--dipole-predictor", choices=["aspc", "gear", "previous", "none"], default="aspc",
+                   help="polarizable models (AMOEBA, HIPPO): predict each step's induced dipoles "
+                        "from the last steps as the start of the solve (default aspc)")
     p.add_argument("--fast", choices=["auto", "on", "off"], default="auto",
-                   help="fused GPU kernels (cuEquivariance) for the blocks that have "
-                        "them: 'auto' (default) where available and faster for the "
+                   help="fused GPU kernels (cuEquivariance, compiled AMOEBA/HIPPO pair terms) for the "
+                        "blocks that have them: 'auto' (default) where available and faster for the "
                         "system size, 'on' wherever available, 'off' never; in "
                         "float32 they agree with the reference to about 1e-6")
+    p.add_argument("--step-graph", choices=["auto", "on", "off"], default="auto",
+                   help="models with step plans (AMOEBA, HIPPO): evaluate the steps on a plan with a "
+                        "Verlet pair list and, on a GPU, replay them as one CUDA graph: 'auto' "
+                        "(default) on a GPU, 'on' also on the CPU, 'off' never")
+    p.add_argument("--skin", type=float, default=1.0,
+                   help="margin of the Verlet pair list of --step-graph in angstrom (default 1)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -568,7 +632,12 @@ def main(argv=None) -> None:
                                        cache_dir=args.cache_dir,
                                        use_fast={"auto": "auto", "on": True,
                                                  "off": False}[args.fast],
-                                       head=args.head)
+                                       head=args.head,
+                                       dipole_predictor=None if args.dipole_predictor == "none"
+                                       else args.dipole_predictor,
+                                       step_graph={"auto": "auto", "on": True,
+                                                   "off": False}[args.step_graph],
+                                       skin=args.skin)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

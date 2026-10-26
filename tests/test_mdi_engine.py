@@ -50,6 +50,17 @@ def _water(engine, charge=None):
     return pos
 
 
+def test_engine_turns_on_the_dipole_predictor_of_polarizable_models():
+    """The engine sets ASPC on an AMOEBA model by default and switches it off on request."""
+    from xnn.ffnn.models import Amoeba, MolecularTopology
+    top = MolecularTopology.from_bonds(["OW", "HW", "HW"], [(0, 1), (0, 2)])
+    engine = MDIEngine(ForceStressOutput(Amoeba("amoeba-water-2003", top, cutoff=10.0)), cutoff=10.0)
+    assert engine.model.model.predictor.kind == "aspc"
+    off = MDIEngine(ForceStressOutput(Amoeba("amoeba-water-2003", top, cutoff=10.0)), cutoff=10.0,
+                    dipole_predictor=None)
+    assert off.model.model.predictor is None
+
+
 def test_cutoff_follows_the_built_model_not_the_config(tmp_path):
     """Route A: a checkpoint trained with D4 must build graphs at the wrapper's
     cutoff (D4's 9 A here), not at the core model's 4 A."""

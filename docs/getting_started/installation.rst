@@ -52,7 +52,7 @@ xnn gives you the ability to install only what you need:
    pip install "xnns[examples]"     # everything the example notebooks need
    pip install "xnns[all]"          # gnn, ase, vesin, hydra, tensorboard, dev and examples
 
-The parity notebooks and tests compare against reference packages, which have
+The fidelity notebooks and tests compare against reference packages, which have
 their own extra optional dependencies: ``ani`` (torchani), ``d3``
 (simple-dftd3), ``d4`` (dftd4) and ``opls`` (OpenMM). The ``examples`` extra
 pins ``mace-torch`` and ``nequip``, which pin ``e3nn==0.4.4``. xnn runs on that

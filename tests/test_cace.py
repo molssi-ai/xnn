@@ -3,7 +3,7 @@
 Covers the Cartesian angular basis, the symmetrized B-feature counts, model
 equivariance / force co-rotation, flexible message-passing depth, periodic
 stress, upstream constructor-key translation, and -- when the original
-``cace`` package is installed -- machine-precision weight-transplant parity
+``cace`` package is installed -- machine-precision weight-transplant fidelity
 against it.
 """
 import numpy as np
@@ -165,7 +165,7 @@ def test_upstream_cace_key_translation():
     assert m.atom_ref.weight[8].item() == -2.5
 
 
-def test_parity_vs_original_cace():
+def test_fidelity_vs_original_cace():
     """Weight transplant from the original cace gives identical E and F."""
     pytest.importorskip("cace")
     from cace.modules import BesselRBF as UpBessel

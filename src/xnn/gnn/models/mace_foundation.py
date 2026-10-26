@@ -48,12 +48,12 @@ from torch import nn
 
 from xnn.common.config import ModelConfig
 from xnn.common.data.hub._download import default_cache_dir, download_file
+from xnn.common.models.constants import exact_float64_constants
 from xnn.common.models.hub import ModelFormat, register_format
 from xnn.common.models.hub.cache import resolve_cache_dir, sanitize, url_slot
 from xnn.common.models.hub.card import ModelCard
 from xnn.common.models.hub.registry import get_card, registered_cards
 
-from ..constants import exact_float64_constants
 from .mace import GATES, INTERACTIONS, MACE
 
 # Published foundation checkpoints: alias -> (download URL, license), a view of

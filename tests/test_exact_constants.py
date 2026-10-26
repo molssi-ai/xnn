@@ -117,7 +117,7 @@ def test_torchscript_export_after_the_repair(tmp_path):
 
 
 def test_bessel_frequencies_keep_learned_and_custom_values():
-    from xnn.gnn.featurizers.radial import BesselRBF
+    from xnn.common.featurizers import BesselRBF
 
     learned = BesselRBF(8, 5.0, trainable=True).double()
     with torch.no_grad():
@@ -135,7 +135,7 @@ def test_bessel_frequencies_keep_learned_and_custom_values():
 
 @pytest.mark.parametrize("default", [torch.float32, torch.float64])
 def test_values_set_on_purpose_are_kept(default):
-    from xnn.gnn.constants import register_constant
+    from xnn.common.models.constants import register_constant
 
     old = torch.get_default_dtype()
     torch.set_default_dtype(default)

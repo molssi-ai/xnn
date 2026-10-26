@@ -1,6 +1,6 @@
 """SpookyNet tests: manuscript fidelity (Nat. Commun. 2021), electronic states,
 nonlocality, invariances, smoothness, batching, TorchScript, config handling
-and (optionally) parity with the reference code.
+and (optionally) fidelity to the reference code.
 
 The centerpiece is ``_reference``: an independent, loop-based implementation
 of the paper's equations (eqs 1-27, with the dispersion term taken from the
@@ -726,28 +726,28 @@ def test_states_dataset_reader(tmp_path):
         load_dataset("spookynet_states", system="water", cache_dir=tmp_path)
 
 
-# parity with the reference implementation (optional)
+# fidelity to the reference implementation (optional)
 
-def _parity(mode):
+def _fidelity(mode):
     pytest.importorskip("spookynet")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "spookynet_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "spookynet_fidelity.py")
     res = subprocess.run([sys.executable, script, mode], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-def test_parity_vs_reference_float64():
+def test_fidelity_vs_reference_float64():
     """Transplanted weights reproduce the reference energies, forces, charges and dipoles."""
-    assert _parity("float64") < 1e-12
+    assert _fidelity("float64") < 1e-12
 
 
-def test_parity_vs_reference_float32():
-    assert _parity("float32") < 1e-5
+def test_fidelity_vs_reference_float32():
+    assert _fidelity("float32") < 1e-5
 
 
-def test_parity_published_checkpoint():
+def test_fidelity_published_checkpoint():
     """The reference code's published example model gives the same predictions."""
     path = os.environ.get("SPOOKYNET_REFERENCE_CHECKPOINT")
     if not path:
@@ -755,7 +755,7 @@ def test_parity_published_checkpoint():
     pytest.importorskip("spookynet")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "spookynet_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "spookynet_fidelity.py")
     res = subprocess.run([sys.executable, script, "float64", path], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert float(res.stdout.strip().splitlines()[-1]) < 1e-12

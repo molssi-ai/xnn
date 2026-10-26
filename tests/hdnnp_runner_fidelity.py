@@ -1,6 +1,6 @@
-"""Parity of the xnn HDNNP (2G, 3G, 4G) with the RuNNer code.
+"""Fidelity of the xnn HDNNP (2G, 3G, 4G) to the RuNNer code.
 
-    XNN_RUNNER=/path/to/RuNNer.x python hdnnp_runner_parity.py [case ...] [--keep DIR]
+    XNN_RUNNER=/path/to/RuNNer.x python hdnnp_runner_fidelity.py [case ...] [--keep DIR]
 
 For every case a RuNNer model is generated with random weights and scaling
 (``input.nn``, ``weights_*.data``, ``scaling.data``, ``qeq_scaling.data``)

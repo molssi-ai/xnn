@@ -17,8 +17,8 @@ like every other field of the ``ffnn`` family: the valence tables are the
 ``torsion_fourier`` / ``pi_torsion`` sections and the JSON
 ``torsion_torsion`` grids, the nonbonded ones ``buffered_14-7`` (with pair
 overrides), ``atomic_multipole``, ``polarizability``, ``charge_penetration``,
-``charge_transfer``, ``pauli_repulsion``, ``damped_dispersion`` and the two
-charge-flux kinds; the settings are ``#metadata`` rows and the type-to-class
+``charge_transfer``, ``pauli_repulsion``, ``damped_dispersion``,
+``exchange_polarization`` and the two charge-flux kinds; the settings are ``#metadata`` rows and the type-to-class
 map is the ``#equivalence`` section. ``amoeba-water-2003`` (Ren and Ponder
 2003), ``hippo-water-2021`` (Rackers *et al.* 2021) and ``amoebapro13``
 (Shi *et al.* 2013) ship with xnn.
@@ -144,6 +144,11 @@ class AmoebaLibrary:
     chgpen, chgtrn, repulsion, dispersion : dict[str, dict]
         Per class: ``{"core", "alpha"}``, ``{"eps", "alpha"}``,
         ``{"k", "alpha", "valence"}``, ``{"c6", "alpha"}``.
+    exchpol : dict[str, dict]
+        Per class: ``{"spring", "size", "damp", "use"}``, the exchange
+        polarization of Chung *et al.* (2022): the spring constant ``k``, the
+        orbital size ``q`` and exponent ``zeta`` of the overlap, and the use
+        flag (a pair takes part when either of its classes is used).
     bndcflux : dict[str, dict]
         ``"A-B" -> {"j"}``: the bond charge flux, in e/Angstrom, moved from
         A to B per unit stretch of the key as stored.
@@ -175,6 +180,7 @@ class AmoebaLibrary:
     chgtrn: dict = field(default_factory=dict)
     repulsion: dict = field(default_factory=dict)
     dispersion: dict = field(default_factory=dict)
+    exchpol: dict = field(default_factory=dict)
     bndcflux: dict = field(default_factory=dict)
     angcflux: dict = field(default_factory=dict)
     settings: dict = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
@@ -377,7 +383,7 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
              "torsion_fourier", "pi_torsion", "torsion_torsion", "buffered_14-7",
              "buffered_14-7_pair", "atomic_multipole", "polarizability",
              "charge_penetration", "charge_transfer", "pauli_repulsion",
-             "damped_dispersion", "bond_charge_flux", "angle_charge_flux"}
+             "damped_dispersion", "exchange_polarization", "bond_charge_flux", "angle_charge_flux"}
     unsupported = {k: len(v) for k, v in ff.sections.items() if k not in known}
     if unsupported:
         if strict:
@@ -464,6 +470,9 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
                                  "valence": float(row.values["valence"])}
     for key, row in ff.rows("damped_dispersion").items():
         lib.dispersion[key[0]] = {"c6": float(row.values["C6"]), "alpha": float(row.values["alpha"])}
+    for key, row in ff.rows("exchange_polarization").items():
+        lib.exchpol[key[0]] = {"spring": float(row.values["spring"]), "size": float(row.values["size"]),
+                               "damp": float(row.values["damp"]), "use": float(row.values["use"]) != 0.0}
     for key, row in ff.rows("bond_charge_flux").items():
         lib.bndcflux[key_of(key)] = {"j": float(row.values["J"])}
     for key, row in ff.rows("angle_charge_flux").items():
@@ -628,7 +637,9 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
             ("charge_transfer", lib.chgtrn, ["eps", "alpha"], lambda v: {"eps": v["eps"], "alpha": v["alpha"]}),
             ("pauli_repulsion", lib.repulsion, ["K", "alpha", "valence"],
              lambda v: {"K": v["k"], "alpha": v["alpha"], "valence": v["valence"]}),
-            ("damped_dispersion", lib.dispersion, ["C6", "alpha"], lambda v: {"C6": v["c6"], "alpha": v["alpha"]})):
+            ("damped_dispersion", lib.dispersion, ["C6", "alpha"], lambda v: {"C6": v["c6"], "alpha": v["alpha"]}),
+            ("exchange_polarization", lib.exchpol, ["spring", "size", "damp", "use"],
+             lambda v: {"spring": v["spring"], "size": v["size"], "damp": v["damp"], "use": 1.0 if v["use"] else 0.0})):
         if table:
             sections.append(make_section(kind, label, ["I"], cols,
                                          [((c,), {k: float(x) for k, x in conv(v).items()}) for c, v in table.items()],
@@ -778,7 +789,7 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
             text = raw
             desc = ""
             if '"' in text:
-                desc = text.split('"')[1]
+                desc = text.split('"')[1].strip()
                 rest = text.split('"')[0].split() + text.split('"')[2].split()
             else:
                 rest = w
@@ -863,6 +874,10 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
             lib.repulsion[w[1]] = {"k": float(w[2]), "alpha": float(w[3]), "valence": float(w[4])}
         elif kw == "dispersion":
             lib.dispersion[w[1]] = {"c6": float(w[2]), "alpha": float(w[3])}
+        elif kw == "exchpol":
+            # class, spring constant, size, damping exponent, whether the class is damped
+            lib.exchpol[w[1]] = {"spring": float(w[2]), "size": float(w[3]), "damp": float(w[4]),
+                                 "use": len(w) < 6 or int(float(w[5])) != 0}
         elif kw == "bndcflux":
             key, flipped = _canonical(w[1:3], "like_bond")
             j = float(w[3])
@@ -922,15 +937,32 @@ def _banner(title: str) -> list[str]:
     return ["", bar, frame, f"      ##  {title}  ##", frame, bar, ""]
 
 
+def _own_numbers(names, kind: str) -> dict:
+    """``{name: int(name)}``, checked to be positive and distinct."""
+    out = {}
+    for name in names:
+        try:
+            number = int(str(name))
+        except ValueError:
+            raise ValueError(f"atom {kind} {name!r} is not an integer; write with keep_numbers=False") from None
+        if number < 1:
+            raise ValueError(f"atom {kind} {name!r} is not a positive integer")
+        out[name] = number
+    if len(set(out.values())) != len(out):
+        raise ValueError(f"two atom {kind} names give the same number")
+    return out
+
+
 def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
-                     title: Optional[str] = None) -> dict:
+                     title: Optional[str] = None, keep_numbers: bool = False) -> dict:
     """Write a library as a Tinker parameter file.
 
     Atom types and classes are renumbered 1..N in library order (Tinker
-    needs integers); the mapping is returned so coordinate files can be
-    written with matching type numbers. Torsion amplitudes are written
-    divided by ``torsionunit`` again. The file is read by Tinker and by the
-    LAMMPS AMOEBA package.
+    needs integers), or keep their own numbers with ``keep_numbers``; the
+    mapping is returned so coordinate files can be written with matching
+    type numbers. Torsion amplitudes are written divided by
+    ``torsionunit`` again. The file is read by Tinker and by the LAMMPS
+    AMOEBA package.
 
     Parameters
     ----------
@@ -940,14 +972,28 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
         Output path.
     title : str, optional
         The ``forcefield`` name written; default the library's setting.
+    keep_numbers : bool, optional
+        Write the type and class names as they are, for a library whose
+        names are Tinker's integers (one read from a ``.prm`` file), so
+        existing coordinate files stay valid.
 
     Returns
     -------
     dict
         ``{"types": {name: int}, "classes": {name: int}}``.
+
+    Raises
+    ------
+    ValueError
+        With ``keep_numbers``, when a type or class name is not a positive
+        integer or two names give the same number.
     """
-    types = {t: i + 1 for i, t in enumerate(lib.atom_types)}
-    classes = {c: i + 1 for i, c in enumerate(lib.classes())}
+    if keep_numbers:
+        types = _own_numbers(lib.atom_types, "type")
+        classes = _own_numbers(lib.classes(), "class")
+    else:
+        types = {t: i + 1 for i, t in enumerate(lib.atom_types)}
+        classes = {c: i + 1 for i, c in enumerate(lib.classes())}
     s = lib.settings
 
     def cl(name: str) -> str:
@@ -1000,8 +1046,9 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
     for t, a in lib.atom_types.items():
         z = int(a.get("element", 0))
         symbol = CHEMICAL_SYMBOLS[z] if 0 < z < len(CHEMICAL_SYMBOLS) else "X"
+        desc = '"' + str(a.get("comment", t))[:30] + '"'
         out.append(f"atom {types[t]:10d} {classes[str(a['class'])]:4d}    {symbol:<4} "
-                   f"\"{a.get('comment', t)[:30]:<30}\" {z:4d} {float(a.get('mass', 0.0)):12.6f} "
+                   f"{desc:<32} {z:4d} {float(a.get('mass', 0.0)):12.6f} "
                    f"{int(a.get('connections', 0) or 0):5d}")
     out.append("")
     if lib.vdw_types:
@@ -1105,7 +1152,9 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
             ("dispersion", "Dispersion Parameters", lib.dispersion,
              lambda v: f"{v['c6']:14.8f} {v['alpha']:14.8f}"),
             ("chgtrn", "Charge Transfer Parameters", lib.chgtrn,
-             lambda v: f"{v['eps']:14.8f} {v['alpha']:14.8f}")):
+             lambda v: f"{v['eps']:14.8f} {v['alpha']:14.8f}"),
+            ("exchpol", "Exchange Polarization Parameters", lib.exchpol,
+             lambda v: f"{v['spring']:14.8f} {v['size']:14.8f} {v['damp']:14.8f} {1 if v['use'] else 0:3d}")):
         if table:
             # one banner per block: the LAMMPS reader parses the file by section titles
             out += _banner(title)

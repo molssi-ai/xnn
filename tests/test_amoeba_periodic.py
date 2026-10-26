@@ -4,8 +4,10 @@ and two 64-water boxes against Tinker (energies by term, forces, internal virial
 The boxes are a 4 x 4 x 4 lattice of randomly oriented, jittered water molecules in a
 12.4294 Angstrom cell evaluated with the shipped water libraries; the references were
 computed with Tinker 8.11.3 on the same coordinates (cutoffs 6 Angstrom, taper 5.4, its
-default Ewald coefficient, 48^3 meshes, induced dipoles converged to 1e-10 Debye).
+default Ewald coefficient, 48^3 meshes and Tinker's default 16^3 ones, induced dipoles
+converged to 1e-10 Debye).
 """
+import copy
 import math
 
 import numpy as np
@@ -13,9 +15,11 @@ import pytest
 import torch
 
 from xnn.common.data import collate, structure_to_graph
+from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine
+from xnn.common.deploy.step_graph import StepGraph
 from xnn.common.models import ForceStressOutput
 from xnn.common.models.ops import cell_volume
-from xnn.ffnn.models import Amoeba, Hippo, MolecularTopology
+from xnn.ffnn.models import Amoeba, Hippo, MolecularTopology, builtin_amoeba
 from xnn.ffnn.models import amoeba_ewald as ew
 from xnn.ffnn.models.amoebalib import KCAL_TO_EV
 
@@ -99,10 +103,21 @@ TINKER_AMOEBA_FORCES = np.array([[-10.73049941, 10.45227510, -7.48333535], [-20.
 TINKER_HIPPO = {"e_bond": 0.00000001, "e_angle": 0.00000000, "e_repulsion": 624.27637121, "e_dispersion": -233.11745121, "e_multipole": -183.53106497, "e_polar": -87.82485316, "e_chgtrn": -125.76374408, "energy": -5.96074220}   # noqa: E501
 TINKER_HIPPO_VIRIAL = np.array([[-374.733, 34.825, -23.782], [34.825, -320.221, 61.47], [-23.782, 61.47, -455.051]])
 TINKER_HIPPO_FORCES = np.array([[-4.27527556, 9.53332856, -1.34967508], [-6.45852711, 7.15980308, 3.56915377], [-10.62015902, -6.93775281, 1.99761812], [5.26340457, 5.54326675, 1.33678951]])   # noqa: E501
-TOL_TERM = 5e-3        # kcal/mol (the two particle-mesh sums differ at the level of their mesh error)
-TOL_DISPERSION = 2e-2  # kcal/mol (the order-4 dispersion mesh converges more slowly)
-TOL_FORCE = 2e-3       # kcal/mol/A
-TOL_VIRIAL = 0.05      # kcal/mol (the reference carries three decimals)
+# the HIPPO box with the exchange polarization of the water values of Chung et al. (2022, Table 1)
+EXCHPOL = {"OW": {"spring": 6.238, "size": 0.255, "damp": 1.586, "use": True},
+           "HW": {"spring": 9.273, "size": 0.001, "damp": 5.685, "use": True}}
+TINKER_HIPPO_EXCHPOL = {"e_polar": -81.44311527, "energy": 0.4209957}
+TINKER_HIPPO_EXCHPOL_FORCES = np.array([[-4.19956136, 9.31200863, -1.31334641], [-6.55655573, 7.32607884, 3.40826096], [-10.67063455, -6.85262682, 1.96538361], [5.21699362, 5.47697107, 1.3604798]])   # noqa: E501
+# the same at Tinker's default 16^3 meshes
+TINKER_AMOEBA_16 = {"e_multipole": 34.15078415, "e_polar": -76.55900824, "energy": 64.32075356}
+TINKER_AMOEBA_16_VIRIAL = np.array([[-651.823, 8.983, 5.918], [8.983, -581.457, 39.36], [5.918, 39.36, -559.051]])
+TINKER_AMOEBA_16_FORCES = np.array([[-10.75798799, 10.38233496, -7.5004989], [-20.22193768, 16.69408847, -3.94680373], [-114.32809796, -61.53079366, 24.72361458], [2.84960679, 4.88508647, 2.40856126]])   # noqa: E501
+TINKER_HIPPO_16 = {"e_dispersion": -233.54472332, "e_multipole": -183.82005897, "e_polar": -87.73205422, "energy": -6.58420937}   # noqa: E501
+TINKER_HIPPO_16_VIRIAL = np.array([[-375.845, 34.784, -23.864], [34.784, -321.171, 61.643], [-23.864, 61.643, -455.898]])   # noqa: E501
+TINKER_HIPPO_16_FORCES = np.array([[-4.35234624, 9.51461307, -1.36353251], [-6.46510101, 7.14793217, 3.59537636], [-10.59393288, -6.95899593, 1.97105238], [5.16639248, 5.49522924, 1.33101038]])   # noqa: E501
+TOL_TERM = 1e-5        # kcal/mol
+TOL_FORCE = 1e-5       # kcal/mol/A
+TOL_VIRIAL = 2e-3      # kcal/mol (the reference carries three decimals)
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +141,7 @@ def _graph(pos, cell=CELL, cutoff=6.3):
 
 
 def _box(cls, **kw):
-    lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+    lib = kw.pop("library", "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021")
     kw.setdefault("cutoff", 6.3)             # 0.3 A beyond the vdW cutoff for the reduced hydrogen sites
     for key in ("ewald_cutoff", "vdw_cutoff", "repulsion_cutoff", "chgtrn_cutoff", "dispersion_cutoff"):
         kw.setdefault(key, 6.0)
@@ -144,6 +159,14 @@ def test_tinker_defaults_for_the_coefficient_and_the_mesh():
     assert ew.pme_grid_size([12.4294] * 3) == [16, 16, 16]
     assert ew.pme_grid_size([15.24] * 3) == [20, 20, 20]
     assert ew.pme_grid_size([30.48] * 3, density=0.8) == [30, 30, 30]
+
+
+def test_requested_meshes_are_rounded_up_as_in_tinker():
+    """A requested mesh is rounded up per axis to an even 2-3-5 size of at least 16, as Tinker does."""
+    sizes = (10, 16, 17, 21, 27, 28, 31, 37, 42, 49, 56, 61)
+    assert [ew.fft_mesh_size(n) for n in sizes] == [16, 16, 18, 24, 30, 30, 32, 40, 48, 50, 60, 64]
+    model = _box(Hippo, pme_grid=[27, 32, 45], dpme_grid=12)
+    assert model.pme_grid == [30, 32, 48] and model.dpme_grid == [16, 16, 16]
 
 
 def test_switching_is_a_c2_step():
@@ -244,14 +267,58 @@ def test_dispersion_ewald_matches_the_lattice_sum():
     assert float(real + recip) == pytest.approx(float(direct), rel=2e-7)
 
 
+@pytest.mark.parametrize("kind", ["block", "neumann", "block-neumann"])
+def test_preconditioners_reproduce_the_diagonal_solve(kind):
+    """Every preconditioner gives the diagonal one's energies and forces; the block one in fewer iterations."""
+    base = ForceStressOutput(_box(Amoeba, pme_grid=24, polar_eps=1e-10)).eval()
+    other = ForceStressOutput(_box(Amoeba, pme_grid=24, polar_eps=1e-10, preconditioner=kind)).eval()
+    g = _graph(BOX)
+    a, b = base(g), other(g)
+    assert float(b["energy"][0]) == pytest.approx(float(a["energy"][0]), abs=1e-9)
+    assert torch.allclose(b["forces"], a["forces"], atol=1e-8)
+    if kind == "block":
+        assert other.model.solver_stats["forward"] < base.model.solver_stats["forward"]
+
+
+def test_predictor_and_adjoint_warm_start_save_iterations_and_keep_the_results():
+    """Along a short trajectory ASPC and the adjoint memory cut iterations; energies and forces stay."""
+    cold = ForceStressOutput(_box(Amoeba, pme_grid=24)).eval()
+    hot = ForceStressOutput(_box(Amoeba, pme_grid=24, predictor="aspc")).eval()
+    velocity = np.random.default_rng(5).normal(scale=0.004, size=BOX.shape)      # Angstrom per step
+    first_adjoint = None
+    for step in range(7):
+        g = _graph(BOX + step * velocity)
+        a, b = cold(g), hot(g)
+        assert float(b["energy"][0]) == pytest.approx(float(a["energy"][0]), abs=1e-8)
+        assert torch.allclose(b["forces"], a["forces"], atol=1e-7)
+        if first_adjoint is None:
+            first_adjoint = cold.model.solver_stats["adjoint"]
+    assert hot.model.solver_stats["forward_guess"]
+    assert hot.model.solver_stats["forward"] <= 0.75 * cold.model.solver_stats["forward"]
+    assert cold.model.solver_stats["adjoint_guess"] and cold.model.solver_stats["adjoint"] < first_adjoint
+
+
+def test_a_batch_of_different_cells_matches_the_structures_one_by_one():
+    """Strained copies of a box in one batch (one mesh plan, one batched FFT) equal separate evaluations."""
+    model = ForceStressOutput(_box(Hippo, pme_grid=24, dpme_grid=24), compute_stress=True)
+    strains = [np.eye(3), np.diag([1.02, 0.99, 1.0]), np.array([[1.0, 0.01, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.98]])]
+    graphs = [_graph(BOX @ s, cell=CELL @ s) for s in strains]
+    together = model(collate(graphs))
+    for b, g in enumerate(graphs):
+        alone = model(g)
+        assert float(together["energy"][b]) == pytest.approx(float(alone["energy"][0]), abs=1e-9)
+        rows = slice(b * len(BOX), (b + 1) * len(BOX))
+        assert torch.allclose(together["forces"][rows], alone["forces"], atol=1e-8)
+        assert torch.allclose(together["stress"][b], alone["stress"][0], atol=1e-9)
+
+
 def test_mesh_self_moments_match_a_brute_force_position_average():
     """The spurious mesh self-interaction of one multipole equals the average over its position."""
     cell = torch.tensor([[7.0, 0.0, 0.0], [0.5, 6.0, 0.0], [-0.3, 0.4, 6.5]])
     alpha, mesh, order = 0.9, [12, 12, 10], 5
     s0, s2, s4 = ew.mesh_self_moments(cell, alpha, mesh, order, "coulomb")
     # the exact reciprocal self term of one unit charge over the mesh vectors: the bare kernel, no spline moduli
-    g = (ew._influence(cell, alpha, mesh, order, "coulomb") / (mesh[0] * mesh[1] * mesh[2])
-         / ew.spline_moduli(mesh, order, torch.float64, cell.device))
+    g = ew._influence(cell, alpha, mesh, order, "coulomb", bare=True) / (mesh[0] * mesh[1] * mesh[2])
     exact_self = 0.5 * float(g.sum())
     n = 12
     frac = torch.stack(torch.meshgrid(*[(torch.arange(n) + 0.5) / n] * 3, indexing="ij"), -1).reshape(-1, 3)
@@ -276,8 +343,7 @@ def test_mesh_self_moments_match_a_brute_force_position_average():
     spurious_Q = float(s0 - 2.0 * torch.einsum("ab,ab->", Q[0], s2) + torch.einsum("ab,abcd,cd->", Q[0], s4, Q[0]))
     assert spurious_Q == pytest.approx(e_Q - exact_Q, abs=1e-6)
     r0, _, _ = ew.mesh_self_moments(cell, alpha, mesh, 4, "r6")
-    g6 = (ew._influence(cell, alpha, mesh, 4, "r6") / (mesh[0] * mesh[1] * mesh[2])
-          / ew.spline_moduli(mesh, 4, torch.float64, cell.device))
+    g6 = ew._influence(cell, alpha, mesh, 4, "r6", bare=True) / (mesh[0] * mesh[1] * mesh[2])
     e_6 = sum(float(-ew.dispersion_pme(one, r[None], cell, alpha, mesh, 4) + alpha ** 6 / 12.0) for r in pos) / len(pos)
     assert float(r0) == pytest.approx(e_6 - 0.5 * float(g6.sum()), abs=1e-7)
     fine = ew.mesh_self_moments(torch.eye(3) * 6.0, 1.2, [64, 64, 64], 5, "coulomb")
@@ -285,19 +351,12 @@ def test_mesh_self_moments_match_a_brute_force_position_average():
     assert abs(float(fine[0])) < 1e-6 and float(fine[1].abs().max()) < 1e-6 and float(fine[2].abs().max()) < 1e-4
 
 
-def test_mesh_self_correction_cuts_the_coarse_mesh_dispersion_error():
-    """At 16^3 (order 4) the corrected dispersion sum is far closer to the converged one than the plain sum."""
+def test_mesh_self_correction_subtracts_the_spurious_self_energy():
+    """With mesh_self the dispersion energy drops by the spurious self moment times sum c^2."""
     model = _box(Hippo, polarization="none")
     model(_graph(BOX))
     c = model.ff.params["disp_c6"][model.top_class].detach()
-    pos, cell = torch.tensor(BOX), torch.tensor(CELL)
-    alpha = ew.ewald_coefficient(6.0)
-    converged = float(ew.dispersion_pme(c, pos, cell, alpha, [96] * 3, 6).sum())
-    plain = float(ew.dispersion_pme(c, pos, cell, alpha, [16] * 3, 4).sum())
-    s0 = ew.mesh_self_moments(cell, alpha, [16] * 3, 4, "r6")[0]
-    corrected = plain + float(s0 * (c * c).sum())
-    assert abs(plain - converged) * EV_TO_KCAL > 0.3
-    assert abs(corrected - converged) < 0.2 * abs(plain - converged)
+    s0 = ew.mesh_self_moments(torch.tensor(CELL), ew.ewald_coefficient(6.0), [16] * 3, 4, "r6")[0]
     full = _box(Hippo, polarization="none", dpme_grid=16, mesh_self=True)
     plain_model = _box(Hippo, polarization="none", dpme_grid=16)
     e_full, e_plain = float(full(_graph(BOX))["e_dispersion"]), float(plain_model(_graph(BOX))["e_dispersion"])
@@ -335,12 +394,40 @@ def test_hippo_box_matches_tinker():
     model = ForceStressOutput(_box(Hippo), compute_stress=True)
     out = model(_graph(BOX))
     for k, ref in TINKER_HIPPO.items():
-        tol = TOL_DISPERSION if k in ("e_dispersion", "energy") else TOL_TERM
-        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=tol), k
+        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=TOL_TERM), k
     forces = out["forces"].detach().numpy() * EV_TO_KCAL
     assert np.abs(forces[:4] - TINKER_HIPPO_FORCES).max() < TOL_FORCE
     virial = -out["stress"][0].detach().numpy() * L ** 3 * EV_TO_KCAL
     assert np.abs(virial + TINKER_HIPPO_VIRIAL).max() < TOL_VIRIAL
+
+
+def _exchpol_library():
+    lib = copy.deepcopy(builtin_amoeba("hippo-water-2021"))
+    lib.exchpol = copy.deepcopy(EXCHPOL)
+    return lib
+
+
+def test_hippo_box_with_exchange_polarization_matches_tinker():
+    """Exchange polarization in a cell, cut by the switch of the repulsion, matches Tinker's."""
+    out = ForceStressOutput(_box(Hippo, library=_exchpol_library()))(_graph(BOX))
+    for k, ref in TINKER_HIPPO_EXCHPOL.items():
+        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=TOL_TERM), k
+    assert np.abs(out["forces"].detach().numpy()[:4] * EV_TO_KCAL - TINKER_HIPPO_EXCHPOL_FORCES).max() < TOL_FORCE
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_boxes_match_tinker_on_its_default_coarse_meshes(cls):
+    """At Tinker's default 16^3 meshes the mesh sums, forces and virial still match Tinker's."""
+    refs, forces, virial_ref = ((TINKER_AMOEBA_16, TINKER_AMOEBA_16_FORCES, TINKER_AMOEBA_16_VIRIAL) if cls is Amoeba
+                                else (TINKER_HIPPO_16, TINKER_HIPPO_16_FORCES, TINKER_HIPPO_16_VIRIAL))
+    model = ForceStressOutput(_box(cls, pme_grid=None, dpme_grid=None), compute_stress=True)
+    out = model(_graph(BOX))
+    for k, ref in refs.items():
+        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=TOL_TERM), k
+    assert np.abs(out["forces"].detach().numpy()[:4] * EV_TO_KCAL - forces).max() < TOL_FORCE
+    virial = -out["stress"][0].detach().numpy() * L ** 3 * EV_TO_KCAL
+    assert np.abs(virial + virial_ref).max() < TOL_VIRIAL
+    assert model.model.intermediates["ewald"]["grids"][0][1] == [16, 16, 16]
 
 
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
@@ -484,3 +571,166 @@ def test_second_derivatives_through_the_iterative_solve(cls):
         p[other, ax2] -= 2 * h
         fm = float(fso(_graph(p))["forces"][atom, axis])
         assert float(row[other, ax2]) == pytest.approx((fp - fm) / (2 * h), rel=1e-4, abs=1e-3)
+
+
+def test_use_fast_validates_and_keeps_the_reference_on_the_cpu():
+    """use_fast is validated, reached by set_use_fast, and inactive on the CPU."""
+    from xnn.common.models.fast import set_use_fast
+    with pytest.raises(ValueError):
+        _box(Amoeba, use_fast="always")
+    ref, fast = _box(Amoeba), _box(Amoeba)
+    set_use_fast(ForceStressOutput(fast), True)
+    assert fast.use_fast is True and ref.use_fast is False
+    fast.eval()
+    assert not fast._fused_active(torch.ones(3, dtype=torch.float64))
+    e_ref = float(ref.eval()(_graph(BOX))["energy"])
+    assert float(fast(_graph(BOX))["energy"]) == e_ref
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_fused_pair_arithmetic_matches_the_reference_on_the_gpu(cls):
+    """Energies, forces and stress agree with the reference over eager, compiling and compiled calls."""
+    g = _graph(BOX).to("cuda")
+    ref = ForceStressOutput(_box(cls), compute_stress=True).to("cuda").eval()
+    fast = ForceStressOutput(_box(cls, use_fast=True), compute_stress=True).to("cuda").eval()
+    want = ref(g)
+    for _ in range(3):
+        got = fast(g)
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_forward_on_a_plan_matches_the_plain_forward(cls, periodic):
+    """A recorded plan reproduces the plain evaluation, also after the atoms move."""
+    model = _box(cls).eval()
+    cell = CELL if periodic else None
+    g = _graph(BOX, cell=cell, cutoff=7.3)
+    padded = model.plan_step(g, skin=1.0, capacity=int(g.edge_index.shape[1]))
+    rng = np.random.default_rng(3)
+    cases = [(model.plan_step(_graph(BOX, cell=cell)), 0.0), (padded, 0.0), (padded, 0.02), (padded, 0.02)]
+    for plan, scale in cases:
+        moved = BOX + rng.normal(scale=scale, size=BOX.shape)
+        results = []
+        for p in (None, plan):
+            g = _graph(moved if p is None else BOX, cell=cell)
+            g.pos = torch.tensor(moved, dtype=g.pos.dtype).requires_grad_(True)
+            out = model(g, p)
+            forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+            results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+        assert not bool(plan.outdated(g.pos))
+        for a, b in zip(*results):
+            assert torch.allclose(a, b, rtol=1e-10, atol=1e-8)
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_a_solve_of_fixed_length_matches_the_tested_solve(cls):
+    """Solves of fixed length on a plan give the tested solve's results and report their convergence."""
+    model = _box(cls).eval()
+    g = _graph(BOX)
+    plan = model.plan_step(g)
+    results = []
+    for fixed in (None, {"forward": 100, "adjoint": 100}):
+        model.set_dipole_predictor(None)
+        model._adjoints.clear()
+        plan.solve_iterations = fixed
+        g.pos = g.pos.detach().requires_grad_(True)
+        out = model(g, plan)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+    assert bool(plan.converged)
+    for a, b in zip(*results):
+        assert torch.equal(a, b)
+    plan.solve_iterations = {"forward": 1, "adjoint": 1}
+    with torch.no_grad():
+        model(g, plan)
+    assert not bool(plan.converged)
+
+
+def _walk(cls, device, steps, **kw):
+    """Plain steps and steps on a plan along a random walk of the box."""
+    ref, model = (ForceStressOutput(_box(cls, **kw).to(device), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.3, warmup=3)
+    rng = np.random.default_rng(5)
+    pos = BOX.copy()
+    for _ in range(steps):
+        pos = pos + rng.normal(scale=0.03, size=BOX.shape)
+        s = {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(Z, device=device),
+             "cell": torch.tensor(CELL, device=device), "pbc": torch.ones(3, dtype=torch.bool, device=device)}
+        got = stepper(s)
+        want = ref(structure_to_graph(s, 6.3, device=device))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+    assert stepper.rebuilds >= 1 and stepper.full_rebuilds == 0 and stepper.plan.solve_iterations
+    return stepper
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_on_a_plan_follow_the_plain_steps(cls):
+    """Steps on a plan follow the plain steps through rebuilds of the pair list and fixed solves."""
+    _walk(cls, "cpu", 6)
+
+
+def test_steps_on_a_plan_follow_the_plain_steps_with_exchange_polarization():
+    """Steps on a plan follow the plain steps with exchange polarization."""
+    _walk(Hippo, "cpu", 4, library=_exchpol_library())
+
+
+def test_steps_on_a_plan_follow_an_atom_wrapped_into_the_cell():
+    """An atom wrapped into the cell makes the steps on a plan record their bonded image shifts again."""
+    ref, model = (ForceStressOutput(_box(Amoeba), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
+    for wrap in (0.0, 0.0, L):
+        pos = BOX.copy()
+        pos[0, 0] += wrap
+        s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(Z), "cell": torch.tensor(CELL),
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+    assert stepper.full_rebuilds == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_replayed_as_a_cuda_graph_follow_the_plain_steps(cls):
+    """Steps replayed as a CUDA graph follow the plain steps on the GPU."""
+    stepper = _walk(cls, "cuda", 10, use_fast=True)
+    assert stepper.recordings >= 1 and stepper.replays >= 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_steps_with_exchange_polarization_replayed_as_a_cuda_graph_follow_the_plain_steps():
+    """Steps with exchange polarization replayed as a CUDA graph follow the plain steps on the GPU."""
+    stepper = _walk(Hippo, "cuda", 10, use_fast=True, library=_exchpol_library())
+    assert stepper.recordings >= 1 and stepper.replays >= 1
+
+
+def test_the_engine_evaluates_steps_on_a_plan():
+    """The MDI engine on step plans gives the plain engine's results."""
+    engines = [MDIEngine(ForceStressOutput(_box(Amoeba), compute_stress=True), 6.3, step_graph=flag, skin=0.5)
+               for flag in (False, True)]
+    for engine in engines:
+        engine.natoms, engine.atomic_numbers = len(BOX), Z.astype(np.int64)
+        engine.cell_bohr = CELL / BOHR_TO_ANGSTROM
+    for shift in (0.0, 0.01):
+        for engine in engines:
+            engine.coords_bohr = (BOX + shift) / BOHR_TO_ANGSTROM
+            engine.calculate()
+        plain, planned = engines
+        assert planned.energy == pytest.approx(plain.energy, rel=1e-10)
+        np.testing.assert_allclose(planned.forces, plain.forces, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(planned.stress, plain.stress, rtol=1e-8, atol=1e-12)
+    assert engines[1].steps is not None
+
+
+def test_the_engine_replays_steps_by_default_only_on_a_gpu():
+    """The engine's step graph is on by default only on a GPU, and its option is validated."""
+    model = ForceStressOutput(_box(Amoeba), compute_stress=True)
+    assert MDIEngine(model, 6.3).steps is None
+    with pytest.raises(ValueError, match="step_graph"):
+        MDIEngine(model, 6.3, step_graph="yes")
+    if torch.cuda.is_available():
+        assert MDIEngine(model, 6.3, device="cuda").steps is not None

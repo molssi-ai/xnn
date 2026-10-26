@@ -3,7 +3,7 @@
 Covers model equivariance / force co-rotation, periodic stress,
 TorchScript/LAMMPS export, upstream yaml key translation, and -- when the
 original ``allegro`` package is installed -- machine-precision
-weight-transplant parity against it.
+weight-transplant fidelity to it.
 """
 import numpy as np
 import pytest
@@ -117,7 +117,7 @@ def test_upstream_allegro_key_translation():
     assert m.atom_scale[8].item() == 3.0
 
 
-def test_parity_vs_original_allegro():
+def test_fidelity_vs_original_allegro():
     """Weight transplant from the original allegro gives identical E and F."""
     pytest.importorskip("allegro")
     from nequip.data import AtomicData, AtomicDataDict

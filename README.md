@@ -143,13 +143,13 @@ the MolSSI Driver Interface.
 | Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4) |
 | Convolutional neural networks (`cnn`) | 3D steerable-/ conventional- / spherical-CNN |
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO |
-| Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer) |
+| Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
 | Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet |
 | Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable) |
 
 Each model is checked against its reference code or paper
-(`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, SpookyNet, NequIP, MACE, Allegro
-and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
+(`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP,
+MACE, Allegro and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
 ## Examples and tests
@@ -177,7 +177,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.21.0},
+  version = {0.22.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

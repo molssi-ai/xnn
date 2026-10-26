@@ -6,7 +6,7 @@ the D3(BJ) dispersion port (against reference values generated with the
 original TensorFlow implementation), flexible depth, periodic stress,
 upstream ``train.py`` key translation, and -- when TensorFlow *and* a clone
 of MMunibas/PhysNet are available -- machine-precision weight-transplant
-parity against the original graph.
+fidelity to the original graph.
 """
 import math
 import os
@@ -220,7 +220,7 @@ def test_upstream_physnet_key_translation():
     assert float(m.a1) > 0
 
 
-def test_parity_vs_original_physnet():
+def test_fidelity_vs_original_physnet():
     """Weight transplant from the original TF PhysNet gives identical E/F/q.
 
     Needs TensorFlow and a clone of MMunibas/PhysNet (path in the
@@ -232,7 +232,7 @@ def test_parity_vs_original_physnet():
         pytest.skip("set PHYSNET_UPSTREAM_PATH to a clone of MMunibas/PhysNet")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "physnet_tf_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "physnet_tf_fidelity.py")
     res = subprocess.run([sys.executable, script, path],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr

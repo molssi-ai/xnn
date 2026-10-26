@@ -284,7 +284,7 @@ class DFTD4(nn.Module, FastPathModule):
     regime : str, optional
         How the EEQ charges are computed: ``"dense"`` builds the ``(N, N)``
         interaction matrix as the reference code does (bit-exact
-        ``dftd4`` parity; memory grows as ``N^2``), ``"large"`` uses the
+        fidelity to ``dftd4``; memory grows as ``N^2``), ``"large"`` uses the
         matrix-free operator, iterative / factorized solve and implicit
         differentiation of :mod:`~xnn.common.models.eeq` (memory ``O(E + N
         N_G)``, agreement with ``dense`` to about 1e-10 hartree, eager

@@ -1,6 +1,6 @@
-"""Parity of the xnn NDDO methods (PM3, PM6, PM6-ORG, PM7) with the MOPAC program.
+"""Fidelity of the xnn NDDO methods (PM3, PM6, PM6-ORG, PM7) to the MOPAC program.
 
-    XNN_MOPAC=/path/to/mopac python sqmnn_mopac_parity.py [PM3 PM6 PM6-ORG PM7]
+    XNN_MOPAC=/path/to/mopac python sqmnn_mopac_fidelity.py [PM3 PM6 PM6-ORG PM7]
 
 Every structure is evaluated by MOPAC (``1SCF PRECISE GRADIENTS``, tight
 SCF) and by xnn in float64; the heats of formation (kcal/mol), gradients
@@ -76,7 +76,7 @@ def run_mopac(symbols, xyz, method, charge=0, multiplicity=1, gradients=True, wo
         kw.append("GRADIENTS")
     if multiplicity != 1:
         kw += ["UHF", {2: "DOUBLET", 3: "TRIPLET", 4: "QUARTET", 5: "QUINTET", 6: "SEXTET"}[multiplicity]]
-    lines = [" ".join(kw), "xnn parity", ""]
+    lines = [" ".join(kw), "xnn fidelity", ""]
     lines += [f"{s:2s} {x:20.12f} 1 {y:20.12f} 1 {z:20.12f} 1" for s, (x, y, z) in zip(symbols, xyz)]
     work = Path(workdir or tempfile.mkdtemp())
     work.mkdir(parents=True, exist_ok=True)

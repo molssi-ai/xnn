@@ -8,7 +8,7 @@ energy bookkeeping, forces/stress, LES nesting), the ``model.extra
 ["dispersion"]`` config hook, the ``total_charge`` data field, batching, all
 four deploy channels (eager, TorchScript whole-system and pair-style ABIs,
 :class:`~xnn.common.deploy.LAMMPSWrapper`, ASE calculator) and -- when the
-upstream ``dftd4`` Python package is installed -- floating-point parity of
+upstream ``dftd4`` Python package is installed -- floating-point fidelity of
 energies, gradients, virials, coordination numbers, EEQ charges,
 polarizabilities and C6 coefficients for molecules, ions and crystals.
 """
@@ -49,7 +49,7 @@ METHANOL = (np.array([[-0.0469, 0.6640, 0.0], [-0.0469, -0.7580, 0.0],
 AMMONIUM = (np.array([[0.0, 0.0, 0.0], [0.59, 0.59, 0.59], [-0.59, -0.59, 0.59],
                       [-0.59, 0.59, -0.59], [0.59, -0.59, -0.59]]), [7, 1, 1, 1, 1])
 # small cutoffs keep the tests fast; the defaults are exercised in the
-# upstream-parity tests
+# upstream-fidelity tests
 # cutoff_eeq pinned to the pair cutoff: the large regime's default (16 A) would
 # otherwise widen the wrapper's neighbor list beyond these test cutoffs
 FAST = dict(cutoff_pair=9.0, cutoff_triple=7.0, cutoff_cn=8.0, cutoff_eeq_cn=8.0, cutoff_eeq=9.0)
@@ -476,7 +476,7 @@ def test_trainer_widens_dataset_cutoff_to_the_wrapper(tmp_path):
     assert trainer.model.model.cutoff == 9.0
 
 
-# parity with the upstream dftd4 package
+# fidelity to the upstream dftd4 package
 def _upstream(pos, z, charge=0.0, cell=None, params=None):
     """Reference D4 results from the ``dftd4`` Python package, in atomic units.
 
@@ -535,7 +535,7 @@ def _compare(pos, z, charge=0.0, cell=None, tol_e=1e-13, **opts):
         assert np.abs(virial - res["virial"]).max() < 1e-11
 
 
-def test_parity_vs_dftd4_molecules():
+def test_fidelity_vs_dftd4_molecules():
     pytest.importorskip("dftd4")
     _compare(*WATER)
     _compare(*METHANOL)
@@ -545,7 +545,7 @@ def test_parity_vs_dftd4_molecules():
     _compare(pos, z)
 
 
-def test_parity_vs_dftd4_crystals():
+def test_fidelity_vs_dftd4_crystals():
     pytest.importorskip("dftd4")
     # rocksalt NaCl and a sheared silicon cell (2 atoms each)
     a = 5.64
@@ -556,13 +556,13 @@ def test_parity_vs_dftd4_crystals():
     cell[1, 0] += 0.5
     _compare(np.array([[0.0, 0, 0], [a / 4, a / 4, a / 4]]), [14, 14], cell=cell)
     # a small periodic water box (intact molecules: an isolated atom would
-    # expose upstream's rounded CN cap, see test_parity_vs_dftd4_reduced_cutoffs)
+    # expose upstream's rounded CN cap, see test_fidelity_vs_dftd4_reduced_cutoffs)
     pos = np.concatenate([WATER[0] + shift for shift in
                           ([0.0, 0.0, 0.0], [3.1, 0.4, 0.2], [0.3, 3.0, 3.2])])
     _compare(pos, [8, 1, 1] * 3, cell=np.eye(3) * 6.2)
 
 
-def test_parity_vs_dftd4_reduced_cutoffs():
+def test_fidelity_vs_dftd4_reduced_cutoffs():
     """Upstream and xnn agree with matching non-default real-space cutoffs."""
     pytest.importorskip("dftd4")
     from dftd4.interface import DampingParam, DispersionModel

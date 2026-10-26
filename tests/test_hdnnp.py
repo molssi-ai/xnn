@@ -1,6 +1,6 @@
 """Tests of the HDNNP family: 1G-4G models, atom-centered symmetry functions, the
 Gaussian-charge Coulomb matrix, the RuNNer file bridge and, with ``XNN_RUNNER``
-set, parity with the RuNNer executable."""
+set, fidelity to the RuNNer executable."""
 import itertools
 import math
 import os
@@ -545,17 +545,17 @@ def test_runner_feature_order():
 def test_runner_model_files_load(tmp_path):
     """A generated RuNNer model loads with its feature order, scaling and weights."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("parity", HERE / "hdnnp_runner_parity.py")
-    parity = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(parity)
+    spec = importlib.util.spec_from_file_location("fidelity", HERE / "hdnnp_runner_fidelity.py")
+    fidelity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fidelity)
     for case in ("2g_molecules", "3g_screened", "4g_molecules", "4g_hardness_nn"):
         d = tmp_path / case
         d.mkdir()
-        parity.make_case(case, d)
+        fidelity.make_case(case, d)
         s = parse_input_nn(d / "input.nn")
         model = load_runner_model(d)
         assert model.generation == s["generation"]
-        out = parity.run_xnn(d)
+        out = fidelity.run_xnn(d)
         assert np.isfinite(out["energy"]).all() and np.isfinite(out["forces"]).all()
 
 
@@ -564,12 +564,12 @@ def test_runner_model_files_load(tmp_path):
                                   "3g_cells", "3g_point", "3g_point_cells", "4g_molecules", "4g_cells",
                                   "4g_hardness_nn", "4g_hardness_nn_cells", "3g_separate", "4g_separate",
                                   "au2mgo"])
-def test_runner_parity(case):
+def test_runner_fidelity(case):
     """Energies, forces and charges equal the RuNNer executable's in float64."""
     import importlib.util
     if case == "au2mgo" and not os.environ.get("XNN_RUNNER_SRC"):
         pytest.skip("needs the RuNNer source tree (XNN_RUNNER_SRC)")
-    spec = importlib.util.spec_from_file_location("parity", HERE / "hdnnp_runner_parity.py")
-    parity = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(parity)
-    assert parity.run_case(case) < 1e-9
+    spec = importlib.util.spec_from_file_location("fidelity", HERE / "hdnnp_runner_fidelity.py")
+    fidelity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fidelity)
+    assert fidelity.run_case(case) < 1e-9

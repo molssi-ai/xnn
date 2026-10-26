@@ -1,6 +1,6 @@
 """ET tests: manuscript fidelity (ICLR 2022 equations and sizes), invariances and
 equivariances, smoothness at the cutoff, TorchScript deployment, config handling and
-(optionally) parity with the reference code.
+(optionally) fidelity to the reference code.
 
 The centerpiece is ``_reference``: a loop-based implementation of the paper's
 equations (the embedding of eq 1 to 4, the attention of eq 5 to 9 and the update of
@@ -468,24 +468,24 @@ def test_reference_key_translation():
     assert m.embedding.weight.shape == (50, 48)
 
 
-# parity with the reference implementation (optional)
+# fidelity to the reference implementation (optional)
 
-def _parity(model_name, dtype):
+def _fidelity(model_name, dtype):
     path = os.environ.get("TORCHMDNET_UPSTREAM_PATH")
     if not path:
         pytest.skip("set TORCHMDNET_UPSTREAM_PATH to a checkout of torchmd/torchmd-net")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "torchmdnet_parity.py")
+    script = os.path.join(os.path.dirname(__file__), "torchmdnet_fidelity.py")
     res = subprocess.run([sys.executable, script, path, model_name, dtype],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-def test_parity_vs_reference_float64():
-    assert _parity("et", "float64") < 1e-12
+def test_fidelity_vs_reference_float64():
+    assert _fidelity("et", "float64") < 1e-12
 
 
-def test_parity_vs_reference_float32():
-    assert _parity("et", "float32") < 1e-4
+def test_fidelity_vs_reference_float32():
+    assert _fidelity("et", "float32") < 1e-4

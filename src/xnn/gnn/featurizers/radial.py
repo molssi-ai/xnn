@@ -1,8 +1,8 @@
-"""Radial pieces of the equivariant GNN edge embedding.
+"""Distance transforms of the equivariant GNN edge embedding.
 
-The Bessel basis (NequIP/MACE/DimeNet-style) plus the chemistry-aware
-*distance transforms* some force fields warp their radial coordinate with
-before the basis expansion: the Agnesi transform (Batatia *et al.*,
+The chemistry-aware *distance transforms* some force fields warp their radial
+coordinate with before the basis expansion (the Bessel basis itself lives in
+:mod:`xnn.common.featurizers.radial`): the Agnesi transform (Batatia *et al.*,
 MACE-MP-0, arXiv:2401.00096; the transform itself is from the radial
 transformations of ACEpotentials.jl, *J. Chem. Phys.* 159, 164101, 2023) and
 a tanh-based soft lower clamp. Both rescale each edge by the covalent radii
@@ -11,12 +11,10 @@ between large atoms map to comparable coordinates.
 """
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor, nn
 
-from ..constants import register_constant, restore_exact
+from xnn.common.models.constants import register_constant
 
 
 def _covalent_radii_table():
@@ -180,86 +178,3 @@ DISTANCE_TRANSFORMS = {
     "Agnesi": AgnesiDistanceTransform,
     "Soft": SoftDistanceTransform,
 }
-
-
-class BesselRBF(nn.Module):
-    """Bessel radial basis (NequIP/DimeNet-style), smoother & fewer functions.
-
-    Expands an interatomic distance ``r`` into a set of ``n_rbf`` invariant
-    radial features using the normalized sinc/Bessel functions
-    ``prefactor * sin(n*pi*r/rc) / r`` for ``n = 1, ..., n_rbf``. Compared with
-    a Gaussian basis this is smoother and needs fewer functions to cover the
-    cutoff sphere.
-
-    Parameters
-    ----------
-    n_rbf : int, optional
-        Number of Bessel basis functions (output width). Default is 8.
-    cutoff : float, optional
-        Cutoff radius ``rc`` used to set the basis frequencies and the
-        normalization. Default is 5.0.
-    trainable : bool, optional
-        If ``True``, the ``n * pi`` frequencies are a learnable
-        :class:`torch.nn.Parameter` (the NequIP ``BesselBasis`` default);
-        otherwise a fixed buffer (the MACE default). Default is ``False``.
-    prefactor : float, optional
-        Overall normalization factor. ``None`` (default) uses the
-        DimeNet/MACE convention ``sqrt(2 / cutoff)``; the original NequIP
-        uses ``2 / cutoff``.
-
-    Attributes
-    ----------
-    freqs : Tensor
-        The angular frequencies ``n * pi`` of shape ``(n_rbf,)`` -- a
-        registered buffer, or a :class:`torch.nn.Parameter` when
-        ``trainable``.
-    norm : float
-        The scalar normalization ``prefactor``.
-    """
-
-    def __init__(self, n_rbf: int = 8, cutoff: float = 5.0,
-                 trainable: bool = False, prefactor: float | None = None):
-        super().__init__()
-        self.cutoff = cutoff
-        freqs = math.pi * torch.arange(1, n_rbf + 1, dtype=torch.get_default_dtype())
-        if trainable:
-            self.freqs = nn.Parameter(freqs)
-        else:
-            self.register_buffer("freqs", freqs)
-        self.norm = math.sqrt(2.0 / cutoff) if prefactor is None else float(prefactor)
-
-    def exact_constants(self) -> bool:
-        """Rebuild fixed float64 frequencies as the exact ``n * pi``.
-
-        A float32 build or checkpoint leaves them float32-rounded; trainable
-        frequencies are learned values and stay, as do stored ones that are not
-        ``n * pi`` up to rounding. See
-        :func:`~xnn.gnn.constants.exact_float64_constants`.
-
-        Returns
-        -------
-        bool
-            Whether any value changed.
-        """
-        freqs = self.freqs
-        if isinstance(freqs, nn.Parameter) or freqs.dtype != torch.float64:
-            return False
-        return restore_exact(freqs, math.pi * torch.arange(1, freqs.numel() + 1,
-                                                           dtype=torch.float64))
-
-    def forward(self, r: Tensor) -> Tensor:
-        """Expand distances into the Bessel radial basis.
-
-        Parameters
-        ----------
-        r : Tensor
-            Interatomic distances of arbitrary shape ``(...)``. Values are
-            clamped to a small positive minimum to avoid division by zero.
-
-        Returns
-        -------
-        Tensor
-            The radial embedding of shape ``(..., n_rbf)``.
-        """
-        r = r.clamp(min=1e-8)[..., None]
-        return self.norm * torch.sin(self.freqs * r / self.cutoff) / r

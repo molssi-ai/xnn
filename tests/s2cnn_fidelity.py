@@ -1,4 +1,4 @@
-"""Parity of the xnn spherical CNN with the reference implementation
+"""Fidelity of the xnn spherical CNN to the reference implementation
 (jonas-koehler/s2cnn), as a harness for the tests and the fidelity notebook.
 
 ``setup()`` makes the reference importable on a current Python / numpy / torch
@@ -7,7 +7,7 @@ grids) and, for the float64 run, routes its float32 constant tables through
 the default dtype. ``compare_all(dtype)`` returns the worst relative error of
 every compared quantity.
 
-    python tests/s2cnn_parity.py            # prints both precisions
+    python tests/s2cnn_fidelity.py            # prints both precisions
 """
 from __future__ import annotations
 

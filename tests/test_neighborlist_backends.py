@@ -116,3 +116,22 @@ def test_mps_positions_use_the_cpu_cell_list(periodic):
                     None if cell is None else cell64.to(torch.float32),
                     None if pbc is None else pbc.cpu())
     assert edge_set(edge_index.cpu(), shifts.cpu()) == edge_set(*ref)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_a_molecule_spread_far_apart_is_listed_on_the_gpu():
+    """A molecule spread over too many cells is listed like the reference and leaves CUDA usable."""
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.9, 0.0, 0.0], [3.6e7, 8.1e7, -8.8e7], [3.6e7, 8.1e7, -8.8e7 + 1.0]],
+                       dtype=torch.float64)
+    edges, shifts = _vesin_neighbor_list(pos.cuda(), 2.0, None, None, False)
+    assert edges.is_cuda
+    assert edge_set(edges.cpu(), shifts.cpu()) == edge_set(*reference(pos, 2.0, None, None))
+    assert float(torch.ones(1, device="cuda").sum()) == 1.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_positions_that_are_not_finite_raise_on_the_gpu():
+    """Non-finite positions on the GPU raise instead of reaching vesin's kernels."""
+    pos = torch.tensor([[0.0, 0.0, 0.0], [float("nan"), 0.0, 0.0]], dtype=torch.float64, device="cuda")
+    with pytest.raises(ValueError, match="not finite"):
+        _vesin_neighbor_list(pos, 2.0, None, None, False)

@@ -59,7 +59,7 @@ holds two sets of reference systems, selected with ``references``:
   TensorFlow code. Default of the legacy functional API below (:func:`edisp`,
   :func:`_ncoord`, :func:`_getc6`), which
   :class:`~xnn.dnn.models.physnet.PhysNet` and BAMBOO's D3(CSO) use, so their
-  upstream parity holds for every element;
+  fidelity to upstream holds for every element;
 * ``"2024"`` -- the current reference code (simple-dftd3 >= 1.1.0), which
   re-parametrized Fr-Pu with up to seven references and added Am-Lr.
   Default of :class:`DFTD3`, verified against ``s-dftd3``.
@@ -126,7 +126,7 @@ _K3 = -4.0
 # Covalent radii (bohr, pre-scaled by 4/3 for the counting function) and
 # sqrt(Q) factors of the PhysNet TensorFlow tables. They are single-precision
 # values that the reference-code radii do not reproduce bit-for-bit (they
-# differ by ~5e-7), so they are kept verbatim to preserve the TF parity of
+# differ by ~5e-7), so they are kept verbatim to preserve the fidelity to the TF reference of
 # :func:`edisp`; ``d3_reference.npz`` supplies the C6 reference systems.
 _LEGACY_RCOV = np.array([
     0.0, 0.80628306, 1.159032, 3.0235617, 2.3684566, 1.9401187, 1.889726,

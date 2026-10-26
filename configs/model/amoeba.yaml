@@ -24,6 +24,9 @@ taper: null                     # start of the switch of every switched term
 polar_eps: 1.0e-8               # convergence of the iterative induced-dipole solve, rms change in Debye
 mesh_self: false                # true removes the position-averaged mesh self-interaction from the mesh sums (plain smooth PME by default)
 solver: auto                    # auto (dense for molecules up to 1000 atoms), dense, iterative
+predictor: null                 # aspc, gear or previous: predict the starting dipoles from the last steps (MD)
+preconditioner: diagonal        # diagonal, block, neumann or block-neumann (fewer iterations, rarely a faster step)
+use_fast: false                 # true or auto: fused GPU kernels for the pair terms (evaluation only)
 # AMOEBA: anharmonic bonds and angles, stretch-bend, out-of-plane bends, Fourier and
 # pi-torsions, torsion-torsion maps, buffered 14-7 van der Waals, permanent atomic
 # multipoles in local frames and Thole-damped mutual induction (Ren and Ponder 2003,

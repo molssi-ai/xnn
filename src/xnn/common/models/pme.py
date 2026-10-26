@@ -200,11 +200,61 @@ def spread_charges(charges: Tensor, pos: Tensor, cell: Tensor, mesh: List[int],
     return grid, flat, w3
 
 
-def spline_moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device) -> Tensor:
-    """``B(m) = prod_i |b_i(m_i)|^2`` over the mesh (paper eq 4.7), ``(K_1, K_2, K_3)``."""
-    return (bspline_moduli(mesh[0], order, dtype, device)[:, None, None]
-            * bspline_moduli(mesh[1], order, dtype, device)[None, :, None]
-            * bspline_moduli(mesh[2], order, dtype, device)[None, None, :])
+def least_squares_moduli(size: int, order: int, dtype: torch.dtype, device: torch.device,
+                         n_alias: int = 50) -> Tensor:
+    """``|b(m)|^2`` of the least-squares spline fit along one mesh axis.
+
+    The particle-mesh sum replaces ``exp(2 pi i m u / K)`` by
+    ``b(m) sum_k M_p(u - k) exp(2 pi i m k / K)``. The Euler exponential
+    spline (:func:`bspline_moduli`) chooses ``b(m)`` to make the two equal
+    at the mesh points; here ``b(m)`` minimises the mean squared difference
+    over ``u``. With ``s_j = |sinc(m / K + j)|^p`` the amplitudes of the
+    spline sum at the aliased frequencies ``m + j K``, that is
+    ``|b(m)|^2 = s_0^2 / (sum_j s_j^2)^2``. Both choices agree at ``m = 0``
+    and as the mesh is refined; at a coarse mesh the least-squares one
+    leaves a far smaller mean self-interaction error in the energies. For
+    an odd order on an even mesh the Nyquist frequency, where the spline
+    sum of an odd order vanishes at the mesh points, carries no weight.
+
+    Parameters
+    ----------
+    size : int
+        Mesh points ``K`` along the axis.
+    order : int
+        Spline order ``p``.
+    dtype, device
+        Of the returned tensor.
+    n_alias : int, optional
+        Aliases ``|j| <= n_alias`` in the sums.
+
+    Returns
+    -------
+    Tensor
+        ``|b(m)|^2``, shape ``(K,)``, in FFT order.
+    """
+    m = torch.fft.fftfreq(size, d=1.0 / size, dtype=dtype, device=device) / size
+    j = torch.arange(-n_alias, n_alias + 1, dtype=dtype, device=device)
+    s2 = torch.sinc(m[:, None] + j[None, :]).abs() ** (2 * order)
+    moduli = s2[:, n_alias] / s2.sum(1).square()
+    if order % 2 == 1 and size % 2 == 0:
+        moduli[size // 2] = 0.0
+    return moduli
+
+
+def spline_moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device,
+                  least_squares: bool = False) -> Tensor:
+    """``B(m) = prod_i |b_i(m_i)|^2`` over the mesh (paper eq 4.7), ``(K_1, K_2, K_3)``:
+    the Euler exponential-spline moduli, or with ``least_squares`` those of
+    :func:`least_squares_moduli`."""
+    if least_squares:
+        b1 = least_squares_moduli(mesh[0], order, dtype, device)
+        b2 = least_squares_moduli(mesh[1], order, dtype, device)
+        b3 = least_squares_moduli(mesh[2], order, dtype, device)
+    else:
+        b1 = bspline_moduli(mesh[0], order, dtype, device)
+        b2 = bspline_moduli(mesh[1], order, dtype, device)
+        b3 = bspline_moduli(mesh[2], order, dtype, device)
+    return b1[:, None, None] * b2[None, :, None] * b3[None, None, :]
 
 
 def pme_weighted_sum(charges: Tensor, pos: Tensor, cell: Tensor, mesh: List[int], order: int,

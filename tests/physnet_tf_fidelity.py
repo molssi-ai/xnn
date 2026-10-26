@@ -1,4 +1,4 @@
-"""Helper for ``test_physnet.py::test_parity_vs_original_physnet``.
+"""Helper for ``test_physnet.py::test_fidelity_vs_original_physnet``.
 
 Builds the original TF1 PhysNet graph (from a MMunibas/PhysNet clone, path in
 ``sys.argv[1]``), transplants every variable into the xnn PhysNet, and

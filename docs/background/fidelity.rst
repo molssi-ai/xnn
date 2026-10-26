@@ -23,7 +23,7 @@ Numerical agreement under identical weights involves:
 - **MACE** (`ACEsuit/mace <https://github.com/ACEsuit/mace>`_): about 1e-16,
   including ScaleShift, the Agnesi and Soft distance transforms and the
   density-normalized blocks. 16 of the 17 released MACE-MP, MACE-OFF checkpoints
-  and every head of ``mace-mh-0`` convert with energy parity of about 1e-15
+  and every head of ``mace-mh-0`` convert with an energy fidelity of about 1e-15
   eV/atom. The ``mace-mh-1`` model is not currently supported and will be
   rejected with an explicit error if requested by a ``from_pretrained()`` call.
 - **NequIP** (`mir-group/nequip <https://github.com/mir-group/nequip>`_): about
@@ -55,7 +55,7 @@ Numerical agreement under identical weights involves:
   `Behler, Chem. Rev. 121, 10037 (2021) <https://doi.org/10.1021/acs.chemrev.0c00868>`_.
 - **SchNet** (`Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
   <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_):
-  a clean-room build, verified against an
+  built from the paper and verified against an
   independent implementation of the paper's equations to about 1e-15. No
   schnetpack code is used or compared against as an oracle.
 - **DimeNet and DimeNet++** (`gasteigerjo/dimenet
@@ -82,6 +82,16 @@ Numerical agreement under identical weights involves:
   float64 round-off (about 1e-14) for molecules, batches, charged structures and
   both ET cutoff conventions and TensorNet groups, and to float32 round-off in
   single precision.
+- **Equiformer and EquiformerV2**
+  (`atomicarchitects/equiformer <https://github.com/atomicarchitects/equiformer>`_;
+  `fairchem-core 1.10 <https://github.com/facebookresearch/fairchem>`_): built
+  from the papers and verified against the reference codes under transplanted
+  weights. Energies and forces agree to float64 round-off (about 1e-14) and to
+  float32 round-off (about 1e-6) for every attention, norm, activation and
+  radial-basis variant, on molecules, batches and periodic cells. The reference
+  EquiformerV2 detaches its edge frames from the positions and samples their
+  roll at random. xnn uses deterministic frames and differentiates through
+  them, so its forces are the exact gradient of its energy.
 - **SpookyNet** (`OUnke/SpookyNet <https://github.com/OUnke/SpookyNet>`_): a
   build from the paper, verified against an independent implementation of its
   equations and against the reference code under transplanted weights: energies,
@@ -94,13 +104,13 @@ Numerical agreement under identical weights involves:
 - **SE(3) steerable CNN** (`Weiler et al., Adv. Neural Inf. Process. Syst. 31
   (2018)
   <https://proceedings.neurips.cc/paper/2018/hash/488e4104520c6aab692863cc1dba45af-Abstract.html>`_):
-  a clean-room build from the
+  built from the
   paper. The steerable kernel basis is formed from Clebsch-Gordan coefficients
   and checked against a numerical solution of the paper's constraint. The energy
   is exactly invariant under the rotations of the grid onto itself and invariant
   to the bandlimit under every other one.
 - **Spherical CNN** (`jonas-koehler/s2cnn
-  <https://github.com/jonas-koehler/s2cnn>`_): a clean-room build from the
+  <https://github.com/jonas-koehler/s2cnn>`_): built from the
   paper; the Wigner d-matrices, the :math:`S^2` / :math:`SO(3)` transforms,
   the integral, the rotation operator and the correlation layers (with
   transplanted filters) match the reference to float32 and float64

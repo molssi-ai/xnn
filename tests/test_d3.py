@@ -8,7 +8,7 @@ finite differences, batching, TorchScript), the
 registered model, the ``extra["dispersion"] = {"name": "d3", ...}`` config
 hook, the deploy channels, the untouched legacy PhysNet/BAMBOO API, and --
 when the upstream ``dftd3`` (simple-dftd3) Python package is installed --
-floating-point parity of energies, gradients and virials for every damping
+floating-point fidelity of energies, gradients and virials for every damping
 function, molecular and periodic.
 """
 import numpy as np
@@ -479,7 +479,7 @@ def test_ase_calculator_matches_eager():
     assert np.abs(atoms.get_forces() - ref["forces"].detach().numpy()).max() < 1e-10
 
 
-# parity with the upstream simple-dftd3 package
+# fidelity to the upstream simple-dftd3 package
 def _upstream_param(damping, **kw):
     from dftd3 import interface as di
     cls = {"bj": di.RationalDampingParam, "zero": di.ZeroDampingParam,
@@ -525,7 +525,7 @@ VARIANTS = {
 
 
 @pytest.mark.parametrize("damping", sorted(VARIANTS))
-def test_parity_vs_sdftd3_molecules(damping):
+def test_fidelity_vs_sdftd3_molecules(damping):
     pytest.importorskip("dftd3")
     up, mine = VARIANTS[damping]
     _compare(*WATER, damping, up, **mine)
@@ -535,7 +535,7 @@ def test_parity_vs_sdftd3_molecules(damping):
 
 
 @pytest.mark.parametrize("damping", ["bj", "zero"])
-def test_parity_vs_sdftd3_crystals(damping):
+def test_fidelity_vs_sdftd3_crystals(damping):
     pytest.importorskip("dftd3")
     up, mine = VARIANTS[damping]
     a = 5.64
@@ -550,7 +550,7 @@ def test_parity_vs_sdftd3_crystals(damping):
     _compare(pos, [8, 1, 1] * 3, damping, up, cell=np.eye(3) * 6.2, **mine)
 
 
-def test_parity_vs_sdftd3_heavy_elements_and_cutoffs():
+def test_fidelity_vs_sdftd3_heavy_elements_and_cutoffs():
     """Actinide references (Z > 86, the re-parametrized part of the table) and
     matching non-default real-space cutoffs."""
     pytest.importorskip("dftd3")

@@ -1,4 +1,4 @@
-"""Parity of xnn SpookyNet with the reference implementation (github.com/OUnke/SpookyNet).
+"""Fidelity of xnn SpookyNet to the reference implementation (github.com/OUnke/SpookyNet).
 
 Random-weight reference models are saved in the reference format and loaded
 through :meth:`SpookyNet.from_reference_checkpoint`; energies, forces,
@@ -8,8 +8,8 @@ then with the reference code's D4 tables loaded into the xnn term (its
 covalent radii are float32-rounded), so the second comparison is of the code
 alone. The physical constants are set to the reference code's values. Usage::
 
-    python spookynet_parity.py float64|float32 [checkpoint.pth]
-    python spookynet_parity.py tables          # the effect of each D4 table
+    python spookynet_fidelity.py float64|float32 [checkpoint.pth]
+    python spookynet_fidelity.py tables          # the effect of each D4 table
 
 With a checkpoint path the published parameters are compared instead of
 random ones. The last line printed is the worst relative error of the code

@@ -67,7 +67,7 @@ def _lattice_inverse(lattice: Tensor, pbc: Optional[Tensor]) -> Tensor:
     which maps a vector to the fractional coordinates of its projection onto
     the periodic sublattice (and is zero for the zero cell of a molecule)."""
     if pbc is None or bool(pbc.all()):
-        return torch.linalg.inv(lattice)
+        return torch.linalg.inv_ex(lattice)[0]
     return torch.linalg.pinv(lattice)
 
 
@@ -137,7 +137,33 @@ def minimum_image_vectors(vec: Tensor, cell: Tensor, pbc: Optional[Tensor] = Non
     return vec + shift @ cell.to(vec.dtype)
 
 
-def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor) -> Tensor:
+def pair_image_shifts(data: AtomicGraph, a: Tensor, b: Tensor) -> Optional[Tensor]:
+    """The integer image shifts ``(M, 3)`` that :func:`pair_vectors` adds to
+    ``pos[b] - pos[a]``, or ``None`` for a batch without cells.
+
+    Parameters
+    ----------
+    data : AtomicGraph
+        The batched graph.
+    a, b : Tensor
+        Atom indices of shape ``(M,)``.
+
+    Returns
+    -------
+    Tensor or None
+        Shifts in lattice vectors, detached.
+    """
+    if data.cell is None or a.shape[0] == 0:
+        return None
+    vec = data.pos[b] - data.pos[a]
+    idx = data.batch[a]
+    lattice = _periodic_lattice(data.cell.to(vec.dtype).detach(), data.pbc)
+    inv = _lattice_inverse(lattice, data.pbc)
+    pbc = None if data.pbc is None else data.pbc[idx]
+    return _image_shifts(vec.detach(), lattice[idx], inv[idx], pbc)
+
+
+def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor, shift: Optional[Tensor] = None) -> Tensor:
     """Minimum-image displacement vectors ``pos[b] - pos[a]``.
 
     For periodic structures the integer image shift is recomputed from the
@@ -154,6 +180,10 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor) -> Tensor:
         The batched graph.
     a, b : Tensor
         Atom indices of shape ``(M,)``.
+    shift : Tensor, optional
+        Image shifts from :func:`pair_image_shifts` to reuse instead of
+        searching them again (they stay valid while the atoms move by less
+        than half the distance to the next image).
 
     Returns
     -------
@@ -165,13 +195,10 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor) -> Tensor:
     vec = data.pos[b] - data.pos[a]
     if data.cell is None or vec.shape[0] == 0:
         return vec.to(data.model_dtype)
-    idx = data.batch[a]
-    cells = data.cell.to(vec.dtype)                                        # (B, 3, 3)
-    lattice = _periodic_lattice(cells.detach(), data.pbc)
-    inv = _lattice_inverse(lattice, data.pbc)
-    pbc = None if data.pbc is None else data.pbc[idx]
-    shift = _image_shifts(vec.detach(), lattice[idx], inv[idx], pbc)
-    return (vec + torch.einsum("mi,mij->mj", shift, cells[idx])).to(data.model_dtype)
+    if shift is None:
+        shift = pair_image_shifts(data, a, b)
+    cells = data.cell.to(vec.dtype)[data.batch[a]]                        # (M, 3, 3)
+    return (vec + (shift[:, :, None] * cells).sum(1)).to(data.model_dtype)
 
 
 def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
@@ -204,7 +231,7 @@ def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
     return (n1 * n2).sum(1) / denom
 
 
-def dihedral_cos_sin(data: AtomicGraph, idx: Tensor) -> tuple[Tensor, Tensor]:
+def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tensor, Tensor]:
     """Cosine and sine of the signed dihedral angle over each atom quadruple.
 
     The same plane-normal construction as :func:`dihedral_cos` (``phi = 0``
@@ -219,6 +246,9 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor) -> tuple[Tensor, Tensor]:
         The batched graph.
     idx : Tensor
         Atom indices of shape ``(4, M)``.
+    vectors : callable, optional
+        ``vectors(a, b)`` returns the bond vectors; :func:`pair_vectors` by
+        default.
 
     Returns
     -------
@@ -227,9 +257,12 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor) -> tuple[Tensor, Tensor]:
         follows the IUPAC convention (positive for a clockwise rotation of
         the far bond when looking along the central bond).
     """
-    b1 = pair_vectors(data, idx[0], idx[1])
-    b2 = pair_vectors(data, idx[1], idx[2])
-    b3 = pair_vectors(data, idx[2], idx[3])
+    if vectors is None:
+        def vectors(a, b):
+            return pair_vectors(data, a, b)
+    b1 = vectors(idx[0], idx[1])
+    b2 = vectors(idx[1], idx[2])
+    b3 = vectors(idx[2], idx[3])
     n1 = torch.cross(b1, b2, dim=1)
     n2 = torch.cross(b2, b3, dim=1)
     norm = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)

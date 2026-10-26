@@ -6,7 +6,7 @@ forces, charges, dipoles), exact charge conservation (neutral and charged),
 building blocks, upstream key translation, periodic stress, the optional
 D3(CSO) dispersion, and -- when a clone of bytedance/bamboo is available
 (path in ``BAMBOO_UPSTREAM_PATH``) -- machine-precision weight-transplant
-parity against the original model.
+fidelity to the original model.
 """
 import os
 import sys
@@ -245,7 +245,7 @@ def _upstream_inputs(g, N, dtype):
     }
 
 
-def test_parity_vs_original_bamboo():
+def test_fidelity_vs_original_bamboo():
     """Weight transplant from bytedance/bamboo gives identical E/F/q/dipole.
 
     Needs a clone of bytedance/bamboo whose path is in the

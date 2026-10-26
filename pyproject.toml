@@ -95,16 +95,16 @@ examples = [
     "openmm>=8.0",
     "rdkit>=2023.9",
 ]
-# The ANI-1 fidelity notebook and parity test compare against aiqm/torchani.
+# The ANI-1 fidelity notebook and fidelity test compare against aiqm/torchani.
 ani = ["torchani==2.9.0", "h5py>=3.0"]
-# The D4 fidelity notebook and parity tests compare against the reference
+# The D4 fidelity notebook and fidelity tests compare against the reference
 # dftd4 Python package (used only as an external oracle). tomli is what
 # its parameter loader wants on Python >= 3.11.
 d4 = ["dftd4>=3.7", "tomli"]
-# The D3 fidelity notebook and parity tests compare against simple-dftd3's
+# The D3 fidelity notebook and fidelity tests compare against simple-dftd3's
 # Python package (used only as an external oracle).
 d3 = ["dftd3>=1.0"]
-# The OPLS fidelity notebook and parity test compare against OpenMM.
+# The OPLS fidelity notebook and fidelity test compare against OpenMM.
 # classical force fields: RDKit assigns atom types from the SMARTS templates
 # in .frc force-field files
 ffnn = ["rdkit>=2023.9"]

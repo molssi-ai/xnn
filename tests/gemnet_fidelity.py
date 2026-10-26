@@ -1,6 +1,6 @@
-"""Parity of xnn GemNet with the reference implementation (TUM-DAML/gemnet_pytorch).
+"""Fidelity of xnn GemNet to the reference implementation (TUM-DAML/gemnet_pytorch).
 
-``python gemnet_parity.py <checkout> random|pretrained`` prints per-structure
+``python gemnet_fidelity.py <checkout> random|pretrained`` prints per-structure
 errors and, on its last line, the worst relative error (energies relative to
 ``max(|E|, 1)``, forces relative to ``max |F|``). ``random`` transplants random
 weights and scaling factors of all four variants in float64; ``pretrained``

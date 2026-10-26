@@ -314,7 +314,7 @@ def test_from_config_scale_shift_transform_keys():
     assert m.pair_repulsion
 
 
-# foundation-model conversion: parity with upstream mace-torch
+# foundation-model conversion: fidelity to upstream mace-torch
 def _upstream_scale_shift_mace(flavor, heads=None):
     """Build a small upstream ScaleShiftMACE of the requested flavor."""
     import mace.modules as mm
@@ -374,7 +374,7 @@ def _upstream_eval(up, g, head=None):
 
 
 @pytest.mark.parametrize("flavor", ["mp0", "off23", "0b", "0b2", "soft"])
-def test_from_mace_torch_parity(flavor):
+def test_from_mace_torch_fidelity(flavor):
     """Every foundation-generation flavor converts to machine precision."""
     pytest.importorskip("mace")
     pytest.importorskip("ase")

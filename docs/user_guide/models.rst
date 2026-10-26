@@ -437,6 +437,67 @@ keys / values / none), ``attn_activation``, ``trainable_rbf`` and
 ``energy_shift`` / ``energy_scale``, are also available. The attention weights
 of a structure are returned by ``model.attention_weights(graph)``.
 
+Equiformer
+==========
+:class:`~xnn.trfnn.models.equiformer.Equiformer` (`atomicarchitects/equiformer
+<https://github.com/atomicarchitects/equiformer>`_) is the equivariant graph
+attention transformer of `Liao and Smidt, Int. Conf. Learn. Represent. (2023)
+<https://arxiv.org/abs/2206.11990>`_. Irreps features pass through pre-norm
+blocks of graph attention and feed-forward networks. The attention combines MLP
+attention weights with non-linear messages built from depth-wise tensor
+products.
+
+.. code-block:: yaml
+
+   model:
+     name: equiformer
+     cutoff: 5.0
+     n_features: 128      # even scalars of the paper architecture
+     n_interactions: 6
+     n_rbf: 32
+     l_max: 2             # 1 (OC20), 2 (QM9, MD17) or 3 (MD17)
+     e3: false            # true: the E(3) model with both parities
+     radial_basis: expnorm
+     smooth_cutoff: true  # continuous energy at the cutoff (not in the paper)
+
+``n_features`` scales the irreps of the paper architecture. Explicit irreps
+(``irreps_node_embedding``, ``irreps_head``, ``irreps_mlp_mid``) override it.
+Other options include ``attention: dot_product`` (the ablation baseline),
+``nonlinear_message``, ``avg_degree`` / ``avg_num_nodes`` and the dropout rates.
+
+EquiformerV2
+============
+:class:`~xnn.trfnn.models.equiformer_v2.EquiformerV2` (`fairchem
+<https://github.com/facebookresearch/fairchem>`_) is the eSCN-based successor of
+`Liao et al., Int. Conf. Learn. Represent. (2024)
+<https://arxiv.org/abs/2306.12059>`_. The tensor products become SO(2) linear
+maps in edge-aligned frames, which makes degrees up to 6 or 8 affordable. The
+attention adds a layer norm on its scalars, the activations act on samples of
+the sphere, and the layer norm treats degree 0 separately.
+
+.. code-block:: yaml
+
+   model:
+     name: equiformer_v2
+     cutoff: 5.0
+     n_features: 96       # channels per coefficient
+     n_interactions: 6
+     n_rbf: 128
+     l_max: 4
+     m_max: 4             # orders kept in the edge frames (2 in the OC20 models)
+     num_heads: 4
+     smooth_cutoff: true
+     # direct_forces: true  # the OC20 force head (not conservative)
+
+Forces and stress from autograd include the dependence of the edge frames on the
+positions, so they are exact derivatives of the energy. The reference code
+detaches the frames. ``norm_type`` (``layer_norm_sh`` / ``layer_norm`` /
+``rms_norm_sh``), ``activation`` (``sep_s2`` / ``s2`` / ``gate``),
+``use_grid_mlp`` and ``grid_resolution`` select the variants of the paper's
+ablations. The reference's truncation to the nearest ``max_neighbors`` atoms is
+not supported, because it makes the energy discontinuous. Use a smaller cutoff
+instead.
+
 BAMBOO
 ======
 :class:`~xnn.hybnn.models.bamboo.BAMBOO` (`bytedance/bamboo
@@ -656,15 +717,39 @@ and torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
 multipoles in local frames and Thole-damped mutual induction. HIPPO keeps the
 valence terms and multipoles and replaces the intermolecular terms by charge
 penetration, density-damped induction, Pauli repulsion, damped dispersion,
-charge transfer and charge flux.
+charge transfer and charge flux. A library with ``exchpol`` parameters adds the
+exchange polarization of `Chung et al., J. Phys. Chem. B 126, 7579 (2022)
+<https://doi.org/10.1021/acs.jpcb.2c04237>`_: the overlap with each neighbor
+shrinks an atom's polarizability along the pair. Similar to Tinker, a pair takes
+part when either of its classes is used, pairs within a molecule carry the
+polarization scale factors of the permanent field (not those of the polarization
+groups), and in a cell the term is tapered by the switch of the repulsion.
 
 Molecules
 ---------
 For a molecule or cluster, every pair within ``cutoff`` interacts in full.
 Choose a cutoff that encloses the whole system. ``polarization`` selects
-mutual, direct or no induction; the default is the library's setting. The induced dipoles come from a
-dense solve for up to a thousand atoms and from conjugate gradients above
-that (``solver`` overrides the choice).
+mutual, direct or no induction. The default is the library's setting.
+A batch of molecules of up to a thousand atoms each is solved directly, as
+one block-diagonal system. Larger molecules and cells use conjugate
+gradients, and ``solver`` overrides the choice. ``preconditioner`` selects
+``"diagonal"`` (the default), ``"block"``, ``"neumann"`` or
+``"block-neumann"``. The others take fewer iterations but rarely give a
+faster step. In molecular dynamics,
+``predictor="aspc"`` starts each solve from dipoles extrapolated from the
+last steps, which saves a fifth to a third of the iterations. The MDI engine turns it
+on by default. Every backward solve starts from the previous one.
+``use_fast=True`` compiles the pair terms into fused GPU kernels. It
+applies to evaluation on a GPU, such as molecular dynamics, while
+training keeps the reference path. The first evaluations pay for the
+compilation. The MDI engine sets ``use_fast="auto"``.
+
+For molecular dynamics, ``plan_step(data, skin, capacity)`` records the
+decisions of one evaluation, and ``model(data, plan)`` reuses them while
+the atoms move. The plan keeps a Verlet pair list built with
+``cutoff + skin``, and ``plan.outdated(pos)`` tells when to rebuild it. The
+MDI engine runs the steps on a plan on a GPU and replays each step as one
+CUDA graph (``--step-graph``).
 
 Periodic cells
 --------------
@@ -679,7 +764,11 @@ charge-transfer terms are switched off smoothly before their cutoff.
    out = ForceStressOutput(box, compute_stress=True)(graph)
 
 The defaults follow Tinker. The Ewald coefficient comes from the real-space
-cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. The
+cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. As in
+Tinker, every mesh size, a requested one too, is rounded up to an even size
+with prime factors 2, 3 and 5, at least 16 (``pme_grid=27`` gives 30). The
+mesh sums use the least-squares spline moduli, as Tinker does, so the
+energies match Tinker's at the same keys even on a coarse mesh. The
 options are ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` for the
 three coefficients, ``pme_grid`` and ``pme_order`` for the mesh,
 ``vdw_cutoff``, ``repulsion_cutoff``, ``chgtrn_cutoff`` and
@@ -689,9 +778,9 @@ Waals cutoff, because the hydrogen sites of that term sit inside their atoms.
 ``polar_eps`` sets the convergence of the induced dipoles in Debye.
 ``mesh_self=True`` removes the spurious mesh self-interaction of every
 multipole (its position average) from the energies, the polarizing field
-and the dispersion sum. It brings the induction, the dispersion and the
-pressure of a coarse mesh closer to the converged values, at the price of
-no longer matching Tinker's plain sums at the same keys.
+and the dispersion sum. It brings the dispersion and the permanent
+multipoles of a coarse mesh closer to the converged values, at the price of
+no longer matching Tinker at the same keys.
 ``ewald=False`` truncates a cell at the cutoff instead. A slab with two
 periodic axes is summed on its cell with the Yeh-Berkowitz correction, so
 leave a vacuum gap of at least the slab thickness along the free axis.
@@ -702,7 +791,8 @@ Training and files
 (``bond``, ``angle``, ``strbnd``, ``urey``, ``opbend``, ``torsion``,
 ``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
 ``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
-(``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``cflux``) and
+(``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``exchpol``,
+``cflux``) and
 ``atom_ref``. While the multipoles train, every molecule keeps its total
 charge (``conserve_charge``), components the library leaves zero by the
 symmetry of the local frame stay zero (``symmetry_mask``), and the

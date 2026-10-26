@@ -1,7 +1,7 @@
 # Benchmarking example — NequIP / Allegro / MACE / PhysNet on Argon
 
 Scores four pre-trained models on the shared Argon test set
-([`../../datasets/argon_md/argon_test.xyz`](../../datasets/argon_md/argon_test.xyz)) and
+([`datasets/argon_md/argon_test.xyz`](../../../../datasets/argon_md/argon_test.xyz)) and
 tabulates their energy/force errors — a one-config, apples-to-apples comparison.
 
 Benchmarking only *scores* pre-trained models; it does not train. The
@@ -68,7 +68,7 @@ torchrun --nproc-per-node 2 -m xnn benchmark --config notebooks/examples/common/
 ```
 
 or give each model its own GPU with `--parallel` (one worker per GPU, logs in
-`runs/argon_benchmark/parts/`), which merges the per-model rows into the same
+`notebooks/examples/common/benchmark/runs/argon_benchmark/parts/`), which merges the per-model rows into the same
 `results.*` files:
 
 ```bash
@@ -95,5 +95,5 @@ xnn benchmark --config notebooks/examples/common/benchmark/argon_benchmark.yaml 
     --set "metrics={'energy': ['mae'], 'forces': ['mae','mse','rmse']}" "output.formats=['json']"
 ```
 
-See the [How-To guide](../../docs/how_tos/benchmark_models.rst) for custom
+See the [How-To guide](../../../../docs/how_tos/benchmark_models.rst) for custom
 metrics and output formats.

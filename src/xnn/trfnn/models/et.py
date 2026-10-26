@@ -62,10 +62,11 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing, GaussianRBF
-from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.blocks import GatedEquivariantBlock
 from xnn.common.models.ops import make_activation, scatter_sum
 from xnn.common.models.registry import register_model
+
+from .base import TransformerPotential
 
 _INFLUENCES = ("both", "keys", "values", "none")
 
@@ -303,7 +304,7 @@ class _EquivariantScalar(nn.Module):
 
 
 @register_model("et")
-class EquivariantTransformer(InteratomicPotential):
+class EquivariantTransformer(TransformerPotential):
     """The TorchMD-Net equivariant transformer (ET).
 
     See the module docstring for the equations. The defaults are the MD17 /
@@ -412,52 +413,8 @@ class EquivariantTransformer(InteratomicPotential):
             for _ in range(n_interactions)])
         self.out_norm = nn.LayerNorm(n_features)
         self.readout = _EquivariantScalar(n_features, activation)
-        self.register_buffer("energy_scale", torch.tensor(float(energy_scale)))
-        self.register_buffer("energy_shift", torch.tensor(float(energy_shift)))
-        self.atom_ref = nn.Embedding(n_elements, 1)
-        nn.init.zeros_(self.atom_ref.weight)
-        if atomic_energies is not None:
-            if species is None:
-                raise ValueError("species is required to map atomic_energies")
-            self.set_atomic_energies(species, atomic_energies)
-
-    @torch.jit.ignore
-    def set_energy_scale_shift(self, scale: float, shift: float) -> None:
-        """Set the per-atom energy standardization from training statistics.
-
-        Parameters
-        ----------
-        scale : float
-            Standard deviation of the training-set energy per atom.
-        shift : float
-            Mean training-set energy per atom.
-        """
-        with torch.no_grad():
-            self.energy_scale.fill_(float(scale))
-            self.energy_shift.fill_(float(shift))
-
-    @torch.jit.ignore
-    def set_atomic_energies(self, species, values) -> None:
-        """Initialize the per-element reference energies ``atom_ref``.
-
-        Parameters
-        ----------
-        species : list of int
-            Atomic numbers the values refer to, in order.
-        values : array-like
-            One reference energy per entry of ``species``.
-
-        Raises
-        ------
-        ValueError
-            If the number of values does not match the number of species.
-        """
-        ae = torch.as_tensor(values, dtype=self.atom_ref.weight.dtype)
-        if ae.numel() != len(list(species)):
-            raise ValueError(
-                f"got {ae.numel()} atomic energies for {len(list(species))} species")
-        with torch.no_grad():
-            self.atom_ref.weight[torch.tensor(list(species)), 0] = ae
+        self._init_energy_terms(n_elements, energy_scale, energy_shift, species,
+                                atomic_energies)
 
     def _edge_terms(self, edge_vec: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """Edge lengths, the unit vectors ``r_ij / |r_ij|``, their basis and the basis at zero."""

@@ -32,6 +32,7 @@ from xnn.ffnn.models import (
     write_tinker_xyz,
 )
 from xnn.ffnn.models import amoeba as am
+from xnn.ffnn.models.amoeba_ewald import matmul3, matvec, vecmat
 from xnn.ffnn.models.amoebalib import KCAL_TO_EV, from_forcefield
 
 EV_TO_KCAL = 1.0 / KCAL_TO_EV
@@ -328,6 +329,63 @@ def test_density_kernels_match_their_closed_forms():
     assert torch.allclose(S_un, 8 * (zi * zj) ** 1.5 / (zi + zj) ** 3, rtol=1e-4)
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the GPU path evaluates both forms on every pair"))])
+def test_two_center_kernels_are_exact_at_nearly_equal_exponents(device):
+    """The two-center ladders keep full precision as the exponents approach each other."""
+    mp = pytest.importorskip("mpmath")
+    mp.mp.dps = 40
+
+    def coulomb(a, b, r):
+        A, B = b * b / (b * b - a * a), a * a / (a * a - b * b)
+        return (1 - A * A * (1 + 2 * B + a * r / 2) * mp.e ** (-a * r)
+                - B * B * (1 + 2 * A + b * r / 2) * mp.e ** (-b * r)) / r
+
+    def repulsion(a, b, r):
+        d = a * a - b * b
+        u, v = mp.e ** (-a * r / 2), mp.e ** (-b * r / 2)
+        S = 8 * (a * b) ** mp.mpf(1.5) / d ** 3 * (a * d * v - 8 * a * b * v / r + b * d * u + 8 * a * b * u / r)
+        return S * S
+
+    def ladder(ref, a, b, x):
+        """D_0, D_1, D_2 = (1/R d/dR)^n g at R = x."""
+        g = lambda t: ref(a, b, t)  # noqa: E731
+        d1 = lambda t: mp.diff(g, t) / t  # noqa: E731
+        return g(x), d1(x), mp.diff(d1, x) / x
+
+    for kernel, ref in ((am.overlap_coulomb_kernel, coulomb), (am.squared_overlap, repulsion)):
+        for rel in (1e-4, 3e-3, 2e-2, 0.2):
+            for r in (2.0, 6.0):
+                zi, zk = torch.tensor([4.3], device=device), torch.tensor([4.3 * (1 + rel)], device=device)
+                got = am.two_center(torch.tensor([r], device=device), zi, zk, 2, kernel)
+                want = ladder(ref, mp.mpf(4.3), mp.mpf(4.3) * (1 + mp.mpf(rel)), mp.mpf(r))
+                for n in range(3):
+                    assert float(got[n]) == pytest.approx(float(want[n]), rel=1e-11), (kernel.__name__, rel, r, n)
+
+
+def test_compiled_ladders_match_the_symbolic_derivation():
+    """Every HIPPO kernel's ladder from its plan equals the term-by-term symbolic ladder."""
+    g = torch.Generator().manual_seed(3)
+    R = 0.8 + 5.0 * torch.rand(40, generator=g, dtype=torch.float64)
+    zi = 3.0 + 2.0 * torch.rand(40, generator=g, dtype=torch.float64)
+    # unequal exponents as far apart as HIPPO's atom classes; nearly equal ones cancel in either form
+    zj = zi + 0.6 + 1.5 * torch.rand(40, generator=g, dtype=torch.float64)
+    S_eq, S_un = am.slater_overlap(zi, zi, True), am.slater_overlap(zi, zj, False)
+    kernels = [(am.core_valence_kernel(zi, "i"), zi, zj, 3), (am.core_valence_kernel(zj, "j"), zi, zj, 3),
+               (am.overlap_coulomb_kernel(zi, zi, True), zi, zi, 4),
+               (am.overlap_coulomb_kernel(zi, zj, False), zi, zj, 4), (S_eq * S_eq, zi, zi, 4),
+               (S_un * S_un, zi, zj, 4)]
+    for kernel, a, b, order in kernels:
+        fast = am.derivative_ladder(kernel, R, a, b, order)
+        series = kernel
+        for n in range(order + 1):
+            ref = series.evaluate(R, a, b)
+            assert torch.allclose(fast[n], ref, rtol=1e-10, atol=1e-13 * float(ref.abs().max())), n
+            series = series.ladder()
+    scalar = am.derivative_ladder(am.overlap_coulomb_kernel(zi[:1], zj[:1], False), R[0], zi[0], zj[0], 2)
+    assert scalar[2].shape == torch.Size([]) or scalar[2].shape == torch.Size([1])
+
+
 def test_hippo_pair_terms_by_hand():
     """Charge transfer, dispersion and the charge-charge core of the penetration
     electrostatics on two bare atoms, from the equations."""
@@ -507,6 +565,103 @@ def test_missing_parameters_are_reported_together():
 
 
 # training
+def test_dense_induction_is_chosen_per_molecule_and_matches_the_iterative_solve():
+    """Many small molecules go to the block-diagonal direct solve, which equals the iterative one."""
+    model = _model(Hippo)
+    assert model._use_dense(6, 400, None) and not model._use_dense(1200, 1, None)
+    assert not model._use_dense(18, 30_000, None)
+    graphs = collate([_graph(_perturbed(s, 0.05)) for s in range(5)])
+    dense = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="dense")
+    iterative = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="iterative", polar_eps=1e-12)
+    e_dense, e_iter = dense(graphs)["e_polar"], iterative(graphs)["e_polar"]
+    assert torch.allclose(e_dense, e_iter, rtol=0, atol=1e-12)
+    warm = Hippo("hippo-water-2021", _top(), cutoff=30.0, solver="iterative", polar_eps=1e-12,
+                 predictor="previous").eval()
+    first = warm(graphs)["e_polar"]
+    cold_iterations = warm.solver_stats["forward"]
+    again = warm(graphs)["e_polar"]
+    assert warm.solver_stats["forward_guess"] and warm.solver_stats["forward"] < cold_iterations
+    assert torch.allclose(first, again, rtol=0, atol=1e-12) and torch.allclose(first, e_dense, rtol=0, atol=1e-12)
+    # an explicit guess: the exact dipoles converge at once, a poor one is passed over
+    exact = warm(graphs)["induced_dipoles"].detach()
+    warm.set_dipole_predictor(None)
+    warm.dipole_guess = exact
+    warm(graphs)
+    assert warm.solver_stats["forward_guess"] and warm.solver_stats["forward"] <= 2 and warm.dipole_guess is None
+    warm.dipole_guess = torch.full_like(exact, 50.0)
+    warm(graphs)
+    assert not warm.solver_stats["forward_guess"]
+
+
+def test_block_preconditioner_inverts_a_molecule_exactly():
+    """One water molecule is one block: the block-preconditioned solve converges at once and equals the dense one."""
+    g = _graph(_monomer(), Z_DIMER[:3])
+    dense = Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, solver="dense")
+    block = Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, solver="iterative", preconditioner="block",
+                   polar_eps=1e-12)
+    assert block.pc_blocks == 1 and block.pc_size == 3
+    mu_dense, mu_block = dense(g)["induced_dipoles"], block(g)["induced_dipoles"]
+    assert block.solver_stats["forward"] <= 2
+    assert torch.allclose(mu_block, mu_dense, atol=1e-12)
+    with pytest.raises(ValueError):
+        Amoeba("amoeba-water-2003", _top(1), cutoff=30.0, preconditioner="ilu")
+
+
+def test_pcg_restarts_with_the_diagonal_when_a_preconditioner_is_indefinite():
+    """A preconditioner that loses definiteness is replaced and the solve still converges."""
+    rng = np.random.default_rng(4)
+    Q = rng.normal(size=(9, 9))
+    A = torch.tensor(Q @ Q.T + 9.0 * np.eye(9))
+    b = torch.tensor(rng.normal(size=(3, 3)))
+    alpha, polar = torch.ones(3, dtype=torch.float64), torch.ones(3, dtype=torch.bool)
+
+    def field_of(v):
+        return v - (A @ v.reshape(-1)).reshape(3, 3)
+
+    x, iterations, _, _ = am._pcg(b, alpha, field_of, polar, 1e-12, 200, precond=lambda r: -r)
+    assert torch.allclose(x.reshape(-1), torch.linalg.solve(A, b.reshape(-1)), atol=1e-10)
+    assert iterations < 200
+
+
+def test_matrix_free_pair_products_match_the_tensor_products():
+    """dipole_field, matvec, vecmat and matmul3 equal their einsum and matmul forms."""
+    g = torch.Generator().manual_seed(5)
+    r, m, D1, D2 = (torch.randn(s, generator=g, dtype=torch.float64) for s in ((7, 3), (2, 7, 3), (7,), (7,)))
+    A = torch.randn(7, 3, 3, generator=g, dtype=torch.float64)
+    T = am.dipole_field_tensor(r, D1, D2)
+    assert torch.allclose(am.dipole_field(m, r, D1, D2), torch.einsum("mab,smb->sma", T, m), atol=1e-14)
+    assert torch.allclose(matvec(A, r), torch.einsum("mab,mb->ma", A, r), atol=1e-14)
+    assert torch.allclose(vecmat(r, A), torch.einsum("mb,mba->ma", r, A), atol=1e-14)
+    B = torch.randn(7, 3, 3, generator=g, dtype=torch.float64)
+    assert torch.allclose(matmul3(A, B), A @ B, atol=1e-14)
+
+
+def test_dipole_predictor_coefficients_and_history():
+    """ASPC and Gear weights from their closed forms; exactness and history handling."""
+    P = am.DipolePredictor
+    assert P.coefficients("aspc", 2) == pytest.approx([2.0, -1.0])
+    assert P.coefficients("aspc", 6) == pytest.approx([22 / 7, -55 / 14, 55 / 21, -22 / 21, 5 / 21, -1 / 42])
+    assert P.coefficients("gear", 6) == [6.0, -15.0, 20.0, -15.0, 6.0, -1.0]
+    for m in range(2, 8):
+        aspc, gear = P.coefficients("aspc", m), P.coefficients("gear", m)
+        assert sum(aspc) == pytest.approx(1.0)
+        assert sum(j * b for j, b in enumerate(aspc, 1)) == pytest.approx(0.0, abs=1e-12)
+        # Gear reproduces any polynomial of degree m - 1 at the next step
+        poly = np.polynomial.Polynomial(np.arange(1.0, m + 1.0))
+        assert sum(b * poly(-j) for j, b in enumerate(gear, 1)) == pytest.approx(poly(0.0), rel=1e-12)
+    pred = P("gear", 4)
+    cubic = np.polynomial.Polynomial([0.3, -1.0, 0.5, 0.2])
+    for t in (-4, -3, -2, -1):
+        pred.push(torch.full((5, 3), float(cubic(t)), dtype=torch.float64))
+    assert torch.allclose(pred.predict(torch.zeros(5, 3, dtype=torch.float64)),
+                          torch.full((5, 3), float(cubic(0)), dtype=torch.float64))
+    assert pred.predict(torch.zeros(4, 3, dtype=torch.float64)) is None
+    pred.push(torch.zeros(4, 3, dtype=torch.float64))
+    assert len(pred._sets) == 1
+    with pytest.raises(ValueError):
+        P("lsq")
+
+
 def test_trainable_selection_and_gradients():
     model = ForceStressOutput(_model(Amoeba, trainable=("vdw", "polarizability", "dipole")))
     P = model.model.ff.params
@@ -613,6 +768,57 @@ def test_d_equals_p_uses_the_polar_scales_for_the_direct_field():
     assert -5.0 < e_dp * EV_TO_KCAL < 0.0           # bounded, no runaway dipoles
 
 
+# the water values of Chung et al. (2022, Table 1) on the HIPPO water dimer, and Tinker's energies
+# (kcal/mol) and forces of the first four atoms (kcal/mol/A) in mutual and direct polarization
+EXCHPOL = {"OW": {"spring": 6.238, "size": 0.255, "damp": 1.586, "use": True},
+           "HW": {"spring": 9.273, "size": 0.001, "damp": 5.685, "use": True}}
+TINKER_EXCHPOL = {
+    "mutual": ({"e_polar": -0.93048599, "energy": -4.86641126},
+               [[-1.45183399, 0.0, 2.30824788], [-0.27202215, 0.0, -0.1958421],
+                [1.98009888, 0.0, -2.12134428], [-0.39776186, 0.0, 1.43423385]]),
+    "direct": ({"e_polar": -0.76842226, "energy": -4.70434753},
+               [[-1.40757799, 0.0, 2.30352805], [-0.313485, 0.0, -0.2633486],
+                [2.28036015, 0.0, -2.46989686], [-0.7139203, 0.0, 1.8323153]])}
+
+
+def _exchpol_library(**use):
+    lib = copy.deepcopy(builtin_amoeba("hippo-water-2021"))
+    lib.exchpol = {c: dict(v, use=use.get(c, True)) for c, v in EXCHPOL.items()}
+    return lib
+
+
+@pytest.mark.parametrize("mode", ["mutual", "direct"])
+def test_exchange_polarization_matches_tinker(mode):
+    """The exchange polarization of the water dimer matches Tinker's energies and forces."""
+    refs, forces = TINKER_EXCHPOL[mode]
+    model = Hippo(_exchpol_library(), _top(), cutoff=30.0, polarization=mode, polar_eps=1e-10)
+    out = ForceStressOutput(model)(_graph(DIMER1))
+    for k, ref in refs.items():
+        assert float(out[k]) / KCAL_TO_EV == pytest.approx(ref, abs=1e-6), k
+    assert np.abs(out["forces"].detach().numpy()[:4] / KCAL_TO_EV - np.array(forces)).max() < 1e-6
+
+
+def test_exchange_polarization_without_a_used_class_is_off():
+    """A pair takes part only when one of its classes is used, so none used leaves the plain induction."""
+    plain = Hippo(builtin_amoeba("hippo-water-2021"), _top(), cutoff=30.0)(_graph(DIMER1))
+    unused = Hippo(_exchpol_library(OW=False, HW=False), _top(), cutoff=30.0)(_graph(DIMER1))
+    damped = Hippo(_exchpol_library(), _top(), cutoff=30.0)(_graph(DIMER1))
+    assert float(unused["e_polar"]) == pytest.approx(float(plain["e_polar"]), abs=1e-12)
+    assert float(damped["e_polar"]) > float(plain["e_polar"]) + 1e-4
+
+
+def test_exchange_polarization_trains_and_round_trips_through_tinker_files(tmp_path):
+    """The exchpol group trains, and the library's exchpol lines survive a Tinker file."""
+    model = Hippo(_exchpol_library(HW=False), _top(), cutoff=30.0, trainable="exchpol")
+    model(_graph(DIMER1))["energy"].sum().backward()
+    for name in ("expol_spring", "expol_size", "expol_damp"):
+        assert float(model.ff.params[name].grad.abs().sum()) > 0, name
+    write_tinker_prm(model.export_library(), tmp_path / "water.prm", keep_numbers=False)
+    back = read_tinker_prm(tmp_path / "water.prm")
+    assert sorted(v["use"] for v in back.exchpol.values()) == [False, True]
+    assert {round(v["spring"], 6) for v in back.exchpol.values()} == {6.238, 9.273}
+
+
 def test_polarization_setting_of_the_library_is_the_default():
     """The file's polarization keyword sets the model's mode; the constructor argument overrides it."""
     lib = builtin_amoeba("hippo-water-2021")
@@ -669,6 +875,44 @@ def test_tinker_prm_and_xyz_round_trip(tmp_path):
     # a model from a Tinker file read back through its integer labels
     model2 = Amoeba(back, MolecularTopology.from_bonds(["1", "2", "2", "1", "2", "2"], BONDS), cutoff=30.0)
     assert float(model2(_graph(DIMER1))["energy"]) == pytest.approx(e_b, abs=1e-9)
+
+
+NUMBERED_PRM = """
+forcefield              AMOEBA-WATER
+atom         36   71    O    "water O"    8    15.999    2
+atom         37   72    H    "water H"    1     1.008    1
+vdw          71    3.405   0.110
+vdw          72    2.655   0.0135   0.91
+bond         71   72    529.6   0.9572
+angle        72   71   72    34.05   108.5
+multipole    36  -37  -37    -0.51966
+                              0.0  0.0  0.14279
+                              0.37928
+                              0.0  -0.41809
+                              0.0  0.0  0.03881
+multipole    37   36   37     0.25983
+                             -0.03859  0.0  -0.05818
+                             -0.03673
+                              0.0  -0.10739
+                             -0.00203  0.0  0.14412
+polarize     36    0.837   0.39   37
+polarize     37    0.496   0.39   36
+"""
+
+
+def test_tinker_prm_keeps_its_own_numbers_on_request(tmp_path):
+    """A library read from a Tinker file is written back with its own type and class numbers."""
+    (tmp_path / "numbered.prm").write_text(NUMBERED_PRM)
+    lib = read_tinker_prm(tmp_path / "numbered.prm")
+    maps = write_tinker_prm(lib, tmp_path / "kept.prm", keep_numbers=True)
+    assert maps == {"types": {"36": 36, "37": 37}, "classes": {"71": 71, "72": 72}}
+    again = read_tinker_prm(tmp_path / "kept.prm")
+    assert again.atom_types == lib.atom_types and again.multipoles == lib.multipoles
+    assert again.polarize == lib.polarize and again.vdw_types == lib.vdw_types
+    assert again.bond("36", "37") == lib.bond("36", "37")
+    assert write_tinker_prm(lib, tmp_path / "renumbered.prm")["types"] == {"36": 1, "37": 2}
+    with pytest.raises(ValueError, match="not an integer"):
+        write_tinker_prm(builtin_amoeba("amoeba-water-2003"), tmp_path / "bad.prm", keep_numbers=True)
 
 
 def test_from_config_and_key_translation(tmp_path):
