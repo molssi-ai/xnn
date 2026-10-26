@@ -14,11 +14,15 @@ from torch import Tensor, nn
 
 
 def exact_softplus(x: Tensor) -> Tensor:
-    """Evaluate ``log(1 + exp(x))`` with stable values and derivatives.
+    """Evaluate ``log(1 + exp(x))`` exactly to round-off, with exact derivatives.
 
-    The exponential's argument is nonpositive. Both branches are smooth
-    softplus expressions, including at zero, unlike a split using ``abs``
-    and ``relu`` whose individual derivatives vanish there.
+    One fused :func:`torch.nn.functional.softplus` kernel per pass in eager
+    mode (two selections around ``log1p(exp(-|x|))`` under TorchScript). The
+    fused kernel returns ``x`` above its threshold and so drops the tail ``log(1 + exp(-x))``,
+    which is below the rounding of the value and of the derivative
+    ``sigmoid(x)`` once ``exp(-threshold)`` is: a threshold of 40 in float64
+    (``exp(-40) = 4e-18``) and 20 otherwise (``exp(-20) = 2e-9``), against
+    the default 20 that drops ``2e-9`` in float64.
 
     Parameters
     ----------
@@ -30,9 +34,15 @@ def exact_softplus(x: Tensor) -> Tensor:
     Tensor
         Softplus values with the same shape as ``x``.
     """
-    positive = x > 0
-    exponent = torch.where(positive, -x, x)
-    return torch.where(positive, x, torch.zeros_like(x)) + torch.log1p(torch.exp(exponent))
+    if torch.jit.is_scripting():
+        # TorchScript differentiates softplus symbolically through exp(x), which
+        # overflows for large x; selections around exp(-|x|) stay finite (and
+        # are fused by the TorchScript fuser)
+        positive = x > 0
+        exponent = torch.where(positive, -x, x)
+        return torch.where(positive, x, torch.zeros_like(x)) + torch.log1p(torch.exp(exponent))
+    threshold = 40.0 if x.dtype == torch.float64 else 20.0
+    return nn.functional.softplus(x, 1.0, threshold)
 
 
 def shifted_softplus(x: Tensor) -> Tensor:
@@ -43,10 +53,8 @@ def shifted_softplus(x: Tensor) -> Tensor:
     what keeps the predicted potential-energy surface (and thus the autograd
     forces) smooth.
 
-    Evaluated with :func:`exact_softplus` minus ``ln 2`` -- exact for all
-    ``x``, unlike :func:`torch.nn.functional.softplus`, which switches to the
-    identity above its threshold and drops the ``log1p(exp(-x))`` tail
-    (~1e-9 at the default threshold of 20). TorchScript-compatible.
+    Evaluated with :func:`exact_softplus` minus ``ln 2``, exact to round-off
+    for all ``x`` in float32 and float64. TorchScript-compatible.
 
     Parameters
     ----------
