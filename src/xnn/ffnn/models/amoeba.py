@@ -90,6 +90,7 @@ from .amoeba_ewald import (
     dispersion_real_kernel,
     ewald_coefficient,
     ewald_ladder,
+    fft_mesh_size,
     fusable,
     fused,
     fused_active,
@@ -267,16 +268,94 @@ def core_valence_kernel(zeta: Tensor, slot: str = "j") -> RadialSeries:
     return RadialSeries({(-1, 0, 0): 1.0, (-1,) + label: -1.0, (0,) + label: -0.5 * zeta})
 
 
-def overlap_coulomb_kernel(zi: Tensor, zj: Tensor, equal: bool) -> RadialSeries:
+# the series in q of R g = 1 - e^-p sum_k q^2k P_k(p) of the overlap Coulomb kernel, p = (zi + zj) R / 2 and
+# q = (zi - zj) R / 2: {power of p: coefficient} of P_0 .. P_6, P_0 the equal-exponent form
+_COULOMB_NEAR = (
+    {0: 1.0, 1: 11 / 16, 2: 3 / 16, 3: 1 / 48},
+    {-1: 3 / 8, 0: 3 / 8, 1: 5 / 32, 2: 1 / 32, 3: 1 / 480},
+    {-3: -1 / 16, -2: -1 / 16, 0: 1 / 48, 1: 19 / 1920, 2: 1 / 640, 3: 1 / 13440},
+    {-3: -1 / 96, -2: -1 / 96, -1: -1 / 320, 0: 1 / 2880, 1: 23 / 80640, 2: 1 / 26880, 3: 1 / 725760},
+    {-3: -1 / 1920, -2: -1 / 1920, -1: -1 / 6720, 1: 1 / 215040, 2: 1 / 1935360, 3: 1 / 63866880},
+    {-3: -1 / 80640, -2: -1 / 80640, -1: -1 / 322560, 0: -1 / 14515200, 1: 31 / 638668800,
+     2: 1 / 212889600, 3: 1 / 8302694400},
+    {-3: -1 / 5806080, -2: -1 / 5806080, -1: -1 / 26611200, 0: -1 / 958003200, 1: 1 / 2846638080,
+     2: 1 / 33210777600, 3: 1 / 1494484992000})
+_NEAR_TERMS = len(_COULOMB_NEAR) - 1
+# the series of c1(t) = (t cosh t - sinh t) / t^3 and c2(t) = sinh t / t of the Slater overlap
+_C1 = tuple((2 * k + 2) / math.factorial(2 * k + 3) for k in range(_NEAR_TERMS + 1))
+_C2 = tuple(1.0 / math.factorial(2 * k + 1) for k in range(_NEAR_TERMS + 1))
+
+
+def _near_weights(table: dict) -> tuple:
+    """``(powers, W)``: the consecutive R powers of a near-equal series and
+    ``W[power, k]``, the coefficient of ``rho^2k`` in the coefficient of that power."""
+    powers = list(range(min(table), max(table) + 1))
+    return powers, [[table.get(p, {}).get(k, 0.0) for k in range(_NEAR_TERMS + 1)] for p in powers]
+
+
+# R g of the Coulomb kernel: the term rho^2k P_k,m p^(2k+m) sits at the power 2k + m of p
+_COULOMB_POWERS, _COULOMB_W = _near_weights(
+    {pw: {k: c for k, row in enumerate(_COULOMB_NEAR) for m, c in row.items() if 2 * k + m == pw}
+     for pw in sorted({2 * k + m for k, row in enumerate(_COULOMB_NEAR) for m in row})})
+# the Slater overlap: rho^2k [c1_k s^(2k+2) + c2_k (s^(2k+1) + s^2k)]
+_SLATER_POWERS, _SLATER_W = _near_weights(
+    {pw: {k: (_C1[k] if pw == 2 * k + 2 else 0.0) + (_C2[k] if pw in (2 * k, 2 * k + 1) else 0.0)
+          for k in range(_NEAR_TERMS + 1) if pw in (2 * k, 2 * k + 1, 2 * k + 2)}
+     for pw in range(2 * _NEAR_TERMS + 3)})
+
+
+_NEAR_CONSTANTS: dict = {}
+
+
+def _near_table(name: str, like: Tensor) -> tuple:
+    """``(powers, W)`` of the near-equal series ``name`` ("coulomb" or
+    "slater"), ``W`` on the device and dtype of ``like``, made once."""
+    powers, W = {"coulomb": (_COULOMB_POWERS, _COULOMB_W), "slater": (_SLATER_POWERS, _SLATER_W)}[name]
+    key = (name, str(like.device), like.dtype)
+    if key not in _NEAR_CONSTANTS:
+        _NEAR_CONSTANTS[key] = torch.tensor(W, dtype=like.dtype, device=like.device)
+    return powers, _NEAR_CONSTANTS[key]
+
+
+def _powers(x: Tensor, lo: int, hi: int) -> Tensor:
+    """``x^lo .. x^hi`` (``lo <= 0 <= hi``) along a new last axis for a positive
+    ``x``, from running products."""
+    parts = [torch.ones_like(x)[..., None]]
+    if lo < 0:
+        parts.insert(0, (1.0 / x)[..., None].expand(x.shape + (-lo,)).cumprod(-1).flip(-1))
+    if hi > 0:
+        parts.append(x[..., None].expand(x.shape + (hi,)).cumprod(-1))
+    return torch.cat(parts, -1)
+
+
+def _near_coefficients(rho: Tensor, scale: Tensor, name: str) -> Tensor:
+    """``scale^power sum_k rho^2k W[power, k]`` for every power of the
+    near-equal series ``name``, ``(..., n_powers)``."""
+    powers, W = _near_table(name, rho)
+    rho2 = rho * rho
+    rho_pow = [torch.ones_like(rho2)]
+    for _ in range(_NEAR_TERMS):
+        rho_pow.append(rho_pow[-1] * rho2)
+    return (torch.stack(rho_pow, -1) @ W.t()) * _powers(scale, powers[0], powers[-1])
+
+
+def overlap_coulomb_kernel(zi: Tensor, zj: Tensor, near: bool) -> RadialSeries:
     """Coulomb interaction kernel of two hydrogen-like densities (the
-    two-center charge-penetration damping): for equal exponents
-    ``[1 - (1 + 11/16 x + 3/16 x^2 + 1/48 x^3) e^-x] / R`` with ``x = zeta R``,
-    otherwise the closed form with ``A = zeta_j^2 / (zeta_j^2 - zeta_i^2)``
-    and ``B = zeta_i^2 / (zeta_i^2 - zeta_j^2)``."""
-    if equal:
-        z = zi
-        return RadialSeries({(-1, 0, 0): 1.0, (-1, 2, 0): -1.0, (0, 2, 0): -11.0 / 16.0 * z,
-                             (1, 2, 0): -3.0 / 16.0 * z ** 2, (2, 2, 0): -z ** 3 / 48.0})
+    two-center charge-penetration damping): the closed form
+    ``[1 - A^2 (1 + 2 B + zeta_i R / 2) e^(-zeta_i R) - B^2 (1 + 2 A + zeta_j R / 2) e^(-zeta_j R)] / R``
+    with ``A = zeta_j^2 / (zeta_j^2 - zeta_i^2)`` and
+    ``B = zeta_i^2 / (zeta_i^2 - zeta_j^2)``, or with ``near`` its series
+    ``[1 - e^-p sum_k q^2k P_k(p)] / R`` in ``q = (zeta_i - zeta_j) R / 2``,
+    ``p = (zeta_i + zeta_j) R / 2``, which holds at equal and nearly equal
+    exponents where the closed form cancels (``P_0`` is the equal-exponent
+    form ``1 + 11/16 p + 3/16 p^2 + 1/48 p^3``)."""
+    if near:
+        half = 0.5 * (zi + zj)
+        coef = _near_coefficients((zi - zj) / (zi + zj), half, "coulomb")
+        terms = {(-1, 0, 0): 1.0}
+        for n, pw in enumerate(_COULOMB_POWERS):
+            terms[(pw - 1, 1, 1)] = -coef[..., n]
+        return RadialSeries(terms)
     A = zj ** 2 / (zj ** 2 - zi ** 2)
     B = zi ** 2 / (zi ** 2 - zj ** 2)
     return RadialSeries({(-1, 0, 0): 1.0,
@@ -284,12 +363,21 @@ def overlap_coulomb_kernel(zi: Tensor, zj: Tensor, equal: bool) -> RadialSeries:
                          (-1, 0, 2): -B * B * (1.0 + 2.0 * A), (0, 0, 2): -B * B * 0.5 * zj})
 
 
-def slater_overlap(zi: Tensor, zj: Tensor, equal: bool) -> RadialSeries:
+def slater_overlap(zi: Tensor, zj: Tensor, near: bool) -> RadialSeries:
     """Overlap of two normalised 1s Slater functions with exponents
-    ``zeta_i / 2`` and ``zeta_j / 2`` (the HIPPO pseudo-orbitals)."""
-    if equal:
-        z = zi
-        return RadialSeries({(0, 1, 0): 1.0, (1, 1, 0): 0.5 * z, (2, 1, 0): z ** 2 / 12.0})
+    ``zeta_i / 2`` and ``zeta_j / 2`` (the HIPPO pseudo-orbitals): the closed
+    form, or with ``near`` the identity
+    ``S = (1 - rho^2)^(3/2) e^-s [s^2 c1(t) + (s + 1) c2(t)]`` with
+    ``s = (zeta_i + zeta_j) R / 4``, ``t = (zeta_i - zeta_j) R / 4``,
+    ``rho = t / s``, ``c2 = sinh t / t`` and
+    ``c1 = (t cosh t - sinh t) / t^3`` as series in ``t``, which holds at
+    equal and nearly equal exponents (``e^-s (1 + s + s^2 / 3)`` at equal
+    ones)."""
+    if near:
+        rho = (zi - zj) / (zi + zj)
+        coef = _near_coefficients(rho, 0.25 * (zi + zj), "slater")
+        coef = coef * (1.0 - rho * rho).clamp_min(0.0)[..., None] ** 1.5
+        return RadialSeries({(pw, 0.5, 0.5): coef[..., n] for n, pw in enumerate(_SLATER_POWERS)})
     delta = zi ** 2 - zj ** 2
     pref = 8.0 * (zi * zj) ** 1.5 / delta ** 3
     return RadialSeries({(0, 0, 1): pref * zi * delta, (-1, 0, 1): -8.0 * pref * zi * zj,
@@ -427,14 +515,13 @@ def derivative_ladder(kernel: RadialSeries, R: Tensor, zi: Tensor, zj: Tensor, o
 
 def _warm_hippo_ladders() -> None:
     """Derive the ladder plans of every HIPPO kernel layout (charge penetration,
-    two-center overlap, squared Slater overlap) ahead of the first evaluation."""
+    the closed forms of the two-center overlap and the squared Slater overlap)
+    ahead of the first evaluation."""
     z1 = torch.ones(1, dtype=torch.float64)
     z2 = 2.0 * z1
     kernels = [(core_valence_kernel(z1, "i"), 3), (core_valence_kernel(z1, "j"), 3)]
-    for equal, zb in ((True, z1), (False, z2)):
-        kernels += [(overlap_coulomb_kernel(z1, zb, equal), 4), (overlap_coulomb_kernel(z1, zb, equal), 2)]
-        S = slater_overlap(z1, zb, equal)
-        kernels.append((S * S, 4))
+    kernels += [(overlap_coulomb_kernel(z1, z2, False), 4), (overlap_coulomb_kernel(z1, z2, False), 2),
+                (squared_overlap(z1, z2, False), 4)]
     for kernel, order in kernels:
         _ladder_plan(tuple(kernel.terms), order)
 
@@ -447,40 +534,100 @@ def core_valence_ladder(R: Tensor, zi: Tensor, zk: Tensor, slot: str, order: int
     return derivative_ladder(core_valence_kernel(zeta.double(), slot), R, zi, zk, order) + [torch.zeros_like(R)]
 
 
+# below this |zeta_i - zeta_k| R the two-center kernels take their series in the exponent difference, exact
+# at equal exponents, and above it their closed forms, whose cancellation is then mild
+_NEAR_EQUAL = 2.0
+
+
+def _near_pairs(R: Tensor, zi: Tensor, zk: Tensor) -> Tensor:
+    return (zi - zk).abs() * R.detach() < _NEAR_EQUAL
+
+
 @fusable
 def two_center_ladder(R: Tensor, zi: Tensor, zk: Tensor, order: int, kernel) -> list[Tensor]:
-    """The ladder of a two-center kernel on every pair, selected between its
-    forms for equal and unequal exponents without a host synchronization;
-    the unequal form sees a distinct stand-in exponent where the two agree.
-    ``kernel(zi, zk, equal)`` builds the series."""
-    eq = (zi - zk).abs() <= 1e-9 * torch.maximum(zi.abs(), zk.abs())
+    """The ladder of a two-center kernel (:func:`overlap_coulomb_kernel` or
+    :func:`squared_overlap`) on every pair, selected between its series for
+    equal and nearly equal exponents and its closed form without a host
+    synchronization; each form sees a stand-in exponent on the pairs of the
+    other (equal exponents for the series, distinct ones for the closed form)."""
+    near = _near_pairs(R, zi, zk)
     zi64, zk64 = zi.double(), zk.double()
-    zk_un = torch.where(eq, 1.5 * zi64 + 1.0, zk64)
-    same = derivative_ladder(kernel(zi64, zk64, True), R, zi64, zk64, order)
-    diff = derivative_ladder(kernel(zi64, zk_un, False), R, zi64, zk_un, order)
-    return [torch.where(eq, a, b) for a, b in zip(same, diff)]
+    zk_un = torch.where(near, 1.5 * zi64 + 1.0, zk64)
+    series = _near_ladder(kernel, R, zi64, torch.where(near, zk64, zi64), order)
+    closed = derivative_ladder(kernel(zi64, zk_un, False), R, zi64, zk_un, order)
+    return [torch.where(near, a, b) for a, b in zip(series, closed)]
 
 
-def squared_overlap(zi: Tensor, zj: Tensor, equal: bool) -> RadialSeries:
+def squared_overlap(zi: Tensor, zj: Tensor, near: bool) -> RadialSeries:
     """The squared overlap ``S^2`` of two Slater densities (HIPPO repulsion)."""
-    S = slater_overlap(zi, zj, equal)
+    S = slater_overlap(zi, zj, near)
     return S * S
 
 
+def _coulomb_near_form(zi: Tensor, zk: Tensor) -> tuple:
+    coef = _near_coefficients((zi - zk) / (zi + zk), 0.5 * (zi + zk), "coulomb")
+    return 1.0, -coef, _COULOMB_POWERS[0] - 1, 0.5 * (zi + zk)
+
+
+def _slater_near_form(zi: Tensor, zk: Tensor) -> tuple:
+    rho = (zi - zk) / (zi + zk)
+    w = (1.0 - rho * rho).clamp_min(0.0)
+    S = _near_coefficients(rho, 0.25 * (zi + zk), "slater") * (w * w.sqrt())[..., None]
+    return 0.0, S, _SLATER_POWERS[0], 0.25 * (zi + zk)
+
+
+# the near-equal series of the two-center kernels as c / R + e^(-lambda R) sum_j Q_j R^(lowest + j), and
+# whether the kernel is its square: kernel -> ((zi, zk) -> (c, Q, lowest, lambda), squared)
+_NEAR_FORMS = {overlap_coulomb_kernel: (_coulomb_near_form, False), squared_overlap: (_slater_near_form, True)}
+
+
+def _near_ladder(kernel, R: Tensor, zi: Tensor, zk: Tensor, order: int) -> list[Tensor]:
+    """The ladder of the near-equal series of a two-center kernel. With a single
+    exponential, ``(1/R d/dR) e^(-lambda R) Q = e^(-lambda R) (Q' - lambda Q) / R``
+    is a recurrence on the coefficients of ``Q``, ``(1/R d/dR)^n (1/R)`` is
+    ``(-1)(-3)..(1 - 2n) R^(-1-2n)``, and the ladder of a square follows from
+    that of its root by the Leibniz rule (``1/R d/dR`` is a derivation)."""
+    form, squared = _NEAR_FORMS[kernel]
+    shape = torch.broadcast_shapes(R.shape, zi.shape, zk.shape)
+    R64 = R.double().expand(shape)
+    inverse, Q, lowest, lam = form(zi.double().expand(shape), zk.double().expand(shape))
+    start = min(lowest, -1) - 2 * order
+    r_pow = _powers(R64, start, lowest + Q.shape[-1] - 1)
+    decay = torch.exp(-lam * R64)
+    ladder, low, factor = [], lowest, 1.0
+    for level in range(order + 1):
+        lo = low - start
+        value = decay * (Q * r_pow[..., lo:lo + Q.shape[-1]]).sum(-1)
+        if inverse:
+            value = value + inverse * factor * r_pow[..., -1 - 2 * level - start]
+        ladder.append(value)
+        if level < order:
+            pw = torch.arange(low, low + Q.shape[-1], dtype=Q.dtype, device=Q.device)
+            Q = (torch.nn.functional.pad(Q * pw, (0, 1))
+                 - torch.nn.functional.pad(lam[..., None] * Q, (1, 0)))
+            low -= 2
+            factor *= -1.0 - 2.0 * level
+    if squared:
+        ladder = [sum(math.comb(n, k) * ladder[k] * ladder[n - k] for k in range(n + 1)) for n in range(order + 1)]
+    return [d.to(R.dtype) for d in ladder]
+
+
 def two_center(R: Tensor, zi: Tensor, zk: Tensor, order: int, kernel) -> list[Tensor]:
-    """The ladder of a two-center kernel (``kernel(zi, zk, equal)`` builds the
-    series), with the closed form of equal exponents where the two agree: on
-    a GPU both forms on every pair (:func:`two_center_ladder`), on a CPU each
-    form on its own pairs."""
+    """The ladder of a two-center kernel (:func:`overlap_coulomb_kernel` or
+    :func:`squared_overlap`), with its series in the exponent difference where
+    ``|zeta_i - zeta_k| R`` is small (equal exponents included) and its closed
+    form elsewhere: on a GPU both forms on every pair
+    (:func:`two_center_ladder`), on a CPU each form on its own pairs."""
     if R.is_cuda:
         return two_center_ladder(R, zi, zk, order, kernel)
-    eq = (zi - zk).abs() <= 1e-9 * torch.maximum(zi.abs(), zk.abs())
+    near_pairs = _near_pairs(R, zi, zk)
     out = [torch.zeros_like(R) for _ in range(order + 1)]
-    for mask, equal in ((eq, True), (~eq, False)):
+    for mask, near in ((near_pairs, True), (~near_pairs, False)):
         if not bool(mask.any()):
             continue
         Rm, zim, zkm = R[mask], zi[mask].double(), zk[mask].double()
-        vals = derivative_ladder(kernel(zim, zkm, equal), Rm, zim, zkm, order)
+        vals = (_near_ladder(kernel, Rm, zim, zkm, order) if near
+                else derivative_ladder(kernel(zim, zkm, False), Rm, zim, zkm, order))
         rows = mask.nonzero()[:, 0]
         for n in range(order + 1):
             out[n] = out[n].index_put((rows,), vals[n])
@@ -1446,8 +1593,9 @@ class Amoeba(InteratomicPotential):
         7 Angstrom and ``cutoff``.
     pme_grid, dpme_grid : sequence of int, optional
         Mesh dimensions of the electrostatic and dispersion particle-mesh
-        sums; by default 1.2 (0.8) points per Angstrom rounded up to an
-        FFT-friendly even size, at least 16.
+        sums, by default 1.2 (0.8) points per Angstrom. As in Tinker, every
+        size is rounded up to an even one with prime factors 2, 3 and 5, at
+        least 16 (a requested 27 becomes 30).
     pme_order, ppme_order, dpme_order : int, optional
         B-spline orders of the multipole, induction and dispersion meshes
         (5, the multipole one, 4).
@@ -3312,8 +3460,8 @@ def _grid_option(value) -> Optional[list]:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return [int(value)] * 3
-    out = [int(x) for x in value]
+        value = [value]
+    out = [fft_mesh_size(x) for x in value]
     return out * 3 if len(out) == 1 else out
 
 

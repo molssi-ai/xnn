@@ -118,8 +118,6 @@ TINKER_HIPPO_16_FORCES = np.array([[-4.35234624, 9.51461307, -1.36353251], [-6.4
 TOL_TERM = 1e-5        # kcal/mol
 TOL_FORCE = 1e-5       # kcal/mol/A
 TOL_VIRIAL = 2e-3      # kcal/mol (the reference carries three decimals)
-# at 16^3 (alpha h = 0.5) the multipole mesh sums of the two codes differ by a few 1e-3 kcal/mol
-TOL_COARSE_TERM, TOL_COARSE_FORCE, TOL_COARSE_VIRIAL = 5e-3, 1e-3, 0.05
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +159,14 @@ def test_tinker_defaults_for_the_coefficient_and_the_mesh():
     assert ew.pme_grid_size([12.4294] * 3) == [16, 16, 16]
     assert ew.pme_grid_size([15.24] * 3) == [20, 20, 20]
     assert ew.pme_grid_size([30.48] * 3, density=0.8) == [30, 30, 30]
+
+
+def test_requested_meshes_are_rounded_up_as_in_tinker():
+    """A requested mesh is rounded up per axis to an even 2-3-5 size of at least 16, as Tinker does."""
+    sizes = (10, 16, 17, 21, 27, 28, 31, 37, 42, 49, 56, 61)
+    assert [ew.fft_mesh_size(n) for n in sizes] == [16, 16, 18, 24, 30, 30, 32, 40, 48, 50, 60, 64]
+    model = _box(Hippo, pme_grid=[27, 32, 45], dpme_grid=12)
+    assert model.pme_grid == [30, 32, 48] and model.dpme_grid == [16, 16, 16]
 
 
 def test_switching_is_a_c2_step():
@@ -312,8 +318,7 @@ def test_mesh_self_moments_match_a_brute_force_position_average():
     alpha, mesh, order = 0.9, [12, 12, 10], 5
     s0, s2, s4 = ew.mesh_self_moments(cell, alpha, mesh, order, "coulomb")
     # the exact reciprocal self term of one unit charge over the mesh vectors: the bare kernel, no spline moduli
-    g = (ew._influence(cell, alpha, mesh, order, "coulomb") / (mesh[0] * mesh[1] * mesh[2])
-         / ew.spline_moduli(mesh, order, torch.float64, cell.device, least_squares=True))
+    g = ew._influence(cell, alpha, mesh, order, "coulomb", bare=True) / (mesh[0] * mesh[1] * mesh[2])
     exact_self = 0.5 * float(g.sum())
     n = 12
     frac = torch.stack(torch.meshgrid(*[(torch.arange(n) + 0.5) / n] * 3, indexing="ij"), -1).reshape(-1, 3)
@@ -338,8 +343,7 @@ def test_mesh_self_moments_match_a_brute_force_position_average():
     spurious_Q = float(s0 - 2.0 * torch.einsum("ab,ab->", Q[0], s2) + torch.einsum("ab,abcd,cd->", Q[0], s4, Q[0]))
     assert spurious_Q == pytest.approx(e_Q - exact_Q, abs=1e-6)
     r0, _, _ = ew.mesh_self_moments(cell, alpha, mesh, 4, "r6")
-    g6 = (ew._influence(cell, alpha, mesh, 4, "r6") / (mesh[0] * mesh[1] * mesh[2])
-          / ew.spline_moduli(mesh, 4, torch.float64, cell.device, least_squares=True))
+    g6 = ew._influence(cell, alpha, mesh, 4, "r6", bare=True) / (mesh[0] * mesh[1] * mesh[2])
     e_6 = sum(float(-ew.dispersion_pme(one, r[None], cell, alpha, mesh, 4) + alpha ** 6 / 12.0) for r in pos) / len(pos)
     assert float(r0) == pytest.approx(e_6 - 0.5 * float(g6.sum()), abs=1e-7)
     fine = ew.mesh_self_moments(torch.eye(3) * 6.0, 1.2, [64, 64, 64], 5, "coulomb")
@@ -413,17 +417,16 @@ def test_hippo_box_with_exchange_polarization_matches_tinker():
 
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
 def test_boxes_match_tinker_on_its_default_coarse_meshes(cls):
-    """At Tinker's default 16^3 meshes the dispersion sum matches Tinker's, the multipole sums nearly."""
+    """At Tinker's default 16^3 meshes the mesh sums, forces and virial still match Tinker's."""
     refs, forces, virial_ref = ((TINKER_AMOEBA_16, TINKER_AMOEBA_16_FORCES, TINKER_AMOEBA_16_VIRIAL) if cls is Amoeba
                                 else (TINKER_HIPPO_16, TINKER_HIPPO_16_FORCES, TINKER_HIPPO_16_VIRIAL))
     model = ForceStressOutput(_box(cls, pme_grid=None, dpme_grid=None), compute_stress=True)
     out = model(_graph(BOX))
     for k, ref in refs.items():
-        tol = TOL_TERM if k == "e_dispersion" else TOL_COARSE_TERM
-        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=tol), k
-    assert np.abs(out["forces"].detach().numpy()[:4] * EV_TO_KCAL - forces).max() < TOL_COARSE_FORCE
+        assert float(out[k]) * EV_TO_KCAL == pytest.approx(ref, abs=TOL_TERM), k
+    assert np.abs(out["forces"].detach().numpy()[:4] * EV_TO_KCAL - forces).max() < TOL_FORCE
     virial = -out["stress"][0].detach().numpy() * L ** 3 * EV_TO_KCAL
-    assert np.abs(virial + virial_ref).max() < TOL_COARSE_VIRIAL
+    assert np.abs(virial + virial_ref).max() < TOL_VIRIAL
     assert model.model.intermediates["ewald"]["grids"][0][1] == [16, 16, 16]
 
 

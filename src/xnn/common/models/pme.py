@@ -212,7 +212,9 @@ def least_squares_moduli(size: int, order: int, dtype: torch.dtype, device: torc
     spline sum at the aliased frequencies ``m + j K``, that is
     ``|b(m)|^2 = s_0^2 / (sum_j s_j^2)^2``. Both choices agree at ``m = 0``
     and as the mesh is refined; at a coarse mesh the least-squares one
-    leaves a far smaller mean self-interaction error in the energies.
+    leaves a far smaller mean self-interaction error in the energies. For
+    an odd order on an even mesh the Nyquist frequency, where the spline
+    sum of an odd order vanishes at the mesh points, carries no weight.
 
     Parameters
     ----------
@@ -233,7 +235,10 @@ def least_squares_moduli(size: int, order: int, dtype: torch.dtype, device: torc
     m = torch.fft.fftfreq(size, d=1.0 / size, dtype=dtype, device=device) / size
     j = torch.arange(-n_alias, n_alias + 1, dtype=dtype, device=device)
     s2 = torch.sinc(m[:, None] + j[None, :]).abs() ** (2 * order)
-    return s2[:, n_alias] / s2.sum(1).square()
+    moduli = s2[:, n_alias] / s2.sum(1).square()
+    if order % 2 == 1 and size % 2 == 0:
+        moduli[size // 2] = 0.0
+    return moduli
 
 
 def spline_moduli(mesh: List[int], order: int, dtype: torch.dtype, device: torch.device,

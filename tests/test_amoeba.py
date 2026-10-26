@@ -329,6 +329,40 @@ def test_density_kernels_match_their_closed_forms():
     assert torch.allclose(S_un, 8 * (zi * zj) ** 1.5 / (zi + zj) ** 3, rtol=1e-4)
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the GPU path evaluates both forms on every pair"))])
+def test_two_center_kernels_are_exact_at_nearly_equal_exponents(device):
+    """The two-center ladders keep full precision as the exponents approach each other."""
+    mp = pytest.importorskip("mpmath")
+    mp.mp.dps = 40
+
+    def coulomb(a, b, r):
+        A, B = b * b / (b * b - a * a), a * a / (a * a - b * b)
+        return (1 - A * A * (1 + 2 * B + a * r / 2) * mp.e ** (-a * r)
+                - B * B * (1 + 2 * A + b * r / 2) * mp.e ** (-b * r)) / r
+
+    def repulsion(a, b, r):
+        d = a * a - b * b
+        u, v = mp.e ** (-a * r / 2), mp.e ** (-b * r / 2)
+        S = 8 * (a * b) ** mp.mpf(1.5) / d ** 3 * (a * d * v - 8 * a * b * v / r + b * d * u + 8 * a * b * u / r)
+        return S * S
+
+    def ladder(ref, a, b, x):
+        """D_0, D_1, D_2 = (1/R d/dR)^n g at R = x."""
+        g = lambda t: ref(a, b, t)  # noqa: E731
+        d1 = lambda t: mp.diff(g, t) / t  # noqa: E731
+        return g(x), d1(x), mp.diff(d1, x) / x
+
+    for kernel, ref in ((am.overlap_coulomb_kernel, coulomb), (am.squared_overlap, repulsion)):
+        for rel in (1e-4, 3e-3, 2e-2, 0.2):
+            for r in (2.0, 6.0):
+                zi, zk = torch.tensor([4.3], device=device), torch.tensor([4.3 * (1 + rel)], device=device)
+                got = am.two_center(torch.tensor([r], device=device), zi, zk, 2, kernel)
+                want = ladder(ref, mp.mpf(4.3), mp.mpf(4.3) * (1 + mp.mpf(rel)), mp.mpf(r))
+                for n in range(3):
+                    assert float(got[n]) == pytest.approx(float(want[n]), rel=1e-11), (kernel.__name__, rel, r, n)
+
+
 def test_compiled_ladders_match_the_symbolic_derivation():
     """Every HIPPO kernel's ladder from its plan equals the term-by-term symbolic ladder."""
     g = torch.Generator().manual_seed(3)

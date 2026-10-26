@@ -717,10 +717,13 @@ and torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
 multipoles in local frames and Thole-damped mutual induction. HIPPO keeps the
 valence terms and multipoles and replaces the intermolecular terms by charge
 penetration, density-damped induction, Pauli repulsion, damped dispersion,
-charge transfer and charge flux. A library with ``exchpol`` parameters adds
-the exchange polarization of `Chung et al., J. Phys. Chem. B 126, 7579
-(2022) <https://doi.org/10.1021/acs.jpcb.2c04237>`_: the overlap with each
-neighbor shrinks an atom's polarizability along the pair.
+charge transfer and charge flux. A library with ``exchpol`` parameters adds the
+exchange polarization of `Chung et al., J. Phys. Chem. B 126, 7579 (2022)
+<https://doi.org/10.1021/acs.jpcb.2c04237>`_: the overlap with each neighbor
+shrinks an atom's polarizability along the pair. Similar to Tinker, a pair takes
+part when either of its classes is used, pairs within a molecule carry the
+polarization scale factors of the permanent field (not those of the polarization
+groups), and in a cell the term is tapered by the switch of the repulsion.
 
 Molecules
 ---------
@@ -761,7 +764,9 @@ charge-transfer terms are switched off smoothly before their cutoff.
    out = ForceStressOutput(box, compute_stress=True)(graph)
 
 The defaults follow Tinker. The Ewald coefficient comes from the real-space
-cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. The
+cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. As in
+Tinker, every mesh size, a requested one too, is rounded up to an even size
+with prime factors 2, 3 and 5, at least 16 (``pme_grid=27`` gives 30). The
 mesh sums use the least-squares spline moduli, as Tinker does, so the
 energies match Tinker's at the same keys even on a coarse mesh. The
 options are ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` for the

@@ -167,6 +167,28 @@ def _fft_friendly(n: int) -> bool:
     return n == 1
 
 
+def fft_mesh_size(n: int, minimum: int = 16) -> int:
+    """The smallest even size of at least ``n`` and ``minimum`` whose prime
+    factors are 2, 3 and 5 (Tinker rounds a requested mesh up the same way).
+
+    Parameters
+    ----------
+    n : int
+        The requested number of mesh points along one axis.
+    minimum : int, optional
+        The smallest mesh, by default 16.
+
+    Returns
+    -------
+    int
+        The mesh size.
+    """
+    n = max(int(n), int(minimum))
+    while not _fft_friendly(n):
+        n += 1
+    return n
+
+
 def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int = 16) -> List[int]:
     """Mesh dimensions from the cell lengths: at least ``density`` points per
     Angstrom along each axis, rounded up to an even size whose prime factors
@@ -186,13 +208,7 @@ def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int =
     list of int
         ``(K_1, K_2, K_3)``.
     """
-    out = []
-    for length in lengths:
-        n = max(minimum, int(math.ceil(float(length) * density - 1e-8)))
-        while not _fft_friendly(n):
-            n += 1
-        out.append(n)
-    return out
+    return [fft_mesh_size(math.ceil(float(length) * density - 1e-8), minimum) for length in lengths]
 
 
 # switching and the real-space ladder
@@ -376,17 +392,18 @@ def stencil_potential(at: Tensor, jac: Tensor, st: dict, hessian: bool):
     return phi, dphi, matmul3(matmul3(jac, h), jac.transpose(1, 2))   # J h J^T
 
 
-def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str) -> Tensor:
+def _influence(cell: Tensor, alpha: float, mesh: List[int], order: int, kind: str, bare: bool = False) -> Tensor:
     """The mesh influence function in FFT order: for ``kind="coulomb"``
     ``K^3 / (pi V) exp(-pi^2 m^2 / alpha^2) / m^2 B(m)`` (zero at ``m = 0``), for
     ``kind="r6"`` ``K^3 / V pi^(3/2) alpha^3 / 3 f(b) B(m)`` with
     ``f(b) = (1 - 2 b^2) e^{-b^2} + 2 b^3 sqrt(pi) erfc(b)``, ``b = k / (2 alpha)``
-    (``f(0) = 1``) and ``B(m)`` the least-squares spline moduli."""
+    (``f(0) = 1``) and ``B(m)`` the least-squares spline moduli (one with
+    ``bare``, the exact reciprocal kernel)."""
     dtype, device = cell.dtype, cell.device
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     volume = cell_volume(cell)
     _, k2sq = mesh_wavevectors(cell, mesh)
-    moduli = _moduli(mesh, order, dtype, device)
+    moduli = 1.0 if bare else _moduli(mesh, order, dtype, device)
     scale = (k1 * k2 * k3) / volume
     if kind == "coulomb":
         m2 = k2sq / (4.0 * math.pi * math.pi)
@@ -717,7 +734,7 @@ def mesh_self_moments(cell: Tensor, alpha: float, mesh: List[int], order: int, k
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     g = _influence(cell, alpha, mesh, order, kind) / (k1 * k2 * k3)
     # the exact reciprocal self term carries the bare kernel, without the spline moduli of the mesh sum
-    g0 = g / _moduli(mesh, order, dtype, device)
+    g0 = _influence(cell, alpha, mesh, order, kind, bare=True) / (k1 * k2 * k3)
     mu = [_alias_moments(k, order, dtype, device) for k in (k1, k2, k3)]
     freq = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2, k3)]
     cache: dict = {}
@@ -822,8 +839,8 @@ def dispersion_real_kernel(R: Tensor, alpha: Tensor) -> Tensor:
     return torch.exp(-x2) * (1.0 + x2 + 0.5 * x2 * x2)
 
 
-__all__ = ["fused", "fused_active", "fusable", "matvec", "vecmat", "matmul3", "ewald_coefficient", "pme_grid_size",
-           "switching", "ewald_ladder",
+__all__ = ["fused", "fused_active", "fusable", "matvec", "vecmat", "matmul3", "ewald_coefficient", "fft_mesh_size",
+           "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
            "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "MeshPlan"]
