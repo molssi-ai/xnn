@@ -488,7 +488,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
 .. example-toctree::
    :caption: Fidelity checks
 
-   SchNet, block by block: verifying the `xnn` implementation against the manuscripts <nb/fidelity_checks/gnn/schnet/schnet_verification>
+   SchNet, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/schnet/schnet_verification>
    3D steerable CNN, block by block: the kernel basis, equivariance and the reference implementation <nb/fidelity_checks/cnn/se3cnn/se3cnn_verification>
    Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/cnn/s2cnn/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
@@ -532,3 +532,4 @@ gradients and timings.
 
    MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/gnn/mace/mace_cueq_parity>
    Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>
+   SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>

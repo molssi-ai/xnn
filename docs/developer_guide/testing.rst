@@ -25,18 +25,23 @@ What the tests check
   agreement with the reference to float64 round-off, and to float32 round-off
   in single precision. The reference is the upstream code under identical
   weights where one exists (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
-  GemNet, SpookyNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, PhysNet,
+  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, PhysNet,
   ANI, the spherical CNN, HDNNP against the RuNNer executable when
   ``XNN_RUNNER`` points to it,
   BAMBOO, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
   AMBER, CHARMM and DREIDING, Tinker for AMOEBA and HIPPO, MOPAC for the NDDO
   methods), and otherwise an independent implementation of the paper's
-  equations with its published tables (SchNet, the SE(3) steerable CNN).
+  equations with its published tables (the SE(3) steerable CNN).
   ``test_mace`` also covers the foundation-checkpoint conversion in
   process, without downloads; ``test_amber``, ``test_charmm`` and
   ``test_amoeba`` also check float32 against float64, the improper and
   multipole-frame conventions, for CHARMM the 1,4 bookkeeping in small rings
   and for HIPPO the density kernels against their closed forms.
+- **Performance** (every model with an upstream code): the xnn implementation
+  is at least as fast and, preferably, as memory-efficient as the reference
+  with the same weights and inputs, in float32 and float64, for inference and for a
+  training step with forces. The model's fidelity notebook reports the
+  comparison.
 - **Pipeline**: neighbor lists against ASE and the vesin backend, mixed
   batches and label masks, float64 geometry, the data and model hubs, ASE
   file I/O, the losses, the benchmark runner, the MDI engine, the fast
@@ -57,3 +62,5 @@ Conventions for new code
   identical weights (guarded by an import check), the reference program, or,
   where neither exists, an independent implementation of the paper's equations
   and its published numbers.
+- A model with an upstream code is also at least as fast and, preferably, as
+  memory-efficient as that code, in float32 and float64, before it is merged.

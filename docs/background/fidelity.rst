@@ -54,10 +54,14 @@ Numerical agreement under identical weights involves:
   Au2/MgO model. Our implementation of 1G follows the definition of
   `Behler, Chem. Rev. 121, 10037 (2021) <https://doi.org/10.1021/acs.chemrev.0c00868>`_.
 - **SchNet** (`Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
-  <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_):
-  built from the paper and verified against an
-  independent implementation of the paper's equations to about 1e-15. No
-  schnetpack code is used or compared against as an oracle.
+  <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_;
+  reference implementation in
+  `schnetpack <https://github.com/atomistic-machine-learning/schnetpack>`_ 2.2.0):
+  built from the paper and verified against an independent implementation of
+  its equations and against ``schnetpack`` under transplanted weights, with its
+  filter network assembled to the paper's two activations. Energies and forces
+  agree to float64 round-off (about 1e-15) and float32 round-off for molecules,
+  batches and periodic cells.
 - **DimeNet and DimeNet++** (`gasteigerjo/dimenet
   <https://github.com/gasteigerjo/dimenet>`_, TensorFlow): about 1e-13 relative
   in energies and forces under transplanted weights in float64. The published

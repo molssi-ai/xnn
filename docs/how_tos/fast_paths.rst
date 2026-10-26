@@ -12,10 +12,11 @@ and the path choice is made at runtime.
 
 Currently, the fast paths exist for the message phase and the symmetric
 contraction of MACE and NequIP (where we use `cuEquivariance
-<https://github.com/NVIDIA/cuEquivariance>`_), the three-body term of D3 and
-D4 and the large-system EEQ solve of D4 (where we use the Triton kernels,
-shipped with CUDA builds of PyTorch), and the reciprocal sum of the LES
-long-range term (for which, we use plain PyTorch).
+<https://github.com/NVIDIA/cuEquivariance>`_), the continuous-filter
+convolution of SchNet, the three-body term of D3 and D4 and the large-system
+EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA builds of
+PyTorch), and the reciprocal sum of the LES long-range term (for which, we use
+plain PyTorch).
 
 Install
 =======
@@ -53,7 +54,8 @@ Note the ``"auto"`` option for the ``use_fast`` argument: it selects a kernel on
 a CUDA device when it is installed and when the system is large enough for it to
 be faster. The thresholds per GPU and precision are based on our own
 experimental benchmarks with measured crossovers
-(:data:`xnn.gnn.fast.AUTO_POLICY`, :data:`xnn.common.models.les.AUTO_POLICY`).
+(:data:`xnn.gnn.fast.AUTO_POLICY`, :data:`xnn.gnn.fast.schnet.AUTO_POLICY`,
+:data:`xnn.common.models.les.AUTO_POLICY`).
 These thresholds are subject to change in any release. So, make sure to clarify
 the xnn's version in your reports if you choose to use the ``"auto"`` option. As
 the dispersion kernels are faster at every system size, they are always selected on a
@@ -71,7 +73,9 @@ What to expect from fast implementations
 - **Training.** The MACE, NequIP and LES fast paths are twice differentiable.
   So, the force training runs through them. The three-body kernels in dispersion
   module are differentiable once. Thus, a training step or a model with trainable
-  damping parameters falls back to the exact reference term.
+  damping parameters falls back to the exact reference term. The SchNet kernels
+  are differentiable once as well (forces and stress at inference), and a model
+  in training mode uses the reference convolution.
 - **Memory.** Above one million edges, the radial networks of MACE and NequIP
   recompute their activations in the backward pass instead of keeping them in
   memory (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model). The
