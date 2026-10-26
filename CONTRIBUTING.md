@@ -164,9 +164,11 @@ Read `docs/developer_guide/extending.rst` first. A new model needs:
 2. its fidelity reference, reproduced to float64 and float32 round-off whatever the implementation
    method: the upstream code under transplanted weights, the reference program, or, where neither
    exists, the paper's equations and published numbers;
+   with an upstream code, the xnn model must also be at least as fast and, preferably, as
+   memory-efficient as that code with the same weights, in float32 and float64, for inference and a training step;
 3. the tests listed under [Tests](#tests), including the fidelity test against the reference;
 4. its row in the model tables of `README.md` and the documentation;
-5. if it is user-facing, a short example under `notebooks/examples/<family>/<model>/`, and its fidelity check under `notebooks/fidelity_checks/<family>/<model>/`.
+5. if it is user-facing, a short example under `notebooks/examples/<family>/<model>/`, and its fidelity check under `notebooks/fidelity_checks/<family>/<model>/`, with the speed and memory comparison against the upstream code.
 
 ## Tests
 
