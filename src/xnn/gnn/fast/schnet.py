@@ -5,9 +5,10 @@ the gather of the neighbor features, their product with the filters and the
 sum onto the centers as separate tensor operations, each writing an ``(E, F)``
 tensor that autograd keeps for the backward pass. Here the two dense layers
 stay matrix products (the ``-ln 2`` of the first shifted softplus is folded
-into the second bias), and one kernel applies the last shifted softplus and
-the envelope, gathers ``h[src]``, multiplies and adds the products onto
-``out[dst]``: the filters and messages are never stored. The backward pass is
+into the second bias), and one kernel applies the second layer's shifted
+softplus (when the model has one) and the envelope, gathers ``h[src]``,
+multiplies and adds the products onto ``out[dst]``: the filters and messages
+are never stored. The backward pass is
 one kernel for the feature gradient and the gradient of the second layer's
 output, then two matrix products back to the radial expansion. Only the two
 pre-activations are saved.
