@@ -35,8 +35,9 @@ jobs:
 
       - name: Install Triton for its interpreter
         # the CPU wheel of torch comes without Triton; its interpreter runs the
-        # fused kernels of the fast paths on CPU tensors in the tests
-        run: pip install "triton==3.1.0"
+        # fused kernels of the fast paths on CPU tensors in the tests (using 3.3:
+        # the 3.1 interpreter crashes in its atomic adds)
+        run: pip install "triton==3.3.1"
 
       - name: Install xnn and test dependencies
         run: pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4" pytest-cov
