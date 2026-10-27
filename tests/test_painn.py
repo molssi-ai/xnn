@@ -756,3 +756,59 @@ def test_fast_path_off_in_training():
     assert not any(b.message.fast_active for b in model.interactions)
     out["forces"].pow(2).sum().backward()
     assert model.filters.weight.grad is not None
+
+
+@pytest.fixture
+def interpreted(monkeypatch):
+    """The fused kernels under Triton's interpreter, on CPU tensors, and offered on CPUs."""
+    pytest.importorskip("triton")
+    import importlib
+
+    import xnn.gnn.fast.painn as fast
+    from xnn.gnn.fast import painn_kernels
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    yield importlib.reload(painn_kernels)
+    monkeypatch.delenv("TRITON_INTERPRET")
+    importlib.reload(painn_kernels)
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.painn import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def test_fast_message_gradients_interpreted(interpreted):
+    """The fused message block and its first derivatives, run by the Triton interpreter."""
+    gen = torch.Generator().manual_seed(1)
+    n, n_edges, F = 4, 9, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).requires_grad_(True)
+
+    x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
+    stacked = rand(n_edges, 2 * 3 * F)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
+
+    def f(x, stacked, direction, v):
+        return interpreted.message(x, stacked[:, 3 * F:], direction, v, edge_index)
+
+    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12, fast_mode=True)
+    assert interpreted.message(x, stacked[:0, 3 * F:], direction[:0], v,
+                               edge_index[:, :0])[1].abs().max() == 0
+
+
+def test_fast_path_parity_interpreted(interpreted):
+    """The whole model with the fused message blocks on a CPU (the interpreter) and the reference."""
+    model = _small(dipole=True, polarizability=True, atomic_dipoles=True).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    graph = collate([_graph(n=8, seed=1, periodic=True), _graph(n=5, seed=2)])
+    keys = ("energy", "forces", "stress", "charges", "dipole", "polarizability")
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(graph)
+        assert all(b.message.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach() for k in keys}
+    for key, ref in out[False].items():
+        assert (out[True][key] - ref).abs().max() <= 1e-12 * ref.abs().max(), key

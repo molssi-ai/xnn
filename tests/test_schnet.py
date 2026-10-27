@@ -471,3 +471,71 @@ def test_fast_path_off_in_training():
     assert not any(b.cfconv.fast_active for b in model.interactions)
     out["forces"].pow(2).sum().backward()
     assert model.interactions[0].cfconv.filter_net[0].weight.grad is not None
+
+
+@pytest.fixture
+def interpreted(monkeypatch):
+    """The fused kernels under Triton's interpreter, on CPU tensors, and offered on CPUs."""
+    pytest.importorskip("triton")
+    import importlib
+
+    import xnn.gnn.fast.schnet as fast
+    from xnn.gnn.fast import schnet_kernels
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    yield importlib.reload(schnet_kernels)
+    monkeypatch.delenv("TRITON_INTERPRET")
+    importlib.reload(schnet_kernels)
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.schnet import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+@pytest.mark.parametrize("activated", [False, True])
+@pytest.mark.parametrize("with_envelope", [False, True])
+def test_fast_cfconv_gradients_interpreted(interpreted, activated, with_envelope):
+    """The fused convolution and its first derivatives, run by the Triton interpreter."""
+    gen = torch.Generator().manual_seed(2)
+    n, n_edges, K, F = 4, 9, 5, 16
+
+    def rand(*shape, grad=True):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).requires_grad_(grad)
+
+    h, rbf = rand(n, F), rand(n_edges, K)
+    envelope = rand(n_edges) if with_envelope else None
+    w1, b1, w2, b2 = rand(F, K, grad=False), rand(F, grad=False), rand(F, F, grad=False), rand(F, grad=False)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
+
+    def f(h, rbf, *env):
+        return interpreted.cfconv(h, rbf, env[0] if env else None, w1, b1, w2, b2, edge_index,
+                                  activated=activated)
+
+    inputs = (h, rbf) + ((envelope,) if with_envelope else ())
+    assert torch.autograd.gradcheck(f, inputs, nondet_tol=1e-12, fast_mode=True)
+
+
+@pytest.mark.parametrize("filter_output_activation", [False, True])
+@pytest.mark.parametrize("cutoff_fn", [None, "cosine"])
+def test_fast_path_parity_interpreted(interpreted, filter_output_activation, cutoff_fn):
+    """The whole model with the fused convolutions on a CPU (the interpreter) and the reference."""
+    from xnn.common.data import collate
+    model = _small(cutoff_fn=cutoff_fn, filter_output_activation=filter_output_activation).eval()
+    with torch.no_grad():
+        torch.nn.init.normal_(model.readout[-1].weight, std=0.3)
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    graph = collate([_graph(n=8, cutoff=5.0, seed=1, periodic=True), _graph(n=5, cutoff=5.0, seed=2)])
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(graph)
+        assert all(b.cfconv.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach() for k in ("energy", "forces", "stress")}
+    for key, ref in out[False].items():
+        assert (out[True][key] - ref).abs().max() <= 1e-12 * ref.abs().max(), key
+
+
+def test_atomic_energies_need_species():
+    with pytest.raises(ValueError, match="species is required"):
+        _small(atomic_energies=[0.1, 0.2])

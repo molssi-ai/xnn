@@ -122,3 +122,34 @@ def test_old_checkpoint_load_names_the_old_defaults():
         build_potential(cfg, old)
     cfg.model.extra["radial_basis"] = "bessel"
     build_potential(cfg, old)
+
+
+def test_pop_and_setdefault_are_reads_and_defaults_stay_plain():
+    opts = ModelOptions({"a": 1, "b": 2})
+    assert opts.pop("a") == 1 and opts.setdefault("c", 3) == 3
+    assert opts.read == {"a", "c"} and opts.unread() == ["b"]
+    opts.get("table", {"x": (1, 2)})                         # a dict default, its tuple as a list
+    opts.get("fn", print)                                    # no config file can hold a function
+    assert opts.resolved() == {"b": 2, "c": 3, "table": {"x": [1, 2]}}
+
+
+def test_override_paths_into_dicts_and_unknown_sections():
+    cfg = apply_overrides(Config(), ["model.extra.head.rank=2", "model.extra.scale=0.5"])
+    assert cfg.model.extra["head"] == {"rank": 2} and cfg.model.extra["scale"] == 0.5
+    with pytest.warns(IgnoredOptionWarning, match="nosuch.a"):
+        apply_overrides(cfg, ["nosuch.a=1"])
+
+
+def test_checkpoint_mismatch_without_old_defaults_raises_as_is():
+    """A checkpoint that does not fit, for a model whose defaults never changed: the plain error."""
+    from xnn.common.models import ForceStressOutput
+    from xnn.common.models.hub.checkpoint import build_potential
+
+    def cfg(n):
+        return from_dict({"model": {"name": "tensornet", "cutoff": 4.5, "n_features": n,
+                                    "n_interactions": 1, "n_rbf": 8}})
+
+    state = ForceStressOutput(build_model(cfg(8).model)).state_dict()
+    with pytest.raises(RuntimeError) as err:
+        build_potential(cfg(16), state)
+    assert "defaults were different" not in str(err.value)
