@@ -102,6 +102,7 @@ from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.blocks import GatedEquivariantBlock
 from xnn.common.models.constants import ExactFloat64Constants
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import (ATOMIC_MASSES, center_of_mass, gather_rows, init_linears_,
                                    scatter_sum)
 from xnn.common.models.registry import register_model
@@ -109,7 +110,7 @@ from xnn.common.models.registry import register_model
 _MAX_Z = 100
 
 
-class _Message(nn.Module):
+class _Message(nn.Module, FastPathModule):
     """The message block of eq 7 and 8 (Fig. 2b).
 
     The shared network ``phi`` and the filters (made for all blocks at once,
@@ -128,6 +129,11 @@ class _Message(nn.Module):
     phi : torch.nn.Sequential or None
         The network ``phi`` of another block to share; ``None`` builds this
         block's own.
+
+    Notes
+    -----
+    A fused GPU implementation (:mod:`xnn.gnn.fast.painn`) evaluates the same
+    block when :attr:`fast_active` is set (see :meth:`PaiNN.set_use_fast`).
     """
 
     def __init__(self, n_features: int, vector_propagation: bool = True,
@@ -140,6 +146,14 @@ class _Message(nn.Module):
         self.phi = phi if phi is not None else nn.Sequential(
             nn.Linear(n_features, n_features), nn.SiLU(),
             nn.Linear(n_features, self.n_parts * n_features))
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device``, all three terms and a power-of-two feature width."""
+        from xnn.gnn.fast.painn import supported
+        n = self.n_features
+        return (self.vector_propagation and 16 <= n <= 512 and n & (n - 1) == 0
+                and supported(device, dtype))
 
     def forward(self, s: Tensor, v: Tensor, W: Tensor, direction: Tensor,
                 edge_index: Tensor) -> Tuple[Tensor, Tensor]:
@@ -163,6 +177,8 @@ class _Message(nn.Module):
         tuple of Tensor
             ``ds`` of shape ``(N, F)`` and ``dv`` of shape ``(N, 3, F)``.
         """
+        if self.fast_active and not self.training and not torch.jit.is_scripting():
+            return self._forward_fast(s, v, W, direction, edge_index)
         src, dst = edge_index[0], edge_index[1]
         n = s.shape[0]
         # the (E, 1, F) factor first in the products: a faster backward on CPUs
@@ -174,6 +190,12 @@ class _Message(nn.Module):
         if self.vector_propagation:
             dv = dv + parts[1].unsqueeze(1) * gather_rows(v, src)
         return ds, scatter_sum(dv, dst, n)
+
+    @torch.jit.unused
+    def _forward_fast(self, s: Tensor, v: Tensor, W: Tensor, direction: Tensor,
+                      edge_index: Tensor) -> Tuple[Tensor, Tensor]:
+        from xnn.gnn.fast.painn_kernels import message
+        return message(self.phi(s), W, direction, v, edge_index)
 
 
 class _Update(nn.Module):
@@ -497,6 +519,49 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
             if species is None:
                 raise ValueError("species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
+        # the fused message blocks (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "PaiNN":
+        """Choose the implementation of the message blocks.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.painn` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the measured size
+            threshold); ``True``: wherever they are available; ``False``:
+            always the reference implementation. Evaluations in training mode
+            always use the reference, which is twice differentiable. In float32
+            the kernels agree with the reference to about 1e-6 relative, in
+            float64 to about 1e-14.
+
+        Returns
+        -------
+        PaiNN
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused message blocks on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.painn import AUTO_POLICY
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        if self.training:
+            for block in blocks:
+                block.fast_active = False
+            return
+        like = self.embedding.weight
+        select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:
@@ -621,6 +686,7 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
             (``(N, 3, F)``) and, with the heads, ``"dipole"`` ``(B, 3)``
             with ``"charges"`` ``(N,)`` and ``"polarizability"`` ``(B, 3, 3)``.
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         s, v = self.representation(data.atomic_numbers, data.edge_index,
                                    data.edge_vectors())
         node_energy = self._energy(s, data.atomic_numbers)
