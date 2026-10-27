@@ -55,11 +55,10 @@ import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
-from xnn.common.featurizers import CosineCutoff
+from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.ops import make_activation, scatter_sum
 from xnn.common.models.registry import register_model
-from xnn.trfnn.models.et import make_radial_basis
 
 _GROUPS = ("O(3)", "SO(3)")
 
@@ -297,10 +296,11 @@ class TensorNet(InteratomicPotential):
     cutoff : float, optional
         Neighbor-list radius and cosine cutoff (Angstrom), by default 4.5.
     radial_basis : str, optional
-        ``"expnorm"`` (default) or ``"gaussian"``.
+        Any basis of :func:`~xnn.common.featurizers.make_radial_basis`:
+        ``"expnorm"`` (default), ``"gaussian"`` or ``"bessel"``.
     trainable_rbf : bool, optional
-        Learn the centers and widths of the exponential-normal basis, by
-        default ``False``.
+        Learn the parameters of the basis (the exponential-normal centers and
+        widths, the Bessel frequencies), by default ``False``.
     activation : str, optional
         Nonlinearity of the filter MLPs and the readout, by default ``"silu"``.
     equivariance_group : str, optional
@@ -579,8 +579,9 @@ class TensorNet(InteratomicPotential):
             Instantiated model.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = (coerce_species(extra.get("species"))
                    if extra.get("species") is not None else None)
         return cls(

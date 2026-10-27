@@ -8,9 +8,9 @@ energy scale and shift. A model built in float32 and cast to float64, or loaded
 from a float32 checkpoint, would carry them float32-rounded, which caps its
 float64 agreement with an exact evaluation (near 1e-10 for the coupling tensors,
 1e-7 for the radial frequencies). :func:`exact_float64_constants` rebuilds every
-float64 one exactly as a float64 build would make it, and the equivariant models
-(:class:`~xnn.gnn.models.base.GNNPotential`, the Equiformers) call it after
-every cast and every ``load_state_dict``. Float32 values are left as built:
+float64 one exactly as a float64 build would make it, and the models that
+carry such constants (through :class:`ExactFloat64Constants`, the Equiformers)
+call it after every cast and every ``load_state_dict``. Float32 values are left as built:
 their rounding is below float32 arithmetic.
 """
 from __future__ import annotations
@@ -130,3 +130,22 @@ def exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
     :func:`exact_float64_constants` on ``module``.
     """
     exact_float64_constants(module)
+
+
+class ExactFloat64Constants:
+    """Mixin for a model whose float64 constants stay exact through casts and loads.
+
+    List it before the :class:`torch.nn.Module` base class. After every cast
+    (``.to``, ``.double``, ...) and every ``load_state_dict`` of the model, or of
+    a module that contains it, :func:`exact_float64_constants` rebuilds its
+    float64 constants exactly.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.register_load_state_dict_post_hook(exact_constants_after_load)
+
+    def _apply(self, fn, recurse=True):
+        out = super()._apply(fn, recurse)
+        exact_float64_constants(self)
+        return out

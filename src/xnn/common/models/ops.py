@@ -95,6 +95,87 @@ def glorot_orthogonal_(weight: Tensor, scale: float = 2.0) -> Tensor:
     return weight
 
 
+def he_orthogonal_(weight: Tensor) -> Tensor:
+    """He-scaled orthogonal initialization with exact standardization (GemNet, section 6).
+
+    A random (semi-)orthogonal matrix is standardized per output unit to zero
+    mean and unit variance and scaled to variance ``1 / fan_in``.
+
+    Parameters
+    ----------
+    weight : Tensor
+        A ``(fan_out, fan_in)`` weight matrix, modified in place.
+
+    Returns
+    -------
+    Tensor
+        ``weight``.
+    """
+    with torch.no_grad():
+        nn.init.orthogonal_(weight)
+        var, mean = torch.var_mean(weight, dim=1, unbiased=True, keepdim=True)
+        weight.sub_(mean).div_(torch.sqrt(var + 1e-6)).mul_(weight.shape[1] ** -0.5)
+    return weight
+
+
+#: Weight initializations by name (:func:`init_linear_`); ``"torch"`` keeps
+#: PyTorch's default.
+WEIGHT_INITS = {
+    "xavier_uniform": nn.init.xavier_uniform_,
+    "xavier_normal": nn.init.xavier_normal_,
+    "glorot_orthogonal": glorot_orthogonal_,
+    "he_orthogonal": he_orthogonal_,
+    "zeros": nn.init.zeros_,
+    "torch": None,
+}
+
+
+def init_linear_(linear: nn.Linear, weight: str = "xavier_uniform") -> nn.Linear:
+    """Initialize a dense layer by name: its weight by ``weight``, its bias to zero.
+
+    Parameters
+    ----------
+    linear : torch.nn.Linear
+        The layer, modified in place.
+    weight : str, optional
+        A name of :data:`WEIGHT_INITS`, by default ``"xavier_uniform"``;
+        ``"torch"`` keeps PyTorch's initialization of weight and bias.
+
+    Returns
+    -------
+    torch.nn.Linear
+        ``linear``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown name.
+    """
+    if weight not in WEIGHT_INITS:
+        raise ValueError(f"weight_init must be one of {sorted(WEIGHT_INITS)}, got {weight!r}")
+    init = WEIGHT_INITS[weight]
+    if init is not None:
+        with torch.no_grad():
+            init(linear.weight)
+            if linear.bias is not None:
+                linear.bias.zero_()
+    return linear
+
+
+def init_linears_(module: nn.Module, weight: str = "xavier_uniform") -> nn.Module:
+    """Apply :func:`init_linear_` to every dense layer inside ``module``.
+
+    Returns
+    -------
+    torch.nn.Module
+        ``module``.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            init_linear_(m, weight)
+    return module
+
+
 def softplus_inverse(x):
     """Return ``y`` such that ``softplus(y) = x`` (``x > 0``, float or array).
 
