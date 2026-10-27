@@ -533,3 +533,4 @@ gradients and timings.
    MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/gnn/mace/mace_cueq_parity>
    Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>
    SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
+   PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>
