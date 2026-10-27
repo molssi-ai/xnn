@@ -102,7 +102,8 @@ from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.blocks import GatedEquivariantBlock
 from xnn.common.models.constants import ExactFloat64Constants
-from xnn.common.models.ops import ATOMIC_MASSES, center_of_mass, init_linears_, scatter_sum
+from xnn.common.models.ops import (ATOMIC_MASSES, center_of_mass, gather_rows, init_linears_,
+                                   scatter_sum)
 from xnn.common.models.registry import register_model
 
 _MAX_Z = 100
@@ -164,13 +165,14 @@ class _Message(nn.Module):
         """
         src, dst = edge_index[0], edge_index[1]
         n = s.shape[0]
-        parts = torch.split(self.phi(s)[src] * W, self.n_features, dim=-1)
+        # the (E, 1, F) factor first in the products: a faster backward on CPUs
+        parts = torch.split(gather_rows(self.phi(s), src) * W, self.n_features, dim=-1)
         ds = scatter_sum(parts[0], dst, n)
         if not self.vectors:
             return ds, torch.zeros_like(v)
         dv = parts[self.n_parts - 1].unsqueeze(1) * direction.unsqueeze(-1)   # (E, 3, F)
         if self.vector_propagation:
-            dv = dv + v[src] * parts[1].unsqueeze(1)
+            dv = dv + parts[1].unsqueeze(1) * gather_rows(v, src)
         return ds, scatter_sum(dv, dst, n)
 
 

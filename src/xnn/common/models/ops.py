@@ -310,6 +310,38 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     return out.index_add(0, index, src)
 
 
+def gather_rows(src: Tensor, index: Tensor) -> Tensor:
+    """Rows ``src[index]`` (dim 0), with the faster backward of the device.
+
+    The node -> edge gather of message passing, the counterpart of
+    :func:`scatter_sum`. On CUDA it indexes (``src[index]``), whose backward
+    sorts the indices and accumulates without atomics, and whose second
+    derivative keeps less memory; elsewhere it uses
+    :func:`torch.index_select`, whose backward (an ``index_add``) is the faster
+    one on CPUs. The values are the same.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Tensor of shape ``(N, *feature_dims)`` (e.g. per-node features).
+    index : torch.Tensor
+        1-D integer tensor of length ``E``, the row of ``src`` for each output
+        row.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(E, *feature_dims)``.
+
+    Notes
+    -----
+    Compatible with :func:`torch.jit.script`.
+    """
+    if src.is_cuda:
+        return src[index]
+    return src.index_select(0, index)
+
+
 def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum per-atom values into per-structure totals, accumulated in float64.
 

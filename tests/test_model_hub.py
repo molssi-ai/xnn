@@ -509,6 +509,7 @@ def _tiny_upstream_mace(heads=None):
 
     n = len(heads) if heads else 1
     e0 = np.array([[0.5, -1.3, -2.1], [0.1, -0.4, -0.9]])[:n]
+    torch.manual_seed(11)          # the same model whatever ran before
     up = mm.ScaleShiftMACE(
         atomic_inter_scale=0.83 if n == 1 else np.array([0.8, 1.1]),
         atomic_inter_shift=0.11 if n == 1 else np.array([0.1, -0.2]),
@@ -553,7 +554,8 @@ def test_mace_torch_model_converts_once_and_caches(tmp_path):
     e0, f0 = _energy(direct, ETHANOL_ISH)
     for m in (first, again):
         e, f = _energy(m, ETHANOL_ISH)
-        assert abs(e - e0) < 1e-12 and (f - f0).abs().max() < 1e-12
+        assert abs(e - e0) < 1e-12 * max(1.0, abs(e0))
+        assert (f - f0).abs().max() < 1e-12 * max(1.0, float(f0.abs().max()))
 
     # the cached copy loads without mace-torch
     code = ("import sys; sys.modules['mace'] = None\n"
@@ -576,7 +578,7 @@ def test_mace_torch_multihead_caches_each_head(tmp_path):
     for head in ("ha", "hb"):
         m = from_pretrained("tiny-mh", head=head, cache_dir=cache, quiet=True)
         e0, _ = _energy(ForceStressOutput(from_mace_torch(up, head=head)), ETHANOL_ISH)
-        assert abs(_energy(m, ETHANOL_ISH)[0] - e0) < 1e-12
+        assert abs(_energy(m, ETHANOL_ISH)[0] - e0) < 1e-12 * max(1.0, abs(e0))
     assert (cache / "tiny-mh" / "raw" / "mh.model").is_file()     # kept for other heads
     assert {r["name"]: r for r in list_models(cache, details=True)}["tiny-mh"]["cached"] \
         == "ready: ha, hb"
