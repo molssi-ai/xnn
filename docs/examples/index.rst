@@ -218,7 +218,7 @@ neutral, charged and open-shell molecules.
    Argon density from MD: `xnn` vs the original NequIP <nb/examples/gnn/nequip/nequip_argon_density_md>
    Training & testing MACE on Argon MD data: `xnn` vs the original MACE, step by step <nb/examples/gnn/mace/mace_argon_train_test>
    Argon density from MD: `xnn` vs the original MACE <nb/examples/gnn/mace/mace_argon_density_md>
-   04 · Recreating the MACE architecture, block by block: original MACE **and** `xnn` <nb/examples/gnn/mace/recreate_mace_architecture>
+   Recreating the MACE architecture, block by block: original MACE **and** `xnn` <nb/examples/gnn/mace/recreate_mace_architecture>
    MACE-OFF23 in xnn: organic chemistry with a pretrained foundation model <nb/examples/gnn/mace/mace_foundation_molecules>
    Fine-tuning strategies for a foundation model: naive, LoRA and multi-head replay <nb/examples/gnn/mace/mace_finetuning_strategies>
    MACE-MP foundation models in xnn: materials properties across generations <nb/examples/gnn/mace/mace_foundation_materials>
