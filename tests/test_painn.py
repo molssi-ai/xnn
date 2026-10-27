@@ -673,3 +673,86 @@ def test_gather_rows_is_indexing(device):
     assert torch.allclose(a, b, rtol=0, atol=1e-14)
     assert torch.autograd.gradgradcheck(lambda x: gather_rows(x, index) ** 2, (src,))
     assert torch.equal(torch.jit.script(gather_rows)(src, index), src[index])
+
+
+def test_fast_path_eligibility(monkeypatch):
+    """The fused message block needs all three terms and a power-of-two width."""
+    import xnn.gnn.fast.painn as fast
+    from xnn.common.finetune import inject_lora
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    cuda = torch.device("cuda")
+    m = _small()
+    assert m.interactions[0].message.fast_supported(cuda, torch.float32)
+    assert not _small(n_features=24).interactions[0].message.fast_supported(cuda, torch.float32)
+    assert not _small(vector_propagation=False).interactions[0].message.fast_supported(
+        cuda, torch.float32)
+    # phi and the filters stay outside the kernels, adapters included
+    inject_lora(m, rank=2)
+    assert m.interactions[0].message.fast_supported(cuda, torch.float32)
+
+
+def _fast_batch(dtype):
+    graphs = [_graph(n=14, seed=1, periodic=True), _graph(n=9, seed=2)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_message_gradients():
+    """Every first derivative of the fused message block (finite differences)."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.painn_kernels import MessageFunction
+    gen = torch.Generator().manual_seed(0)
+    n, n_edges, F = 5, 12, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).cuda().requires_grad_(True)
+
+    x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
+    stacked = rand(n_edges, 2 * 3 * F)                  # one block's columns of stacked filters
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).cuda()
+
+    def f(x, stacked, direction, v):
+        W = stacked[:, 3 * F:]
+        return MessageFunction.apply(x, W, direction, v, edge_index[0], edge_index[1])
+
+    # atomic adds sum in a run-dependent order
+    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("shared", [False, True])
+def test_fast_path_parity(dtype, shared):
+    """The fused message blocks give the reference energies, forces, stress,
+    charges, dipoles and polarizabilities."""
+    pytest.importorskip("triton")
+    model = _small(n_features=32, n_interactions=3, shared_interactions=shared,
+                   shared_filters=shared, dipole=True, polarizability=True, atomic_dipoles=True)
+    model = model.to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    keys = ("energy", "forces", "stress", "charges", "dipole", "polarizability")
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(b.message.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach().double() for k in keys}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max()
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_path_off_in_training():
+    """A training-mode evaluation (force training) runs the reference message blocks."""
+    pytest.importorskip("triton")
+    model = _small().to("cuda").train()
+    model.set_use_fast(True)
+    out = ForceStressOutput(model).train()(_fast_batch(torch.float64))
+    assert not any(b.message.fast_active for b in model.interactions)
+    out["forces"].pow(2).sum().backward()
+    assert model.filters.weight.grad is not None
