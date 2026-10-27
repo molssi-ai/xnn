@@ -998,7 +998,10 @@ class OPLS(InteratomicPotential):
         ValueError
             If the library or the topology specification is missing.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
 
         def listy(value):
             """Coerce a possibly stringified list to a Python value."""

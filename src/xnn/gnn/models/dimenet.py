@@ -657,8 +657,9 @@ class DimeNet(InteratomicPotential):
     def _common_options(cfg) -> dict:
         """The constructor options shared by DimeNet and DimeNet++ read from a config."""
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         p = extra.get("p")
         if p is None:   # the reference code's spelling: envelope_exponent = p - 1
             p = int(extra.get("envelope_exponent", 5)) + 1
@@ -709,7 +710,10 @@ class DimeNet(InteratomicPotential):
         DimeNet
             Instantiated model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         return cls(n_bilinear=int(extra.get("n_bilinear", 8)), **cls._common_options(cfg))
 
 
@@ -789,7 +793,10 @@ class DimeNetPP(DimeNet):
         DimeNetPP
             Instantiated model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         options = cls._common_options(cfg)
         if options["n_output_features"] is None:
             options["n_output_features"] = 256

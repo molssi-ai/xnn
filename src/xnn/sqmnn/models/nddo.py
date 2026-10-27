@@ -310,7 +310,10 @@ class NDDO(InteratomicPotential):
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
         ``reuse_density``, ``scf_starts``.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
                 "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts")
         return cls(**{k: extra[k] for k in keys if k in extra})

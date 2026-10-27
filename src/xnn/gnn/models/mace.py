@@ -1463,8 +1463,9 @@ class MACE(EquivariantGNN):
         import ast
 
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         foundation = extra.get("foundation")
         if foundation is not None:
             model = cls.from_foundation(foundation, head=extra.get("head"),

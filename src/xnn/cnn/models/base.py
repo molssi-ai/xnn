@@ -367,8 +367,9 @@ class VoxelPotential(InteratomicPotential):
     def _common_config_options(cfg) -> dict:
         """The constructor options every voxel model reads from a config."""
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = coerce_species(extra.get("species"), default=[1, 6, 8])
         sigma = extra.get("sigma")
         return dict(

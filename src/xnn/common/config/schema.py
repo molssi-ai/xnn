@@ -58,9 +58,11 @@ class ModelConfig:
         Number of radial basis functions used to expand interatomic distances.
         MACE ``num_bessel``/``num_radial_basis``. Defaults to ``8``.
     extra : dict[str, Any]
-        Free-form, model-specific options (e.g. the species list, correlation
-        order, and irreps for MACE). Defaults to the canonical MACE architecture
-        options (see :func:`_default_mace_extra`).
+        Model-specific options (e.g. the species list, correlation order, and
+        irreps for MACE). Options the model does not use are ignored with a
+        warning when it is built. When not given: the canonical MACE
+        architecture options for ``name="mace"`` (see
+        :func:`_default_mace_extra`), none for the other models.
     """
 
     name: str = "mace"             # registry key: schnet/hdnnp/ani/nequip/mace/allegro
@@ -68,8 +70,12 @@ class ModelConfig:
     n_features: int = 32           # MACE num_channels
     n_interactions: int = 2        # MACE num_interactions
     n_rbf: int = 8                 # MACE num_bessel / num_radial_basis
-    # free-form, model-specific options (MACE architecture defaults)
-    extra: dict[str, Any] = field(default_factory=_default_mace_extra)
+    # model-specific options (the MACE architecture defaults for MACE)
+    extra: Optional[dict[str, Any]] = None
+
+    def __post_init__(self):
+        if self.extra is None:
+            self.extra = _default_mace_extra() if self.name.lower() == "mace" else {}
 
 
 @dataclass
@@ -472,11 +478,15 @@ class Config:
         recorded subtraction.
 
         Overwrites ``data.cutoff`` with ``model.cutoff`` so the neighbor-list
-        radius and the model interaction radius stay in lockstep, and
-        normalizes :attr:`subtracted_dispersion`.
+        radius and the model interaction radius stay in lockstep, drops the
+        MACE default options when the model is not MACE, and normalizes
+        :attr:`subtracted_dispersion`.
         """
         # keep the neighbor-list cutoff and the model cutoff in lockstep
         self.data.cutoff = self.model.cutoff
+        # the MACE defaults of a default config do not follow a change of model
+        if self.model.name.lower() != "mace" and self.model.extra == _default_mace_extra():
+            self.model.extra = {}
         from ..finetune.replay import REPLAY_FILTERS
         if self.data.replay_filter not in REPLAY_FILTERS:
             raise ValueError(f"data.replay_filter must be one of {REPLAY_FILTERS}, "

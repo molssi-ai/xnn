@@ -183,7 +183,10 @@ class CNN3D(VoxelPotential):
         CNN3D
             The model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         opts = cls._common_config_options(cfg)
         channels = extra.get("channels")
         strides = extra.get("strides")

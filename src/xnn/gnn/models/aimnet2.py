@@ -777,8 +777,9 @@ class AIMNet2(GNNPotential):
             neighbor-list cutoff.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         foundation = extra.get("foundation")
         if foundation is not None:
             options = {k: extra[k] for k in COULOMB_OPTIONS if k in extra}

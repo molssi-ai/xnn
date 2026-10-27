@@ -684,7 +684,10 @@ class SteerableCNN(VoxelPotential):
         SteerableCNN
             The model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         opts = cls._common_config_options(cfg)
         fields = extra.get("fields")
         strides = extra.get("strides")
