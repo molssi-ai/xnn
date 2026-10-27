@@ -783,8 +783,9 @@ class NequIP(EquivariantGNN):
             The instantiated model.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = coerce_species(extra.get("species"), default=[1, 6, 8])
 
         if extra.get("global_rescale_scale") is not None:

@@ -559,8 +559,9 @@ class BAMBOO(InteratomicPotential):
             The instantiated model.
         """
         from xnn.common.config.coerce import coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = (coerce_species(extra.get("species"))
                    if extra.get("species") is not None else None)
         return cls(

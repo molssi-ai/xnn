@@ -14,35 +14,12 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import he_orthogonal_, scatter_sum
 from xnn.common.models.registry import register_model
 
 from ..featurizers import BesselRBF, PolynomialCutoff, SphericalBesselBasis, real_spherical_harmonics, zonal_harmonics
 
 _MAX_Z = 100
-
-
-def he_orthogonal_(weight: Tensor) -> Tensor:
-    """He-scaled orthogonal initialization with exact standardization (paper section 6).
-
-    A random (semi-)orthogonal matrix is standardized per output unit to zero
-    mean and unit variance and scaled to variance ``1 / fan_in``.
-
-    Parameters
-    ----------
-    weight : Tensor
-        A ``(fan_out, fan_in)`` weight matrix, modified in place.
-
-    Returns
-    -------
-    Tensor
-        ``weight``.
-    """
-    with torch.no_grad():
-        nn.init.orthogonal_(weight)
-        var, mean = torch.var_mean(weight, dim=1, unbiased=True, keepdim=True)
-        weight.sub_(mean).div_(torch.sqrt(var + 1e-6)).mul_(weight.shape[1] ** -0.5)
-    return weight
 
 
 class _Dense(nn.Linear):
@@ -923,8 +900,9 @@ class GemNet(InteratomicPotential):
             Instantiated model.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = (coerce_species(extra["species"])
                    if extra.get("species") is not None else None)
         quadruplets = extra.get("quadruplets")

@@ -2,7 +2,8 @@ name: Tests
 
 # Runs the test suite on CPU with coverage and uploads the coverage report and
 # the JUnit test results to Codecov (coverage graphs and test analytics).
-# GPU-only tests (fast paths, Triton kernels) skip themselves without CUDA.
+# GPU-only tests (fast paths, Triton kernels) skip themselves without CUDA; the
+# Triton kernels also run on CPU tensors under Triton's interpreter.
 
 on:
   push:
@@ -31,6 +32,12 @@ jobs:
 
       - name: Install CPU-only torch
         run: pip install "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Triton for its interpreter
+        # the CPU wheel of torch comes without Triton; its interpreter runs the
+        # fused kernels of the fast paths on CPU tensors in the tests (using 3.3:
+        # the 3.1 interpreter crashes in its atomic adds)
+        run: pip install "triton==3.3.1"
 
       - name: Install xnn and test dependencies
         run: pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4" pytest-cov

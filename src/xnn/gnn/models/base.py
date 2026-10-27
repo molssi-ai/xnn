@@ -22,18 +22,13 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.constants import exact_float64_constants
+from xnn.common.models.constants import ExactFloat64Constants
 
 from ..featurizers import SphericalHarmonicEdgeEmbedding
 from .blocks import species_irreps
 
 
-def _exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
-    """``load_state_dict`` post-hook: a float32 checkpoint brings rounded constants."""
-    exact_float64_constants(module)
-
-
-class GNNPotential(InteratomicPotential):
+class GNNPotential(ExactFloat64Constants, InteratomicPotential):
     """Species bookkeeping shared by every GNN potential in this package.
 
     Handles what all graph potentials need regardless of angular basis: an
@@ -73,13 +68,6 @@ class GNNPotential(InteratomicPotential):
         self.register_buffer("z_to_index", z_to_index)
         self.atom_ref = nn.Embedding(200, 1)
         nn.init.zeros_(self.atom_ref.weight)
-        # float64 constants stay exact through loads and casts
-        self.register_load_state_dict_post_hook(_exact_constants_after_load)
-
-    def _apply(self, fn, recurse=True):
-        out = super()._apply(fn, recurse)
-        exact_float64_constants(self)
-        return out
 
     def set_atomic_energies(self, values) -> None:
         """Initialise the per-element reference energies ``atom_ref``.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from .options import warn_ignored
 from .schema import Config, DataConfig, ModelConfig, OptimConfig, TrainerConfig
 from .translate import translate_model_keys
 
@@ -26,9 +27,11 @@ def from_dict(d: dict[str, Any]) -> Config:
     sections (``model``, ``data``, ``optim``, ``trainer``) are dispatched to their dataclass;
     the ``model`` section first has upstream key spellings translated to the
     xnn canonical names (:func:`~xnn.common.config.translate.translate_model_keys`),
-    then unknown keys inside it are collected into ``ModelConfig.extra``. Known
-    top-level scalars (``device``, ``seed``, ``output_dir``) are applied
-    directly. Unrecognized keys are ignored.
+    then its other keys are collected into ``ModelConfig.extra`` (the model's
+    options; those the model does not use are reported when it is built).
+    Known top-level scalars (``device``, ``seed``, ``output_dir``,
+    ``subtracted_dispersion``) are applied directly. Any other key is ignored
+    with an :class:`~xnn.common.config.options.IgnoredOptionWarning`.
 
     Parameters
     ----------
@@ -50,14 +53,17 @@ def from_dict(d: dict[str, Any]) -> Config:
         valid = {f.name for f in dataclasses.fields(klass)}
         known = {k: v for k, v in sub.items() if k in valid}
         if key == "model":
-            known.setdefault("extra", {})
+            known["extra"] = dict(known.get("extra") or {})
             known["extra"].update({k: v for k, v in sub.items() if k not in valid})
+        else:
+            warn_ignored(key, set(sub) - valid)
         kwargs[key] = klass(**known)
-    # top-level scalars (device, seed, output_dir)
+    # top-level scalars (device, seed, output_dir, subtracted_dispersion)
     top_valid = {f.name for f in dataclasses.fields(Config)} - set(_SECTIONS)
     for k in list(d):
         if k in top_valid:
             kwargs[k] = d.pop(k)
+    warn_ignored("config", set(d))
     return Config(**kwargs)
 
 
@@ -66,7 +72,11 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
 
     Shared by the CLI and Hydra paths so the same override syntax works
     everywhere. Each value is parsed with :func:`ast.literal_eval` and falls
-    back to the raw string if parsing fails. Entries without ``=`` are skipped.
+    back to the raw string if parsing fails. A ``model`` key that is not a
+    field of :class:`ModelConfig` is a model option (``model.extra``), as in a
+    config file. An entry without ``=``, or one naming a key the config does
+    not have, is ignored with an
+    :class:`~xnn.common.config.options.IgnoredOptionWarning`.
     :meth:`Config.__post_init__` is re-run afterwards to re-synchronize the
     cutoffs.
 
@@ -85,6 +95,7 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
     import ast
     for ov in overrides:
         if "=" not in ov:
+            warn_ignored("overrides", [ov])
             continue
         path, raw = ov.split("=", 1)
         try:
@@ -94,8 +105,24 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
         obj = cfg
         parts = path.split(".")
         for p in parts[:-1]:
-            obj = getattr(obj, p)
-        setattr(obj, parts[-1], val)
+            if isinstance(obj, dict):
+                obj = obj.setdefault(p, {})
+            elif dataclasses.is_dataclass(obj) and hasattr(obj, p):
+                obj = getattr(obj, p)
+            else:
+                obj = None
+                break
+        last = parts[-1]
+        if isinstance(obj, dict):
+            obj[last] = val
+        elif obj is None:
+            warn_ignored("overrides", [path])
+        elif last in {f.name for f in dataclasses.fields(obj)}:
+            setattr(obj, last, val)
+        elif isinstance(obj, ModelConfig):
+            obj.extra[last] = val                     # a model option
+        else:
+            warn_ignored("overrides", [path])
     cfg.__post_init__()
     return cfg
 

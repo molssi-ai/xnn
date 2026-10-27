@@ -100,6 +100,8 @@ def build_model(cfg):
         ``True`` for the defaults) wraps it with the Latent Ewald Summation
         long-range term. Dispersion is applied before LES, so LES sees the
         D4-corrected model's features (they are passed through unchanged).
+        Options of ``cfg.extra`` that the build does not use are ignored with
+        an :class:`~xnn.common.config.options.IgnoredOptionWarning`.
 
     Raises
     ------
@@ -122,10 +124,12 @@ def prepare_model(cfg):
     """Build a model and the config that rebuilds it.
 
     The same as :func:`build_model`, also returning the resolved
-    :class:`~xnn.common.config.schema.ModelConfig`: with a ``"pretrained"``
-    source the architecture keys are taken from the checkpoint and recorded
-    in place of the source, so the returned config rebuilds the model from
-    its weights alone (what the trainer writes into its checkpoints).
+    :class:`~xnn.common.config.schema.ModelConfig`: its options are those
+    given plus the defaults the model used for the others, and with a
+    ``"pretrained"`` source the architecture keys are taken from the
+    checkpoint and recorded in place of the source, so the returned config
+    rebuilds the model from its weights alone, whatever later versions choose
+    as defaults (what the trainer writes into its checkpoints).
 
     ``extra["pretrained"]`` names any source
     :func:`~xnn.common.models.from_pretrained` accepts (registry name, local
@@ -159,6 +163,7 @@ def prepare_model(cfg):
     """
     import copy
 
+    from ..config.options import ModelOptions, model_options, warn_ignored
     from ..finetune.heads import MultiHead, head_names, head_options
     from ..finetune.lora import inject_lora, lora_options
     from ..finetune.reference import REFERENCE_MARKERS, reference_markers
@@ -171,17 +176,26 @@ def prepare_model(cfg):
             "xnn.common.finetune.estimate_atomic_energies / average_atomic_energies")
 
     extra = dict(cfg.extra or {})
+    tracked = None
     if extra.get("pretrained") is not None:
         # the checkpoint's own wrappers come loaded; only the ones the config
-        # adds on top are built here
+        # adds on top are built here (_from_pretrained checks the other keys)
         model, cfg, new_wrappers = _from_pretrained(cfg)
         extra = dict(cfg.extra or {})
     else:
         key = cfg.name.lower()
         if key not in _MODELS:
             raise KeyError(f"unknown model '{cfg.name}'. registered: {sorted(_MODELS)}")
-        model = _MODELS[key].from_config(cfg)
+        # the options nothing reads are reported at the end
+        tracked = ModelOptions(cfg.extra or {})
+        built = copy.copy(cfg)
+        built.extra = tracked
+        model = _MODELS[key].from_config(built)
         cfg = copy.deepcopy(cfg)
+        # the options given and the model's defaults for the others: the config
+        # rebuilds this model whatever later versions choose as defaults
+        cfg.extra = tracked.resolved()
+        extra = model_options(built)
         new_wrappers = {k: extra[k] for k in _WRAPPER_KEYS if extra.get(k)}
 
     core = core_model(model)
@@ -212,6 +226,8 @@ def prepare_model(cfg):
                     "model's electrostatics off to use LES instead.")
             opts = dict(new_wrappers[key]) if isinstance(new_wrappers[key], dict) else {}
             model = LatentEwald(model, **opts)
+    if tracked is not None:
+        warn_ignored(f"model '{cfg.name}'", tracked.unread())
     return model, cfg
 
 
@@ -451,10 +467,12 @@ def add_dispersion(model, spec):
     from .d4 import D4Dispersion, d4_options_from_extra
     if isinstance(spec, str):
         spec = {"name": spec}
+    from ..config.options import warn_ignored
+
     opts = dict(spec) if isinstance(spec, dict) else {}
     name = str(opts.pop("name", "d4")).lower()
-    if name == "d4":
-        return D4Dispersion(model, **d4_options_from_extra(opts))
-    if name == "d3":
-        return D3Dispersion(model, **d3_options_from_extra(opts))
-    raise KeyError(f"unknown dispersion model '{name}' (use 'd3' or 'd4')")
+    if name not in ("d3", "d4"):
+        raise KeyError(f"unknown dispersion model '{name}' (use 'd3' or 'd4')")
+    picked = (d4_options_from_extra if name == "d4" else d3_options_from_extra)(opts)
+    warn_ignored(f"dispersion '{name}'", set(opts) - set(picked))
+    return (D4Dispersion if name == "d4" else D3Dispersion)(model, **picked)

@@ -30,6 +30,22 @@ def test_softplus_derivatives(fn, dtype):
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_exact_softplus_scripted_form(monkeypatch, dtype):
+    """The form TorchScript evaluates (selections around exp(-|x|)), run eagerly so that it is
+    measured: the eager fused softplus to round-off, with finite derivatives at the extremes."""
+    from xnn.common.models import ops
+
+    x = torch.tensor([-1000., -30., -1., -1e-3, 0., 1e-3, 1., 30., 1000.], dtype=dtype,
+                     requires_grad=True)
+    eager = ops.exact_softplus(x)
+    monkeypatch.setattr(torch.jit, "is_scripting", lambda: True)
+    scripted = ops.exact_softplus(x)
+    torch.testing.assert_close(scripted, eager, rtol=2 * torch.finfo(dtype).eps, atol=0)
+    first, = torch.autograd.grad(scripted.sum(), x)
+    torch.testing.assert_close(first, torch.sigmoid(x))
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
 @pytest.mark.parametrize('kind', [3, 8, 9])
 def test_acsf_collinear_derivatives_are_finite(dtype, kind):
     """Angular descriptors have finite derivatives on collinear distinct atoms."""

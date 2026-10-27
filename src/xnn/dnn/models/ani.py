@@ -320,7 +320,10 @@ class ANI(DescriptorPotential):
         ANI
             Instantiated model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         preset = str(extra.get("preset", "")).lower().replace("_", "-")
         # ANI-2x carries a different default element set than the other presets.
         default_species = (ANI2X_SPECIES if preset in ("ani-2x", "ani2x")

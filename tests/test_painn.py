@@ -70,24 +70,53 @@ def test_registered():
     assert "painn" in available_models()
 
 
-def test_paper_defaults():
-    """PaiNN() is the ICML 2021 architecture: F = 128, T = 3, 20 Bessel
-    functions with a cosine cutoff at 5 A, a 128 -> 64 -> 1 readout, and
-    about 588k parameters (Table IV: 588.3k)."""
+def test_defaults():
+    """PaiNN() has F = 128, T = 3 and 20 Gaussians with a cosine cutoff at 5 A."""
     m = PaiNN()
     assert m.embedding.weight.shape == (100, 128)
     assert len(m.interactions) == 3 and m.cutoff == 5.0
+    assert m.rbf.centers.tolist() == pytest.approx(torch.linspace(0, 5, 20).tolist())
+    assert m.rbf.gamma == pytest.approx(0.5 * (19 / 5.0) ** 2)
+    assert not m.atomic_dipoles and not m.shared_filters and not m.shared_interactions
+
+
+def test_paper_architecture():
+    """With the paper's options, PaiNN is the ICML 2021 architecture: F = 128,
+    T = 3, 20 Bessel functions with a cosine cutoff at 5 A, a 128 -> 64 -> 1
+    readout, and about 588k parameters (Table IV: 588.3k)."""
+    m = PaiNN(radial_basis="bessel")
     assert m.rbf.freqs.shape == (20,) and m.rbf.norm == 1.0
-    assert m.interactions[0].message.filter.weight.shape == (384, 20)
+    assert m.filters.weight.shape == (3 * 384, 20)              # three blocks of (s, vv, vs)
     assert m.interactions[0].update.lin_v.weight.shape == (256, 128)
     assert m.readout[0].weight.shape == (64, 128) and m.readout[2].weight.shape == (1, 64)
     assert m.dipole_head is None and m.polarizability_head is None
     n = sum(p.numel() for p in m.parameters())
     assert abs(n - 588_300) / 588_300 < 0.01
     # the tensorial heads: two gated blocks 128 -> 64 -> 1
-    t = PaiNN(dipole=True, polarizability=True)
+    t = PaiNN(radial_basis="bessel", dipole=True, atomic_dipoles=True, polarizability=True)
     assert [b.lin_v.weight.shape for b in t.dipole_head.blocks] == [(128, 128), (2, 64)]
     assert t.polarizability_head.blocks[1].net[2].weight.shape == (2, 64)
+    # latent charges alone (eq 12): an atom-wise network 128 -> 64 -> 1
+    q = PaiNN(dipole=True)
+    assert [lin.weight.shape for lin in q.dipole_head[::2]] == [(64, 128), (1, 64)]
+
+
+def test_weight_sharing():
+    """Shared filters: one block's filters for all; shared interactions: one set of
+    message and update networks, filters per block."""
+    m = PaiNN(n_features=8, shared_filters=True)
+    assert m.filters.weight.shape[0] == m.filter_width == 24
+    assert m.interactions[0].update is not m.interactions[1].update
+    m = PaiNN(n_features=8, shared_interactions=True)
+    assert m.interactions[0].message.phi is m.interactions[2].message.phi
+    assert m.interactions[0].update is m.interactions[2].update
+    assert m.filters.weight.shape[0] == 3 * m.filter_width
+    both = PaiNN(n_features=8, shared_interactions=True, shared_filters=True)
+    assert _count(both) < _count(m) < _count(PaiNN(n_features=8))
+
+
+def _count(module):
+    return sum(p.numel() for p in module.parameters())
 
 
 def _n_params(**kw):
@@ -114,7 +143,7 @@ def test_ablations_drop_their_parameters(F, kw, per_block):
 
 
 def test_invalid_options():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="radial_basis"):
         PaiNN(n_features=8, radial_basis="chebyshev")
     with pytest.raises(ValueError):
         PaiNN(n_features=8, atomic_energies=[1.0])
@@ -123,14 +152,48 @@ def test_invalid_options():
 def test_radial_basis_is_the_paper_form():
     """The filters are built from sin(n pi r / r_cut) / r, 1 <= n <= n_rbf,
     times the cosine cutoff."""
-    m = _small(n_rbf=5)
+    m = _small(n_rbf=5, radial_basis="bessel")
     r = torch.linspace(0.3, 4.9, 25)
     ref = torch.stack([torch.sin(n * math.pi * r / 5.0) / r for n in range(1, 6)], -1)
     assert torch.allclose(m.rbf(r), ref, atol=1e-14)
     assert torch.allclose(m.cutoff_fn(r), 0.5 * (torch.cos(math.pi * r / 5.0) + 1))
     assert float(m.cutoff_fn(torch.tensor([5.0, 6.0])).abs().max()) == 0.0
-    g = _small(n_rbf=5, radial_basis="gaussian")
-    assert g.rbf.centers.tolist() == pytest.approx([0, 1.25, 2.5, 3.75, 5.0])
+
+
+@pytest.mark.parametrize("shared_filters", [False, True])
+def test_per_block_filter_state_dict_loads(shared_filters):
+    """A state dict with one filter layer per block (xnn 0.22 and earlier) loads."""
+    model = _small(shared_filters=shared_filters, dipole=True).eval()
+    old = dict(model.state_dict())
+    w, b = old.pop("filters.weight"), old.pop("filters.bias")
+    for k in range(len(model.interactions)):
+        part = slice(0, None) if shared_filters else slice(k * model.filter_width,
+                                                           (k + 1) * model.filter_width)
+        old[f"interactions.{k}.message.filter.weight"] = w[part].clone()
+        old[f"interactions.{k}.message.filter.bias"] = b[part].clone()
+    fresh = _small(seed=1, shared_filters=shared_filters, dipole=True).eval()
+    fresh.load_state_dict(old)
+    g = _graph()
+    assert torch.equal(fresh(g)["energy"], model(g)["energy"])
+
+
+@pytest.mark.parametrize("radial_basis", ["gaussian", "bessel"])
+def test_float64_basis_exact_after_cast_and_load(radial_basis):
+    """A float32 build cast to float64, or a float32 checkpoint, keeps the exact
+    Gaussian centers and Bessel frequencies n pi."""
+    name, exact = (("centers", torch.linspace(0.0, 5.0, 20, dtype=torch.float64))
+                   if radial_basis == "gaussian"
+                   else ("freqs", math.pi * torch.arange(1, 21, dtype=torch.float64)))
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        m32 = PaiNN(radial_basis=radial_basis)
+    finally:
+        torch.set_default_dtype(old)
+    assert torch.equal(getattr(m32.double().rbf, name), exact)
+    m64 = PaiNN(radial_basis=radial_basis)
+    m64.load_state_dict(PaiNN(radial_basis=radial_basis).float().state_dict())
+    assert torch.equal(getattr(m64.rbf, name), exact)
 
 
 # the paper's equations, atom by atom
@@ -142,8 +205,9 @@ def _reference(model, Z, pos, total_charge=0.0):
     pos = torch.as_tensor(pos, dtype=torch.float64)
     s = model.embedding.weight[Z].clone()
     v = torch.zeros(N, 3, F)
-    for block in model.interactions:
+    for k, block in enumerate(model.interactions):
         msg, upd = block.message, block.update
+        first = (0 if model.shared_filters else k) * model.filter_width
         ds, dv = torch.zeros(N, F), torch.zeros(N, 3, F)
         for i in range(N):
             for j in range(N):
@@ -156,7 +220,7 @@ def _reference(model, Z, pos, total_charge=0.0):
                 e = rij / d
                 rbf = model.rbf(torch.tensor([d]))[0]
                 fcut = 0.5 * (math.cos(math.pi * d / rc) + 1.0)
-                W = _lin(msg.filter, rbf) * fcut
+                W = _lin(model.filters, rbf)[first:first + model.filter_width] * fcut
                 phi = _lin(msg.phi[2], _silu(_lin(msg.phi[0], s[j])))
                 x = phi * W
                 ds[i] += x[:F]                                   # eq 7
@@ -199,13 +263,21 @@ def _reference(model, Z, pos, total_charge=0.0):
 
     m = torch.tensor(ATOMIC_MASSES)[Z][:, None]
     r = pos - (m * pos).sum(0) / m.sum()
+    def atomwise(net, si):
+        for layer in net:
+            si = _lin(layer, si) if isinstance(layer, torch.nn.Linear) else _silu(si)
+        return si[0]
+
     if model.dipole_head is not None:
-        q, mu = zip(*[gated(model.dipole_head, s[i], v[i]) for i in range(N)])
-        q, mu = torch.stack(q), torch.stack(mu)
+        if model.atomic_dipoles:                                 # eq 13
+            q, mu = zip(*[gated(model.dipole_head, s[i], v[i]) for i in range(N)])
+            q, mu = torch.stack(q), torch.stack(mu)
+        else:                                                    # eq 12
+            q, mu = torch.stack([atomwise(model.dipole_head, s[i]) for i in range(N)]), 0.0
         if model.correct_charges:
             q = q + (total_charge - q.sum()) / N
         out["charges"] = q
-        out["dipole"] = ((mu if model.atomic_dipoles else 0.0) + q[:, None] * r).sum(0)
+        out["dipole"] = (mu + q[:, None] * r).sum(0)
     if model.polarizability_head is not None:
         a0, nu = zip(*[gated(model.polarizability_head, s[i], v[i]) for i in range(N)])
         a0, nu = torch.stack(a0), torch.stack(nu)
@@ -216,14 +288,16 @@ def _reference(model, Z, pos, total_charge=0.0):
     return out
 
 
-@pytest.mark.parametrize("radial_basis", ["bessel", "gaussian"])
 @pytest.mark.parametrize("ablation", [{}, {"scalar_product": False},
                                       {"vector_propagation": False},
                                       {"scalar_product": False, "vector_propagation": False},
                                       {"vector_features": False},
-                                      {"atomic_dipoles": False}])
-def test_forward_matches_paper_equations(radial_basis, ablation):
-    model = _small(radial_basis=radial_basis, dipole=True, polarizability=True,
+                                      {"atomic_dipoles": True},
+                                      {"radial_basis": "bessel"}, {"radial_basis": "expnorm"},
+                                      {"shared_filters": True}, {"shared_interactions": True},
+                                      {"shared_filters": True, "shared_interactions": True}])
+def test_forward_matches_paper_equations(ablation):
+    model = _small(dipole=True, polarizability=True,
                    energy_shift=-0.3, energy_scale=1.7, **ablation)
     model.set_atomic_energies(SPECIES, [-0.5, -1.0, -2.0])
     s = _structure(7, seed=3)
@@ -246,7 +320,7 @@ def test_edge_direction_is_the_paper_convention():
         for p in model.parameters():
             p.zero_()
         msg = model.interactions[0].message
-        msg.filter.bias[2 * 16:].fill_(1.0)      # W_vs = 1 (times the cutoff)
+        model.filters.bias[2 * 16:].fill_(1.0)   # W_vs = 1 (times the cutoff)
         msg.phi[2].bias[2 * 16:].fill_(1.0)      # phi_vs = 1
         model.interactions[0].update.lin_v.weight.zero_()
     g = structure_to_graph({"pos": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -526,19 +600,29 @@ def test_train_step_with_dipole_and_polarizability_targets(tmp_path):
 def test_from_config_extras():
     cfg = from_dict({"model": {
         "name": "painn", "cutoff": 4.0, "n_features": 16, "n_interactions": 2, "n_rbf": 6,
-        "extra": {"radial_basis": "gaussian", "shared_filters": True, "dipole": True,
-                  "polarizability": True, "scalar_product": False,
+        "extra": {"radial_basis": "bessel", "shared_filters": True, "atomic_dipoles": True,
+                  "dipole": True, "polarizability": True, "scalar_product": False,
                   "energy_shift": -1.5, "energy_scale": 0.2, "species": SPECIES,
                   "atomic_energies": [-13.6, -1030.0, -2043.0]}}})
     m = build_model(cfg.model)
-    assert m.rbf.centers.shape == (6,) and m.cutoff == 4.0
-    assert m.interactions[0].message.filter is m.interactions[1].message.filter
+    assert m.rbf.freqs.shape == (6,) and m.cutoff == 4.0
+    assert m.filters.weight.shape[0] == m.filter_width
+    assert m.atomic_dipoles
     assert m.dipole_head is not None and m.polarizability_head is not None
     assert not m.interactions[0].update.scalar_product
     assert float(m.energy_shift) == -1.5 and float(m.energy_scale) == pytest.approx(0.2)
     assert float(m.atom_ref.weight[6, 0]) == pytest.approx(-1030.0)
     out = m(_graph())
     assert out["dipole"].shape == (1, 3)
+
+
+def test_model_option_override():
+    """A dotted override of a model option lands in the model's options."""
+    from xnn.common.config import apply_overrides
+    cfg = apply_overrides(from_dict({"model": {"name": "painn", "n_features": 8}}),
+                          ["model.radial_basis='bessel'"])
+    assert cfg.model.extra["radial_basis"] == "bessel"
+    assert hasattr(build_model(cfg.model).rbf, "freqs")
 
 
 def test_reference_key_translation():
@@ -550,26 +634,179 @@ def test_reference_key_translation():
 
 # fidelity to the reference implementation (optional)
 
-def _fidelity(dtype, radial_basis):
+def _fidelity(dtype):
     pytest.importorskip("schnetpack")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "painn_spk_fidelity.py")
-    res = subprocess.run([sys.executable, script, dtype, radial_basis],
-                         capture_output=True, text=True)
+    script = os.path.join(os.path.dirname(__file__), "painn_fidelity.py")
+    res = subprocess.run([sys.executable, script, dtype], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("radial_basis", ["bessel", "gaussian"])
-def test_fidelity_vs_reference_float64(radial_basis):
+def test_fidelity_vs_reference_float64():
     """Transplanted weights give the reference energies, forces, charges,
     dipoles and polarizabilities at the float64 floor (a layout or sign
     convention error would show as O(1))."""
-    assert _fidelity("float64", radial_basis) < 1e-12
+    assert _fidelity("float64") < 1e-12
 
 
-@pytest.mark.parametrize("radial_basis", ["bessel", "gaussian"])
-def test_fidelity_vs_reference_float32(radial_basis):
+def test_fidelity_vs_reference_float32():
     """The same in float32, at float32 round-off."""
-    assert _fidelity("float32", radial_basis) < 1e-5
+    assert _fidelity("float32") < 1e-5
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_gather_rows_is_indexing(device):
+    """The message gather: the values and both derivatives of ``src[index]``, scriptable."""
+    from xnn.common.models.ops import gather_rows
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    gen = torch.Generator().manual_seed(0)
+    src = torch.randn(7, 3, 4, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    index = torch.randint(0, 7, (20,), generator=gen).to(device)
+    assert torch.equal(gather_rows(src, index), src[index])
+    probe = torch.randn(20, 3, 4, dtype=torch.float64, generator=gen).to(device)
+    a, = torch.autograd.grad((gather_rows(src, index) * probe).sum(), src)
+    b, = torch.autograd.grad((src[index] * probe).sum(), src)
+    assert torch.allclose(a, b, rtol=0, atol=1e-14)
+    assert torch.autograd.gradgradcheck(lambda x: gather_rows(x, index) ** 2, (src,))
+    assert torch.equal(torch.jit.script(gather_rows)(src, index), src[index])
+
+
+def test_fast_path_eligibility(monkeypatch):
+    """The fused message block needs all three terms and a power-of-two width."""
+    import xnn.gnn.fast.painn as fast
+    from xnn.common.finetune import inject_lora
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    cuda = torch.device("cuda")
+    m = _small()
+    assert m.interactions[0].message.fast_supported(cuda, torch.float32)
+    assert not _small(n_features=24).interactions[0].message.fast_supported(cuda, torch.float32)
+    assert not _small(vector_propagation=False).interactions[0].message.fast_supported(
+        cuda, torch.float32)
+    # phi and the filters stay outside the kernels, adapters included
+    inject_lora(m, rank=2)
+    assert m.interactions[0].message.fast_supported(cuda, torch.float32)
+
+
+def _fast_batch(dtype):
+    graphs = [_graph(n=14, seed=1, periodic=True), _graph(n=9, seed=2)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_message_gradients():
+    """Every first derivative of the fused message block (finite differences)."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.painn_kernels import MessageFunction
+    gen = torch.Generator().manual_seed(0)
+    n, n_edges, F = 5, 12, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).cuda().requires_grad_(True)
+
+    x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
+    stacked = rand(n_edges, 2 * 3 * F)                  # one block's columns of stacked filters
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).cuda()
+
+    def f(x, stacked, direction, v):
+        W = stacked[:, 3 * F:]
+        return MessageFunction.apply(x, W, direction, v, edge_index[0], edge_index[1])
+
+    # atomic adds sum in a run-dependent order
+    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("shared", [False, True])
+def test_fast_path_parity(dtype, shared):
+    """The fused message blocks give the reference energies, forces, stress,
+    charges, dipoles and polarizabilities."""
+    pytest.importorskip("triton")
+    model = _small(n_features=32, n_interactions=3, shared_interactions=shared,
+                   shared_filters=shared, dipole=True, polarizability=True, atomic_dipoles=True)
+    model = model.to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    keys = ("energy", "forces", "stress", "charges", "dipole", "polarizability")
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(b.message.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach().double() for k in keys}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max()
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_path_off_in_training():
+    """A training-mode evaluation (force training) runs the reference message blocks."""
+    pytest.importorskip("triton")
+    model = _small().to("cuda").train()
+    model.set_use_fast(True)
+    out = ForceStressOutput(model).train()(_fast_batch(torch.float64))
+    assert not any(b.message.fast_active for b in model.interactions)
+    out["forces"].pow(2).sum().backward()
+    assert model.filters.weight.grad is not None
+
+
+@pytest.fixture
+def interpreted(monkeypatch):
+    """The fused kernels under Triton's interpreter (chosen by conftest.py on machines without
+    CUDA), on CPU tensors, with the fast path offered on CPUs."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.painn as fast
+    from xnn.gnn.fast import painn_kernels
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    return painn_kernels
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.painn import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def test_fast_message_gradients_interpreted(interpreted):
+    """The fused message block and its first derivatives, run by the Triton interpreter."""
+    gen = torch.Generator().manual_seed(1)
+    n, n_edges, F = 4, 9, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).requires_grad_(True)
+
+    x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
+    stacked = rand(n_edges, 2 * 3 * F)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
+
+    def f(x, stacked, direction, v):
+        return interpreted.message(x, stacked[:, 3 * F:], direction, v, edge_index)
+
+    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12, fast_mode=True)
+    assert interpreted.message(x, stacked[:0, 3 * F:], direction[:0], v,
+                               edge_index[:, :0])[1].abs().max() == 0
+
+
+def test_fast_path_parity_interpreted(interpreted):
+    """The whole model with the fused message blocks on a CPU (the interpreter) and the reference."""
+    model = _small(dipole=True, polarizability=True, atomic_dipoles=True).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    graph = collate([_graph(n=8, seed=1, periodic=True), _graph(n=5, seed=2)])
+    keys = ("energy", "forces", "stress", "charges", "dipole", "polarizability")
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(graph)
+        assert all(b.message.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach() for k in keys}
+    for key, ref in out[False].items():
+        assert (out[True][key] - ref).abs().max() <= 1e-12 * ref.abs().max(), key

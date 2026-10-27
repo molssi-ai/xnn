@@ -14,11 +14,15 @@ from torch import Tensor, nn
 
 
 def exact_softplus(x: Tensor) -> Tensor:
-    """Evaluate ``log(1 + exp(x))`` with stable values and derivatives.
+    """Evaluate ``log(1 + exp(x))`` exactly to round-off, with exact derivatives.
 
-    The exponential's argument is nonpositive. Both branches are smooth
-    softplus expressions, including at zero, unlike a split using ``abs``
-    and ``relu`` whose individual derivatives vanish there.
+    One fused :func:`torch.nn.functional.softplus` kernel per pass in eager
+    mode (two selections around ``log1p(exp(-|x|))`` under TorchScript). The
+    fused kernel returns ``x`` above its threshold and so drops the tail ``log(1 + exp(-x))``,
+    which is below the rounding of the value and of the derivative
+    ``sigmoid(x)`` once ``exp(-threshold)`` is: a threshold of 40 in float64
+    (``exp(-40) = 4e-18``) and 20 otherwise (``exp(-20) = 2e-9``), against
+    the default 20 that drops ``2e-9`` in float64.
 
     Parameters
     ----------
@@ -30,9 +34,15 @@ def exact_softplus(x: Tensor) -> Tensor:
     Tensor
         Softplus values with the same shape as ``x``.
     """
-    positive = x > 0
-    exponent = torch.where(positive, -x, x)
-    return torch.where(positive, x, torch.zeros_like(x)) + torch.log1p(torch.exp(exponent))
+    if torch.jit.is_scripting():
+        # TorchScript differentiates softplus symbolically through exp(x), which
+        # overflows for large x; selections around exp(-|x|) stay finite (and
+        # are fused by the TorchScript fuser)
+        positive = x > 0
+        exponent = torch.where(positive, -x, x)
+        return torch.where(positive, x, torch.zeros_like(x)) + torch.log1p(torch.exp(exponent))
+    threshold = 40.0 if x.dtype == torch.float64 else 20.0
+    return nn.functional.softplus(x, 1.0, threshold)
 
 
 def shifted_softplus(x: Tensor) -> Tensor:
@@ -43,10 +53,8 @@ def shifted_softplus(x: Tensor) -> Tensor:
     what keeps the predicted potential-energy surface (and thus the autograd
     forces) smooth.
 
-    Evaluated with :func:`exact_softplus` minus ``ln 2`` -- exact for all
-    ``x``, unlike :func:`torch.nn.functional.softplus`, which switches to the
-    identity above its threshold and drops the ``log1p(exp(-x))`` tail
-    (~1e-9 at the default threshold of 20). TorchScript-compatible.
+    Evaluated with :func:`exact_softplus` minus ``ln 2``, exact to round-off
+    for all ``x`` in float32 and float64. TorchScript-compatible.
 
     Parameters
     ----------
@@ -85,6 +93,87 @@ def glorot_orthogonal_(weight: Tensor, scale: float = 2.0) -> Tensor:
         fan_out, fan_in = weight.shape
         weight.mul_(math.sqrt(scale / ((fan_in + fan_out) * float(weight.var()))))
     return weight
+
+
+def he_orthogonal_(weight: Tensor) -> Tensor:
+    """He-scaled orthogonal initialization with exact standardization (GemNet, section 6).
+
+    A random (semi-)orthogonal matrix is standardized per output unit to zero
+    mean and unit variance and scaled to variance ``1 / fan_in``.
+
+    Parameters
+    ----------
+    weight : Tensor
+        A ``(fan_out, fan_in)`` weight matrix, modified in place.
+
+    Returns
+    -------
+    Tensor
+        ``weight``.
+    """
+    with torch.no_grad():
+        nn.init.orthogonal_(weight)
+        var, mean = torch.var_mean(weight, dim=1, unbiased=True, keepdim=True)
+        weight.sub_(mean).div_(torch.sqrt(var + 1e-6)).mul_(weight.shape[1] ** -0.5)
+    return weight
+
+
+#: Weight initializations by name (:func:`init_linear_`); ``"torch"`` keeps
+#: PyTorch's default.
+WEIGHT_INITS = {
+    "xavier_uniform": nn.init.xavier_uniform_,
+    "xavier_normal": nn.init.xavier_normal_,
+    "glorot_orthogonal": glorot_orthogonal_,
+    "he_orthogonal": he_orthogonal_,
+    "zeros": nn.init.zeros_,
+    "torch": None,
+}
+
+
+def init_linear_(linear: nn.Linear, weight: str = "xavier_uniform") -> nn.Linear:
+    """Initialize a dense layer by name: its weight by ``weight``, its bias to zero.
+
+    Parameters
+    ----------
+    linear : torch.nn.Linear
+        The layer, modified in place.
+    weight : str, optional
+        A name of :data:`WEIGHT_INITS`, by default ``"xavier_uniform"``;
+        ``"torch"`` keeps PyTorch's initialization of weight and bias.
+
+    Returns
+    -------
+    torch.nn.Linear
+        ``linear``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown name.
+    """
+    if weight not in WEIGHT_INITS:
+        raise ValueError(f"weight_init must be one of {sorted(WEIGHT_INITS)}, got {weight!r}")
+    init = WEIGHT_INITS[weight]
+    if init is not None:
+        with torch.no_grad():
+            init(linear.weight)
+            if linear.bias is not None:
+                linear.bias.zero_()
+    return linear
+
+
+def init_linears_(module: nn.Module, weight: str = "xavier_uniform") -> nn.Module:
+    """Apply :func:`init_linear_` to every dense layer inside ``module``.
+
+    Returns
+    -------
+    torch.nn.Module
+        ``module``.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            init_linear_(m, weight)
+    return module
 
 
 def softplus_inverse(x):
@@ -219,6 +308,38 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     shape = [dim_size] + list(src.shape[1:])
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
     return out.index_add(0, index, src)
+
+
+def gather_rows(src: Tensor, index: Tensor) -> Tensor:
+    """Rows ``src[index]`` (dim 0), with the faster backward of the device.
+
+    The node -> edge gather of message passing, the counterpart of
+    :func:`scatter_sum`. On CUDA it indexes (``src[index]``), whose backward
+    sorts the indices and accumulates without atomics, and whose second
+    derivative keeps less memory; elsewhere it uses
+    :func:`torch.index_select`, whose backward (an ``index_add``) is the faster
+    one on CPUs. The values are the same.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Tensor of shape ``(N, *feature_dims)`` (e.g. per-node features).
+    index : torch.Tensor
+        1-D integer tensor of length ``E``, the row of ``src`` for each output
+        row.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(E, *feature_dims)``.
+
+    Notes
+    -----
+    Compatible with :func:`torch.jit.script`.
+    """
+    if src.is_cuda:
+        return src[index]
+    return src.index_select(0, index)
 
 
 def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:

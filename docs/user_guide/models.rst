@@ -150,25 +150,26 @@ scratch, set ``n_features``, ``n_rbf``, ``n_interactions``, ``hidden``,
 
 SchNet
 ======
-:class:`~xnn.gnn.models.schnet.SchNet` is the continuous-filter convolutional
-network of `Schütt et al., Adv. Neural Inf. Process. Syst. 30 (2017)
-<https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_,
-built from the paper with its architecture as the defaults.
+:class:`~xnn.gnn.models.schnet.SchNet` (`schnetpack
+<https://github.com/atomistic-machine-learning/schnetpack>`_) is the
+continuous-filter convolutional network of `Schütt et al., Adv. Neural Inf.
+Process. Syst. 30 (2017)
+<https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_.
+Its defaults are those of the reference code.
 
 .. code-block:: yaml
 
    model:
      name: schnet
      cutoff: 5.0
-     cutoff_fn: cosine           # Smooth finite cutoff; the paper trains cutoff-free
-     n_features: 64
-     n_interactions: 3
-     n_rbf: 50
+     n_features: 128
+     n_interactions: 6
+     n_rbf: 20
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options such as ``gamma`` and ``energy_shift`` / ``energy_scale`` can also
-be set.
+``configs/model/schnet.yaml`` lists every option with its default, and the
+paper's settings.
 
 DimeNet and DimeNet++
 =====================
@@ -232,13 +233,14 @@ cannot be combined with LES or dispersion terms or exported to TorchScript.
 
 PaiNN
 =====
-:class:`~xnn.gnn.models.painn.PaiNN` is the equivariant message passing network
-of `Schütt et al., Proc. Mach. Learn. Res. 139, 9377 (2021)
-<https://proceedings.mlr.press/v139/schutt21a.html>`_ with scalar and vector
-features, matching ``schnetpack``. Optional heads predict dipole moments and
-polarizability tensors, trained with ``dipole_weight`` /
-``polarizability_weight`` on data that has ``dipole`` / ``polarizability``
-labels.
+:class:`~xnn.gnn.models.painn.PaiNN` (`schnetpack
+<https://github.com/atomistic-machine-learning/schnetpack>`_) is the
+equivariant message passing network of `Schütt et al., Proc. Mach. Learn. Res.
+139, 9377 (2021) <https://proceedings.mlr.press/v139/schutt21a.html>`_ with
+scalar and vector features. Its defaults are those of the reference code.
+Optional heads predict dipole moments and polarizability tensors, trained with
+``dipole_weight`` / ``polarizability_weight`` on data that has ``dipole`` /
+``polarizability`` labels.
 
 .. code-block:: yaml
 
@@ -253,9 +255,8 @@ labels.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options, including ``radial_basis`` (bessel / gaussian),
-``shared_filters``, ``atomic_dipoles`` and ``energy_shift`` /
-``energy_scale``, are also available.
+``configs/model/painn.yaml`` lists every option with its default, and the
+paper's settings.
 
 TensorNet
 =========
@@ -281,7 +282,7 @@ structure enters the products.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options, including ``radial_basis`` (expnorm / gaussian),
+Other options, including ``radial_basis`` (expnorm, gaussian or bessel),
 ``trainable_rbf``, ``activation`` and ``energy_shift`` / ``energy_scale``, are
 also available.
 
@@ -433,7 +434,8 @@ model.
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
 Other options, including ``neighbor_embedding``, ``distance_influence`` (both /
-keys / values / none), ``attn_activation``, ``trainable_rbf`` and
+keys / values / none), ``attn_activation``, ``radial_basis`` (expnorm, gaussian
+or bessel), ``trainable_rbf`` and
 ``energy_shift`` / ``energy_scale``, are also available. The attention weights
 of a structure are returned by ``model.attention_weights(graph)``.
 

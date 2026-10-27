@@ -654,8 +654,9 @@ class CACE(GNNPotential):
         import ast
 
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = coerce_species(extra.get("species"), default=[1, 6, 8])
         message_types = extra.get("message_types", list(MESSAGE_TYPES))
         if isinstance(message_types, str):

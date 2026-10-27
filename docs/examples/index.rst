@@ -218,7 +218,7 @@ neutral, charged and open-shell molecules.
    Argon density from MD: `xnn` vs the original NequIP <nb/examples/gnn/nequip/nequip_argon_density_md>
    Training & testing MACE on Argon MD data: `xnn` vs the original MACE, step by step <nb/examples/gnn/mace/mace_argon_train_test>
    Argon density from MD: `xnn` vs the original MACE <nb/examples/gnn/mace/mace_argon_density_md>
-   04 · Recreating the MACE architecture, block by block: original MACE **and** `xnn` <nb/examples/gnn/mace/recreate_mace_architecture>
+   Recreating the MACE architecture, block by block: original MACE **and** `xnn` <nb/examples/gnn/mace/recreate_mace_architecture>
    MACE-OFF23 in xnn: organic chemistry with a pretrained foundation model <nb/examples/gnn/mace/mace_foundation_molecules>
    Fine-tuning strategies for a foundation model: naive, LoRA and multi-head replay <nb/examples/gnn/mace/mace_finetuning_strategies>
    MACE-MP foundation models in xnn: materials properties across generations <nb/examples/gnn/mace/mace_foundation_materials>
@@ -488,12 +488,12 @@ reference (:ref:`fidelity`), ending with a weight transplant.
 .. example-toctree::
    :caption: Fidelity checks
 
-   SchNet, block by block: verifying the `xnn` implementation against the manuscripts <nb/fidelity_checks/gnn/schnet/schnet_verification>
+   SchNet, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/schnet/schnet_verification>
    3D steerable CNN, block by block: the kernel basis, equivariance and the reference implementation <nb/fidelity_checks/cnn/se3cnn/se3cnn_verification>
    Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/cnn/s2cnn/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
-   PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/gnn/painn/painn_verification>
+   PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/trfnn/et/torchmdnet_verification>
    Equiformer, block by block: the authors' implementation in float64 and float32, and the speed of a training step <nb/fidelity_checks/trfnn/equiformer/equiformer_verification>
@@ -532,3 +532,5 @@ gradients and timings.
 
    MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/gnn/mace/mace_cueq_parity>
    Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>
+   SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
+   PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>

@@ -483,7 +483,10 @@ class HDNNP(DescriptorPotential):
         ``charge_neuron``, ``constrain_charges``, ``ewald_accuracy``; ``runner`` (a RuNNer model
         directory) loads that model instead. 1G: see :meth:`NNP1G.from_config`.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         if extra.get("runner"):
             from xnn.dnn.common.runner import load_runner_model
             return _check_cutoff(load_runner_model(extra["runner"]), cfg)
@@ -712,7 +715,10 @@ class NNP1G(InteratomicPotential):
         """Build from ``cfg.extra``: ``species`` (one entry per atom, in order),
         ``hidden``, ``activation``, ``coordinates``, ``length``, ``symmetrize``,
         ``max_permutations``; ``cfg.cutoff`` sizes the data pipeline's graph."""
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         return cls(extra["species"], hidden=extra.get("hidden", (30, 30)),
                    activation=extra.get("activation", "tanh"),
                    coordinates=extra.get("coordinates", "distances"),

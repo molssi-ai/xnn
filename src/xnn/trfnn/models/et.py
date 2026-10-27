@@ -61,7 +61,7 @@ import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
-from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing, GaussianRBF
+from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.blocks import GatedEquivariantBlock
 from xnn.common.models.ops import make_activation, scatter_sum
 from xnn.common.models.registry import register_model
@@ -78,39 +78,6 @@ def _xavier_zero_bias_(module: nn.Module) -> None:
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
-
-
-def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool) -> nn.Module:
-    """The radial basis of the TorchMD-Net models.
-
-    Parameters
-    ----------
-    name : str
-        ``"expnorm"`` (:class:`~xnn.common.featurizers.ExpNormalSmearing`,
-        eq 1 of the ET paper) or ``"gaussian"`` (Gaussians every
-        ``cutoff / (n_rbf - 1)`` with the spacing as width).
-    n_rbf : int
-        Number of basis functions.
-    cutoff : float
-        Upper cutoff.
-    trainable : bool
-        Learn the centers and widths of the exponential-normal basis.
-
-    Returns
-    -------
-    torch.nn.Module
-        The basis, mapping distances ``(...)`` to ``(..., n_rbf)``.
-
-    Raises
-    ------
-    ValueError
-        For an unknown ``name``.
-    """
-    if name == "expnorm":
-        return ExpNormalSmearing(n_rbf, cutoff, trainable=trainable)
-    if name == "gaussian":
-        return GaussianRBF(n_rbf, cutoff)
-    raise ValueError(f"radial_basis must be 'expnorm' or 'gaussian', got {name!r}")
 
 
 class _NeighborEmbedding(nn.Module):
@@ -326,10 +293,11 @@ class EquivariantTransformer(TransformerPotential):
     num_heads : int, optional
         Attention heads (``n_features`` must be divisible by it), by default 8.
     radial_basis : str, optional
-        ``"expnorm"`` (default, eq 1) or ``"gaussian"``.
+        Any basis of :func:`~xnn.common.featurizers.make_radial_basis`:
+        ``"expnorm"`` (default, eq 1), ``"gaussian"`` or ``"bessel"``.
     trainable_rbf : bool, optional
-        Learn the centers and widths of the exponential-normal basis, by
-        default ``False`` (the paper's configurations).
+        Learn the parameters of the basis (the exponential-normal centers and
+        widths, the Bessel frequencies), by default ``False``.
     activation : str, optional
         Nonlinearity of the distance filters and the output network, by
         default ``"silu"``.
@@ -565,8 +533,9 @@ class EquivariantTransformer(TransformerPotential):
             Instantiated model.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = (coerce_species(extra.get("species"))
                    if extra.get("species") is not None else None)
         return cls(

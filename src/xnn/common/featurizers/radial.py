@@ -239,3 +239,64 @@ class BesselRBF(nn.Module):
         """
         r = r.clamp(min=1e-8)[..., None]
         return self.norm * torch.sin(self.freqs * r / self.cutoff) / r
+
+
+#: The radial bases a model with a choice of basis can draw from (:func:`make_radial_basis`).
+RADIAL_BASES = ("gaussian", "bessel", "expnorm")
+
+
+def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool = False, *,
+                      gamma: float | None = None, prefactor: float | None = None) -> nn.Module:
+    """A radial basis by name: the bases shared by every model that lets the basis be chosen.
+
+    An option the chosen basis does not have is ignored with an
+    :class:`~xnn.common.config.options.IgnoredOptionWarning`.
+
+    Parameters
+    ----------
+    name : str
+        ``"gaussian"`` (:class:`GaussianRBF`: ``n_rbf`` Gaussians centered on
+        ``[0, cutoff]``, the center spacing as width unless ``gamma`` is
+        given; the centers stay exact in float64 through casts and loads),
+        ``"bessel"`` (:class:`BesselRBF`, ``prefactor * sin(n pi r / cutoff) / r``)
+        or ``"expnorm"`` (:class:`ExpNormalSmearing`, Gaussians in
+        ``exp(-r)`` with their own cosine envelope).
+    n_rbf : int
+        Number of basis functions.
+    cutoff : float
+        The cutoff radius.
+    trainable : bool, optional
+        Learn the parameters of the basis (the Bessel frequencies, the
+        exponential-normal centers and widths); the Gaussian basis has none.
+    gamma : float or None, optional
+        The exponent of the Gaussians, ``exp(-gamma (r - mu)^2)``.
+    prefactor : float or None, optional
+        The normalization of the Bessel functions (``None``: ``sqrt(2 / cutoff)``).
+
+    Returns
+    -------
+    torch.nn.Module
+        Maps distances ``(...)`` to ``(..., n_rbf)``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``name``.
+    """
+    if name not in RADIAL_BASES:
+        raise ValueError(f"radial_basis must be one of {RADIAL_BASES}, got {name!r}")
+    from ..config.options import warn_ignored
+    given = {"trainable": trainable and name == "gaussian",
+             "gamma": gamma is not None and name != "gaussian",
+             "prefactor": prefactor is not None and name != "bessel"}
+    warn_ignored(f"radial basis {name!r}", [k for k, ignored in given.items() if ignored])
+    if name == "gaussian":
+        from ..models.constants import register_constant
+        if gamma is None and n_rbf > 1:          # the center spacing as width, in double precision
+            gamma = 0.5 * ((n_rbf - 1) / cutoff) ** 2
+        basis = GaussianRBF(n_rbf, cutoff, gamma=gamma)
+        register_constant(basis, "centers", torch.linspace(0.0, cutoff, n_rbf, dtype=torch.float64))
+        return basis
+    if name == "bessel":
+        return BesselRBF(n_rbf, cutoff, trainable=trainable, prefactor=prefactor)
+    return ExpNormalSmearing(n_rbf, cutoff, trainable=trainable)

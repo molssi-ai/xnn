@@ -102,7 +102,7 @@ def test_invalid_options():
     with pytest.raises(ValueError):
         EquivariantTransformer(n_features=16, num_heads=4, distance_influence="edges")
     with pytest.raises(ValueError):
-        EquivariantTransformer(n_features=16, num_heads=4, radial_basis="bessel")
+        EquivariantTransformer(n_features=16, num_heads=4, radial_basis="chebyshev")
     with pytest.raises(ValueError):
         EquivariantTransformer(n_features=16, num_heads=4, atomic_energies=[1.0])
 

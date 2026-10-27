@@ -1,16 +1,34 @@
-# SchNet, the paper architecture (Schuett et al., NIPS 2017): F = 64 feature
-# maps, T = 3 interaction blocks, Gaussian RBFs every 0.1 A on [0, 30] with
-# gamma = 10 A^-2, and no explicit cutoff (30 A covers every pair of the
-# paper's molecular datasets).
+# SchNet (Schuett et al., NIPS 2017): every option at its default; the paper's
+# model is the commented block at the end.
 name: schnet
-cutoff: 30.0
-n_features: 64
-n_interactions: 3
-n_rbf: 301
+cutoff: 5.0
+n_features: 128
+n_interactions: 6
+n_rbf: 20
+extra:
+  radial_basis: gaussian          # gaussian / bessel / expnorm
+  gamma: null                     # Gaussian exponent; null: the center spacing as width
+  cutoff_fn: cosine               # filter envelope; null for none
+  n_filters: null                 # filter width; null: n_features
+  filter_output_activation: false # shifted softplus after the second filter layer too
+  interaction_input_bias: false   # bias in the first atom-wise layer of every block
+  readout_activation: silu        # silu / ssp / any activation name
+  shared_interactions: false      # one interaction block for all
+  weight_init: xavier_uniform     # xavier_uniform / xavier_normal / glorot_orthogonal / he_orthogonal / torch
+  zero_init_readout: false        # last readout layer starts at zero
+  energy_shift: 0.0               # per-atom energy standardization
+  energy_scale: 1.0
+  species: null                   # e.g. [1, 6, 8]
+  atomic_energies: null           # per-element reference energies, or average / estimated
 
-# For condensed phases / large systems, use a finite cutoff with a matching
-# 0.1 A RBF grid and the smooth cosine filter envelope instead:
-#   cutoff: 5.0
-#   n_rbf: 50
+# The paper's model:
+#   cutoff: 30.0
+#   n_features: 64
+#   n_interactions: 3
+#   n_rbf: 301
 #   extra:
-#     cutoff_fn: cosine
+#     gamma: 10.0
+#     cutoff_fn: null
+#     filter_output_activation: true
+#     interaction_input_bias: true
+#     readout_activation: ssp

@@ -97,10 +97,17 @@ def m_primary_order(lmax: int, mmax: int) -> List[int]:
 def _s2_grid_float64(lmax: int, mmax: int, res_beta: int, res_alpha: int) -> Tuple[Tensor, Tensor]:
     """The matrices from the reduced coefficients to sphere samples and back, float64 ``(P, n)``."""
     from e3nn.o3 import FromS2Grid, ToS2Grid
-    to_grid = ToS2Grid(lmax, (res_beta, res_alpha), normalization="component", dtype=torch.float64)
+    # e3nn builds parts of the grid in the default dtype: float64 here, whatever the
+    # caller's default, since the result is cached for every later build
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        to_grid = ToS2Grid(lmax, (res_beta, res_alpha), normalization="component", dtype=torch.float64)
+        from_grid = FromS2Grid((res_beta, res_alpha), lmax, normalization="component",
+                               dtype=torch.float64)
+    finally:
+        torch.set_default_dtype(previous)
     to_mat = torch.einsum("mbi,am->bai", to_grid.shb, to_grid.sha)
-    from_grid = FromS2Grid((res_beta, res_alpha), lmax, normalization="component",
-                           dtype=torch.float64)
     from_mat = torch.einsum("am,mbi->bai", from_grid.sha, from_grid.shb)
     for l in range(mmax + 1, lmax + 1):
         # the degrees cut to |m| <= mmax keep the variance of the full degree
@@ -1088,8 +1095,9 @@ class EquiformerV2(TransformerPotential):
             Instantiated model.
         """
         from xnn.common.config.coerce import coerce_per_species, coerce_species
+        from xnn.common.config.options import model_options
 
-        extra = dict(cfg.extra or {})
+        extra = model_options(cfg)
         species = (coerce_species(extra.get("species"))
                    if extra.get("species") is not None else None)
         kwargs = {}

@@ -63,6 +63,10 @@ The ``from_pretrained`` function returns a model object wrapped in the
 :class:`~xnn.common.models.outputs.ForceStressOutput` class. This object is
 already in the ``eval()`` mode and in the model checkpoint's ``dtype``. 
 
+A checkpoint rebuilds the model it was trained as, even when a later xnn
+version changes that model's defaults: its config records every option of the
+model, the defaults it used included.
+
 Here are some additional options for customizing the load behavior:
 
 .. code-block:: python

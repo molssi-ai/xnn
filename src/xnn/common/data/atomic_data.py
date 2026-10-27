@@ -344,15 +344,23 @@ class AtomicGraph:
             Edge displacement vectors ``r_ij`` of shape ``(E, 3)``.
         """
         if self.cell is None or self.cell.shape[0] == 1:
-            # molecules and single structures: one function that forms the
-            # vectors block by block in the geometry dtype, so a float64
-            # geometry never holds (E, 3) float64 temporaries for every edge
-            # (4.8 GB at 71 million edges), and whose backward keeps no float
-            # copy of the shifts. A single cell is a plain product: gathering
-            # it onto every edge makes the stress backward accumulate 9 E
-            # values into nine entries (1.5 s of a D4 step on 5000 atoms).
+            # molecules and single structures: beyond one block of edges, one
+            # function that forms the vectors block by block in the geometry
+            # dtype, so a float64 geometry never holds (E, 3) float64
+            # temporaries for every edge (4.8 GB at 71 million edges), and whose
+            # backward keeps no float copy of the shifts. A single cell is a
+            # plain product: gathering it onto every edge makes the stress
+            # backward accumulate 9 E values into nine entries (1.5 s of a D4
+            # step on 5000 atoms).
             cell = (self.cell[0].to(self.pos.dtype) if self.cell is not None
                     else self.pos.new_zeros(0))
+            if self.edge_index.shape[1] <= EDGE_BLOCK:
+                # one block: the same operations without the Python function,
+                # whose overhead is a few percent of a small molecule's step
+                vec = self.pos[self.edge_index[1]] - self.pos[self.edge_index[0]]
+                if self.cell is not None:
+                    vec = vec + self.cell_shifts.to(vec.dtype) @ cell
+                return vec.to(self.model_dtype)
             return _EdgeVectors.apply(self.pos, cell, self.edge_index, self.cell_shifts,
                                       self.model_dtype)
         src, dst = self.edge_index[0], self.edge_index[1]

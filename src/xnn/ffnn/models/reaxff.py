@@ -2388,7 +2388,10 @@ class ReaxFF(InteratomicPotential):
         ReaxFF
             The model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
         ffield = extra.get("ffield")
         if ffield is None:
             raise ValueError("ReaxFF needs a parameter library: set "

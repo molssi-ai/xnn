@@ -12,12 +12,6 @@ from torch import nn
 from xnn.common.models.base import InteratomicPotential
 
 
-def _exact_constants_after_load(module: nn.Module, incompatible_keys) -> None:
-    """``load_state_dict`` post-hook: a float32 checkpoint brings rounded constants."""
-    from xnn.common.models.constants import exact_float64_constants
-    exact_float64_constants(module)
-
-
 class TransformerPotential(InteratomicPotential):
     """Base of the transformer potentials: energy standardization and per-element references.
 
@@ -48,7 +42,8 @@ class TransformerPotential(InteratomicPotential):
                 raise ValueError("species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
         if self.exact_float64:
-            self.register_load_state_dict_post_hook(_exact_constants_after_load)
+            from xnn.common.models.constants import exact_constants_after_load
+            self.register_load_state_dict_post_hook(exact_constants_after_load)
 
     def _apply(self, fn, recurse=True):
         out = super()._apply(fn, recurse)

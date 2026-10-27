@@ -3346,7 +3346,10 @@ class Amoeba(InteratomicPotential):
         Amoeba
             The model.
         """
-        extra = dict(cfg.extra or {})
+
+        from xnn.common.config.options import model_options
+
+        extra = model_options(cfg)
 
         def listy(value):
             if isinstance(value, str) and value.lstrip().startswith(("[", "(")):
