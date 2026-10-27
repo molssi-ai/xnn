@@ -103,8 +103,7 @@ from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.blocks import GatedEquivariantBlock
 from xnn.common.models.constants import ExactFloat64Constants
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import (ATOMIC_MASSES, center_of_mass, gather_rows, init_linears_,
-                                   scatter_sum)
+from xnn.common.models.ops import ATOMIC_MASSES, center_of_mass, gather_rows, init_linears_, scatter_sum
 from xnn.common.models.registry import register_model
 
 _MAX_Z = 100
