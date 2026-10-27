@@ -8,6 +8,7 @@ DTNN standardization) that reuses only the model's *parameters*. Given the
 same weights, the model must reproduce it to float64 precision.
 """
 import math
+import os
 
 import numpy as np
 import pytest
@@ -475,17 +476,15 @@ def test_fast_path_off_in_training():
 
 @pytest.fixture
 def interpreted(monkeypatch):
-    """The fused kernels under Triton's interpreter, on CPU tensors, and offered on CPUs."""
+    """The fused kernels under Triton's interpreter (chosen by conftest.py on machines without
+    CUDA), on CPU tensors, with the fast path offered on CPUs."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
     pytest.importorskip("triton")
-    import importlib
-
     import xnn.gnn.fast.schnet as fast
     from xnn.gnn.fast import schnet_kernels
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
     monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
-    yield importlib.reload(schnet_kernels)
-    monkeypatch.delenv("TRITON_INTERPRET")
-    importlib.reload(schnet_kernels)
+    return schnet_kernels
 
 
 def test_fast_support_needs_cuda():

@@ -760,17 +760,15 @@ def test_fast_path_off_in_training():
 
 @pytest.fixture
 def interpreted(monkeypatch):
-    """The fused kernels under Triton's interpreter, on CPU tensors, and offered on CPUs."""
+    """The fused kernels under Triton's interpreter (chosen by conftest.py on machines without
+    CUDA), on CPU tensors, with the fast path offered on CPUs."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
     pytest.importorskip("triton")
-    import importlib
-
     import xnn.gnn.fast.painn as fast
     from xnn.gnn.fast import painn_kernels
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
     monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
-    yield importlib.reload(painn_kernels)
-    monkeypatch.delenv("TRITON_INTERPRET")
-    importlib.reload(painn_kernels)
+    return painn_kernels
 
 
 def test_fast_support_needs_cuda():

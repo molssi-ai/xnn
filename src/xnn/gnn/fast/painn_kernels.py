@@ -2,7 +2,8 @@
 
 Imported only when the fast path runs, so that ``triton`` is needed only there.
 """
-from __future__ import annotations
+# no postponed annotations: Triton's interpreter (TRITON_INTERPRET=1) recognizes the
+# tl.constexpr parameters of a kernel only from evaluated annotations
 
 from typing import Tuple
 
