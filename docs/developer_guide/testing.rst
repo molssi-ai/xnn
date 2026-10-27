@@ -64,3 +64,8 @@ Conventions for new code
   and its published numbers.
 - A model with an upstream code is also at least as fast and, preferably, as
   memory-efficient as that code, in float32 and float64, before it is merged.
+- Its defaults are those of the upstream code as shipped; where the paper
+  differs, the paper's values are options, which the tests and notebooks pass.
+  Options draw on the shared abstractions (radial bases, cutoffs, activations)
+  wherever they fit. A config key or option that nothing uses is ignored with
+  an ``IgnoredOptionWarning`` (``tests/test_config_options.py``).

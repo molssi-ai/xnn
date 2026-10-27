@@ -493,7 +493,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    Spherical CNN, block by block: harmonic analysis, correlations, equivariance and the reference implementation <nb/fidelity_checks/cnn/s2cnn/s2cnn_verification>
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
-   PaiNN, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/gnn/painn/painn_verification>
+   PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/trfnn/et/torchmdnet_verification>
    Equiformer, block by block: the authors' implementation in float64 and float32, and the speed of a training step <nb/fidelity_checks/trfnn/equiformer/equiformer_verification>

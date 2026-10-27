@@ -57,9 +57,10 @@ Numerical agreement under identical weights involves:
   <https://proceedings.neurips.cc/paper/2017/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_;
   reference implementation in
   `schnetpack <https://github.com/atomistic-machine-learning/schnetpack>`_ 2.2.0):
-  built from the paper and verified against an independent implementation of
-  its equations and against ``schnetpack`` under transplanted weights, with its
-  filter network assembled to the paper's two activations. Energies and forces
+  verified against an independent implementation of the paper's equations and
+  against ``schnetpack`` under transplanted weights, with the default options
+  (those of ``schnetpack``) and with the paper's (the reference's filter
+  networks assembled to the paper's two activations). Energies and forces
   agree to float64 round-off (about 1e-15) and float32 round-off for molecules,
   batches and periodic cells.
 - **DimeNet and DimeNet++** (`gasteigerjo/dimenet
@@ -75,10 +76,11 @@ Numerical agreement under identical weights involves:
   <https://proceedings.mlr.press/v139/schutt21a.html>`_; reference
   implementation in
   `schnetpack <https://github.com/atomistic-machine-learning/schnetpack>`_):
-  a build from the paper, verified against an independent implementation
-  of its equations and against ``schnetpack`` under transplanted weights:
-  energies, forces, latent charges, dipoles and polarizabilities agree to
-  float64 and float32 round-off.
+  verified against an independent implementation of the paper's equations
+  and against ``schnetpack`` under transplanted weights, with the default
+  options (those of ``schnetpack``), the paper's and shared weights: energies,
+  forces, latent charges, dipoles and polarizabilities agree to float64 and
+  float32 round-off.
 - **ET and TensorNet** (`torchmd/torchmd-net
   <https://github.com/torchmd/torchmd-net>`_): built from the papers, verified
   against independent implementations of their equations and against the
