@@ -422,6 +422,16 @@ def _as_dtype(dtype) -> Optional[torch.dtype]:
     return getattr(torch, str(dtype).replace("torch.", ""))
 
 
+#: The options of the models whose defaults changed after xnn 0.22, as they were
+#: then: a checkpoint saved before the change records only the options set by
+#: hand and needs these to rebuild (the hint of a failed load).
+_OLD_DEFAULTS = {
+    "schnet": "gamma: 10.0, cutoff_fn: null, filter_output_activation: true, "
+              "interaction_input_bias: true, readout_activation: ssp",
+    "painn": "radial_basis: bessel (and atomic_dipoles: true with a dipole head)",
+}
+
+
 def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: Any = None,
                     compute_forces: bool = True, compute_stress: bool = False,
                     eeq_reuse: bool = False, model_options: Optional[dict[str, Any]] = None,
@@ -497,7 +507,15 @@ def build_potential(config: Any, state_dict: dict, *, dtype=None, dispersion: An
         base = build_model(config.model)
         # ForceStressOutput has no parameters of its own; loading through
         # it matches the trainer's state-dict layout
-        ForceStressOutput(base).load_state_dict(state_dict)
+        try:
+            ForceStressOutput(base).load_state_dict(state_dict)
+        except RuntimeError as err:
+            hint = _OLD_DEFAULTS.get(str(config.model.name).lower())
+            if hint is None:
+                raise
+            raise RuntimeError(f"{err}\n\n{label} may have been saved by xnn 0.22 or earlier, "
+                               f"when the {config.model.name} defaults were different; add these "
+                               f"options to its model config to rebuild it: {hint}") from err
         multi = find_multihead(base)
         if multi is not None:
             if head is None and len(multi.heads) > 1:
