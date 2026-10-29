@@ -500,8 +500,8 @@ def _fidelity(dtype):
         pytest.skip("set TORCHMDNET_UPSTREAM_PATH to a checkout of torchmd/torchmd-net")
     import subprocess
     import sys
-    script = os.path.join(os.path.dirname(__file__), "torchmdnet_fidelity.py")
-    res = subprocess.run([sys.executable, script, path, "tensornet", dtype],
+    script = os.path.join(os.path.dirname(__file__), "tensornet_fidelity.py")
+    res = subprocess.run([sys.executable, script, path, dtype],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     return float(res.stdout.strip().splitlines()[-1])
@@ -513,3 +513,263 @@ def test_fidelity_vs_reference_float64():
 
 def test_fidelity_vs_reference_float32():
     assert _fidelity("float32") < 1e-4
+
+
+# adapters on the pair embedding
+
+def test_lora_adapter_reaches_the_pair_embedding():
+    """An adapted model gives the outputs of the model with the adapters merged."""
+    from xnn.common.finetune import inject_lora, merge_lora
+    model = _small(n_features=16)
+    inject_lora(model, rank=2)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "lora_out" in name:
+                p.normal_()
+    graph = _graph(n=7, seed=3, total_charge=1.0)
+    adapted = ForceStressOutput(model)(graph)
+    merged = ForceStressOutput(merge_lora(model))(_graph(n=7, seed=3, total_charge=1.0))
+    for key in ("energy", "forces"):
+        err = (adapted[key] - merged[key]).abs().max() / merged[key].abs().max()
+        assert err < 1e-12, (key, float(err))
+
+
+# fast path (fused Triton kernels)
+
+def test_fast_path_eligibility(monkeypatch):
+    """The fused layers need a power-of-two width; adapters stay outside the kernels."""
+    import xnn.gnn.fast.tensornet as fast
+    from xnn.common.finetune import inject_lora
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    cuda = torch.device("cuda")
+    m = _small(n_features=16)
+    assert m.tensor_embedding.fast_supported(cuda, torch.float32)
+    assert all(layer.fast_supported(cuda, torch.float32) for layer in m.layers)
+    assert not _small(n_features=24).layers[0].fast_supported(cuda, torch.float32)
+    inject_lora(m, rank=2)
+    assert m.layers[0].fast_supported(cuda, torch.float32)
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.tensornet import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fused_inputs(device, seed):
+    """Random inputs of both fused functions: ten rows per atom, pairs with self pairs."""
+    gen = torch.Generator().manual_seed(seed)
+    n, n_pairs, F = 5, 14, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+
+    src = torch.cat([torch.randint(0, n, (n_pairs - n,), generator=gen), torch.arange(n)]).to(device)
+    dst = torch.cat([torch.randint(0, n, (n_pairs - n,), generator=gen), torch.arange(n)]).to(device)
+    u = torch.nn.functional.normalize(torch.randn(n_pairs, 3, dtype=torch.float64, generator=gen), dim=1)
+    u[n_pairs - n:] = 0.0                                   # self pairs carry no direction
+    return dict(rows=rand(n, 10, F), a=rand(n_pairs, 3 * F), cut=rand(n_pairs),
+                left=rand(n, F), right=rand(n, F), d=[rand(n_pairs, F) for _ in range(3)],
+                u=u.to(device).requires_grad_(True), src=src, dst=dst)
+
+
+def _check_fused_gradients(kernels, device, fast_mode=False):
+    t = _fused_inputs(device, seed=0)
+    src, dst = t["src"], t["dst"]
+
+    def messages(rows, a, cut):
+        return kernels.MessageFunction.apply(rows, a, cut, src, dst)
+
+    def embedding(left, right, cut, d1, d2, d3, u):
+        return kernels.EmbeddingFunction.apply(left, right, cut, d1, d2, d3, u, src, dst)
+
+    # the embedding's neighbor term adds atomically, in a run-dependent order
+    assert torch.autograd.gradcheck(messages, (t["rows"], t["a"], t["cut"]), nondet_tol=1e-12,
+                                    fast_mode=fast_mode)
+    assert torch.autograd.gradcheck(embedding, (t["left"], t["right"], t["cut"], *t["d"], t["u"]),
+                                    nondet_tol=1e-12, fast_mode=fast_mode)
+    # second derivatives (force training): the backward functions, differentiated once more
+    assert torch.autograd.gradgradcheck(messages, (t["rows"], t["a"], t["cut"]), nondet_tol=1e-12,
+                                        fast_mode=fast_mode)
+    assert torch.autograd.gradgradcheck(embedding, (t["left"], t["right"], t["cut"], *t["d"], t["u"]),
+                                        nondet_tol=1e-12, fast_mode=fast_mode)
+    # and the values are the reference sums
+    with torch.no_grad():
+        F = t["left"].shape[1]
+        a = (t["a"] * t["cut"][:, None]).reshape(-1, 3, F)
+        part = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2, 2], device=device)
+        expect = torch.zeros_like(t["rows"]).index_add_(0, dst, a[:, part] * t["rows"][src])
+        assert torch.allclose(messages(t["rows"], t["a"], t["cut"]), expect, rtol=0, atol=1e-13)
+        w = t["cut"][:, None] * (t["left"][dst] + t["right"][src])
+        u = t["u"]
+        uu = torch.stack([u[:, 0] * u[:, 0], u[:, 0] * u[:, 1], u[:, 0] * u[:, 2],
+                          u[:, 1] * u[:, 1], u[:, 1] * u[:, 2], u[:, 2] * u[:, 2]], dim=1)
+        per_pair = torch.cat([(w * t["d"][0])[:, None], (w * t["d"][1])[:, None] * u[:, :, None],
+                              (w * t["d"][2])[:, None] * uu[:, :, None]], dim=1)
+        expect = torch.zeros_like(t["rows"]).index_add_(0, dst, per_pair)
+        got = embedding(t["left"], t["right"], t["cut"], *t["d"], t["u"])
+        assert torch.allclose(got, expect, rtol=0, atol=1e-13)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_kernels_gradients():
+    """Values and every first and second derivative of the fused functions (finite differences)."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import tensornet_kernels
+    _check_fused_gradients(tensornet_kernels, "cuda")
+
+
+def _fast_batch(dtype, device="cuda"):
+    graphs = [_graph(n=14, seed=1, periodic=True, total_charge=1.0),
+              _graph(n=9, seed=2, total_charge=-1.0)]
+    batch = collate(graphs).to(device)
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("group", ["O(3)", "SO(3)"])
+def test_fast_path_parity(dtype, group):
+    """The fused layers give the reference energies, forces and stress."""
+    pytest.importorskip("triton")
+    model = _small(n_features=32, n_rbf=8, equivariance_group=group).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    keys = ("energy", "forces", "stress")
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert model.tensor_embedding.fast_active == use_fast
+        assert all(layer.fast_active == use_fast for layer in model.layers)
+        out[use_fast] = {k: res[k].detach().double() for k in keys}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max()
+        assert err < tol, (key, float(err))
+
+
+def _training_gradients(model, batch, use_fast):
+    """The weight gradients of an energy and force loss (forces with create_graph)."""
+    model.set_use_fast(use_fast).train()
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model, compute_stress=True).train()(batch)
+    assert model.tensor_embedding.fast_active == use_fast
+    assert all(layer.fast_active == use_fast for layer in model.layers)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum() + out["stress"].pow(2).sum()).backward()
+    return {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+            if p.grad is not None}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("group", ["O(3)", "SO(3)"])
+def test_fast_path_training(dtype, group):
+    """Force training through the fused layers gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = _small(n_features=32, n_rbf=8, equivariance_group=group).to("cuda", dtype)
+    ref = _training_gradients(model, _fast_batch(dtype), False)
+    fast = _training_gradients(model, _fast_batch(dtype), True)
+    assert ref.keys() == fast.keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in ref.items():
+        err = (fast[name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_auto_crossover_per_mode(monkeypatch):
+    """"auto" applies the evaluation crossover in evaluation mode and the training one in
+    training mode."""
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.tensornet as fast
+    from xnn.common.models.fast import AutoPolicy
+    never = AutoPolicy(default_min_edges=10 ** 9, default_min_edges_float64=10 ** 9)
+    always = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+    model = _small(n_features=16).to("cuda", torch.float64).set_use_fast("auto")
+    names = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    for training in (False, True):
+        for policy in names:
+            with monkeypatch.context() as patch:
+                for name in names:
+                    patch.setattr(fast, name, never if name == policy else always)
+                ForceStressOutput(model.train(training)).train(training)(_fast_batch(torch.float64))
+            expect = policy != ("AUTO_POLICY_TRAINING" if training else "AUTO_POLICY")
+            assert model.tensor_embedding.fast_active == expect, (training, policy)
+            assert all(layer.fast_active == expect for layer in model.layers)
+
+
+def _needs_interpreter():
+    """Skip unless Triton's interpreter is on (no CUDA device) and recent enough."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    triton = pytest.importorskip("triton")
+    if tuple(int(v) for v in triton.__version__.split(".")[:2]) < (3, 2):
+        pytest.skip("Triton's interpreter before 3.2 mis-evaluates these kernels")
+
+
+def test_fast_kernels_gradients_interpreted():
+    """The fused functions and their first and second derivatives, run by the Triton interpreter."""
+    _needs_interpreter()
+    from xnn.gnn.fast import tensornet_kernels
+    # random projections of the Jacobians: the interpreter runs every kernel call in Python
+    _check_fused_gradients(tensornet_kernels, "cpu", fast_mode=True)
+
+
+def test_fast_path_parity_interpreted(monkeypatch):
+    """The fused layers under Triton's interpreter give the reference energies and forces."""
+    _needs_interpreter()
+    import xnn.gnn.fast.tensornet as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small(n_features=16).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(torch.float64, device="cpu"))
+        out[use_fast] = {k: res[k].detach() for k in ("energy", "forces")}
+    for key, ref in out[False].items():
+        assert (out[True][key] - ref).abs().max() / ref.abs().max() < 1e-12, key
+
+
+# recomputing the filter networks in the backward pass
+
+def test_filter_networks_recompute(monkeypatch):
+    """Recomputed filter networks give the same energies and forces; "auto" takes them in
+    evaluation mode from the threshold on, "off" never."""
+    import torch.utils.checkpoint
+
+    import xnn.gnn.models.tensornet as tn
+    from xnn.gnn.models.blocks import set_recompute_radial
+    real, calls = torch.utils.checkpoint.checkpoint, []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", counting)
+    model = _small(n_features=16).eval()
+
+    def run():
+        return ForceStressOutput(model)(_graph(n=9, seed=4, total_charge=1.0))
+
+    kept = run()
+    assert not calls                                   # below RECOMPUTE_MIN_PAIRS
+    set_recompute_radial(model, True)
+    assert all(layer.recompute == "on" for layer in model.layers)
+    recomputed = run()
+    assert len(calls) == len(model.layers)
+    for key in ("energy", "forces"):
+        assert torch.allclose(recomputed[key], kept[key], rtol=0, atol=1e-13), key
+    calls.clear()
+    set_recompute_radial(model, "auto")
+    monkeypatch.setattr(tn, "RECOMPUTE_MIN_PAIRS", 1)
+    run()
+    assert len(calls) == len(model.layers)
+    calls.clear()
+    model.train()
+    run()
+    assert not calls                                   # "auto" keeps them when training
+    set_recompute_radial(model.eval(), False)
+    run()
+    assert not calls

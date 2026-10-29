@@ -1,17 +1,17 @@
-"""Fidelity of the xnn ET and TensorNet to the reference code (torchmd/torchmd-net).
+"""Fidelity of the xnn ET to the reference code (torchmd/torchmd-net), and the shared setup.
 
-    python torchmdnet_fidelity.py <path to a torchmd-net checkout> et|tensornet [float64|float32]
+    python torchmdnet_fidelity.py <path to a torchmd-net checkout> et [float64|float32]
 
-Builds randomly initialized xnn models, transplants their weights into the
-reference modules (``TorchMD_ET`` / ``TensorNet`` with the ``EquivariantScalar``
-/ ``Scalar`` output, the ``Atomref`` prior and the ``TorchMD_Net`` wrapper) and
-compares energies and forces on random molecules, a batch and, for TensorNet,
-charged structures, in the requested precision. The last printed line is the
-worst relative error (energies relative to ``max(|E|, 1)``, forces to the
-largest component). The reference package is used as an external oracle only;
-its neighbor search (a warp kernel) is replaced by a plain PyTorch all-pairs
-list with the same conventions (both directions, self pairs, ``pos[i] -
-pos[j]``), and TensorNet runs its pure-PyTorch path (warp is not imported).
+Builds randomly initialized xnn ET models, transplants their weights into the
+reference modules (``TorchMD_ET`` with the ``EquivariantScalar`` output, the
+``Atomref`` prior and the ``TorchMD_Net`` wrapper) and compares energies and
+forces on random molecules and a batch, in the requested precision. The last
+printed line is the worst relative error (energies relative to
+``max(|E|, 1)``, forces to the largest component). The reference package is
+used as an external oracle only; :func:`setup` replaces its neighbor search (a
+warp kernel) by a plain PyTorch list with the same conventions (both
+directions, self pairs, ``pos[i] - pos[j]``). TensorNet has its own harness,
+``tensornet_fidelity.py``, built on the same setup.
 """
 import sys
 
@@ -20,30 +20,48 @@ import torch
 
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput
-from xnn.gnn.models.tensornet import TensorNet
 from xnn.trfnn.models.et import EquivariantTransformer
 
+#: the pairs ``(receiver, neighbor, shift)`` the patched neighbor search returns, with
+#: ``vec = pos[receiver] - pos[neighbor] + shift``; ``None`` searches all pairs
+PAIRS = None
 
-def setup(upstream_path):
+
+def setup(upstream_path, warp=False):
     """Import the reference package from ``upstream_path`` and patch its neighbor search.
 
-    The reference's neighbor search and TensorNet kernels are warp custom ops whose
-    registration needs a newer torch than xnn pins; both modules are replaced by
-    stubs before the import, so the pure-PyTorch paths run and warp is not needed.
+    The reference's neighbor search and TensorNet kernels are warp custom ops. By
+    default both modules are replaced by stubs before the import, so the
+    pure-PyTorch paths run and warp is not needed; ``warp=True`` keeps them (warp
+    installed and a torch recent enough for their registration), so TensorNet runs
+    its warp kernels. The patched search returns the pairs of :data:`PAIRS` when
+    they are set (the neighbor list of an xnn graph plus the self pairs, periodic
+    images included) and otherwise all pairs of a structure within the cutoff.
     """
     import types
+    if "torchmdnet.models.utils" in sys.modules:
+        return
     sys.path.insert(0, upstream_path)
-    ops = types.ModuleType("torchmdnet.extensions.ops")
+    if not warp:
+        ops = types.ModuleType("torchmdnet.extensions.ops")
 
-    def get_neighbor_pairs_kernel(*args, **kwargs):
-        raise NotImplementedError("the fidelity harness replaces the neighbor search")
+        def get_neighbor_pairs_kernel(*args, **kwargs):
+            raise NotImplementedError("the fidelity harness replaces the neighbor search")
 
-    ops.get_neighbor_pairs_kernel = get_neighbor_pairs_kernel
-    sys.modules["torchmdnet.extensions.ops"] = ops
-    sys.modules["torchmdnet.extensions.warp_ops"] = types.ModuleType("torchmdnet.extensions.warp_ops")
+        ops.get_neighbor_pairs_kernel = get_neighbor_pairs_kernel
+        sys.modules["torchmdnet.extensions.ops"] = ops
+        sys.modules["torchmdnet.extensions.warp_ops"] = types.ModuleType(
+            "torchmdnet.extensions.warp_ops")
     import torchmdnet.models.utils as utils
 
     def all_pairs(self, pos, batch=None, box=None):
+        if PAIRS is not None:
+            i, j, shift = PAIRS
+            if not self.loop:
+                keep = i != j
+                i, j, shift = i[keep], j[keep], shift[keep]
+            vec = pos[i] - pos[j] + shift
+            return torch.stack([i, j]), vec.norm(dim=-1), vec
         n = pos.shape[0]
         if batch is None:
             batch = torch.zeros(n, dtype=torch.long, device=pos.device)
@@ -58,7 +76,7 @@ def setup(upstream_path):
 
     utils.OptimizedDistance.forward = all_pairs
     import torchmdnet.models.tensornet as tn
-    assert not tn.OPT, "the reference TensorNet must run its pure-PyTorch path"
+    assert tn.OPT == warp, f"the reference TensorNet must run its {'warp' if warp else 'pure-PyTorch'} path"
 
 
 def _copy(dst, src):
@@ -115,37 +133,6 @@ def build_et(model, dtype):
     return ref.eval()
 
 
-def build_tensornet(model, dtype):
-    """The reference TorchMD_Net around a TensorNet with the xnn weights."""
-    from torchmdnet.models.model import TorchMD_Net
-    from torchmdnet.models.output_modules import Scalar
-    from torchmdnet.models.tensornet import TensorNet as RefTensorNet
-    from torchmdnet.priors import Atomref
-
-    F = model.n_features
-    rep = RefTensorNet(hidden_channels=F, num_layers=len(model.layers), num_rbf=model.rbf.n_rbf,
-                       rbf_type="expnorm", trainable_rbf=isinstance(model.rbf.means, torch.nn.Parameter),
-                       activation="silu", cutoff_lower=0.0, cutoff_upper=model.cutoff,
-                       max_z=model.tensor_embedding.emb.num_embeddings,
-                       equivariance_invariance_group=model.equivariance_group,
-                       static_shapes=False, dtype=dtype)
-    out = Scalar(F, activation="silu", dtype=dtype)
-    prior = Atomref(max_z=model.atom_ref.num_embeddings, trainable=False)
-    ref = TorchMD_Net(rep, out, prior_model=[prior], std=model.energy_scale.clone(),
-                      derivative=True, dtype=dtype)
-    _copy(rep.distance_expansion.means, model.rbf.means)
-    _copy(rep.distance_expansion.betas, model.rbf.betas)
-    _copy_module(rep.tensor_embedding, model.tensor_embedding)
-    for layer, src in zip(rep.layers, model.layers):
-        _copy_module(layer, src)
-    _copy_module(rep.out_norm, model.out_norm)
-    _copy_module(rep.linear, model.linear)
-    _copy_module(out.output_network.layers[0], model.readout[0])
-    _copy_module(out.output_network.layers[2], model.readout[2])
-    _copy(prior.atomref.weight, model.atom_ref.weight)
-    return ref.eval()
-
-
 def reference_outputs(ref, graph, dtype):
     z = graph.atomic_numbers
     pos = graph.pos.to(dtype).clone()
@@ -180,47 +167,35 @@ def compare(model, ref, graph, dtype, label):
 
 def main():
     upstream, which = sys.argv[1], sys.argv[2]
+    if which != "et":
+        sys.exit("torchmdnet_fidelity.py checks ET; TensorNet has tensornet_fidelity.py")
     dtype = {"float32": torch.float32, "float64": torch.float64}[
         sys.argv[3] if len(sys.argv) > 3 else "float64"]
     setup(upstream)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
     worst = 0.0
-    if which == "et":
-        variants = [("vector_cutoff", dict(vector_cutoff=True)),
-                    ("original cutoff", dict(vector_cutoff=False)),
-                    ("no neighbor embedding", dict(neighbor_embedding=False, distance_influence="keys"))]
-        cases = [((5, 0), None), ((9, 1), None), ((14, 2), None)]
-    else:
-        variants = [("O(3)", dict(equivariance_group="O(3)")),
-                    ("SO(3)", dict(equivariance_group="SO(3)")),
-                    ("O(3), no interaction", dict(n_interactions=0))]
-        cases = [((5, 0), None), ((9, 1), 1.0), ((14, 2), -1.0)]
+    variants = [("vector_cutoff", dict(vector_cutoff=True)),
+                ("original cutoff", dict(vector_cutoff=False)),
+                ("no neighbor embedding", dict(neighbor_embedding=False, distance_influence="keys"))]
+    cases = [(5, 0), (9, 1), (14, 2)]
     for name, options in variants:
-        if which == "et":
-            model = EquivariantTransformer(n_features=32, n_interactions=2, n_rbf=16, num_heads=4,
-                                           cutoff=5.0, energy_scale=1.7, **options)
-            ref = build_et(model, dtype)
-        else:
-            kw = dict(n_features=16, n_interactions=2, n_rbf=16, cutoff=4.5, energy_scale=1.7)
-            kw.update(options)
-            model = TensorNet(**kw)
-            ref = build_tensornet(model, dtype)
+        model = EquivariantTransformer(n_features=32, n_interactions=2, n_rbf=16, num_heads=4,
+                                       cutoff=5.0, energy_scale=1.7, **options)
         with torch.no_grad():
             model.atom_ref.weight.normal_()
             for p in model.parameters():
                 if p.dim() == 1:
                     p.add_(0.1 * torch.randn_like(p))
         model.eval()
-        ref = (build_et if which == "et" else build_tensornet)(model, dtype)
-        print(f"{which} {name} ({dtype}):")
-        for (n, seed), q in cases:
-            graph = structure_to_graph(random_molecule(n, seed, q), model.cutoff)
-            worst = max(worst, compare(model, ref, graph, dtype, f"{n} atoms, q={q}"))
-        batch = collate([structure_to_graph(random_molecule(n, 10 + n, 1.0 if which != "et" else None),
-                                            model.cutoff) for n in (6, 11)])
+        ref = build_et(model, dtype)
+        print(f"et {name} ({dtype}):")
+        for n, seed in cases:
+            graph = structure_to_graph(random_molecule(n, seed), model.cutoff)
+            worst = max(worst, compare(model, ref, graph, dtype, f"{n} atoms"))
+        batch = collate([structure_to_graph(random_molecule(n, 10 + n), model.cutoff) for n in (6, 11)])
         worst = max(worst, compare(model, ref, batch, dtype, "batch of two"))
-    print(f"worst relative error ({which}, {dtype}): {worst:.3e}")
+    print(f"worst relative error (et, {dtype}): {worst:.3e}")
     print(worst)
 
 

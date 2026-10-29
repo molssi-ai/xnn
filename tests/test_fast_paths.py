@@ -257,3 +257,22 @@ def test_gpu_training_gradients():
     for n, g0 in grads[False].items():
         err = (grads[True][n] - g0).abs().max() / g0.abs().max().clamp(min=1e-30)
         assert float(err) < 1e-10, n
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_compile_twice_differentiable():
+    """A compiled function with its compiled first and second derivatives (finite differences)."""
+    from xnn.common.models.fast import compile_twice_differentiable
+
+    def fn(a, b, c):
+        n = (a * a).sum(dim=1, keepdim=True) + 1.0
+        return a * b / n, (b * c).sum(dim=1) + c.pow(3).sum(dim=1)
+
+    compiled = compile_twice_differentiable(fn, 3)
+    gen = torch.Generator().manual_seed(0)
+    args = [torch.randn(5, 4, dtype=torch.float64, generator=gen).cuda().requires_grad_(True)
+            for _ in range(3)]
+    for got, ref in zip(compiled(*args), fn(*args)):
+        assert torch.allclose(got, ref, rtol=0, atol=1e-14)
+    assert torch.autograd.gradcheck(compiled, args)
+    assert torch.autograd.gradgradcheck(compiled, args)
