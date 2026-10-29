@@ -574,11 +574,12 @@ def test_second_derivatives_through_the_iterative_solve(cls):
 
 
 def test_use_fast_validates_and_keeps_the_reference_on_the_cpu():
-    """use_fast is validated, reached by set_use_fast, and inactive on the CPU."""
+    """use_fast is validated, defaults to "auto", is reached by set_use_fast, and is inactive on the CPU."""
     from xnn.common.models.fast import set_use_fast
     with pytest.raises(ValueError):
         _box(Amoeba, use_fast="always")
-    ref, fast = _box(Amoeba), _box(Amoeba)
+    assert _box(Amoeba).use_fast == "auto"
+    ref, fast = _box(Amoeba, use_fast=False), _box(Amoeba)
     set_use_fast(ForceStressOutput(fast), True)
     assert fast.use_fast is True and ref.use_fast is False
     fast.eval()
@@ -640,13 +641,18 @@ def test_a_solve_of_fixed_length_matches_the_tested_solve(cls):
         out = model(g, plan)
         forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
         results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+        if fixed is None:
+            counts = [model.solver_stats[phase] for phase in ("forward", "adjoint")]
     assert bool(plan.converged)
+    # the fixed solves report the tested solves' counts (zero for the adjoint shortcut)
+    assert plan.needed.tolist() == counts
     for a, b in zip(*results):
         assert torch.equal(a, b)
     plan.solve_iterations = {"forward": 1, "adjoint": 1}
     with torch.no_grad():
         model(g, plan)
     assert not bool(plan.converged)
+    assert float(plan.needed[0]) == 2.0
 
 
 def _walk(cls, device, steps, **kw):
@@ -676,6 +682,31 @@ def test_steps_on_a_plan_follow_the_plain_steps(cls):
 def test_steps_on_a_plan_follow_the_plain_steps_with_exchange_polarization():
     """Steps on a plan follow the plain steps with exchange polarization."""
     _walk(Hippo, "cpu", 4, library=_exchpol_library())
+
+
+def test_steps_on_a_plan_shorten_their_solves():
+    """The fixed lengths follow what the solves needed: a length set too long is lowered, the steps unchanged."""
+    ref, model = (ForceStressOutput(_box(Hippo, predictor="aspc", polar_eps=1e-5), compute_stress=True).eval()
+                  for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, shorten=3)
+    velocity = np.random.default_rng(5).normal(scale=0.004, size=BOX.shape)
+    lengths = []
+    for step in range(8):
+        pos = BOX + step * velocity
+        s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(Z), "cell": torch.tensor(CELL),
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+        if stepper.plan.solve_iterations is not None:
+            lengths.append(dict(stepper.plan.solve_iterations))
+            if len(lengths) == 1:
+                stepper.plan.solve_iterations = {"forward": 40, "adjoint": 40}
+    # the adjoint shortcut needs no iterations; the lowered forward length holds what the solves needed
+    assert lengths[0]["adjoint"] == 1
+    assert lengths[-1]["forward"] < 40 and lengths[-1]["adjoint"] == 1
+    assert 1 <= float(stepper.plan.needed[0]) <= lengths[-1]["forward"]
+    assert stepper.needed == []
 
 
 def test_steps_on_a_plan_follow_an_atom_wrapped_into_the_cell():
@@ -734,3 +765,24 @@ def test_the_engine_replays_steps_by_default_only_on_a_gpu():
         MDIEngine(model, 6.3, step_graph="yes")
     if torch.cuda.is_available():
         assert MDIEngine(model, 6.3, device="cuda").steps is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+def test_mixed_precision_evaluates_the_ladders_in_the_working_precision():
+    """``mixed_precision=True`` stays close to the float32 reference and changes nothing in float64."""
+    g = _graph(BOX).to("cuda")
+    ref = ForceStressOutput(_box(Hippo), compute_stress=True).to("cuda").eval()
+    want = ref(g)
+    out = {}
+    for dtype in (torch.float64, torch.float32):
+        g.compute_dtype = dtype
+        for mixed in (False, True):
+            model = ForceStressOutput(_box(Hippo, use_fast=True, mixed_precision=mixed), compute_stress=True)
+            model = model.to(device="cuda", dtype=dtype).eval()
+            out[dtype, mixed] = {k: v.double() for k, v in model(g).items() if k in ("energy", "forces", "stress")}
+    # the energy is the small sum of large terms: its tolerance scales with the terms
+    terms = sum(float(want[k].abs()) for k in ("e_multipole", "e_repulsion", "e_dispersion", "e_chgtrn", "e_polar"))
+    for key, tol in (("energy", 1e-5), ("forces", 1e-4), ("stress", 1e-4)):
+        scale = terms if key == "energy" else float(want[key].abs().max())
+        assert torch.allclose(out[torch.float64, True][key], out[torch.float64, False][key], rtol=0, atol=1e-10 * scale)
+        assert torch.allclose(out[torch.float32, True][key], want[key], rtol=0, atol=tol * scale), key

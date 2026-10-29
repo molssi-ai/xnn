@@ -251,6 +251,30 @@ def test_frame_rotation_is_consistent_with_quadrupole_trace_and_units():
     assert float(I["d"][0].norm()) == pytest.approx(0.14279 * am.BOHR)
 
 
+def test_z_only_frame_takes_the_lab_axis_of_tinker():
+    """A z-only frame's x axis comes from the lab x axis unless the z axis lies within 45 degrees of
+    it, then from the lab y axis, as in Tinker; a quadrupole with Qxx != Qyy tells the choices apart."""
+    lib = builtin_amoeba("hippo-water-2021")
+    lib.multipoles["OW"] = [{"frame": ("0", "0", "0"), "q": lib.multipoles["OW"][0]["q"], "dipole": [0.0] * 3,
+                             "quadrupole": [[0.0] * 3 for _ in range(3)]}]
+    lib.multipoles["HW"] = [{"frame": ("OW", "0", "0"), "q": lib.multipoles["HW"][0]["q"], "dipole": [0.0, 0.0, 0.1],
+                             "quadrupole": [[0.3, 0.0, 0.0], [0.0, -0.5, 0.0], [0.0, 0.0, 0.2]]}]
+    lib.bndcflux, lib.angcflux = {}, {}
+    # such a quadrupole makes the energy depend on the orientation of the system, which is said once
+    with pytest.warns(UserWarning, match="not symmetric about the free axis"):
+        model = Hippo(lib, MolecularTopology.from_bonds(["OW", "HW"], [(0, 1)]), cutoff=30.0, polarization="none")
+    for angle, lab in ((50.0, [1.0, 0.0, 0.0]), (40.0, [0.0, 1.0, 0.0])):
+        # the hydrogen at the origin, its z atom (the oxygen) `angle` degrees from the lab x axis
+        a = angle * DEG
+        g = _graph([[math.cos(a), math.sin(a), 0.0], [0.0, 0.0, 0.0]], [8, 1])
+        R, _ = model._frames(g, am._Images(g, None))
+        x_axis, z_axis = R[1, :, 0], R[1, :, 2]
+        assert torch.allclose(z_axis, torch.tensor([math.cos(a), math.sin(a), 0.0]), atol=1e-12)
+        lab = torch.tensor(lab)
+        expected = lab - (lab @ z_axis) * z_axis
+        assert torch.allclose(x_axis, expected / expected.norm(), atol=1e-12)
+
+
 def test_thole_damping_functions():
     R = torch.tensor([1.5, 3.0])
     a = torch.tensor([0.837, 0.496])
@@ -618,7 +642,7 @@ def test_pcg_restarts_with_the_diagonal_when_a_preconditioner_is_indefinite():
     def field_of(v):
         return v - (A @ v.reshape(-1)).reshape(3, 3)
 
-    x, iterations, _, _ = am._pcg(b, alpha, field_of, polar, 1e-12, 200, precond=lambda r: -r)
+    x, iterations, _, _, _ = am._pcg(b, alpha, field_of, polar, 1e-12, 200, precond=lambda r: -r)
     assert torch.allclose(x.reshape(-1), torch.linalg.solve(A, b.reshape(-1)), atol=1e-10)
     assert iterations < 200
 
