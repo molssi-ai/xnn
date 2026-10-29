@@ -713,49 +713,37 @@ by term. Forces, torques and the stress come from autograd.
    model, structure = Amoeba.from_tinker_xyz("ubiquitin.xyz", "amoebapro13")
    model = Amoeba.from_atoms(atoms, "amoebapro13", trainable=("torsion", "vdw", "polarizability"))
 
-The AMOEBA energy has the valence terms of the papers (anharmonic bonds and
-angles, stretch-bend, Urey-Bradley, out-of-plane bends, torsions, pi-torsions
-and torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
+AMOEBA has the valence terms of the papers (anharmonic bonds and angles,
+stretch-bend, Urey-Bradley, out-of-plane bends, torsions, pi-torsions and
+torsion-torsion maps), the buffered 14-7 van der Waals term, permanent
 multipoles in local frames and Thole-damped mutual induction. HIPPO keeps the
-valence terms and multipoles and replaces the intermolecular terms by charge
-penetration, density-damped induction, Pauli repulsion, damped dispersion,
-charge transfer and charge flux. A library with ``exchpol`` parameters adds the
-exchange polarization of `Chung et al., J. Phys. Chem. B 126, 7579 (2022)
-<https://doi.org/10.1021/acs.jpcb.2c04237>`_: the overlap with each neighbor
-shrinks an atom's polarizability along the pair. Similar to Tinker, a pair takes
-part when either of its classes is used, pairs within a molecule carry the
-polarization scale factors of the permanent field (not those of the polarization
-groups), and in a cell the term is tapered by the switch of the repulsion.
+valence terms and the multipoles. It replaces the intermolecular terms by
+charge penetration, density-damped induction, Pauli repulsion, damped
+dispersion, charge transfer and charge flux. A library with ``exchpol``
+parameters adds the exchange polarization of `Chung et al., J. Phys. Chem. B
+126, 7579 (2022) <https://doi.org/10.1021/acs.jpcb.2c04237>`_, where the
+overlap with each neighbor shrinks an atom's polarizability along the pair.
+As in Tinker, a pair takes part when either of its classes is used, and in a
+cell the term is tapered by the switch of the repulsion.
+``configs/model/amoeba.yaml`` and ``configs/model/hippo.yaml`` list every
+option with its default.
 
 Molecules
 ---------
-For a molecule or cluster, every pair within ``cutoff`` interacts in full.
-Choose a cutoff that encloses the whole system. ``polarization`` selects
+For a molecule or cluster, every pair within ``cutoff`` interacts in full, so
+choose a cutoff that encloses the whole system. ``polarization`` selects
 mutual, direct or no induction. The default is the library's setting.
-A batch of molecules of up to a thousand atoms each is solved directly, as
-one block-diagonal system. Larger molecules and cells use conjugate
-gradients, and ``solver`` overrides the choice. ``preconditioner`` selects
-``"diagonal"`` (the default), ``"block"``, ``"neumann"`` or
-``"block-neumann"``. The others take fewer iterations but rarely give a
-faster step. In molecular dynamics,
-``predictor="aspc"`` starts each solve from dipoles extrapolated from the
-last steps, which saves a fifth to a third of the iterations. The MDI engine turns it
-on by default. Every backward solve starts from the previous one.
-``use_fast=True`` compiles the pair terms into fused GPU kernels. It
-applies to evaluation on a GPU, such as molecular dynamics, while
-training keeps the reference path. The first evaluations pay for the
-compilation. The MDI engine sets ``use_fast="auto"``.
 
-For molecular dynamics, ``plan_step(data, skin, capacity)`` records the
-decisions of one evaluation, and ``model(data, plan)`` reuses them while
-the atoms move. The plan keeps a Verlet pair list built with
-``cutoff + skin``, and ``plan.outdated(pos)`` tells when to rebuild it. The
-MDI engine runs the steps on a plan on a GPU and replays each step as one
-CUDA graph (``--step-graph``).
+A batch of molecules of up to a thousand atoms each is solved directly, as
+one block-diagonal system. Larger molecules and cells use conjugate gradients.
+``solver`` overrides the choice and ``preconditioner`` selects ``"diagonal"``
+(the default), ``"block"``, ``"neumann"`` or ``"block-neumann"``. The others
+take fewer iterations but rarely give a faster step. ``polar_eps`` sets the
+convergence of the induced dipoles in Debye.
 
 Periodic cells
 --------------
-A structure with a cell is evaluated with Ewald sums: the multipoles, the
+A structure with a cell is evaluated with Ewald sums. The multipoles, the
 induction and HIPPO's dispersion split into a real-space part within
 ``ewald_cutoff`` and a particle-mesh part. The van der Waals, repulsion and
 charge-transfer terms are switched off smoothly before their cutoff.
@@ -766,26 +754,56 @@ charge-transfer terms are switched off smoothly before their cutoff.
    out = ForceStressOutput(box, compute_stress=True)(graph)
 
 The defaults follow Tinker. The Ewald coefficient comes from the real-space
-cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. As in
-Tinker, every mesh size, a requested one too, is rounded up to an even size
-with prime factors 2, 3 and 5, at least 16 (``pme_grid=27`` gives 30). The
-mesh sums use the least-squares spline moduli, as Tinker does, so the
-energies match Tinker's at the same keys even on a coarse mesh. The
-options are ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` for the
-three coefficients, ``pme_grid`` and ``pme_order`` for the mesh,
-``vdw_cutoff``, ``repulsion_cutoff``, ``chgtrn_cutoff`` and
-``dispersion_cutoff`` for the switched terms, and ``taper`` for the start of
-the switch. Keep the neighbor cutoff about 0.3 Angstrom above the van der
-Waals cutoff, because the hydrogen sites of that term sit inside their atoms.
-``polar_eps`` sets the convergence of the induced dipoles in Debye.
-``mesh_self=True`` removes the spurious mesh self-interaction of every
-multipole (its position average) from the energies, the polarizing field
-and the dispersion sum. It brings the dispersion and the permanent
-multipoles of a coarse mesh closer to the converged values, at the price of
-no longer matching Tinker at the same keys.
-``ewald=False`` truncates a cell at the cutoff instead. A slab with two
-periodic axes is summed on its cell with the Yeh-Berkowitz correction, so
-leave a vacuum gap of at least the slab thickness along the free axis.
+cutoff (7 Angstrom at most) and the mesh has 1.2 points per Angstrom. Every
+mesh size, a requested one too, is rounded up to an even size with prime
+factors 2, 3 and 5, at least 16 (``pme_grid=27`` gives 30). The mesh sums use
+the least-squares spline moduli, so the energies match Tinker's at the same
+keys even on a coarse mesh.
+
+- ``ewald_alpha``, ``pewald_alpha`` and ``dewald_alpha`` set the three Ewald
+  coefficients, ``pme_grid`` and ``pme_order`` the mesh.
+- ``vdw_cutoff``, ``repulsion_cutoff``, ``chgtrn_cutoff`` and
+  ``dispersion_cutoff`` set the switched terms, ``taper`` the start of the
+  switch. Keep the neighbor cutoff about 0.3 Angstrom above the van der Waals
+  cutoff, because the hydrogen sites of that term sit inside their atoms.
+- ``mesh_self=True`` removes the mesh self-interaction of every multipole
+  from the energies, the polarizing field and the dispersion sum. A coarse
+  mesh then comes closer to the converged values, but no longer matches
+  Tinker at the same keys.
+- ``ewald=False`` truncates a cell at the cutoff instead.
+
+A slab with two periodic axes is summed on its cell with the Yeh-Berkowitz
+correction. Leave a vacuum gap of at least the slab thickness along the free
+axis.
+
+Molecular dynamics
+------------------
+``predictor="aspc"`` starts each induction solve from dipoles extrapolated
+from the last steps, which saves a fifth to a third of the iterations. Every
+backward solve starts from the previous one.
+
+``use_fast=True`` runs the pair terms, the fields, the induction solve and
+the mesh sums on fused GPU kernels. It applies to evaluation on a GPU, while
+training keeps the reference path. The first evaluations pay for the
+compilation. The kernels give the numbers of the reference implementation to
+round-off in float64 and in float32. For that, a float32 HIPPO model
+evaluates the radial ladders of its pair terms in float64 and casts.
+``mixed_precision=True`` evaluates them in float32 throughout, as Tinker9's
+mixed precision does. That is ten to thirty percent faster per MD step,
+depending on the GPU. The energies stay at the float32 round-off and the forces
+lose up to one digit. It has no effect on a float64 model or on AMOEBA.
+
+.. code-block:: python
+
+   model = Hippo.from_tinker_xyz("system.xyz", lib, use_fast=True, mixed_precision=True)
+   model = model.to("cuda", torch.float32)
+
+``plan_step(data, skin, capacity)`` records the decisions of one evaluation,
+and ``model(data, plan)`` reuses them while the atoms move. The plan keeps a
+Verlet pair list built with ``cutoff + skin``, and ``plan.outdated(pos)``
+tells when to rebuild it. The MDI engine turns the predictor on, sets
+``use_fast="auto"``, runs the steps on a plan on a GPU and replays each step
+as one CUDA graph (``--step-graph``).
 
 Training and files
 ------------------
@@ -794,15 +812,16 @@ Training and files
 ``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
 ``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
 (``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``exchpol``,
-``cflux``) and
-``atom_ref``. While the multipoles train, every molecule keeps its total
-charge (``conserve_charge``), components the library leaves zero by the
-symmetry of the local frame stay zero (``symmetry_mask``), and the
-quadrupoles stay symmetric and traceless; ``export_library`` writes the
-multipoles the model uses. ``forward`` reports every energy term, the
-monopoles, the induced dipoles and the molecular dipole. Libraries are read
-from ``.frc`` and Tinker ``.prm`` files and written back to either. A Tinker
-``.xyz`` file builds the topology directly.
+``cflux``) and ``atom_ref``. While the multipoles train, every molecule keeps
+its total charge (``conserve_charge``), the components the library leaves
+zero by symmetry stay zero (``symmetry_mask``), and the quadrupoles stay
+symmetric and traceless. ``export_library`` writes the multipoles the model
+uses.
+
+``forward`` reports every energy term, the monopoles, the induced dipoles and
+the molecular dipole. Libraries are read from ``.frc`` and Tinker ``.prm``
+files and written back to either. A Tinker ``.xyz`` file builds the topology
+directly.
 
 Semiempirical methods: PM3, PM6, PM6-ORG, PM7
 =============================================

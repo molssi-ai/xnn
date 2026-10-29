@@ -32,7 +32,7 @@ is not available yet.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
    * - DimeNet / DimeNet++
      - |Y|
@@ -53,7 +53,7 @@ is not available yet.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
    * - TensorNet
      - |Y|
@@ -243,3 +243,50 @@ is not available yet.
   so training runs through the kernels.
 - ``use_fast="auto"`` picks the fast path above a measured system size (see
   :ref:`howto-fast-paths`).
+
+Add-on terms
+============
+
+An add-on term wraps any model above and adds its energy to the model's
+prediction. Enable it in the model's config: ``dispersion: {name: d3}`` or
+``dispersion: {name: d4}`` for a dispersion term, ``long_range: {n_channels: 4}``
+for the LES long-range term (see :ref:`configuration`). The columns and marks
+are the same as above.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 8 14 8 12 15 15
+
+   * - Add-on
+     - ASE
+     - Torchscript-LAMMPS
+     - MDI
+     - Reference-Path
+     - Fast-Path (Training)
+     - Fast-Path (Inference)
+   * - D3
+     - |Y|
+     - |Y|
+     - |Y|
+     - |N|
+     - |N|
+     - |Y|
+   * - D4
+     - |Y|
+     - |Y|
+     - |Y|
+     - |N|
+     - |N|
+     - |Y|
+   * - LES
+     - |Y|
+     - |Y|
+     - |Y|
+     - |N|
+     - |Y|
+     - |Y|
+
+- The D3, D4 and LES terms match their upstream codes to round-off. Their
+  speed against those codes has not been compared yet.
+- The dispersion kernels are differentiable once. A training step therefore
+  uses the reference three-body term, and the fast path serves evaluation.
