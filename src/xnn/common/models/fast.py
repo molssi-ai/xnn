@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import torch
 from torch import nn
@@ -199,3 +199,79 @@ def iter_fast_capable(model: nn.Module, device: torch.device,
     for m in fast_modules(model):
         if m.fast_supported(device, dtype):
             yield m
+
+
+def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int) -> Callable[..., Any]:
+    """``fn`` compiled by :func:`torch.compile` and differentiable twice.
+
+    Compiled code has a first derivative but no second, which a force loss
+    needs. Here ``fn`` runs inside an autograd function whose backward is the
+    compiled vector-Jacobian product of ``fn`` (:func:`torch.func.vjp`), itself
+    an autograd function whose backward is the compiled vector-Jacobian product
+    of that. Each order is a few fused kernels, as in evaluation mode. Third
+    derivatives are not supported.
+
+    Parameters
+    ----------
+    fn : callable
+        A function of ``n_inputs`` tensors returning a tensor or a tuple of
+        tensors, written in differentiable torch operations.
+    n_inputs : int
+        The number of its tensor arguments.
+
+    Returns
+    -------
+    callable
+        ``fn`` with the same arguments and outputs.
+    """
+    from torch.func import vjp
+
+    def as_tuple(*xs):
+        out = fn(*xs)
+        return tuple(out) if isinstance(out, (tuple, list)) else (out,)
+
+    def first(*args):
+        _, pull = vjp(as_tuple, *args[:n_inputs])
+        return pull(tuple(args[n_inputs:]))
+
+    def second(*args):
+        # the arguments of first (inputs and incoming gradients), then one cotangent per input
+        k = len(args) - n_inputs
+        _, pull = vjp(first, *args[:k])
+        return pull(tuple(args[k:]))
+
+    # torch.compile keeps a few compiled versions per code object; the closures of every call
+    # here share theirs, so each wrapped function gets its own copies (named after it)
+    name = getattr(fn, "__name__", "fn")
+    for f, kind in ((as_tuple, "forward"), (first, "vjp"), (second, "vjp_vjp")):
+        f.__code__ = f.__code__.replace(co_name=f"{name}_{kind}")
+    forward = torch.compile(as_tuple, dynamic=True)
+    first_c = torch.compile(first, dynamic=True)
+    second_c = torch.compile(second, dynamic=True)
+
+    class Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *args):
+            ctx.save_for_backward(*args)
+            return tuple(first_c(*args))
+
+        @staticmethod
+        @torch.autograd.function.once_differentiable
+        def backward(ctx, *cotangents):
+            return tuple(second_c(*ctx.saved_tensors, *cotangents))
+
+    class Stage(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *xs):
+            ctx.save_for_backward(*xs)
+            return forward(*xs)
+
+        @staticmethod
+        def backward(ctx, *grads):
+            return Grad.apply(*ctx.saved_tensors, *grads)
+
+    def apply(*xs):
+        out = Stage.apply(*xs)
+        return out[0] if len(out) == 1 else out
+
+    return apply

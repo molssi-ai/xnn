@@ -40,7 +40,8 @@ Conventions worth knowing:
 
 * the sums over neighbors include ``j = i`` (the reference neighbor list
   carries self pairs at ``d_ii = 0``), which contribute to ``I`` in the
-  embedding and to every message; the model adds them as per-atom terms;
+  embedding and to every message; the model appends one self pair per atom
+  (zero distance and direction, cutoff one) to the pairs of the graph;
 * ``r_ij`` points from the neighbor to the center atom, which is the xnn edge
   vector ``pos[dst] - pos[src]``; the sign only matters for the ``SO(3)``
   variant;
@@ -57,20 +58,28 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import make_activation, scatter_sum
+from xnn.common.models.constants import ExactFloat64Constants
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import gather_rows, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 
 _GROUPS = ("O(3)", "SO(3)")
+
+#: Pairs (self pairs included) from which an interaction layer in evaluation mode
+#: recomputes its filter network in the backward pass instead of keeping its activations
+#: (``recompute="auto"``, see :func:`~xnn.gnn.models.set_recompute_radial`). Recomputing
+#: lowers the peak of the fused layers by about a quarter and costs 13-35 % of the time
+#: of an evaluation, so it is left to graphs where memory binds (with the defaults about
+#: 18 GB at a million pairs in float32); ``True`` takes it at any size.
+RECOMPUTE_MIN_PAIRS = 1_000_000
 
 
 def skew_tensor(vector: Tensor) -> Tensor:
     """The skew-symmetric tensor ``[v]_x`` of a vector, ``(N, 3, F) -> (N, 3, 3, F)``."""
     zero = torch.zeros_like(vector[:, 0])
     x, y, z = vector[:, 0], vector[:, 1], vector[:, 2]
-    rows = [torch.stack([zero, -z, y], dim=1),
-            torch.stack([z, zero, -x], dim=1),
-            torch.stack([-y, x, zero], dim=1)]
-    return torch.stack(rows, dim=1)
+    rows = torch.stack([zero, -z, y, z, zero, -x, -y, x, zero], dim=1)
+    return rows.reshape(vector.shape[0], 3, 3, vector.shape[2])
 
 
 def axial_vector(tensor: Tensor) -> Tensor:
@@ -102,11 +111,12 @@ def frobenius(tensor: Tensor) -> Tensor:
 
 def tensor_matmul(a: Tensor, b: Tensor) -> Tensor:
     """Feature-wise matrix product of two ``(N, 3, 3, F)`` tensors."""
-    product = torch.matmul(a.permute(0, 3, 1, 2), b.permute(0, 3, 1, 2))
-    return product.permute(0, 2, 3, 1)
+    # the products summed over the inner index (elementwise kernels): a batched matrix
+    # product of N F separate 3 x 3 matrices runs far below the device's speed
+    return (a.unsqueeze(3) * b.unsqueeze(1)).sum(dim=2)
 
 
-class _TensorEmbedding(nn.Module):
+class _TensorEmbedding(nn.Module, FastPathModule):
     """The tensor embedding layer (section 3.2 of the TensorNet paper).
 
     Parameters
@@ -115,22 +125,24 @@ class _TensorEmbedding(nn.Module):
         Feature width ``F``.
     n_rbf : int
         Number of radial basis functions.
-    cutoff : float
-        Cosine cutoff radius.
     n_elements : int
         Size of the type embedding table (indexed by ``Z``).
     activation : str
         Nonlinearity of the norm MLP.
+
+    Notes
+    -----
+    A fused GPU implementation (:mod:`xnn.gnn.fast.tensornet`) evaluates the
+    sums over the pairs when :attr:`fast_active` is set (see
+    :meth:`TensorNet.set_use_fast`).
     """
 
-    def __init__(self, n_features: int, n_rbf: int, cutoff: float, n_elements: int,
-                 activation: str):
+    def __init__(self, n_features: int, n_rbf: int, n_elements: int, activation: str):
         super().__init__()
         self.n_features = n_features
         self.distance_proj1 = nn.Linear(n_rbf, n_features)
         self.distance_proj2 = nn.Linear(n_rbf, n_features)
         self.distance_proj3 = nn.Linear(n_rbf, n_features)
-        self.cutoff_fn = CosineCutoff(cutoff)
         self.emb = nn.Embedding(n_elements, n_features)
         self.emb2 = nn.Linear(2 * n_features, n_features)
         self.act = make_activation(activation)
@@ -139,9 +151,29 @@ class _TensorEmbedding(nn.Module):
         self.linears_scalar = nn.ModuleList([
             nn.Linear(n_features, 2 * n_features), nn.Linear(2 * n_features, 3 * n_features)])
         self.init_norm = nn.LayerNorm(n_features)
+        self.fast_active = False
 
-    def forward(self, atomic_numbers: Tensor, src: Tensor, dst: Tensor, r: Tensor,
-                unit: Tensor, rbf: Tensor, rbf_self: Tensor) -> Tensor:
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` and a power-of-two feature width."""
+        from xnn.gnn.fast.tensornet import supported
+        n = self.n_features
+        return 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
+
+    def _pair_terms(self, emb: Tensor) -> Tuple[Tensor, Tensor]:
+        """The center and neighbor terms of the pair embedding, per atom ``(N, F)`` each.
+
+        ``emb2`` is affine, so ``emb2([z_i, z_j]) = A_i + B_j`` with
+        ``A = emb2([z, 0])`` and ``B = emb2([0, z]) - emb2([0, 0])``; one call of
+        the module itself (an adapter on it included) evaluates them.
+        """
+        n = emb.shape[0]
+        zero = torch.zeros_like(emb)
+        out = self.emb2(torch.cat([torch.cat([emb, zero], dim=1), torch.cat([zero, emb], dim=1),
+                                   torch.zeros_like(emb[:1]).repeat(1, 2)], dim=0))
+        return out[:n], out[n:2 * n] - out[2 * n:]
+
+    def forward(self, atomic_numbers: Tensor, src: Tensor, dst: Tensor, cut: Tensor,
+                unit: Tensor, rbf: Tensor) -> Tensor:
         """Embed the neighborhoods into ``(N, 3, 3, F)`` tensors.
 
         Parameters
@@ -149,26 +181,26 @@ class _TensorEmbedding(nn.Module):
         atomic_numbers : Tensor
             Per-atom atomic numbers ``(N,)``.
         src, dst : Tensor
-            Neighbor ``j`` and center ``i`` of every edge, ``(E,)`` each.
-        r : Tensor
-            Edge lengths ``(E,)``.
+            Neighbor ``j`` and center ``i`` of every pair, self pairs included,
+            ``(P,)`` each.
+        cut : Tensor
+            The cosine cutoff of every pair ``(P,)``.
         unit : Tensor
-            Unit vectors ``(r_i - r_j) / |r_i - r_j|``, ``(E, 3)``.
+            Unit vectors ``(r_i - r_j) / |r_i - r_j|`` (zero for a self pair),
+            ``(P, 3)``.
         rbf : Tensor
-            Radial basis of the edge lengths ``(E, n_rbf)``.
-        rbf_self : Tensor
-            The radial basis at zero distance, ``(1, n_rbf)``.
+            Radial basis of the pair distances ``(P, n_rbf)``.
         """
         n = atomic_numbers.shape[0]
-        emb = self.emb(atomic_numbers)
-        pair = self.emb2(torch.cat([emb[dst], emb[src]], dim=-1))     # (E, F), center first
-        pair_self = self.emb2(torch.cat([emb, emb], dim=-1))          # (N, F), cutoff(0) = 1
-        weight = self.cutoff_fn(r).unsqueeze(-1) * pair
-        scalar = (scatter_sum(weight * self.distance_proj1(rbf), dst, n)
-                  + pair_self * self.distance_proj1(rbf_self))
+        center, neighbor = self._pair_terms(self.emb(atomic_numbers))
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(center, neighbor, cut, unit, rbf, src, dst)
+        pair = gather_rows(center, dst) + gather_rows(neighbor, src)      # (P, F)
+        weight = cut.unsqueeze(-1) * pair
+        scalar = scatter_sum(weight * self.distance_proj1(rbf), dst, n)
         vector = scatter_sum((weight * self.distance_proj2(rbf)).unsqueeze(1)
                              * unit.unsqueeze(-1), dst, n)            # (N, 3, F)
-        outer = unit.unsqueeze(2) * unit.unsqueeze(1)                 # (E, 3, 3)
+        outer = unit.unsqueeze(2) * unit.unsqueeze(1)                 # (P, 3, 3)
         full = scatter_sum((weight * self.distance_proj3(rbf))[:, None, None, :]
                            * outer.unsqueeze(-1), dst, n)             # (N, 3, 3, F)
         skew = skew_tensor(vector)
@@ -184,8 +216,26 @@ class _TensorEmbedding(nn.Module):
         symmetric = self.linears_tensor[2](symmetric) * norm[:, 2, None, None, :]
         return compose(scalar, skew, symmetric)
 
+    @torch.jit.unused
+    def _forward_fast(self, center: Tensor, neighbor: Tensor, cut: Tensor, unit: Tensor,
+                      rbf: Tensor, src: Tensor, dst: Tensor) -> Tensor:
+        """The layer on the fused pair sums and the compact parts (scalar, vector, six entries)."""
+        from xnn.gnn.fast.tensornet import stage
+        from xnn.gnn.fast.tensornet_kernels import embedding
+        rows = embedding(center, neighbor, cut, self.distance_proj1(rbf),
+                         self.distance_proj2(rbf), self.distance_proj3(rbf), unit, src, dst)
+        training = self.training
+        I, v, S, squared = stage("embedding_parts", rows, training)(rows)
+        norm = self.init_norm(squared)
+        for linear in self.linears_scalar:
+            norm = self.act(linear(norm))
+        norm = norm.reshape(rows.shape[0], 3, self.n_features)
+        return stage("compose_rows", rows, training)(self.linears_tensor[0](I) * norm[:, 0],
+                                                     self.linears_tensor[1](v) * norm[:, 1, None, :],
+                                                     self.linears_tensor[2](S) * norm[:, 2, None, :])
 
-class _Interaction(nn.Module):
+
+class _Interaction(nn.Module, FastPathModule):
     """One interaction layer (section 3.3 of the TensorNet paper).
 
     Parameters
@@ -194,36 +244,76 @@ class _Interaction(nn.Module):
         Feature width ``F``.
     n_rbf : int
         Number of radial basis functions.
-    cutoff : float
-        Cosine cutoff radius.
     activation : str
         Nonlinearity of the edge filter MLP.
     o3 : bool
         ``True`` for the ``O(3)`` products ``YM + MY``, ``False`` for the
         ``SO(3)`` product ``2 YM``.
+
+    Attributes
+    ----------
+    recompute : str
+        ``"auto"`` (default): in evaluation mode from :data:`RECOMPUTE_MIN_PAIRS`
+        pairs, the filter network keeps only its input for the backward pass and
+        runs again there (the same values); ``"on"``: whenever a gradient is
+        needed; ``"off"``: never. Set with
+        :func:`~xnn.gnn.models.set_recompute_radial`.
+
+    Notes
+    -----
+    A fused GPU implementation (:mod:`xnn.gnn.fast.tensornet`) evaluates the
+    messages when :attr:`fast_active` is set (see :meth:`TensorNet.set_use_fast`).
     """
 
-    def __init__(self, n_features: int, n_rbf: int, cutoff: float, activation: str,
-                 o3: bool):
+    recompute: str
+    #: recomputes its filter network on request (see set_recompute_radial)
+    radial_recompute = True
+
+    def __init__(self, n_features: int, n_rbf: int, activation: str, o3: bool):
         super().__init__()
         self.n_features = n_features
         self.o3 = o3
-        self.cutoff_fn = CosineCutoff(cutoff)
+        self.recompute = "auto"
         self.act = make_activation(activation)
         self.linears_scalar = nn.ModuleList([
             nn.Linear(n_rbf, n_features), nn.Linear(n_features, 2 * n_features),
             nn.Linear(2 * n_features, 3 * n_features)])
         self.linears_tensor = nn.ModuleList(
             [nn.Linear(n_features, n_features, bias=False) for _ in range(6)])
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` and a power-of-two feature width."""
+        from xnn.gnn.fast.tensornet import supported
+        n = self.n_features
+        return 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
 
     def _filters(self, rbf: Tensor) -> Tensor:
         """The edge filter MLP, ``(E, n_rbf) -> (E, 3 F)``."""
+        if not torch.jit.is_scripting() and self._recomputes(rbf):
+            return self._filters_recomputed(rbf)
+        return self._filter_network(rbf)
+
+    def _filter_network(self, rbf: Tensor) -> Tensor:
         for linear in self.linears_scalar:
             rbf = self.act(linear(rbf))
         return rbf
 
-    def forward(self, X: Tensor, src: Tensor, dst: Tensor, r: Tensor, rbf: Tensor,
-                q: Tensor, rbf_self: Tensor) -> Tensor:
+    @torch.jit.unused
+    def _recomputes(self, rbf: Tensor) -> bool:
+        if self.recompute == "off" or not (torch.is_grad_enabled() and rbf.requires_grad):
+            return False
+        if self.recompute == "on":
+            return True
+        return not self.training and rbf.shape[0] >= RECOMPUTE_MIN_PAIRS
+
+    @torch.jit.unused
+    def _filters_recomputed(self, rbf: Tensor) -> Tensor:
+        from torch.utils.checkpoint import checkpoint
+        return checkpoint(self._filter_network, rbf, use_reentrant=False)
+
+    def forward(self, X: Tensor, src: Tensor, dst: Tensor, cut: Tensor, rbf: Tensor,
+                q: Tensor) -> Tensor:
         """Update the tensors ``X`` of shape ``(N, 3, 3, F)``.
 
         Parameters
@@ -231,19 +321,19 @@ class _Interaction(nn.Module):
         X : Tensor
             Current tensors ``(N, 3, 3, F)``.
         src, dst : Tensor
-            Neighbor ``j`` and center ``i`` of every edge, ``(E,)`` each.
-        r : Tensor
-            Edge lengths ``(E,)``.
+            Neighbor ``j`` and center ``i`` of every pair, self pairs included,
+            ``(P,)`` each.
+        cut : Tensor
+            The cosine cutoff of every pair ``(P,)``.
         rbf : Tensor
-            Radial basis of the edge lengths ``(E, n_rbf)``.
+            Radial basis of the pair distances ``(P, n_rbf)``.
         q : Tensor
             Total charge of every atom's structure, ``(N,)``.
-        rbf_self : Tensor
-            The radial basis at zero distance, ``(1, n_rbf)``.
         """
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(X, src, dst, cut, rbf, q)
         n, F = X.shape[0], self.n_features
-        filters = (self._filters(rbf) * self.cutoff_fn(r).unsqueeze(-1)).reshape(-1, 3, F)
-        filters_self = self._filters(rbf_self).reshape(1, 3, F)       # cutoff(0) = 1
+        filters = (self._filters(rbf) * cut.unsqueeze(-1)).reshape(-1, 3, F)
 
         X = X / (frobenius(X) + 1.0)[:, None, None, :]
         scalar, skew, symmetric = decompose(X)
@@ -252,13 +342,12 @@ class _Interaction(nn.Module):
         symmetric = self.linears_tensor[2](symmetric)
         Y = compose(scalar, skew, symmetric)
 
-        # messages from the neighbors and from the atom itself
+        # messages from the neighbors and, through the self pairs, from the atom itself
         vector = axial_vector(skew)
-        m_scalar = scatter_sum(filters[:, 0] * scalar[src], dst, n) + filters_self[:, 0] * scalar
-        m_vector = (scatter_sum(filters[:, 1].unsqueeze(1) * vector[src], dst, n)
-                    + filters_self[:, 1].unsqueeze(1) * vector)
-        m_symmetric = (scatter_sum(filters[:, 2][:, None, None, :] * symmetric[src], dst, n)
-                       + filters_self[:, 2][:, None, None, :] * symmetric)
+        m_scalar = scatter_sum(filters[:, 0] * gather_rows(scalar, src), dst, n)
+        m_vector = scatter_sum(filters[:, 1].unsqueeze(1) * gather_rows(vector, src), dst, n)
+        m_symmetric = scatter_sum(filters[:, 2][:, None, None, :] * gather_rows(symmetric, src),
+                                  dst, n)
         message = compose(m_scalar, skew_tensor(m_vector), m_symmetric)
 
         charge_scale = (1.0 + 0.1 * q)[:, None, None, None]
@@ -274,9 +363,27 @@ class _Interaction(nn.Module):
         dX = compose(scalar, skew, symmetric)
         return X + dX + charge_scale * tensor_matmul(dX, dX)
 
+    @torch.jit.unused
+    def _forward_fast(self, X: Tensor, src: Tensor, dst: Tensor, cut: Tensor, rbf: Tensor,
+                      q: Tensor) -> Tensor:
+        """The layer on the fused messages and the compact parts (scalar, vector, six entries)."""
+        from xnn.gnn.fast.tensornet import stage
+        from xnn.gnn.fast.tensornet_kernels import messages
+        training = self.training
+        Xn, I, v, S = stage("interaction_parts", X, training)(X)
+        I = self.linears_tensor[0](I)
+        v = self.linears_tensor[1](v)
+        S = self.linears_tensor[2](S)
+        m = messages(torch.cat([I.unsqueeze(1), v, S], dim=1), self._filters(rbf), cut, src, dst)
+        product = "interaction_product_o3" if self.o3 else "interaction_product_so3"
+        I, v, S = stage(product, X, training)(I, v, S, m, q)
+        return stage("interaction_update", X, training)(Xn, self.linears_tensor[3](I),
+                                                        self.linears_tensor[4](v),
+                                                        self.linears_tensor[5](S), q)
+
 
 @register_model("tensornet")
-class TensorNet(InteratomicPotential):
+class TensorNet(ExactFloat64Constants, InteratomicPotential):
     """TensorNet interatomic potential (rank-2 Cartesian tensor features).
 
     See the module docstring for the equations. The defaults are the
@@ -324,6 +431,8 @@ class TensorNet(InteratomicPotential):
         Neighbor-list cutoff radius.
     rbf : torch.nn.Module
         The radial basis.
+    cutoff_fn : torch.nn.Module
+        The cosine cutoff of the embedding and the filters.
     tensor_embedding : torch.nn.Module
         The tensor embedding layer.
     layers : torch.nn.ModuleList
@@ -358,10 +467,10 @@ class TensorNet(InteratomicPotential):
         self.n_interactions = n_interactions
         self.equivariance_group = equivariance_group
         self.rbf = make_radial_basis(radial_basis, n_rbf, cutoff, trainable_rbf)
-        self.tensor_embedding = _TensorEmbedding(n_features, n_rbf, cutoff, n_elements,
-                                                 activation)
+        self.cutoff_fn = CosineCutoff(cutoff)
+        self.tensor_embedding = _TensorEmbedding(n_features, n_rbf, n_elements, activation)
         self.layers = nn.ModuleList([
-            _Interaction(n_features, n_rbf, cutoff, activation, equivariance_group == "O(3)")
+            _Interaction(n_features, n_rbf, activation, equivariance_group == "O(3)")
             for _ in range(n_interactions)])
         self.out_norm = nn.LayerNorm(3 * n_features)
         self.linear = nn.Linear(3 * n_features, n_features)
@@ -381,6 +490,48 @@ class TensorNet(InteratomicPotential):
             if species is None:
                 raise ValueError("species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
+        # the fused embedding and interaction layers (see set_use_fast); "auto" takes them
+        # where measured faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "TensorNet":
+        """Choose the implementation of the embedding and interaction layers.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.tensornet` where they are available and faster
+            for the input (a CUDA device, Triton, a graph above the size
+            crossover measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available; ``False``:
+            always the reference implementation. The kernels are twice
+            differentiable, so force training takes them as well. In float32
+            the kernels agree with the reference to about 1e-6 relative, in
+            float64 to about 1e-14.
+
+        Returns
+        -------
+        TensorNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused layers on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.tensornet import AUTO_POLICY, AUTO_POLICY_TRAINING
+        layers = self.__dict__.get("_fast_layers")
+        if layers is None:
+            layers = fast_modules(self)
+            self.__dict__["_fast_layers"] = layers
+        like = self.linear.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(layers, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:
@@ -443,14 +594,21 @@ class TensorNet(InteratomicPotential):
         Tensor
             The tensors ``X`` of shape ``(N, 3, 3, F)`` after the last layer.
         """
-        src, dst = edge_index[0], edge_index[1]
         r = torch.linalg.norm(edge_vec, dim=-1)
         unit = edge_vec / r.clamp(min=1e-12).unsqueeze(-1)
+        # the sums over neighbors include the atom itself: one self pair per atom
+        # (r = 0, no direction, cutoff 1) appended to the pairs
+        n = atomic_numbers.shape[0]
+        loops = torch.arange(n, dtype=edge_index.dtype, device=edge_index.device)
+        src = torch.cat([edge_index[0], loops])
+        dst = torch.cat([edge_index[1], loops])
+        r = torch.cat([r, r.new_zeros((n,))])
+        unit = torch.cat([unit, unit.new_zeros((n, 3))])
+        cut = self.cutoff_fn(r)
         rbf = self.rbf(r)
-        rbf_self = self.rbf(torch.zeros(1, dtype=r.dtype, device=r.device))
-        X = self.tensor_embedding(atomic_numbers, src, dst, r, unit, rbf, rbf_self)
+        X = self.tensor_embedding(atomic_numbers, src, dst, cut, unit, rbf)
         for layer in self.layers:
-            X = layer(X, src, dst, r, rbf, total_charge, rbf_self)
+            X = layer(X, src, dst, cut, rbf, total_charge)
         return X
 
     def _features(self, X: Tensor) -> Tensor:
@@ -544,6 +702,7 @@ class TensorNet(InteratomicPotential):
             ``"node_features"`` (the invariant readout features, ``(N, F)``)
             and ``"node_tensors"`` (``(N, 3, 3, F)``).
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         edge_vec = data.edge_vectors()
         if data.total_charge is None:
             q = torch.zeros(data.num_nodes, dtype=edge_vec.dtype, device=edge_vec.device)

@@ -279,7 +279,8 @@ def set_recompute_radial(model: nn.Module, recompute="auto") -> nn.Module:
     Parameters
     ----------
     model : torch.nn.Module
-        Any model; every :class:`RadialNet` in it is set.
+        Any model; every :class:`RadialNet` in it is set, and every other module
+        that declares ``radial_recompute`` (the TensorNet filter networks).
     recompute : bool or str
         ``"auto"`` (default), ``True`` (whenever a gradient is needed) or
         ``False`` (never); see :class:`RadialNet`.
@@ -293,6 +294,6 @@ def set_recompute_radial(model: nn.Module, recompute="auto") -> nn.Module:
     if recompute not in modes:
         raise ValueError(f"recompute must be 'auto', True or False, got {recompute!r}")
     for module in model.modules():
-        if isinstance(module, RadialNet):
+        if isinstance(module, RadialNet) or getattr(type(module), "radial_recompute", False):
             module.recompute = modes[recompute]
     return model
