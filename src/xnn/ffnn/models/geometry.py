@@ -191,13 +191,15 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor, shift: Optional[Tensor
         Displacements of shape ``(M, 3)``.
     """
     # formed in the geometry's dtype, returned in the model's (see
-    # AtomicGraph.edge_vectors)
-    vec = data.pos[b] - data.pos[a]
+    # AtomicGraph.edge_vectors); index_select gathers, whose backward adds
+    # atomically, where the advanced-index gather sorts its indices and sums
+    # every atom's terms one after the other
+    vec = data.pos.index_select(0, b) - data.pos.index_select(0, a)
     if data.cell is None or vec.shape[0] == 0:
         return vec.to(data.model_dtype)
     if shift is None:
         shift = pair_image_shifts(data, a, b)
-    cells = data.cell.to(vec.dtype)[data.batch[a]]                        # (M, 3, 3)
+    cells = data.cell.to(vec.dtype).index_select(0, data.batch.index_select(0, a))     # (M, 3, 3)
     return (vec + (shift[:, :, None] * cells).sum(1)).to(data.model_dtype)
 
 
