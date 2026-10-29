@@ -93,7 +93,7 @@ What to expect from fast implementations
   the backward pass instead of being kept in memory
   (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model; ``True``
   helps on small GPUs). For PaiNN this needs about a third of the memory of an
-  evaluation for 25 to 50 % more time. The SchNet, PaiNN and TensorNet kernels
+  evaluation for 25 to 60 % more time. The SchNet, PaiNN and TensorNet kernels
   need about half the memory of their reference counterparts. The LES fast path
   needs 10 to 30 times less memory than its reference counterpart on large
   periodic cells.
