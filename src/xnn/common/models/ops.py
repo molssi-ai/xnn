@@ -368,6 +368,15 @@ def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     return out.index_add(0, index, src.to(torch.float64))
 
 
+def structure_sums(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
+    """:func:`structure_sum` of several per-atom rows at once: ``src`` ``(T, N)``
+    to float64 totals ``(T, dim_size)`` in one scatter (one cast, one zero
+    fill and one index add for every row instead of three launches per row).
+    """
+    out = torch.zeros(int(src.shape[0]), dim_size, dtype=torch.float64, device=src.device)
+    return out.index_add(1, index, src.to(torch.float64))
+
+
 #: Standard atomic weights (u) by atomic number, Z = 0 to 99 (the ASE table),
 #: for :func:`center_of_mass`.
 ATOMIC_MASSES = [
