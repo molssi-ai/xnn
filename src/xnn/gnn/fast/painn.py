@@ -11,9 +11,10 @@ one kernel that adds the gradients of ``phi(s)`` and ``v`` onto the neighbors an
 writes those of the filters and directions.
 
 The gradient reaches the features, the filters and the directions (so forces,
-stress and, through ``phi`` and the filters, the weights), but only once:
-evaluations that train (:attr:`torch.nn.Module.training`, where a force loss
-needs second derivatives) use the reference block.
+stress and, through ``phi`` and the filters, the weights). The backward kernel
+is itself differentiable, through one more kernel of the same form, so the
+second derivatives of a force loss run fused as well and training takes the
+kernels too.
 """
 from __future__ import annotations
 
@@ -21,10 +22,15 @@ import torch
 
 from xnn.common.models.fast import AutoPolicy
 
-#: Edge counts above which ``use_fast="auto"`` takes the kernels: every size, since the
-#: kernels were faster than the reference from a single small molecule on, on every GPU
-#: measured (T4, V100, A30) in both precisions, and use less memory.
+#: Edge counts above which ``use_fast="auto"`` takes the kernels in evaluation mode (energy
+#: and forces): every size, since the kernels were faster than the reference from a single
+#: small molecule on, on every GPU measured (T4, V100, A30) in both precisions, and use less
+#: memory.
 AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+
+#: The same for training mode (a step with a force loss, second derivatives included): every
+#: size as well, on the same GPUs.
+AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
 
 
 def supported(device: torch.device, dtype: torch.dtype) -> bool:

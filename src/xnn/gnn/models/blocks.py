@@ -280,7 +280,8 @@ def set_recompute_radial(model: nn.Module, recompute="auto") -> nn.Module:
     ----------
     model : torch.nn.Module
         Any model; every :class:`RadialNet` in it is set, and every other module
-        that declares ``radial_recompute`` (the TensorNet filter networks).
+        that declares ``radial_recompute`` (the TensorNet filter networks, the PaiNN
+        filters).
     recompute : bool or str
         ``"auto"`` (default), ``True`` (whenever a gradient is needed) or
         ``False`` (never); see :class:`RadialNet`.

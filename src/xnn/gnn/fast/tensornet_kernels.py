@@ -22,6 +22,8 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
+from ._csr import orderings
+
 #: rows per atom: scalar, vector (3), symmetric (6)
 ROWS = 10
 
@@ -533,32 +535,6 @@ def _cut_and_direction_gradients(dots: Tensor, u: Tensor) -> Tuple[Tensor, Tenso
 def _warps(n_features: int) -> int:
     """Warps per program: one atom's ten rows (16 with padding) of ``F`` values."""
     return 4 if n_features <= 128 else 8
-
-
-def _compressed(index: Tensor, n: int) -> Tuple[Tensor, Tensor]:
-    """The pairs sorted by ``index`` (stable) and the row pointers ``(n + 1,)``."""
-    order = torch.argsort(index, stable=True)
-    ptr = torch.zeros(n + 1, dtype=torch.int64, device=index.device)
-    ptr[1:] = torch.cumsum(torch.bincount(index, minlength=n), 0)
-    return order, ptr
-
-
-#: the orderings of the last pair list: the layers of one evaluation share them
-_last = [None]
-
-
-def orderings(src: Tensor, dst: Tensor, n: int) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """The pairs by center and by neighbor: ``(order_dst, ptr_dst, order_src, ptr_src)``.
-
-    Computed once per pair list: the embedding and every layer of an evaluation pass
-    the same ``src`` and ``dst`` tensors.
-    """
-    hit = _last[0]
-    if hit is not None and hit[0] is src and hit[1] is dst and hit[2] == n:
-        return hit[3]
-    out = (*_compressed(dst, n), *_compressed(src, n))
-    _last[0] = (src, dst, n, out)
-    return out
 
 
 def _contiguous(t):
