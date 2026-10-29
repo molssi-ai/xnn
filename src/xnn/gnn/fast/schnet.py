@@ -26,20 +26,21 @@ from xnn.common.models.fast import AutoPolicy
 #: and forces). Below them a call is bound by kernel launches and the two paths tie, the
 #: kernels up to a few percent behind; above them the kernels win on every GPU measured. The
 #: crossover comes earlier in float64, where the reference's elementwise passes cost more, and
-#: on GPUs with little float64 throughput (T4) the kernels win at every size.
+#: on GPUs with little float64 throughput (T4) the kernels win at every size. A GPU in neither
+#: table takes the largest measured thresholds.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"T4": 6_000, "V100": 15_000, "A30": 15_000},
-    min_edges_float64={"T4": 0, "V100": 7_000, "A30": 7_000},
-    default_min_edges=15_000,
-    default_min_edges_float64=7_000,
+    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000},
+    min_edges_float64={"T4": 0, "V100": 8_000, "A30": 4_000, "A100": 25_000},
+    default_min_edges=30_000,
+    default_min_edges_float64=25_000,
 )
 
 #: The same for training mode (a step with a force loss, second derivatives included).
 AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"T4": 6_000, "V100": 15_000, "A30": 7_000},
-    min_edges_float64={"T4": 0, "V100": 4_000, "A30": 4_000},
-    default_min_edges=15_000,
-    default_min_edges_float64=4_000,
+    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000},
+    min_edges_float64={"T4": 0, "V100": 4_000, "A30": 2_000, "A100": 15_000},
+    default_min_edges=30_000,
+    default_min_edges_float64=15_000,
 )
 
 
