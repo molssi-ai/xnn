@@ -15,7 +15,8 @@ energies and forces of water boxes and a batch of cells. The models have
 ``F = 128`` and ``T = 3``, in four variants: the defaults (20 Gaussians to
 5 Angstrom, latent charges), the paper's options (20 Bessel functions,
 atomic dipoles), shared interactions, and shared interactions and filters.
-The last printed line is the worst relative error. The reference is used as
+The last printed line is the worst relative error; in float32, the worst
+error in units of its bound (see :data:`F32_BOUND`). The reference is used as
 an external oracle only.
 
 The feature layouts differ by fixed permutations (see
@@ -24,6 +25,8 @@ The feature layouts differ by fixed permutations (see
 ``U`` in its vector mixing; xnn uses ``(s, vv, vs)``, ``(vv, sv, ss)`` and
 ``[U, V]``. Both stack the filters of all blocks in one layer.
 """
+import copy
+import dataclasses
 import math
 import sys
 
@@ -44,6 +47,12 @@ SHARED = dict(DEFAULT, shared_interactions=True)
 SHARED_ALL = dict(DEFAULT, shared_interactions=True, shared_filters=True)
 
 KEYS = ("energy", "forces", "charges", "dipole", "polarizability")
+
+#: float32 errors pass within this bound, or within FLOOR_FACTOR times the reference's own
+#: float32 error where that is larger: a small output whose terms cancel (the polarizability of
+#: a few atoms) carries more float32 round-off, and how much depends on the summation order
+F32_BOUND = 1e-5
+FLOOR_FACTOR = 4.0
 
 
 def build_model(settings, dtype, seed=0, built_in=None) -> PaiNN:
@@ -258,17 +267,32 @@ def water_box(n_side, seed, spacing=3.1):
             "cell": np.eye(3) * n_side * spacing, "pbc": [True] * 3}
 
 
-def compare(model, ref, graph, label, keys=KEYS) -> float:
-    """Worst error over ``keys``: energies relative to ``max(|E|, 1)``, the others to their largest component."""
+def compare(model, ref, graph, label, keys=KEYS, exact=None) -> float:
+    """Worst error over ``keys``: energies relative to ``max(|E|, 1)``, the others to their largest component.
+
+    With ``exact`` (the reference in float64), the worst error in units of its float32 bound
+    instead: :data:`F32_BOUND`, or :data:`FLOOR_FACTOR` times the reference's own float32 error
+    (its float32 against its float64 evaluation) where that is larger.
+    """
     a, b = xnn_outputs(model, graph), reference_outputs(ref, graph)
-    errors = {}
+    if exact is not None:
+        wide = dataclasses.replace(graph, pos=graph.pos.double(),
+                                   cell=None if graph.cell is None else graph.cell.double())
+        c = reference_outputs(exact, wide)
+    errors, scores = {}, {}
     for key in keys:
         scale = b[key].abs().max().item()
         if key == "energy":
             scale = max(scale, 1.0)
         errors[key] = (a[key].to(b[key].dtype) - b[key]).abs().max().item() / scale
-    print(f"  {label:34s} " + "  ".join(f"{k} {e:.2e}" for k, e in errors.items()))
-    return max(errors.values())
+        if exact is not None:
+            floor = (b[key].double() - c[key]).abs().max().item() / scale
+            scores[key] = errors[key] / max(F32_BOUND, FLOOR_FACTOR * floor)
+    line = "  ".join(f"{k} {e:.2e}" for k, e in errors.items())
+    if exact is not None:
+        line += f"  (of bound {max(scores.values()):.2f})"
+    print(f"  {label:34s} {line}")
+    return max((scores or errors).values())
 
 
 def model_and_reference(settings, dtype, seed=0, built_in=None):
@@ -287,22 +311,28 @@ def run(dtype) -> float:
     for label, settings in variants:
         print(f"{label} ({name}):")
         model, ref = model_and_reference(settings, dtype)
+        # float32: the reference's own round-off, from the same weights in float64
+        exact = copy.deepcopy(ref).double() if dtype == torch.float32 else None
         for n, seed in ((5, 0), (9, 1), (21, 2)):
             graph = structure_to_graph(random_molecule(n, seed), cutoff)
-            worst = max(worst, compare(model, ref, graph, f"molecule of {n} atoms"))
+            worst = max(worst, compare(model, ref, graph, f"molecule of {n} atoms", exact=exact))
         batch = collate([structure_to_graph(random_molecule(n, 10 + n), cutoff) for n in (6, 12, 17)])
-        worst = max(worst, compare(model, ref, batch, "batch of three molecules"))
+        worst = max(worst, compare(model, ref, batch, "batch of three molecules", exact=exact))
         if settings in (DEFAULT, PAPER):
+            ef = ("energy", "forces")
             graph = structure_to_graph(water_box(4, 0), cutoff)
-            worst = max(worst, compare(model, ref, graph, "water box of 192 atoms", ("energy", "forces")))
+            worst = max(worst, compare(model, ref, graph, "water box of 192 atoms", ef, exact))
             batch = collate([structure_to_graph(water_box(k, k), cutoff) for k in (3, 4)])
-            worst = max(worst, compare(model, ref, batch, "batch of two cells", ("energy", "forces")))
+            worst = max(worst, compare(model, ref, batch, "batch of two cells", ef, exact))
         if dtype == torch.float64 and settings in (DEFAULT, PAPER):
             print(f"{label}, built in float32 and cast to float64:")
             model, ref = model_and_reference(settings, dtype, built_in=torch.float32)
             graph = structure_to_graph(random_molecule(21, 2), cutoff)
             worst = max(worst, compare(model, ref, graph, "molecule of 21 atoms"))
-    print(f"worst relative error ({name}): {worst:.3e}")
+    if dtype == torch.float32:
+        print(f"worst error in units of the float32 bound: {worst:.3f}")
+    else:
+        print(f"worst relative error ({name}): {worst:.3e}")
     return worst
 
 
