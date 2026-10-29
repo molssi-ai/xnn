@@ -519,3 +519,14 @@ html[data-theme="dark"] img.logo__image {
 	font-style: italic;
 	white-space: nowrap;
 }
+
+/* Model support table: available, available without an upstream to compare, not available */
+.check-green,
+.check-orange,
+.cross-red {
+	font-weight: bold;
+	font-size: 1.15em;
+}
+.check-green { color: #1a9c3e; }
+.check-orange { color: #f08c00; }
+.cross-red { color: #d62828; }

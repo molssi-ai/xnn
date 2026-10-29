@@ -15,6 +15,7 @@ and the command line interfaces.
    data
    featurizers
    models
+   model_support
    configuration
    training
    deployment
