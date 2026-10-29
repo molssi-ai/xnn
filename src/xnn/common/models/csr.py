@@ -1,8 +1,9 @@
 """Compressed rows of a pair list: the pairs sorted by center or by neighbor.
 
-The fused kernels of SchNet and TensorNet run one program per atom over its
-pairs in one of these orders and accumulate in registers, so their sums need no
-atomic adds and come out the same in every run.
+The fused kernels of SchNet, TensorNet and the AMOEBA/HIPPO induction run one
+program per atom over its pairs in one of these orders and accumulate in
+registers, so their sums need no atomic adds and come out the same in every
+run.
 """
 from typing import Optional, Tuple
 
