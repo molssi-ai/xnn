@@ -18,6 +18,9 @@ from torch import Tensor, nn
 
 from ..data import structure_to_graph
 
+# the phases of the fixed-length solves, in the order of a plan's ``needed`` counts
+PHASES = ("forward", "adjoint")
+
 
 def plan_core(model: nn.Module) -> Optional[nn.Module]:
     """The submodule of ``model`` that records step plans, or ``None``.
@@ -49,7 +52,13 @@ class StepGraph:
     converged solves; then the solves run the largest count of the last two
     steps plus a quarter, and on a GPU the step is recorded as a CUDA graph
     and replayed from then on. A step whose solves did not converge in that
-    length is evaluated again with converged solves, and the length raised.
+    length is evaluated again with converged solves, and the length raised
+    above the one that failed. Every ``shorten`` steps the lengths are
+    lowered to the largest count the solves needed in them plus a quarter,
+    when that is shorter, and the step is recorded again: the dipole
+    predictor keeps improving after the warm-up, and a length set then would
+    be paid at every step. A failed length stops being a floor after four
+    times ``shorten`` converged steps.
 
     Parameters
     ----------
@@ -66,6 +75,9 @@ class StepGraph:
     warmup : int, optional
         Steps with converged solves before the lengths are fixed, by default
         8 (it also fills the history of the dipole predictor).
+    shorten : int, optional
+        Steps between the checks that lower the lengths, by default 25; 0
+        keeps the lengths once fixed.
     capture : bool, optional
         Record the step as a CUDA graph on a GPU, by default ``True``.
     compute_dtype : torch.dtype, optional
@@ -78,7 +90,7 @@ class StepGraph:
     """
 
     def __init__(self, model: nn.Module, cutoff: float, skin: float = 1.0, margin: float = 1.2, warmup: int = 8,
-                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None):
+                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None, shorten: int = 25):
         # in training mode the forces would carry a graph for a force loss, and the
         # backward pass would solve the dipoles again
         self.model = model.eval()
@@ -87,6 +99,7 @@ class StepGraph:
             raise ValueError("the model records no step plans")
         self.cutoff, self.skin, self.margin = float(cutoff), float(skin), float(margin)
         self.warmup, self.capture, self.compute_dtype = int(warmup), bool(capture), compute_dtype
+        self.shorten = int(shorten)
         self.rebuilds = 0
         self.full_rebuilds = 0
         self.recordings = 0
@@ -106,6 +119,10 @@ class StepGraph:
         self.steps = 0
         self.recent: collections.deque = collections.deque(maxlen=2)
         self.floor: dict = {}
+        # the iterations the fixed solves needed, per step since the last check, and the converged
+        # steps of fixed length since the last failed length
+        self.needed: list = []
+        self.settled = 0
 
     def __call__(self, struct: dict) -> dict:
         """Evaluate one step.
@@ -207,7 +224,9 @@ class StepGraph:
 
     def _replay(self, struct: dict) -> Optional[dict]:
         self.cuda_graph.replay()
-        outdated, converged = torch.stack([self.flag, self.plan.converged]).tolist()
+        # one read from the device: the rebuild flag, the convergence and the iterations needed
+        status = torch.cat([torch.stack([self.flag, self.plan.converged]).to(torch.float64), self.plan.needed])
+        outdated, converged, *needed = status.tolist()
         if outdated:
             if self._refresh(struct):
                 return self._replay(struct)
@@ -216,13 +235,44 @@ class StepGraph:
             self._lengthen()
             return None
         self.replays += 1
+        # a shortened length drops the graph: the next step records it again
+        self._shorten(needed)
         return {key: value.clone() for key, value in self.outputs.items()}
+
+    def _length(self, phase: str, count: int) -> int:
+        """The fixed length for solves that needed ``count`` iterations: a quarter
+        more plus one, and above a length that failed."""
+        return max(int(math.ceil(1.25 * count)) + 1, self.floor[phase] + 2 if phase in self.floor else 0)
 
     def _lengthen(self) -> None:
         """The fixed length did not suffice: the next steps converge, and the length
         is raised from their counts."""
         self.floor, self.plan.solve_iterations = dict(self.plan.solve_iterations), None
+        # the counts of the steps before the failure no longer set the length
+        self.recent.clear()
+        self.needed.clear()
+        self.settled = 0
         self.cuda_graph = None
+
+    def _shorten(self, needed: list) -> None:
+        """Note the iterations the fixed solves needed; every ``shorten`` steps lower
+        the lengths to what they needed, when that is shorter."""
+        if not self.shorten or self.plan.solve_iterations is None:
+            return
+        self.needed.append(needed)
+        self.settled += 1
+        if self.settled > 4 * self.shorten:
+            self.floor = {}
+        if len(self.needed) < self.shorten:
+            return
+        lengths = dict(self.plan.solve_iterations)
+        for slot, phase in enumerate(PHASES):
+            if phase in lengths:
+                lengths[phase] = min(lengths[phase], self._length(phase, max(int(row[slot]) for row in self.needed)))
+        self.needed.clear()
+        if lengths != self.plan.solve_iterations:
+            self.plan.solve_iterations = lengths
+            self.cuda_graph = None
 
     def _eager(self) -> dict:
         if self.capture and self.pos.is_cuda and self.stream is None:
@@ -236,13 +286,12 @@ class StepGraph:
         else:
             out = self._step()
         self.steps += 1
-        if self.plan.solve_iterations is None and self.steps >= self.warmup:
+        if self.plan.solve_iterations is None and self.steps >= self.warmup and len(self.recent) == 2:
             counts: dict = {}
             for seen in self.recent:
                 for phase, n in seen.items():
                     counts[phase] = max(counts.get(phase, 0), n)
-            self.plan.solve_iterations = {phase: max(int(math.ceil(1.25 * n)) + 1, self.floor.get(phase, 0) + 2)
-                                          for phase, n in counts.items()}
+            self.plan.solve_iterations = {phase: self._length(phase, n) for phase, n in counts.items()}
         return out
 
     def _step(self) -> dict:
@@ -250,6 +299,8 @@ class StepGraph:
         if self.plan.solve_iterations is not None and not bool(self.plan.converged):
             self._lengthen()
             out = self._run()
+        elif self.plan.solve_iterations is not None:
+            self._shorten(self.plan.needed.tolist())
         if self.plan.solve_iterations is None:
             stats = self.core.solver_stats
             self.recent.append({phase: int(stats[phase]) for phase in ("forward", "adjoint") if phase in stats})

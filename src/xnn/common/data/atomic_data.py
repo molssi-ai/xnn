@@ -357,16 +357,18 @@ class AtomicGraph:
             if self.edge_index.shape[1] <= EDGE_BLOCK:
                 # one block: the same operations without the Python function,
                 # whose overhead is a few percent of a small molecule's step
-                vec = self.pos[self.edge_index[1]] - self.pos[self.edge_index[0]]
+                # index_select gathers: their backward adds atomically, where the
+                # advanced-index gather sorts every edge's index in its backward
+                vec = self.pos.index_select(0, self.edge_index[1]) - self.pos.index_select(0, self.edge_index[0])
                 if self.cell is not None:
                     vec = vec + self.cell_shifts.to(vec.dtype) @ cell
                 return vec.to(self.model_dtype)
             return _EdgeVectors.apply(self.pos, cell, self.edge_index, self.cell_shifts,
                                       self.model_dtype)
         src, dst = self.edge_index[0], self.edge_index[1]
-        vec = self.pos[dst] - self.pos[src]
+        vec = self.pos.index_select(0, dst) - self.pos.index_select(0, src)
         # cell of the structure each edge belongs to (via its src node)
-        cell_per_edge = self.cell[self.batch[src]]              # (E, 3, 3)
+        cell_per_edge = self.cell.index_select(0, self.batch.index_select(0, src))     # (E, 3, 3)
         vec = vec + torch.einsum("ei,eij->ej", self.cell_shifts.to(vec.dtype), cell_per_edge)
         return vec.to(self.model_dtype)
 
