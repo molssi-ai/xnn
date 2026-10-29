@@ -60,7 +60,7 @@ is not available yet.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
    * - NequIP
      - |Y|
