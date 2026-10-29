@@ -699,27 +699,36 @@ def _fast_batch(dtype):
     return batch
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_fast_message_gradients():
-    """Every first derivative of the fused message block (finite differences)."""
-    pytest.importorskip("triton")
-    from xnn.gnn.fast.painn_kernels import MessageFunction
+def _check_message_gradients(kernels, device, fast_mode=False):
+    """Every first and second derivative of the fused message block (finite differences)."""
     gen = torch.Generator().manual_seed(0)
     n, n_edges, F = 5, 12, 16
 
     def rand(*shape):
-        return torch.randn(*shape, dtype=torch.float64, generator=gen).cuda().requires_grad_(True)
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
 
     x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
     stacked = rand(n_edges, 2 * 3 * F)                  # one block's columns of stacked filters
-    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).cuda()
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).to(device)
 
     def f(x, stacked, direction, v):
-        W = stacked[:, 3 * F:]
-        return MessageFunction.apply(x, W, direction, v, edge_index[0], edge_index[1])
+        return kernels.message(x, stacked[:, 3 * F:], direction, v, edge_index)
 
+    inputs = (x, stacked, direction, v)
     # atomic adds sum in a run-dependent order
-    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12)
+    assert torch.autograd.gradcheck(f, inputs, nondet_tol=1e-12, fast_mode=fast_mode)
+    # second derivatives (force training): the backward function, differentiated once more
+    assert torch.autograd.gradgradcheck(f, inputs, nondet_tol=1e-12, fast_mode=fast_mode)
+    assert kernels.message(x, stacked[:0, 3 * F:], direction[:0], v,
+                           edge_index[:, :0])[1].abs().max() == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_message_gradients():
+    """Every first and second derivative of the fused message block (finite differences)."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import painn_kernels
+    _check_message_gradients(painn_kernels, "cuda")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
@@ -746,16 +755,123 @@ def test_fast_path_parity(dtype, shared):
         assert err < tol, (key, float(err))
 
 
+def _training_gradients(model, batch, use_fast):
+    """The weight gradients of an energy and force loss (forces with create_graph)."""
+    model.set_use_fast(use_fast).train()
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model, compute_stress=True).train()(batch)
+    assert all(b.message.fast_active == use_fast for b in model.interactions)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum() + out["stress"].pow(2).sum()).backward()
+    return {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+            if p.grad is not None}
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_fast_path_off_in_training():
-    """A training-mode evaluation (force training) runs the reference message blocks."""
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("shared", [False, True])
+def test_fast_path_training(dtype, shared):
+    """Force training through the fused message blocks gives the reference's weight gradients."""
     pytest.importorskip("triton")
-    model = _small().to("cuda").train()
-    model.set_use_fast(True)
-    out = ForceStressOutput(model).train()(_fast_batch(torch.float64))
-    assert not any(b.message.fast_active for b in model.interactions)
-    out["forces"].pow(2).sum().backward()
-    assert model.filters.weight.grad is not None
+    model = _small(n_features=32, n_interactions=3, shared_interactions=shared,
+                   shared_filters=shared).to("cuda", dtype)
+    ref = _training_gradients(model, _fast_batch(dtype), False)
+    fast = _training_gradients(model, _fast_batch(dtype), True)
+    assert ref.keys() == fast.keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in ref.items():
+        err = (fast[name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_auto_crossover_per_mode(monkeypatch):
+    """"auto" applies the evaluation crossover in evaluation mode and the training one in
+    training mode."""
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.painn as fast
+    from xnn.common.models.fast import AutoPolicy
+    never = AutoPolicy(default_min_edges=10 ** 9, default_min_edges_float64=10 ** 9)
+    always = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+    model = _small().to("cuda", torch.float64).set_use_fast("auto")
+    names = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    for training in (False, True):
+        for policy in names:
+            with monkeypatch.context() as patch:
+                for name in names:
+                    patch.setattr(fast, name, never if name == policy else always)
+                ForceStressOutput(model.train(training)).train(training)(_fast_batch(torch.float64))
+            expect = policy != ("AUTO_POLICY_TRAINING" if training else "AUTO_POLICY")
+            assert all(b.message.fast_active == expect for b in model.interactions), (training, policy)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_filters_recompute(monkeypatch, shared):
+    """Recomputed filters give the same energies, forces and weight gradients of a force loss;
+    "auto" takes them in evaluation mode from the threshold on, "off" never."""
+    import torch.utils.checkpoint
+
+    import xnn.gnn.models.painn as pn
+    from xnn.gnn.models.blocks import set_recompute_radial
+    real, calls = torch.utils.checkpoint.checkpoint, []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", counting)
+    model = _small(n_interactions=3, shared_filters=shared).double()
+    with torch.no_grad():
+        model.filters.bias.normal_()
+
+    def graph():
+        g = collate([_graph(n=9, seed=4, periodic=True), _graph(n=5, seed=5)])
+        g.pos, g.cell = g.pos.double(), g.cell.double()
+        return g
+
+    def run():
+        out = ForceStressOutput(model.eval(), compute_stress=True).eval()(graph())
+        return {k: out[k].detach() for k in ("energy", "forces", "stress")}
+
+    kept, kept_grads = run(), _training_gradients(model, graph(), False)
+    assert not calls                                   # below RECOMPUTE_MIN_EDGES
+    set_recompute_radial(model, True)
+    assert model.recompute == "on"
+    recomputed = run()
+    assert len(calls) == len(model.interactions)
+    for key, ref in kept.items():
+        assert torch.allclose(recomputed[key], ref, rtol=0, atol=1e-12 * ref.abs().max()), key
+    grads = _training_gradients(model, graph(), False)
+    assert grads.keys() == kept_grads.keys()
+    for name, g in kept_grads.items():
+        assert torch.allclose(grads[name], g, rtol=0, atol=1e-11 * g.abs().max()), name
+    calls.clear()
+    set_recompute_radial(model, "auto")
+    monkeypatch.setattr(pn, "RECOMPUTE_MIN_EDGES", 1)
+    run()
+    assert len(calls) == len(model.interactions)
+    calls.clear()
+    _training_gradients(model, graph(), False)           # "auto" keeps the filters in training
+    assert not calls
+    set_recompute_radial(model, False)
+    run()
+    assert not calls
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_recompute(dtype):
+    """The fused message blocks with recomputed filters give the reference's energies, forces
+    and weight gradients of a force loss."""
+    pytest.importorskip("triton")
+    from xnn.gnn.models.blocks import set_recompute_radial
+    model = _small(n_features=32, n_interactions=3).to("cuda", dtype)
+    ref = _training_gradients(model, _fast_batch(dtype), False)
+    set_recompute_radial(model, True)
+    fast = _training_gradients(model, _fast_batch(dtype), True)
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in ref.items():
+        err = (fast[name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
 
 
 @pytest.fixture
@@ -777,23 +893,10 @@ def test_fast_support_needs_cuda():
 
 
 def test_fast_message_gradients_interpreted(interpreted):
-    """The fused message block and its first derivatives, run by the Triton interpreter."""
-    gen = torch.Generator().manual_seed(1)
-    n, n_edges, F = 4, 9, 16
-
-    def rand(*shape):
-        return torch.randn(*shape, dtype=torch.float64, generator=gen).requires_grad_(True)
-
-    x, v, direction = rand(n, 3 * F), rand(n, 3, F), rand(n_edges, 3)
-    stacked = rand(n_edges, 2 * 3 * F)
-    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
-
-    def f(x, stacked, direction, v):
-        return interpreted.message(x, stacked[:, 3 * F:], direction, v, edge_index)
-
-    assert torch.autograd.gradcheck(f, (x, stacked, direction, v), nondet_tol=1e-12, fast_mode=True)
-    assert interpreted.message(x, stacked[:0, 3 * F:], direction[:0], v,
-                               edge_index[:, :0])[1].abs().max() == 0
+    """The fused message block and its first and second derivatives, run by the Triton
+    interpreter (random projections of the Jacobians: the interpreter runs every kernel call
+    in Python)."""
+    _check_message_gradients(interpreted, "cpu", fast_mode=True)
 
 
 def test_fast_path_parity_interpreted(interpreted):

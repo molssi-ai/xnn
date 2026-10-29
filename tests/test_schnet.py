@@ -413,7 +413,8 @@ def test_float64_centers_exact_after_cast_and_load():
 # fast path (fused continuous-filter convolution)
 
 def test_fast_path_eligibility(monkeypatch):
-    """The fused convolution needs a power-of-two width and plain dense filter layers."""
+    """The fused convolution needs a power-of-two filter width; the filter network stays
+    outside the kernels, adapters included."""
     import xnn.gnn.fast.schnet as fast
     from xnn.common.finetune import inject_lora
     monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
@@ -423,7 +424,7 @@ def test_fast_path_eligibility(monkeypatch):
     odd = SchNet(n_features=48, n_interactions=2, n_rbf=10, cutoff=5.0)
     assert not odd.interactions[0].cfconv.fast_supported(cuda, torch.float32)
     inject_lora(m, rank=2)
-    assert not m.interactions[0].cfconv.fast_supported(cuda, torch.float32)
+    assert m.interactions[0].cfconv.fast_supported(cuda, torch.float32)
 
 
 def _fast_batch(dtype):
@@ -462,16 +463,117 @@ def test_fast_path_parity(dtype, cutoff_fn, activated):
         assert err < tol, (key, float(err))
 
 
+def _training_gradients(model, batch, use_fast):
+    """The weight gradients of an energy and force loss (forces with create_graph)."""
+    model.set_use_fast(use_fast).train()
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model, compute_stress=True).train()(batch)
+    assert all(b.cfconv.fast_active == use_fast for b in model.interactions)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum() + out["stress"].pow(2).sum()).backward()
+    return {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+            if p.grad is not None}
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_fast_path_off_in_training():
-    """A training-mode evaluation (force training) runs the reference convolution."""
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("cutoff_fn", [None, "cosine"])
+@pytest.mark.parametrize("activated", [False, True])
+def test_fast_path_training(dtype, cutoff_fn, activated):
+    """Force training through the fused convolutions gives the reference's weight gradients."""
     pytest.importorskip("triton")
-    model = SchNet(n_features=64, n_interactions=2, n_rbf=20, cutoff=5.0).to("cuda").train()
-    model.set_use_fast(True)
-    out = ForceStressOutput(model).train()(_fast_batch(torch.float64))
-    assert not any(b.cfconv.fast_active for b in model.interactions)
-    out["forces"].pow(2).sum().backward()
-    assert model.interactions[0].cfconv.filter_net[0].weight.grad is not None
+    model = SchNet(n_features=32, n_interactions=2, n_rbf=20, cutoff=5.0, cutoff_fn=cutoff_fn,
+                   filter_output_activation=activated).to("cuda", dtype)
+    with torch.no_grad():
+        torch.nn.init.normal_(model.readout[-1].weight, std=0.3)
+    ref = _training_gradients(model, _fast_batch(dtype), False)
+    fast = _training_gradients(model, _fast_batch(dtype), True)
+    assert ref.keys() == fast.keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in ref.items():
+        err = (fast[name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_path_lora():
+    """Adapters on the filter networks act in the fused convolutions as in the reference."""
+    pytest.importorskip("triton")
+    from xnn.common.finetune import inject_lora
+    model = SchNet(n_features=32, n_interactions=2, n_rbf=20, cutoff=5.0)
+    inject_lora(model, rank=2)
+    torch.manual_seed(3)
+    with torch.no_grad():
+        torch.nn.init.normal_(model.readout[-1].weight, std=0.3)
+        for name, p in model.named_parameters():
+            if "lora" in name:
+                p.normal_(std=0.1)
+    model = model.to("cuda", torch.float64)
+    ref = _training_gradients(model, _fast_batch(torch.float64), False)
+    fast = _training_gradients(model, _fast_batch(torch.float64), True)
+    assert any("lora" in name for name in ref)
+    for name, g in ref.items():
+        err = (fast[name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_auto_crossover_per_mode(monkeypatch):
+    """"auto" applies the evaluation crossover in evaluation mode and the training one in
+    training mode."""
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.schnet as fast
+    from xnn.common.models.fast import AutoPolicy
+    never = AutoPolicy(default_min_edges=10 ** 9, default_min_edges_float64=10 ** 9)
+    always = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+    model = SchNet(n_features=32, n_interactions=2, n_rbf=20, cutoff=5.0)
+    model = model.to("cuda", torch.float64).set_use_fast("auto")
+    names = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    for training in (False, True):
+        for policy in names:
+            with monkeypatch.context() as patch:
+                for name in names:
+                    patch.setattr(fast, name, never if name == policy else always)
+                ForceStressOutput(model.train(training)).train(training)(_fast_batch(torch.float64))
+            expect = policy != ("AUTO_POLICY_TRAINING" if training else "AUTO_POLICY")
+            assert all(b.cfconv.fast_active == expect for b in model.interactions), (training, policy)
+
+
+def _check_cfconv_gradients(kernels, device, activated, with_envelope, fast_mode=False):
+    """The fused convolution, its first and second derivatives (finite differences) and its
+    values against the reference sum."""
+    gen = torch.Generator().manual_seed(2)
+    n, n_edges, F = 4, 9, 16
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+
+    h, z = rand(n, F), rand(n_edges, F)
+    envelope = rand(n_edges) if with_envelope else None
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).to(device)
+
+    def f(h, z, *env):
+        return kernels.cfconv(h, z, env[0] if env else None, edge_index, activated=activated)
+
+    inputs = (h, z) + ((envelope,) if with_envelope else ())
+    # atomic adds sum in a run-dependent order
+    assert torch.autograd.gradcheck(f, inputs, nondet_tol=1e-12, fast_mode=fast_mode)
+    assert torch.autograd.gradgradcheck(f, inputs, nondet_tol=1e-12, fast_mode=fast_mode)
+    with torch.no_grad():
+        w = shifted_softplus(z) if activated else z
+        if with_envelope:
+            w = w * envelope[:, None]
+        expect = torch.zeros_like(h).index_add_(0, edge_index[1], h[edge_index[0]] * w)
+        assert torch.allclose(f(*inputs), expect, rtol=0, atol=1e-13)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("activated", [False, True])
+@pytest.mark.parametrize("with_envelope", [False, True])
+def test_fast_cfconv_gradients(activated, with_envelope):
+    """Values and every first and second derivative of the fused convolution."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import schnet_kernels
+    _check_cfconv_gradients(schnet_kernels, "cuda", activated, with_envelope)
 
 
 @pytest.fixture
@@ -495,24 +597,9 @@ def test_fast_support_needs_cuda():
 @pytest.mark.parametrize("activated", [False, True])
 @pytest.mark.parametrize("with_envelope", [False, True])
 def test_fast_cfconv_gradients_interpreted(interpreted, activated, with_envelope):
-    """The fused convolution and its first derivatives, run by the Triton interpreter."""
-    gen = torch.Generator().manual_seed(2)
-    n, n_edges, K, F = 4, 9, 5, 16
-
-    def rand(*shape, grad=True):
-        return torch.randn(*shape, dtype=torch.float64, generator=gen).requires_grad_(grad)
-
-    h, rbf = rand(n, F), rand(n_edges, K)
-    envelope = rand(n_edges) if with_envelope else None
-    w1, b1, w2, b2 = rand(F, K, grad=False), rand(F, grad=False), rand(F, F, grad=False), rand(F, grad=False)
-    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
-
-    def f(h, rbf, *env):
-        return interpreted.cfconv(h, rbf, env[0] if env else None, w1, b1, w2, b2, edge_index,
-                                  activated=activated)
-
-    inputs = (h, rbf) + ((envelope,) if with_envelope else ())
-    assert torch.autograd.gradcheck(f, inputs, nondet_tol=1e-12, fast_mode=True)
+    """The fused convolution and its first and second derivatives, run by the Triton
+    interpreter (random projections of the Jacobians)."""
+    _check_cfconv_gradients(interpreted, "cpu", activated, with_envelope, fast_mode=True)
 
 
 @pytest.mark.parametrize("filter_output_activation", [False, True])
