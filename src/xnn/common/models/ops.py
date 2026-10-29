@@ -305,6 +305,9 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     Written to stay compatible with :func:`torch.jit.script` so scriptable model
     cores (e.g. SchNet's ``node_energy``) can call it.
     """
+    if dim_size == 1:
+        # one bucket: a reduction, not every row's atomic add into the same addresses
+        return src.sum(0, keepdim=True)
     shape = [dim_size] + list(src.shape[1:])
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
     return out.index_add(0, index, src)
@@ -364,6 +367,9 @@ def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     torch.Tensor
         Float64 totals of shape ``(dim_size,)``.
     """
+    if dim_size == 1:
+        # one structure: a reduction, not every atom's atomic add into one address
+        return src.to(torch.float64).sum(0, keepdim=True)
     out = torch.zeros(dim_size, dtype=torch.float64, device=src.device)
     return out.index_add(0, index, src.to(torch.float64))
 
@@ -373,6 +379,9 @@ def structure_sums(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     to float64 totals ``(T, dim_size)`` in one scatter (one cast, one zero
     fill and one index add for every row instead of three launches per row).
     """
+    if dim_size == 1:
+        # one structure: a reduction, not every atom's atomic adds into the same few addresses
+        return src.to(torch.float64).sum(1, keepdim=True)
     out = torch.zeros(int(src.shape[0]), dim_size, dtype=torch.float64, device=src.device)
     return out.index_add(1, index, src.to(torch.float64))
 
