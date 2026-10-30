@@ -130,10 +130,14 @@ class StepGraph:
         # the rebuild ahead of time: its flag, and the positions of the step before (graph buffers)
         self.due: Optional[Tensor] = None
         self.last: Optional[Tensor] = None
+        # with a plan that has them, both flags, the convergence and the iterations needed in one buffer
+        self.status: Optional[Tensor] = None
         # a rebuild flagged by the last step, done during the next replay on the stream ``side``
         self.pending = False
         # the pairs are found by the grid search, all of it on the second stream
         self.gridded = False
+        self._cell_key = None
+        self._grid_cache: Optional[tuple] = None
         self.side = None
         self.staged = None
         self.stream = None
@@ -160,6 +164,9 @@ class StepGraph:
             ``energy``, ``forces`` and, when the model computes it, ``stress``.
         """
         pos, cell = struct["pos"], struct.get("cell")
+        # the caller's cell as given: while it stays the same tensor, unchanged, the grid of the
+        # staged pair search is not decided again (that reads the cell on the host)
+        self._cell_key = None if cell is None else (id(cell), getattr(cell, "_version", None))
         if self.plan is None or pos.shape != self.pos.shape or (cell is None) != (self.cell is None):
             self.reset()
             self._new_plan(struct)
@@ -266,21 +273,35 @@ class StepGraph:
             self.side.wait_stream(torch.cuda.current_stream(self.pos.device))
         return half
 
+    def _grid(self):
+        """:func:`cell_grid` of the staged search, kept while the caller's cell is unchanged."""
+        key = (self._cell_key, self.cutoff + self.skin)
+        if self._grid_cache is None or self._grid_cache[0] != key or self._cell_key is None:
+            self._grid_cache = (key, cell_grid(self.pos, self.cutoff + self.skin, *self._box()))
+        return self._grid_cache[1]
+
     def _stage(self, half: tuple) -> tuple:
         """The new pair list from ``half`` and whether an atom jumped, queued on the
         second stream while the replay runs; the current stream waits for them."""
         with torch.cuda.stream(self.side):
             cut = self.cutoff + self.skin
-            grid = None if half else cell_grid(self.pos, cut, *self._box())
+            grid = None if half else self._grid()
+            over = None
             if grid is not None:
                 from ..data.grid_pairs import grid_pairs
-                # the grid's cell is three cutoffs wide: one image of every pair
-                fresh = self.core.stage_pairs(self.graph, self.plan, grid_pairs(self.pos.detach(), cut, *grid),
-                                              single_image=True)
+                # the grid's cell is three cutoffs wide: one image of every pair; the pairs go into
+                # buffers of the plan's capacity with their number on the device, so the host reads
+                # nothing while the replay runs (more pairs than fit count as a jump: a full rebuild)
+                pairs = grid_pairs(self.pos.detach(), cut, *grid, capacity=self.plan.capacity)
+                if len(pairs) == 4:
+                    over = pairs[3][0] > int(self.plan.capacity)
+                fresh = self.core.stage_pairs(self.graph, self.plan, pairs, single_image=True)
             else:
                 fresh = self.core.stage_pairs(self.graph, self.plan,
                                               unique_pairs(self.pos.detach(), cut, *self._box(), half=half or None))
             jump = None if self.cell is None else self._jump()
+            if over is not None:
+                jump = over if jump is None else torch.logical_or(jump, over)
         torch.cuda.current_stream(self.pos.device).wait_stream(self.side)
         # kept until the next stage: the copies into the plan read it on the current stream
         self.staged = fresh
@@ -312,11 +333,17 @@ class StepGraph:
         fresh = jump = None
         if half is not None:
             fresh, jump = self._stage(half)
-        # one read from the device: the rebuild flags, the convergence, a jump and the iterations needed
-        flags = [self.flag, self.due, self.plan.converged] + ([] if jump is None else [jump])
-        status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]).tolist()
-        (outdated, due, converged), needed = status[:3], status[len(flags):]
-        if jump is not None and status[3]:
+        # one read from the device: the rebuild flags, the convergence, the iterations needed and a jump
+        if self.status is not None:
+            status = self.status if jump is None else torch.cat([self.status, jump.reshape(1).to(torch.float64)])
+        else:
+            flags = [self.flag, self.due, self.plan.converged]
+            status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]
+                               + ([] if jump is None else [jump.reshape(1).to(torch.float64)]))
+        status = status.tolist()
+        n = int(self.plan.needed.numel())
+        (outdated, due, converged), needed = status[:3], status[3:3 + n]
+        if jump is not None and status[3 + n]:
             # an atom wrapped back into the cell: its bonded image shifts change too
             fresh = None
         if outdated or not converged:
@@ -345,9 +372,9 @@ class StepGraph:
         return out
 
     def _length(self, phase: str, count: int) -> int:
-        """The fixed length for solves that needed ``count`` iterations: a quarter
-        more plus one, and above a length that failed."""
-        return max(int(math.ceil(1.25 * count)) + 1, self.floor[phase] + 2 if phase in self.floor else 0)
+        """The fixed length for solves whose largest count over the last ``shorten`` steps was
+        ``count``: one more, and above a length that failed."""
+        return max(count + 1, self.floor[phase] + 2 if phase in self.floor else 0)
 
     def _lengthen(self) -> None:
         """The fixed length did not suffice: the next steps converge, and the length
@@ -418,10 +445,18 @@ class StepGraph:
             return
         graph = torch.cuda.CUDAGraph()
         self.last = self.pos.detach().clone()
+        checks = getattr(self.plan, "checks", None)
+        if callable(checks):
+            # its kernel is built before the capture (no kernel is loaded during one); last stays pos
+            checks(self.pos, self.last, steps=2)
         with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
             outputs = self._run()
-            flag = self.plan.outdated(self.pos)
-            due = self.plan.due(self.pos, self.last, steps=2)
-            self.last.copy_(self.pos.detach())
-        self.cuda_graph, self.outputs, self.flag, self.due = graph, outputs, flag, due
+            flag = due = status = None
+            if callable(checks):
+                status = checks(self.pos, self.last, steps=2)
+            else:
+                flag = self.plan.outdated(self.pos)
+                due = self.plan.due(self.pos, self.last, steps=2)
+                self.last.copy_(self.pos.detach())
+        self.cuda_graph, self.outputs, self.flag, self.due, self.status = graph, outputs, flag, due, status
         self.recordings += 1
