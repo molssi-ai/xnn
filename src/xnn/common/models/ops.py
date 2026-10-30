@@ -226,6 +226,107 @@ class Square(nn.Module):
         return x * x
 
 
+#: From this many elements a training activation (:class:`SiLU`, :class:`GELU`)
+#: keeps its fused derivative under autograd; below it torch's own function,
+#: whose fewer Python calls win where the step is bound by launches.
+FUSED_SLOPE_MIN_ELEMENTS = 1 << 20
+
+
+class SiLU(nn.SiLU):
+    """:class:`torch.nn.SiLU` whose derivative stays the fused kernel under autograd.
+
+    Differentiated with a graph (the forces of a force loss), torch writes
+    the derivative of ``silu`` as six recorded operations, each differentiated
+    again for the parameter gradients. Here the derivative is the one
+    ``silu_backward`` kernel torch uses without a graph, and its own
+    derivative the closed form ``silu''(x) = s (1 - s) (2 + x (1 - 2 s))``
+    with ``s = sigmoid(x)``. In training on inputs of at least
+    :data:`FUSED_SLOPE_MIN_ELEMENTS` (a force loss differentiates the
+    derivative); otherwise, and under TorchScript, the values and derivatives
+    are those of :func:`torch.nn.functional.silu`, the same numbers.
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        if not torch.jit.is_scripting():
+            if (self.training and x.requires_grad and torch.is_grad_enabled()
+                    and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS):
+                return _SiLU.apply(x)
+        return torch.nn.functional.silu(x)
+
+
+class _SiLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)
+        return torch.nn.functional.silu(x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (x,) = ctx.saved_tensors
+        return _SiLUSlope.apply(grad, x)
+
+
+class _SiLUSlope(torch.autograd.Function):
+    """``g silu'(x)`` by the fused kernel, differentiable again."""
+
+    @staticmethod
+    def forward(ctx, g: Tensor, x: Tensor) -> Tensor:
+        ctx.save_for_backward(g, x)
+        return torch.ops.aten.silu_backward(g, x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        g, x = ctx.saved_tensors
+        s = torch.sigmoid(x)
+        # s (1 - s) (2 + x (1 - 2 s)) as s - s^2 times (x + 2) - 2 x s
+        curvature = torch.addcmul(s, s, s, value=-1.0) * torch.addcmul(x + 2.0, x, s, value=-2.0)
+        return _SiLUSlope.apply(grad, x), grad * g * curvature
+
+
+class GELU(nn.GELU):
+    """:class:`torch.nn.GELU` (exact form) whose derivative stays the fused kernel under autograd.
+
+    As :class:`SiLU`: the derivative is the one ``gelu_backward`` kernel, its
+    own derivative the closed form ``gelu''(x) = phi(x) (2 - x^2)`` with the
+    standard normal density ``phi``, under the same conditions. The ``"tanh"``
+    approximation and TorchScript use :func:`torch.nn.functional.gelu`.
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        if not torch.jit.is_scripting():
+            if (self.approximate == "none" and self.training and x.requires_grad
+                    and torch.is_grad_enabled() and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS):
+                return _GELU.apply(x)
+        return torch.nn.functional.gelu(x, approximate=self.approximate)
+
+
+class _GELU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)
+        return torch.nn.functional.gelu(x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (x,) = ctx.saved_tensors
+        return _GELUSlope.apply(grad, x)
+
+
+class _GELUSlope(torch.autograd.Function):
+    """``g gelu'(x)`` by the fused kernel, differentiable again."""
+
+    @staticmethod
+    def forward(ctx, g: Tensor, x: Tensor) -> Tensor:
+        ctx.save_for_backward(g, x)
+        return torch.ops.aten.gelu_backward(g, x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        g, x = ctx.saved_tensors
+        density = torch.exp(-0.5 * x * x) * (1.0 / math.sqrt(2.0 * math.pi))
+        return _GELUSlope.apply(grad, x), grad * g * density * (2.0 - x * x)
+
+
 def make_activation(activation) -> nn.Module:
     """Return a fresh activation module from a name or a module instance.
 
@@ -256,7 +357,7 @@ def make_activation(activation) -> nn.Module:
     if isinstance(activation, nn.Module):
         return activation
     factories = {
-        "silu": nn.SiLU,
+        "silu": SiLU,
         "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
         "gaussian": GaussianActivation,
         "tanh": nn.Tanh,
