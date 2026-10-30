@@ -99,7 +99,8 @@ from xnn.common.models.electrostatics import (
     coulomb_pme,
     ewald_parameters,
 )
-from xnn.common.models.ops import scatter_sum, structure_sum
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import GELU, gather_rows, scatter_sum, structure_sum
 from xnn.common.models.registry import register_model
 
 from .base import GNNPotential
@@ -129,11 +130,11 @@ def _mlp(sizes: Sequence[int], final_activation: bool) -> nn.Sequential:
         nn.init.zeros_(linear.bias)
         layers.append(linear)
         if i < len(sizes) - 1 or final_activation:
-            layers.append(nn.GELU())
+            layers.append(GELU())
     return nn.Sequential(*layers)
 
 
-class ShellConvolution(nn.Module):
+class ShellConvolution(FastPathModule, nn.Module):
     """The AIMNet2 convolution of per-atom features over the radial shells (paper eqs 4-5).
 
     For center ``i`` with neighbors ``j`` carrying features ``a_jcs`` (one
@@ -173,6 +174,7 @@ class ShellConvolution(nn.Module):
     """
 
     n_channels: int
+    fast_active: bool
     n_shells: int
     n_combinations: int
     output_dim: int
@@ -187,39 +189,88 @@ class ShellConvolution(nn.Module):
         self.n_shells = n_shells
         self.n_combinations = n_combinations
         self.output_dim = n_channels * (n_shells + n_combinations)
+        self.fast_active = False
 
-    def forward(self, feats: Tensor, g: Tensor, gu: Tensor, dst: Tensor,
-                num_nodes: int) -> Tensor:
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` and a power-of-two number of shells."""
+        from xnn.gnn.fast.aimnet2 import supported
+        n = self.n_shells
+        return n & (n - 1) == 0 and supported(device, dtype)
+
+    def forward(self, nodes: Tensor, g: Tensor, gu: Tensor, edge_index: Tensor) -> Tensor:
         """Convolve neighbor features into per-center environment features.
 
         Parameters
         ----------
-        feats : Tensor
-            Features of the neighbor (source) atom of every edge, shape
-            ``(E, n_channels, n_shells)``.
+        nodes : Tensor
+            The convolved per-atom quantity, shape ``(N, n_channels, n_shells)``.
         g : Tensor
             Radial basis of every edge, shape ``(E, n_shells)``.
         gu : Tensor
             Radial basis times the unit bond vector, shape ``(E, n_shells, 3)``.
-        dst : Tensor
-            Center atom of every edge, shape ``(E,)``.
-        num_nodes : int
-            Number of atoms ``N``.
+        edge_index : Tensor
+            Source (row 0, the neighbor ``j``) and destination (row 1, the
+            center ``i``) of every edge.
 
         Returns
         -------
         Tensor
             Environment features, shape ``(N, output_dim)``.
         """
-        scalar = scatter_sum(feats * g[:, None, :], dst, num_nodes)        # (N, C, S)
-        # one Cartesian component at a time keeps the edge temporaries at
-        # (E, C, S) instead of (E, C, S, 3)
-        vector = torch.stack(
-            [scatter_sum(feats * gu[:, None, :, d], dst, num_nodes) for d in range(3)],
-            dim=-1)                                                          # (N, C, S, 3)
-        mixed = torch.einsum("csh,ncsd->nchd", [self.weight, vector])
-        norms = mixed.square().sum(-1)                                       # (N, C, H)
+        gsv = torch.cat([g.unsqueeze(-1), gu], dim=-1)
+        nb_edge, nb_src = neighbor_matrix(edge_index, nodes.shape[0])
+        scalar, norms = shell_sums(nodes, gsv, nb_edge, nb_src, self.weight)
         return torch.cat([scalar.flatten(1), norms.flatten(1)], dim=-1)
+
+
+def neighbor_matrix(edge_index: Tensor, num_nodes: int) -> Tuple[Tensor, Tensor]:
+    """The edges of every center as rows of a padded matrix: ``(nb_edge, nb_src)``.
+
+    Row ``i`` lists the edges into atom ``i`` (``nb_edge``, padded with ``E``)
+    and their neighbors (``nb_src``, padded with ``N``), ``(N, M)`` for the
+    largest number of neighbors ``M``; the padding indexes a zero row appended
+    to the gathered tensors.
+    """
+    src, dst = edge_index[0], edge_index[1]
+    num_edges = src.shape[0]
+    order = torch.argsort(dst, stable=True)
+    counts = torch.zeros(num_nodes, dtype=torch.long, device=dst.device).index_add_(
+        0, dst, torch.ones_like(dst))
+    width = int(counts.max()) if num_nodes > 0 and num_edges > 0 else 0
+    starts = torch.cumsum(counts, 0) - counts
+    rows = dst[order]
+    cols = torch.arange(num_edges, device=dst.device) - starts[rows]
+    nb_edge = torch.full((num_nodes, max(width, 1)), num_edges, dtype=torch.long, device=dst.device)
+    nb_edge[rows, cols] = order
+    nb_src = torch.cat([src, src.new_full((1,), num_nodes)])[nb_edge]
+    return nb_edge, nb_src
+
+
+def shell_sums(nodes: Tensor, gsv: Tensor, nb_edge: Tensor, nb_src: Tensor,
+               weight: Tensor) -> Tuple[Tensor, Tensor]:
+    """The scalar sums ``(N, C, S)`` and vector norms ``(N, C, H)`` of :class:`ShellConvolution`.
+
+    The neighbors of every center as rows of a padded matrix
+    (:func:`neighbor_matrix`): one gather of the per-atom quantity ``(N, C, S)``
+    and one of ``gsv`` ``(E, S, 4)`` (the radial basis and its products with
+    the unit bond vector) onto it, and the four shell sums as one contraction
+    over the neighbors, a batched matrix product. Every channel is
+    independent, so the convolutions of several quantities run as one over
+    their channels stacked (with their weights stacked).
+    """
+    n, m = nb_src.shape
+    a = gather_rows(torch.cat([nodes, nodes.new_zeros((1,) + nodes.shape[1:])]), nb_src.reshape(-1))
+    gv = gather_rows(torch.cat([gsv, gsv.new_zeros((1,) + gsv.shape[1:])]), nb_edge.reshape(-1))
+    a = a.view(n, m, nodes.shape[1], nodes.shape[2])                         # (N, M, C, S)
+    gv = gv.view(n, m, gsv.shape[1], gsv.shape[2])                           # (N, M, S, 4)
+    # the operand order sets cuBLAS's layout: basis first, float32 takes the kernels for a
+    # small output (about twice as fast); float64 keeps the order its matrix units favor
+    if nodes.dtype == torch.float32:
+        sums = torch.einsum("nmsk,nmcs->ncsk", gv, a)                        # (N, C, S, 4)
+    else:
+        sums = torch.einsum("nmcs,nmsk->ncsk", a, gv)
+    mixed = torch.einsum("csh,ncsd->nchd", [weight, sums[..., 1:]])
+    return sums[..., 0], mixed.square().sum(-1)                              # (N, C, H)
 
 
 @register_model("aimnet2")
@@ -374,6 +425,8 @@ class AIMNet2(GNNPotential):
         self.aim_size = int(aim_size)
         self.node_feature_dim = int(aim_size)
         self.coulomb = coulomb
+        # the fused shell convolutions (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
         self.coulomb_sr_cutoff = float(coulomb_sr_cutoff)
         self.lr_cutoff = float(lr_cutoff)
         self.dsf_alpha = float(dsf_alpha)
@@ -505,10 +558,10 @@ class AIMNet2(GNNPotential):
         if cell is not None and pbc is not None:
             periodic = pbc.any(dim=1)[batch]
         if method == "simple":
-            if bool(periodic.any()):
+            if cell is not None and pbc is not None and bool(periodic.any()):
                 raise ValueError("coulomb='simple' sums every pair of a molecule; periodic "
                                  "structures need coulomb='dsf', 'ewald' or 'pme'")
-            return coulomb_direct(charges, pos, batch)
+            return coulomb_direct(charges, pos, batch, num_graphs=num_graphs)
         if method == "dsf":
             return coulomb_dsf(charges, edge_index, r, self.dsf_alpha, self.lr_cutoff)
         # ewald / pme: the lattice sum for the periodic structures of the
@@ -541,9 +594,56 @@ class AIMNet2(GNNPotential):
             node = node.index_add(0, idx, coulomb_direct(charges[idx], pos[idx], batch[idx]))
         return node
 
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "AIMNet2":
+        """Choose the implementation of the shell convolutions.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.aimnet2` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            differentiable at any order and reach the weights, so force
+            training takes them as well.
+
+        Returns
+        -------
+        AIMNet2
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused shell convolutions on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.aimnet2 import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.embedding.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
+
+    @torch.jit.unused
+    def _shell_sums_fast(self, nodes: Tensor, gsv: Tensor, edge_index: Tensor,
+                         weight: Tensor) -> Tuple[Tensor, Tensor]:
+        """:func:`shell_sums` by the fused kernels, from the per-atom quantity ``(N, C, S)``."""
+        from xnn.gnn.fast.aimnet2_kernels import shell_sums as fused_sums
+        sums = fused_sums(nodes, gsv, edge_index)                            # (N, C, S, 4)
+        mixed = torch.einsum("csh,ncsd->nchd", [weight, sums[..., 1:]])
+        return sums[..., 0], mixed.square().sum(-1)
+
     def _evaluate(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
                   pos: Tensor, cell: Optional[Tensor], pbc: Optional[Tensor], batch: Tensor,
-                  num_graphs: int, totals: Tensor) -> Dict[str, Tensor]:
+                  num_graphs: int, totals: Tensor, checked: bool = False) -> Dict[str, Tensor]:
         """The network and the electrostatics on raw tensors (scriptable).
 
         Parameters
@@ -566,6 +666,9 @@ class AIMNet2(GNNPotential):
             ``B``.
         totals : Tensor
             Channel targets of the charge equilibration ``(B, C)``.
+        checked : bool, optional
+            The caller has checked the elements against the species already
+            (one host synchronization fewer), by default ``False``.
 
         Returns
         -------
@@ -575,7 +678,7 @@ class AIMNet2(GNNPotential):
             for two channels, ``"spin_charges"`` ``(N,)``.
         """
         index = self.z_to_index[atomic_numbers]
-        if bool((index < 0).any()):
+        if not checked and bool((index < 0).any()):
             raise ValueError("an element of the structure is not among the model's species")
         num_nodes = atomic_numbers.shape[0]
 
@@ -590,7 +693,12 @@ class AIMNet2(GNNPotential):
         src, dst = edge_local[0], edge_local[1]
         g = self.rbf(r) * self.envelope(r)[:, None]                        # (E, S)
         unit = -vec_local / r[:, None]                                       # r_j - r_i
-        gu = g[:, :, None] * unit[:, None, :]                                # (E, S, 3)
+        gsv = torch.cat([g.unsqueeze(-1), g[:, :, None] * unit[:, None, :]], dim=-1)   # (E, S, 4)
+        fast = self.conv_a.fast_active and not torch.jit.is_scripting()
+        if fast:
+            nb_edge, nb_src = edge_local, edge_local      # unused by the fused kernels
+        else:
+            nb_edge, nb_src = neighbor_matrix(edge_local, num_nodes)
 
         n_feat, n_rbf, n_ch = self.n_features, self.n_rbf, self.charge_channels
         a = self.embedding(index).view(num_nodes, n_feat, n_rbf)
@@ -598,11 +706,22 @@ class AIMNet2(GNNPotential):
         aim = a.new_zeros((num_nodes, self.aim_size))
         last = len(self.passes) - 1
         for i, mlp in enumerate(self.passes):
-            parts = [a.flatten(1), self.conv_a(a[src], g, gu, dst, num_nodes)]
-            if q is not None:
-                parts.append(q)
-                parts.append(self.conv_q(q[src][:, :, None].expand(-1, -1, n_rbf),
-                                         g, gu, dst, num_nodes))
+            if q is None:
+                nodes, weight = a, self.conv_a.weight
+            else:
+                # the features and the charges (the same value in every shell)
+                # convolved as one, their channels stacked
+                nodes = torch.cat([a, q[:, :, None].expand(-1, -1, n_rbf)], dim=1)
+                weight = torch.cat([self.conv_a.weight, self.conv_q.weight], dim=0)
+            if fast:
+                scalar, norms = self._shell_sums_fast(nodes, gsv, edge_local, weight)
+            else:
+                scalar, norms = shell_sums(nodes, gsv, nb_edge, nb_src, weight)
+            if q is None:
+                parts = [a.flatten(1), scalar.flatten(1), norms.flatten(1)]
+            else:
+                parts = [a.flatten(1), scalar[:, :n_feat].flatten(1), norms[:, :n_feat].flatten(1),
+                         q, scalar[:, n_feat:].flatten(1), norms[:, n_feat:].flatten(1)]
             out = mlp(torch.cat(parts, dim=-1))
             if i == last:
                 aim = out
@@ -625,7 +744,7 @@ class AIMNet2(GNNPotential):
             # the network has learned the short-range Coulomb energy: take it
             # out under the envelope and add the full (or truncated) sum
             pair = (0.5 * self.coulomb_constant * self.sr_envelope(r)
-                    * charges[src] * charges[dst] / r)
+                    * gather_rows(charges, src) * gather_rows(charges, dst) / r)
             node_coulomb = -scatter_sum(pair.to(torch.float64), dst, num_nodes)
             node_coulomb = node_coulomb + self._coulomb_long_range(
                 charges, pos, cell, pbc, batch, num_graphs, edge_index, r_all)
@@ -726,8 +845,9 @@ class AIMNet2(GNNPotential):
         num_graphs, batch = data.num_graphs, data.batch
         dtype = self.embedding.weight.dtype
         totals = self._channel_totals(data, dtype)                           # (B, C)
+        self._select_fast(int(data.edge_index.shape[1]))
         out = self._evaluate(z, data.edge_index, data.edge_vectors(), data.pos, data.cell,
-                             data.pbc, batch, num_graphs, totals)
+                             data.pbc, batch, num_graphs, totals, checked=True)
         charges = out["charges"]
         result = {
             "node_energy": out["node_energy"],
