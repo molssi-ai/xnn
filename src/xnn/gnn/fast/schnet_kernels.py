@@ -3,7 +3,7 @@
 Imported only when the fast path runs, so that ``triton`` is needed only there.
 
 One program handles one atom and walks its edges in a sorted order (compressed
-rows, :mod:`xnn.gnn.fast._csr`: by center for the sums onto centers, by
+rows, :mod:`xnn.common.models.csr`: by center for the sums onto centers, by
 neighbor for the sums onto neighbors and the per-edge gradients), a chunk of
 edges at a time, accumulating in registers: no atomic adds, and the same
 result in every run.
@@ -20,7 +20,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
-from ._csr import orderings
+from xnn.common.models.csr import orderings
 
 LN2 = math.log(2.0)
 

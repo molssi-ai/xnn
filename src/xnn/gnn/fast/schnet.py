@@ -29,16 +29,16 @@ from xnn.common.models.fast import AutoPolicy
 #: on GPUs with little float64 throughput (T4) the kernels win at every size. A GPU in neither
 #: table takes the largest measured thresholds.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000},
-    min_edges_float64={"T4": 0, "V100": 8_000, "A30": 4_000, "A100": 25_000},
+    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000, "H200": 25_000},
+    min_edges_float64={"T4": 0, "V100": 8_000, "A30": 4_000, "A100": 25_000, "H200": 20_000},
     default_min_edges=30_000,
     default_min_edges_float64=25_000,
 )
 
 #: The same for training mode (a step with a force loss, second derivatives included).
 AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000},
-    min_edges_float64={"T4": 0, "V100": 4_000, "A30": 2_000, "A100": 15_000},
+    min_edges={"T4": 6_000, "V100": 15_000, "A30": 6_000, "A100": 30_000, "H200": 20_000},
+    min_edges_float64={"T4": 0, "V100": 4_000, "A30": 2_000, "A100": 15_000, "H200": 12_000},
     default_min_edges=30_000,
     default_min_edges_float64=15_000,
 )
