@@ -22,8 +22,10 @@ Upstream conventions preserved (defaults of the reference ``uuulin`` mode):
 * per-channel ("uuu") weightless tensor products whose Wigner-3j blocks are
   scaled by ``sqrt(2 l_out + 1)``, followed by a strided linear mix with
   ``1/sqrt(mul * n_paths)`` normalization;
-* variance-preserving scalar MLPs (:class:`e3nn.nn.FullyConnectedNet` is
-  transplant-identical to upstream's ``ScalarMLPFunction``);
+* variance-preserving scalar MLPs (:class:`~xnn.gnn.models.blocks.RadialNet`, an
+  :class:`e3nn.nn.FullyConnectedNet` transplant-identical to upstream's
+  ``ScalarMLPFunction``, each layer one matrix product with its normalization
+  as the product's scalar factor);
 * the cumulative-softmax latent resnet coefficients;
 * per-species scale/shift ``E_i = sigma_Z eps_i + mu_Z`` of the deployed
   upstream model (``atom_ref`` shift + ``atom_scale`` buffer, as in the xnn
@@ -40,17 +42,16 @@ from typing import Final, List, Optional, Tuple
 
 import torch
 from e3nn import o3
-from e3nn.nn import FullyConnectedNet
 from torch import Tensor, nn
 from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.constants import register_constant, restore_exact
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import gather_rows, scatter_sum
 from xnn.common.models.registry import register_model
 
 from .base import EquivariantGNN
-from .blocks import tp_path_exists
+from .blocks import RadialNet, tp_path_exists
 
 
 class _ChannelWeighter(nn.Module):
@@ -93,8 +94,10 @@ class _ChannelWeighter(nn.Module):
         )
         self.register_buffer("_which_irrep", which, persistent=False)
         register_constant(self, "_alpha", alpha, persistent=False)
+        self._alpha_value = float(alpha)
+        self._scaled = alpha != 1.0
 
-    def forward(self, edge_attr: Tensor, weights: Tensor) -> Tensor:
+    def forward(self, edge_attr: Tensor, weights: Tensor, prescaled: bool = False) -> Tensor:
         """Apply per-irrep channel weights.
 
         Parameters
@@ -110,7 +113,12 @@ class _ChannelWeighter(nn.Module):
             Weighted channels of shape ``(E, mul_out, irreps.dim)``.
         """
         w = weights.reshape(-1, self.mul_out, self._num_irreps)
-        w = w.index_select(-1, self._which_irrep) * self._alpha
+        # a gather over an expanded index: on CUDA faster than index_select along
+        # the last axis, with a scatter-add backward (index_add with few indices)
+        index = self._which_irrep.expand(w.shape[0], w.shape[1], self._which_irrep.shape[0])
+        w = w.gather(-1, index)
+        if self._scaled and not prescaled:
+            w = w * self._alpha
         return edge_attr.unsqueeze(-2) * w
 
 
@@ -129,6 +137,8 @@ class _Contracter(nn.Module):
     instructions : list of (int, int, e3nn.o3.Irrep)
         ``(i_in1, i_in2, ir_out)`` per output block, in output order.
     """
+
+    _diagonal: Final[bool]
 
     def __init__(self, irs_in1: List[o3.Irrep], irs_in2: List[o3.Irrep],
                  instructions: List[Tuple[int, int, o3.Irrep]]):
@@ -151,6 +161,13 @@ class _Contracter(nn.Module):
             k += ir_out.dim
         self.__dict__["_blocks"] = (blocks, dim1, dim2)
         self.register_buffer("_w3j", self._block_w3j(torch.get_default_dtype()))
+        # a coupling with nonzero entries only at i == j (a layer that keeps only
+        # scalars) is an inner product: the inputs multiply elementwise, no outer
+        self._diagonal = False
+        if dim1 == dim2:
+            w3j64 = self._block_w3j(torch.float64)
+            off_diagonal = w3j64 - torch.diag_embed(torch.diagonal(w3j64, dim1=1, dim2=2))
+            self._diagonal = bool((off_diagonal == 0).all())
 
     def _block_w3j(self, dtype: torch.dtype) -> Tensor:
         """The block Wigner-3j tensor ``(dim_out, dim1, dim2)`` in ``dtype``."""
@@ -170,8 +187,19 @@ class _Contracter(nn.Module):
         return restore_exact(self._w3j, self._block_w3j(torch.float64))
 
     def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
-        """Contract ``(E, mul, dim1) x (E, mul, dim2) -> (E, mul, dim_out)``."""
-        return torch.einsum("zui,zuj,kij->zuk", x1, x2, self._w3j)
+        """Contract ``(E, mul, dim1) x (E, mul, dim2) -> (E, mul, dim_out)``.
+
+        The outer product of the two inputs per edge and channel, then one
+        matrix product with the coupling block over both input axes.
+        """
+        z, u, d1 = x1.shape[0], x1.shape[1], x1.shape[2]
+        d2 = x2.shape[2]
+        if self._diagonal:
+            out = torch.mm((x1 * x2).reshape(z * u, d1), torch.diagonal(self._w3j, dim1=1, dim2=2).t())
+            return out.reshape(z, u, -1)
+        outer = (x1.unsqueeze(3) * x2.unsqueeze(2)).reshape(z * u, d1 * d2)
+        out = torch.mm(outer, self._w3j.reshape(self._w3j.shape[0], d1 * d2).t())
+        return out.reshape(z, u, -1)
 
 
 class _StridedLinear(nn.Module):
@@ -199,6 +227,8 @@ class _StridedLinear(nn.Module):
     _dims: Final[List[int]]
     _norms: Final[List[float]]
     _wnums: Final[List[int]]
+    _split_sizes: Final[List[int]]
+    _sections: Final[List[int]]
     mul: Final[int]
 
     def __init__(self, irs_in: List[o3.Irrep], irs_out: List[o3.Irrep], mul: int):
@@ -225,20 +255,30 @@ class _StridedLinear(nn.Module):
             wnums.append(mul * len(idx) * mul)
         self._starts, self._stops, self._ns = starts, stops, ns
         self._dims, self._norms, self._wnums = dims, norms, wnums
+        # one split of the input into sections (the outputs' ranges and any gaps
+        # between them): its backward is one concatenation, where a slice per
+        # output would fill and add a full-size gradient each
+        bounds = sorted(set([0, off[-1]] + starts + stops))
+        self._split_sizes = [b - a for a, b in zip(bounds[:-1], bounds[1:])]
+        self._sections = [bounds.index(start) for start in starts]
         self.w = nn.Parameter(
             torch.empty(sum(wnums)).uniform_(-math.sqrt(3), math.sqrt(3)))
 
     def forward(self, x: Tensor) -> Tensor:
         """Mix ``(E, mul, dim_in) -> (E, mul, dim_out)``."""
+        # per irrep, one matrix product over (u, n) for every edge and component:
+        # the rows (edge, component), the normalization folded into the weight
         outs: List[Tensor] = []
         w_index = 0
+        n_edges = x.shape[0]
+        parts = torch.split(x, self._split_sizes, dim=-1)
         for i in range(len(self._starts)):
-            piece = x[:, :, self._starts[i]:self._stops[i]]
-            piece = piece.reshape(-1, self.mul, self._ns[i], self._dims[i])
-            wg = self.w[w_index:w_index + self._wnums[i]].reshape(
-                self.mul, self.mul, self._ns[i])
+            n, d = self._ns[i], self._dims[i]
+            piece = parts[self._sections[i]].reshape(n_edges, self.mul * n, d)
+            wg = self.w[w_index:w_index + self._wnums[i]].reshape(self.mul, self.mul * n) * self._norms[i]
             w_index += self._wnums[i]
-            outs.append(torch.einsum("vun,zuni->zvi", wg, piece) * self._norms[i])
+            rows = piece.transpose(1, 2).reshape(n_edges * d, self.mul * n)
+            outs.append(torch.mm(rows, wg.t()).reshape(n_edges, d, self.mul).transpose(1, 2))
         return torch.cat(outs, dim=-1)
 
 
@@ -365,7 +405,7 @@ class Allegro(EquivariantGNN):
             raise ValueError("initial_scalar_embedding_dim must be even")
         self.type_embeddings = nn.Parameter(
             torch.randn(2, len(self.species), embed_dim // 2))
-        self.basis_embed = FullyConnectedNet([n_rbf, embed_dim], None)
+        self.basis_embed = RadialNet([n_rbf, embed_dim], None)
 
         # -- irreps of the tensor track: forward growth + backward pruning of
         #    unreachable/unneeded paths, exactly as upstream
@@ -422,26 +462,32 @@ class Allegro(EquivariantGNN):
             self.tps.append(_Contracter(arg_irs, env_irs, instr))
             self.linears.append(_StridedLinear(full_out, out_irs, num_tensor_features))
             if layer == 0:
-                self.latents.append(FullyConnectedNet(
+                self.latents.append(RadialNet(
                     [embed_dim] + two_body_latent, F.silu))
             else:
-                self.latents.append(FullyConnectedNet(
+                self.latents.append(RadialNet(
                     [self.latents[-1].hs[-1]
                      + num_tensor_features * n_scalar_outs[-2]] + latent, F.silu))
             n_w = self._env_weighter.weight_numel
             if layer == 0:
                 n_w += self._edge_weighter.weight_numel
-            self.env_embed_mlps.append(FullyConnectedNet(
+            self.env_embed_mlps.append(RadialNet(
                 [self.latents[-1].hs[-1]] + env_embed + [n_w],
                 F.silu if env_embed else None))
         self._n_scalar_outs = n_scalar_outs
         self._edge_w_numel = self._edge_weighter.weight_numel
         self._env_w_numel = self._env_weighter.weight_numel
+        # the weighters' and the edge energy's constant factors, applied to the
+        # MLPs' last matrices (once) instead of every edge
+        register_constant(self, "_env_out_scale",
+                          [self._edge_weighter._alpha_value] * self._edge_w_numel
+                          + [self._env_weighter._alpha_value] * self._env_w_numel, persistent=False)
+        register_constant(self, "_energy_out_scale", [self._energy_factor], persistent=False)
 
-        self.final_latent = FullyConnectedNet(
+        self.final_latent = RadialNet(
             [self.latents[-1].hs[-1] + num_tensor_features * n_scalar_outs[-1]]
             + latent, F.silu)
-        self.edge_eng = FullyConnectedNet(
+        self.edge_eng = RadialNet(
             [self.final_latent.hs[-1]] + edge_eng + [1], F.silu)
         # invariant per-atom features (for e.g. LES): the final per-edge
         # scalar latents summed onto their centre atoms
@@ -490,14 +536,17 @@ class Allegro(EquivariantGNN):
 
         # two-body scalar embedding: (center type || neighbor type) * radial
         types = self.z_to_index[atomic_numbers].clamp(min=0)
-        center_embed = self.type_embeddings[0][types[edge_index[1]]]
-        neighbor_embed = self.type_embeddings[1][types[edge_index[0]]]
+        center_embed = gather_rows(self.type_embeddings[0], types[edge_index[1]])
+        neighbor_embed = gather_rows(self.type_embeddings[1], types[edge_index[0]])
         edge_invariants = (torch.cat((center_embed, neighbor_embed), dim=-1)
                            * self.basis_embed(edge_radial))
 
         # resnet coefficients: cumulative softmax over the layer parameters
         coeff = (self._resnet_params - self._resnet_params.max()).exp()
         cumsum = coeff.cumsum(dim=0) + 1e-12
+        # the factors of every layer at once: of the running latents and of the new ones
+        keep = (cumsum[:-1] / cumsum[1:]).sqrt()
+        mix = (coeff[1:] / cumsum[1:]).sqrt()
 
         latents = torch.zeros(1, device=edge_vec.device, dtype=edge_vec.dtype)
         latent_in = edge_invariants
@@ -507,19 +556,23 @@ class Allegro(EquivariantGNN):
                 self.latents, self.env_embed_mlps, self.tps, self.linears):
             new_latents = latent_mlp(latent_in)
             if self.latent_resnet and layer > 0:
-                latents = ((cumsum[layer - 1] / cumsum[layer]).sqrt() * latents
-                           + (coeff[layer] / cumsum[layer]).sqrt() * new_latents)
+                latents = torch.addcmul(keep[layer - 1] * latents, mix[layer - 1], new_latents)
             else:
                 latents = new_latents
-            weights = env_mlp(latents)
+            # the weighters' normalization rides on the MLP's last matrix
+            if layer == 0:
+                weights = env_mlp(latents, None, self._env_out_scale)
+            else:
+                weights = env_mlp(latents, None, self._env_out_scale.narrow(0, self._edge_w_numel,
+                                                                              self._env_w_numel))
             w_index: int = 0
             if layer == 0:
                 edge_w = weights.narrow(-1, 0, self._edge_w_numel)
                 w_index += self._edge_w_numel
-                features = self._edge_weighter(features, edge_w)
+                features = self._edge_weighter(features, edge_w, True)
             env_w = weights.narrow(-1, w_index, self._env_w_numel)
-            env_edges = self._env_weighter(edge_sh, env_w)
-            local_env = scatter_sum(env_edges, center, num_atoms)[center]
+            env_edges = self._env_weighter(edge_sh, env_w, True)
+            local_env = gather_rows(scatter_sum(env_edges, center, num_atoms), center)
             local_env = local_env - env_edges   # env of all *other* neighbours
             features = tp(features, local_env)
             scalars = features[:, :, :self._n_scalar_outs[layer]].reshape(
@@ -530,12 +583,11 @@ class Allegro(EquivariantGNN):
 
         new_latents = self.final_latent(latent_in)
         if self.latent_resnet:
-            latents = ((cumsum[layer - 1] / cumsum[layer]).sqrt() * latents
-                       + (coeff[layer] / cumsum[layer]).sqrt() * new_latents)
+            latents = torch.addcmul(keep[layer - 1] * latents, mix[layer - 1], new_latents)
         else:
             latents = new_latents
 
-        edge_energy = self.edge_eng(latents).squeeze(-1) * self._energy_factor
+        edge_energy = self.edge_eng(latents, None, self._energy_out_scale).squeeze(-1)
         eps = scatter_sum(edge_energy, center, num_atoms)
         features = scatter_sum(latents, center, num_atoms)
         return features, (self.atom_scale[atomic_numbers] * eps
