@@ -19,7 +19,7 @@ GRID_BLOCK, GRID_WARPS = 64, 2
 
 @triton.jit
 def _grid_pairs(pos_ptr, box_ptr, cell_ptr, atoms_ptr, start_ptr, count_ptr, offset_ptr, i_ptr, k_ptr, shift_ptr,
-                NX, NY, NZ, WRITE: tl.constexpr, BLOCK: tl.constexpr):
+                NX, NY, NZ, cap, WRITE: tl.constexpr, BLOCK: tl.constexpr):
     i = tl.program_id(0)
     lx = tl.load(box_ptr + 0)
     ly = tl.load(box_ptr + 1)
@@ -56,11 +56,13 @@ def _grid_pairs(pos_ptr, box_ptr, cell_ptr, atoms_ptr, start_ptr, count_ptr, off
             hit = m & (k > i) & (dx * dx + dy * dy + dz * dz <= cut2)
             if WRITE:
                 at = base + count + tl.cumsum(hit.to(tl.int32), 0) - 1
-                tl.store(i_ptr + at, tl.zeros([BLOCK], dtype=tl.int64) + i, mask=hit)
-                tl.store(k_ptr + at, k.to(tl.int64), mask=hit)
-                tl.store(shift_ptr + 3 * at + 0, (-ix).to(tl.int64), mask=hit)
-                tl.store(shift_ptr + 3 * at + 1, (-iy).to(tl.int64), mask=hit)
-                tl.store(shift_ptr + 3 * at + 2, (-iz).to(tl.int64), mask=hit)
+                # the pairs beyond the buffer's capacity are not written (the caller sees the count)
+                put = hit & (at < cap)
+                tl.store(i_ptr + at, tl.zeros([BLOCK], dtype=tl.int64) + i, mask=put)
+                tl.store(k_ptr + at, k.to(tl.int64), mask=put)
+                tl.store(shift_ptr + 3 * at + 0, (-ix).to(tl.int64), mask=put)
+                tl.store(shift_ptr + 3 * at + 1, (-iy).to(tl.int64), mask=put)
+                tl.store(shift_ptr + 3 * at + 2, (-iz).to(tl.int64), mask=put)
             count += tl.sum(hit.to(tl.int32), 0)
     if not WRITE:
         tl.store(count_ptr + i, count)
@@ -80,7 +82,7 @@ def grid_shape(lengths: list, cutoff: float) -> Optional[tuple]:
     return tuple(shape)
 
 
-def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple) -> tuple:
+def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capacity: Optional[int] = None) -> tuple:
     """Every pair within ``cutoff`` once, as ``(i, k, shift)`` with ``i < k``, sorted by ``i``.
 
     Parameters
@@ -93,12 +95,18 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple) -> tup
         The edges of the orthorhombic cell ``(3,)``.
     shape : tuple of int
         The cells per axis, from :func:`grid_shape`.
+    capacity : int, optional
+        Write the pairs into buffers of this many entries, without reading their number
+        on the host: the entries past it repeat the first pair, and their number comes
+        back on the device (a pair list staged behind a running step).
 
     Returns
     -------
     tuple of Tensor
         ``i`` and ``k`` ``(M,)`` and the integer image shifts ``(M, 3)``, with the
-        displacement ``pos[k] - pos[i] + shift * lengths``.
+        displacement ``pos[k] - pos[i] + shift * lengths``; with ``capacity`` the
+        buffers ``(capacity,)`` and the number of pairs ``(1,)`` (more than the capacity
+        when they did not fit).
     """
     N, device = int(pos.shape[0]), pos.device
     pos = pos.detach().contiguous()
@@ -120,15 +128,21 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple) -> tup
     args = (pos, box, cell, atoms, start)
     sizes = shape
     if N:
-        _grid_pairs[(N,)](*args, counts, counts, counts, counts, counts, *sizes, WRITE=False, BLOCK=GRID_BLOCK,
+        _grid_pairs[(N,)](*args, counts, counts, counts, counts, counts, *sizes, 0, WRITE=False, BLOCK=GRID_BLOCK,
                           num_warps=GRID_WARPS)
     offset = torch.zeros(N + 1, dtype=torch.int64, device=device)
     offset[1:] = torch.cumsum(counts, 0)
-    M = int(offset[-1])
-    i = torch.empty(M, dtype=torch.int64, device=device)
-    k = torch.empty(M, dtype=torch.int64, device=device)
-    shift = torch.empty(M, 3, dtype=torch.int64, device=device)
-    if M:
-        _grid_pairs[(N,)](*args, counts, offset, i, k, shift, *sizes, WRITE=True, BLOCK=GRID_BLOCK,
+    M = int(offset[-1]) if capacity is None else int(capacity)
+    i = torch.zeros(M, dtype=torch.int64, device=device)
+    k = torch.zeros(M, dtype=torch.int64, device=device)
+    shift = torch.zeros(M, 3, dtype=torch.int64, device=device)
+    if M and N:
+        _grid_pairs[(N,)](*args, counts, offset, i, k, shift, *sizes, M, WRITE=True, BLOCK=GRID_BLOCK,
                           num_warps=GRID_WARPS)
-    return i, k, shift
+    if capacity is None:
+        return i, k, shift
+    # the padding repeats the first pair (a pair of distinct atoms: no zero distance in the arithmetic)
+    total = offset[-1:]
+    pad = torch.arange(M, device=device) >= total
+    return (torch.where(pad, i[:1], i), torch.where(pad, k[:1], k), torch.where(pad[:, None], shift[:1], shift),
+            total)
