@@ -103,12 +103,21 @@ def fused_active() -> bool:
     return _FUSED.get()
 
 
+def _compile_options() -> dict:
+    """The inductor options of the fused blocks: its combo kernels merge the independent small
+    kernels of a block (the valence terms, the frames) into shared launches, where this version
+    of PyTorch has them."""
+    import torch._inductor.config as inductor_config
+    return {"combo_kernels": True} if hasattr(inductor_config, "combo_kernels") else {}
+
+
 def fusable(fn):
     """Mark a pure function of per-pair tensors for the fused path.
 
     Inside :func:`fused` it runs through ``torch.compile`` with dynamic sizes,
     which turns its chain of small elementwise operations into a few generated
-    kernels in the forward and in the backward pass. The first fused call runs
+    kernels in the forward and in the backward pass (independent ones merged
+    into shared launches by the inductor's combo kernels). The first fused call runs
     eagerly, so evaluations that happen once never pay for the compilation.
     A compiled function has no double backward: the fused path serves
     evaluations with first derivatives (molecular dynamics, inference).
@@ -120,7 +129,7 @@ def fusable(fn):
         if torch.compiler.is_compiling() or not _FUSED.get():
             return fn(*args, **kwargs)
         if "compiled" not in state:
-            state["compiled"] = torch.compile(fn, dynamic=True)
+            state["compiled"] = torch.compile(fn, dynamic=True, options=_compile_options())
             return fn(*args, **kwargs)
         if torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing():
             # no compilation can run inside a CUDA-graph capture: the compiled code of an earlier
@@ -519,6 +528,7 @@ class MeshPlan:
             self.tables = km.spline_tables(u.detach(), self.mesh, self.order)
             self.jac_g = (inv * sizes).contiguous()                          # (G, 3, 3): J of every structure
             self._zero = self.tables[0].new_zeros(self.tables[0].shape[0])    # the absent charges of a pass
+            self._paired: Optional[tuple] = None
             return
         base = torch.floor(u)
         self._splines = bspline_with_derivatives(u - base, self.order)      # (N, 3, p) each
@@ -641,17 +651,64 @@ class MeshPlan:
                           torch.stack([h[:, 4], h[:, 5], h[:, 2]], -1)], -2)
         return phi, dphi, matmul3(matmul3(self.jac, hf), self.jac.transpose(1, 2))
 
-    def field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float) -> Tensor:
+    def field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float, guard: Optional[Tensor] = None) -> Tensor:
         """``acc += coef d - grad(mesh potential of the dipoles d)`` in place, the mesh part of the
         induction solve's field on the kernels (no graph: the solve runs without gradients; the
-        Jacobians constants). One spread, two FFTs and one gather, no intermediate per atom."""
+        Jacobians constants). One spread, two FFTs and one gather, no intermediate per atom. With
+        the scalars ``guard`` of a conjugate-gradient iteration the spread and the gather do nothing
+        once the solve has converged."""
         from . import amoeba_kernels as km
         w, start = self.tables
         k1, k2, k3 = self.mesh
-        grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh, self.groups, 1)
+        grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh, self.groups, 1,
+                                   guard)
         pot = torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * self.influence(alpha, "coulomb"),
                                s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
-        return km.gather_field(pot, self.jac_g, w, start, self.batch, self.mesh, acc, d, coef)
+        return km.gather_field(pot, self.jac_g, w, start, self.batch, self.mesh, acc, d, coef, guard)
+
+    def paired_field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float,
+                          guard: Optional[Tensor] = None) -> Tensor:
+        """:meth:`field_into` for two sets of dipoles stacked ``(2 N, 3)`` (the paired solve of the
+        induction): the second set spreads into a second batch of grids, both are transformed
+        together, and one gather serves both. The doubled tables are made once per plan."""
+        from . import amoeba_kernels as km
+        if self._paired is None or self._paired[0] != float(alpha):
+            w, start = self.tables
+            self._paired = (float(alpha), torch.cat([w, w]), torch.cat([start, start]),
+                            torch.cat([self.batch, self.batch + self.groups]),
+                            torch.cat([self.jac_g, self.jac_g]).contiguous(),
+                            self.influence(alpha, "coulomb").repeat(2, 1, 1, 1),
+                            self._zero.new_zeros(2 * self._zero.shape[0]))
+        _, w, start, batch, jac, influence, zero = self._paired
+        k1, k2, k3 = self.mesh
+        grid = km.spread_cartesian(zero, d, None, jac, w, start, batch, self.mesh, 2 * self.groups, 1, guard)
+        pot = torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * influence, s=(k1, k2, k3), dim=(1, 2, 3),
+                               norm="forward")
+        return km.gather_field(pot, jac, w, start, batch, self.mesh, acc, d, coef, guard)
+
+    def dipole_adjoint(self, mu: Tensor, lam: Tensor, alpha: float, scale: Optional[float] = None) -> Tensor:
+        """The gradient with respect to the scaled coordinates of ``sum(lam . E(mu))``, the mesh field of
+        dipoles ``mu`` probed by ``lam`` (the mesh part of the induction's implicit backward), as the
+        backward of the mesh convolution forms it but without the gathers that term does not need: the
+        potentials of ``mu`` and of the probes, then one adjoint kernel. With ``lam`` equal to ``scale``
+        times ``mu`` one spread and FFT pair serves both."""
+        from . import amoeba_kernels as km
+        w, start = self.tables
+        k1, k2, k3 = self.mesh
+        influence = self.influence(alpha, "coulomb")
+
+        def potential(d):
+            grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh,
+                                       self.groups, 1)
+            return torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * influence, s=(k1, k2, k3),
+                                    dim=(1, 2, 3), norm="forward")
+
+        pot = potential(mu)
+        # the field is minus the potential's gradient: the probes are -lam
+        probe = -lam
+        psi = -scale * pot if scale is not None else potential(probe)
+        return km.adjoint_cartesian(pot, (self._zero, probe, None), 1, psi, (self._zero, mu, None), 1, self.jac_g,
+                                    w, start, self.batch, self.mesh)
 
     @region("mesh.dispersion")
     def dispersion(self, c: Tensor, alpha: float) -> Tensor:

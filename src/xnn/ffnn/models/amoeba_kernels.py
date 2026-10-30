@@ -1,4 +1,4 @@
-"""Fused Triton kernels of the HIPPO nonbonded pair terms.
+"""Fused Triton kernels of the AMOEBA and HIPPO nonbonded pair terms.
 
 One program handles a block of pairs and keeps a pair's whole arithmetic in registers: the
 distance, the derivative ladders of every radial kernel (:mod:`xnn.ffnn.models.amoeba_ladders`,
@@ -7,13 +7,17 @@ the per-atom halves of the four pair energies, the direct- and polar-scaled perm
 mutual ladder members of the induction and the exchange-polarization tensors with atomic adds,
 and the two mutual ladder members per pair. The eager functions of :mod:`xnn.ffnn.models.amoeba`
 (``hippo_pair_block``, ``_real_space_fields``, ``exchange_polarization_tensor``) define what is
-computed; these kernels compute the same numbers with the same scale factors and flags.
+computed; these kernels compute the same numbers with the same scale factors and flags. The AMOEBA kernels
+(``_amoeba_forward`` / ``_amoeba_backward``) follow ``amoeba_pair_block`` and the buffered 14-7 term. The
+backward kernels are differentiable once more through the generated tangent and adjoint kernels of
+:mod:`xnn.ffnn.models.amoeba_tangents` (second derivatives, parameter gradients).
 
 Imported only on CUDA devices, so that ``triton`` is needed only there.
 """
 # no postponed annotations: Triton's interpreter (TRITON_INTERPRET=1) recognizes the
 # tl.constexpr parameters of a kernel only from evaluated annotations
 import math
+from typing import Optional
 
 import torch
 import triton
@@ -22,7 +26,10 @@ from torch import Tensor
 from torch.autograd.function import once_differentiable
 from triton.language.extra import libdevice
 
+from xnn.common.models.csr import compressed, narrow_keys
+
 from . import amoeba_ladders as lad
+from .geometry import TINY
 
 # the per-atom parameter table: one row per atom, these columns
 PARAMS = ("chgpen_core", "chgpen_alpha", "rep_k", "rep_alpha", "rep_valence", "disp_alpha", "disp_c6",
@@ -30,12 +37,13 @@ PARAMS = ("chgpen_core", "chgpen_alpha", "rep_k", "rep_alpha", "rep_valence", "d
 NP = len(PARAMS) + 1          # plus the exchange-polarization use flag
 # the float64 scalars of an evaluation, loaded by the kernel: the Coulomb constant, 1 / sqrt(pi),
 # the three Ewald coefficients, the switch windows (taper, cutoff) of the repulsion, charge transfer
-# and dispersion, and the neighbor cutoff
+# and dispersion, the neighbor cutoff, and the real-space cutoffs of the Ewald sums of the
+# electrostatics and the dispersion
 SCALARS = ("coulomb", "inv_sqrt_pi", "alpha_e", "alpha_p", "alpha_d", "rep_taper", "rep_cutoff", "ct_taper",
-           "ct_cutoff", "disp_taper", "disp_cutoff", "cutoff")
+           "ct_cutoff", "disp_taper", "disp_cutoff", "cutoff", "ewald_cutoff", "disp_ewald_cutoff")
 TILE, WARPS = 64, 2
-# the mutual-field kernel does little per pair: a larger block amortizes its block reductions
-MUTUAL_BLOCK, MUTUAL_WARPS = 256, 4
+# the mutual field: one program per atom walks the pairs of its row in chunks of this many
+ROWS_CHUNK, ROWS_WARPS = 64, 2
 # in float64 the pair kernels run as one launch per term group (the permanent electrostatics, the
 # polar fields, the repulsion with the dispersion, the charge transfer and the exchange polarization),
 # each with the live state of its own terms: one launch of every term (GROUP 0) spills its working
@@ -44,6 +52,9 @@ SPLIT_DTYPES = (torch.float64,)
 SPLIT_BACKWARD = (torch.float64,)
 # the register cap of the pair kernels: without it ptxas allots the float64 backward 32 registers
 MAXNREG = 255
+# the AMOEBA backward in float32 (180 registers a thread) in blocks of one warp: more blocks resident per
+# multiprocessor hide its atomic adds better than two-warp blocks
+AMOEBA_BACKWARD_LAUNCH = {torch.float32: (32, 1)}
 _COUNTS: dict = {}
 
 
@@ -60,6 +71,24 @@ def _count(count, M: int, device) -> Tensor:
 
 
 _SCALARS: dict = {}
+
+
+def _segments(N: int, widths: dict, device, flat: Optional[Tensor] = None) -> tuple:
+    """Per-atom accumulators ``(N, width)`` (``(N,)`` for a width of one) as contiguous segments of one
+    float64 buffer, zeroed in one fill (or views into ``flat``, e.g. that buffer cast once)."""
+    if flat is None:
+        flat = torch.zeros(N * sum(widths.values()), dtype=torch.float64, device=device)
+    out, at = {}, 0
+    for key, width in widths.items():
+        view = flat[at * N:(at + width) * N]
+        out[key] = view if width == 1 else view.view(N, width)
+        at += width
+    return out, flat
+
+
+def _cast_segments(flat: Tensor, N: int, widths: dict, dtype) -> dict:
+    """The accumulators of :func:`_segments` in ``dtype``: one cast for all of them."""
+    return _segments(N, widths, flat.device, flat if flat.dtype == dtype else flat.to(dtype))[0]
 
 
 def _scalar(value: float, device) -> Tensor:
@@ -186,8 +215,9 @@ def _field(C1, dx, dy, dz, qxx, qxy, qxz, qyy, qyz, qzz, rx, ry, rz, D1, D2, D3,
 
 @triton.jit
 def _pairs_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_ptr, d_ptr, Q_ptr, par_ptr,
-                   c_ptr, sc_ptr, enode_ptr, epair_ptr, fd_ptr, fp_ptr, du_ptr, xp_ptr, n_ptr,
-                   POLAR: tl.constexpr, EXPOL: tl.constexpr, WRITE_PAIRS: tl.constexpr,
+                   c_ptr, sc_ptr, enode_ptr, epair_ptr, fd_ptr, fp_ptr, du_ptr, xp_ptr, n_ptr, sel_ptr,
+                   SELECT: tl.constexpr, KEEP_R: tl.constexpr, POLAR: tl.constexpr, EXPOL: tl.constexpr,
+                   WRITE_PAIRS: tl.constexpr,
                    SW_REP: tl.constexpr, SW_CT: tl.constexpr, SW_DISP: tl.constexpr, NP: tl.constexpr,
                    GROUP: tl.constexpr, MIXED: tl.constexpr, BLOCK: tl.constexpr):
     """The HIPPO pair terms of one block of pairs (see the module docstring). The per-atom
@@ -195,16 +225,32 @@ def _pairs_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_p
     evaluation: every atomic add casts to their type. ``GROUP`` selects the terms of a launch: 1
     the permanent electrostatics with the fields and mutual ladders, 2 the repulsion, dispersion,
     charge transfer and exchange polarization, 0 all of them. ``MIXED`` evaluates the ladders in
-    the working precision instead of float64."""
+    the working precision instead of float64. ``KEEP_R`` forms the Ewald factors ``keep`` and
+    ``keep_d`` from the distance and the cutoffs of the scalars instead of loading them. With
+    ``SELECT`` the lanes take the pairs listed in ``sel`` (increasing, so still sorted by i), the
+    first ``n`` of them; the others are not visited."""
     acc = enode_ptr.dtype.element_ty
-    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
-    m = e < tl.load(n_ptr)
+    start = tl.program_id(0) * BLOCK
+    n = tl.load(n_ptr)
+    if start >= n:
+        # past the pairs to visit (a plan's padding, the pairs beyond the cutoff)
+        return
+    lane = (start + tl.arange(0, BLOCK)).to(tl.int64)
+    m = lane < n
+    last = tl.minimum(start + BLOCK - 1, n - 1)
+    if SELECT:
+        e = tl.load(sel_ptr + lane, mask=m, other=0)
+        first = tl.load(sel_ptr + start)
+        last = tl.load(sel_ptr + last)
+    else:
+        e = lane
+        first = start
     i = tl.load(i_ptr + e, mask=m, other=0)
     k = tl.load(k_ptr + e, mask=m, other=0)
     # the pairs of a plan are sorted by i: the lanes of a block's first atom add their sums in one
     # operation each (_add_sorted); the k side spreads over the atoms on its own
-    i0 = tl.load(i_ptr + tl.program_id(0) * BLOCK)
-    i1 = tl.load(i_ptr + tl.minimum(tl.program_id(0) * BLOCK + BLOCK - 1, tl.maximum(tl.load(n_ptr) - 1, 0)))
+    i0 = tl.load(i_ptr + first)
+    i1 = tl.load(i_ptr + last)
     same = m & (i == i0)
     tail = m & (i == i1) & (i1 != i0)
     rest = m & (i != i0) & (i != i1)
@@ -218,8 +264,9 @@ def _pairs_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_p
     s5 = tl.load(s_ptr + e * 8 + 5, mask=m, other=0.0)
     s6 = tl.load(s_ptr + e * 8 + 6, mask=m, other=0.0)
     s7 = tl.load(s_ptr + e * 8 + 7, mask=m, other=0.0)
-    keep = tl.load(keep_ptr + e, mask=m, other=0.0)
-    keep_d = tl.load(keepd_ptr + e, mask=m, other=0.0)
+    if not KEEP_R:
+        keep = tl.load(keep_ptr + e, mask=m, other=0.0)
+        keep_d = tl.load(keepd_ptr + e, mask=m, other=0.0)
     per = tl.load(per_ptr + e, mask=m, other=0.0)
     coulomb = tl.load(sc_ptr)
     inv_sqrt_pi = tl.load(sc_ptr + 1)
@@ -257,6 +304,10 @@ def _pairs_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_p
     # the float32 square root and division of the GPU are approximate and biased: both through float64
     R = tl.sqrt((rx * rx + ry * ry + rz * rz).to(tl.float64)).to(rx.dtype)
     inv = (1.0 / R.to(tl.float64)).to(rx.dtype)
+    if KEEP_R:
+        # the Ewald factors from the distance: within the real-space cutoffs in a cell, one otherwise
+        keep = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 12).to(R.dtype), 1.0, 0.0), 1.0).to(R.dtype)
+        keep_d = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 13).to(R.dtype), 1.0, 0.0), 1.0).to(R.dtype)
     if MIXED:
         # the ladders in the working precision (Tinker9's mixed precision)
         R64 = R
@@ -477,7 +528,8 @@ def _pairs_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_p
 
 def pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Tensor, keep_d: Tensor, per: Tensor,
                   q: Tensor, d: Tensor, Q: Tensor, params: Tensor, scalars: Tensor, polar: bool, expol: bool,
-                  switch_modes: tuple, write_pairs: bool = False, count=None, mixed: bool = False) -> dict:
+                  switch_modes: tuple, write_pairs: bool = False, count=None, mixed: bool = False,
+                  select: Optional[Tensor] = None, tangents: Optional[tuple] = None) -> dict:
     """Launch the pair kernel.
 
     Parameters
@@ -490,7 +542,9 @@ def pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: T
         The eight scale factors per pair ``(M, 8)``.
     keep, keep_d, per : Tensor
         Per pair: the Ewald real-space factor of the electrostatics and of the dispersion
-        (one for pairs of molecules), and whether the pair belongs to a periodic cell.
+        (one for pairs of molecules), and whether the pair belongs to a periodic cell. ``keep``
+        and ``keep_d`` may be ``None``: the kernel then forms them from the distance and the
+        real-space cutoffs of ``scalars``.
     q, d, Q : Tensor
         The global-frame multipoles ``(N,)``, ``(N, 3)``, ``(N, 3, 3)``.
     params : Tensor
@@ -510,6 +564,12 @@ def pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: T
     mixed : bool, optional
         Evaluate the ladders in the working precision (Tinker9's mixed precision) instead of
         float64; no effect on a float64 evaluation.
+    select : Tensor, optional
+        The pairs to visit, increasing (:func:`select_pairs`); ``count`` is then their number.
+        The others contribute nothing (pairs beyond the cutoff) and get zeros per pair.
+    tangents : tuple of Tensor, optional
+        Directions of the pair vectors, charges, dipoles and quadrupoles: the generated tangent kernel
+        (:mod:`.amoeba_tangents`) also returns the outputs' derivatives along them (``<key>_t``).
 
     Returns
     -------
@@ -520,30 +580,46 @@ def pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: T
     M, N = int(i_.shape[0]), int(q.shape[0])
     dtype, device = r_vec.dtype, r_vec.device
     # the sums over pairs accumulate in float64 whatever the working precision
-    out = {"e_node": torch.zeros(N, 4, dtype=torch.float64, device=device),
-           "field_d": torch.zeros(N, 3, dtype=torch.float64, device=device),
-           "field_p": torch.zeros(N, 3, dtype=torch.float64, device=device),
-           "du": torch.zeros(M, 2, dtype=dtype, device=device),
-           "expol": torch.zeros(N, 9, dtype=torch.float64, device=device) if (polar and expol) else None,
-           "e_pair": torch.empty(M, 4, dtype=dtype, device=device) if write_pairs else None}
+    widths = {"e_node": 4, "field_d": 3, "field_p": 3, **({"expol": 9} if (polar and expol) else {})}
+    out, flat = _segments(N, widths, device)
+    out.setdefault("expol", None)
+    out.update({"du": torch.zeros(M, 2, dtype=dtype, device=device),
+                "e_pair": ((torch.empty if select is None else torch.zeros)(M, 4, dtype=dtype, device=device)
+                           if write_pairs else None)})
+
+    keys = ("e_node", "field_d", "field_p", "du", "expol", "e_pair")
+    if tangents is not None:
+        out.update({k + "_t": None if out[k] is None else torch.zeros_like(out[k]) for k in keys})
 
     def finish(out):
-        for key in ("e_node", "field_d", "field_p", "expol"):
-            if out[key] is not None:
+        out.update(_cast_segments(flat, N, widths, dtype))
+        for key in ("e_node_t", "field_d_t", "field_p_t", "expol_t"):
+            if out.get(key) is not None:
                 out[key] = out[key].to(dtype)
-        if out["expol"] is not None:
-            out["expol"] = out["expol"].view(N, 3, 3)
+        for key in ("expol", "expol_t"):
+            if out.get(key) is not None:
+                out[key] = out[key].view(N, 3, 3)
         return out
 
     if M == 0:
         return finish(out)
     dummy = out["du"]
+    kernel, extra = _pairs_forward, ()
+    if tangents is not None:
+        from . import amoeba_tangents as tg
+        kernel = tg._pairs_forward_t
+        r_t, q_t, d_t, Q_t = (t.contiguous() for t in tangents)
+        extra = (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(),
+                 *[dummy if out[k + "_t"] is None else out[k + "_t"] for k in ("e_node", "e_pair", "field_d",
+                                                                               "field_p", "du", "expol")])
     for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
-        _pairs_forward[(triton.cdiv(M, TILE),)](
-            i_, k_, r_vec.contiguous(), scales.contiguous(), keep.contiguous(), keep_d.contiguous(),
-            per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
-            constants(device), scalars, out["e_node"], out["e_pair"] if write_pairs else dummy, out["field_d"],
-            out["field_p"], out["du"], out["expol"] if out["expol"] is not None else dummy, _count(count, M, device),
+        kernel[(triton.cdiv(M, TILE),)](
+            i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
+            dummy if keep_d is None else keep_d.contiguous(), per.contiguous(), q.contiguous(), d.contiguous(),
+            Q.reshape(N, 9).contiguous(), params.contiguous(), constants(device), scalars, out["e_node"],
+            out["e_pair"] if write_pairs else dummy, out["field_d"], out["field_p"], out["du"],
+            out["expol"] if out["expol"] is not None else dummy, _count(count, M, device),
+            dummy if select is None else select, *extra, SELECT=select is not None, KEEP_R=keep is None,
             POLAR=bool(polar), EXPOL=bool(polar and expol), WRITE_PAIRS=bool(write_pairs),
             SW_REP=int(switch_modes[0]), SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]),
             NP=NP, GROUP=group, MIXED=bool(mixed), BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
@@ -695,7 +771,9 @@ def _switch_derivative(R, taper, cutoff):
 @triton.jit
 def _pairs_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_ptr, d_ptr, Q_ptr, par_ptr,
                     c_ptr, sc_ptr, ge_ptr, gfd_ptr, gfp_ptr, gdu_ptr, gxp_ptr, gr_ptr, gq_ptr, gd_ptr, gQ_ptr,
-                    n_ptr, POLAR: tl.constexpr, EXPOL: tl.constexpr, SW_REP: tl.constexpr, SW_CT: tl.constexpr,
+                    n_ptr, sel_ptr, SELECT: tl.constexpr, KEEP_R: tl.constexpr, POLAR: tl.constexpr,
+                    EXPOL: tl.constexpr,
+                    SW_REP: tl.constexpr, SW_CT: tl.constexpr,
                     SW_DISP: tl.constexpr, NP: tl.constexpr, GROUP: tl.constexpr, MIXED: tl.constexpr,
                     BLOCK: tl.constexpr):
     """The gradients of the pair terms for incoming gradients of every output of the forward
@@ -703,16 +781,30 @@ def _pairs_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_
     charges, dipoles and quadrupoles (atomic adds, cast to the accumulators' type). ``GROUP``
     selects the terms of a launch: 1 the permanent electrostatics, 2 the polar fields and mutual
     ladders, 3 the repulsion, dispersion, charge transfer and exchange polarization, 0 all; the
-    groups after the first add to the stored pair-vector gradient."""
+    groups after the first add to the stored pair-vector gradient. ``SELECT`` as in the forward
+    kernel: the pairs not visited keep a zero gradient."""
     acc = gq_ptr.dtype.element_ty
-    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
-    m = e < tl.load(n_ptr)
+    start = tl.program_id(0) * BLOCK
+    n = tl.load(n_ptr)
+    if start >= n:
+        # past the pairs to visit (a plan's padding, the pairs beyond the cutoff)
+        return
+    lane = (start + tl.arange(0, BLOCK)).to(tl.int64)
+    m = lane < n
+    last = tl.minimum(start + BLOCK - 1, n - 1)
+    if SELECT:
+        e = tl.load(sel_ptr + lane, mask=m, other=0)
+        first = tl.load(sel_ptr + start)
+        last = tl.load(sel_ptr + last)
+    else:
+        e = lane
+        first = start
     i = tl.load(i_ptr + e, mask=m, other=0)
     k = tl.load(k_ptr + e, mask=m, other=0)
     # the pairs of a plan are sorted by i: the lanes of a block's first atom add their sums in one
     # operation each (_add_sorted); the k side spreads over the atoms on its own
-    i0 = tl.load(i_ptr + tl.program_id(0) * BLOCK)
-    i1 = tl.load(i_ptr + tl.minimum(tl.program_id(0) * BLOCK + BLOCK - 1, tl.maximum(tl.load(n_ptr) - 1, 0)))
+    i0 = tl.load(i_ptr + first)
+    i1 = tl.load(i_ptr + last)
     same = m & (i == i0)
     tail = m & (i == i1) & (i1 != i0)
     rest = m & (i != i0) & (i != i1)
@@ -726,8 +818,9 @@ def _pairs_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_
     s5 = tl.load(s_ptr + e * 8 + 5, mask=m, other=0.0)
     s6 = tl.load(s_ptr + e * 8 + 6, mask=m, other=0.0)
     s7 = tl.load(s_ptr + e * 8 + 7, mask=m, other=0.0)
-    keep = tl.load(keep_ptr + e, mask=m, other=0.0)
-    keep_d = tl.load(keepd_ptr + e, mask=m, other=0.0)
+    if not KEEP_R:
+        keep = tl.load(keep_ptr + e, mask=m, other=0.0)
+        keep_d = tl.load(keepd_ptr + e, mask=m, other=0.0)
     per = tl.load(per_ptr + e, mask=m, other=0.0)
     coulomb = tl.load(sc_ptr)
     inv_sqrt_pi = tl.load(sc_ptr + 1)
@@ -768,6 +861,10 @@ def _pairs_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_
     # the float32 square root and division of the GPU are approximate and biased: both through float64
     R = tl.sqrt((rx * rx + ry * ry + rz * rz).to(tl.float64)).to(rx.dtype)
     inv = (1.0 / R.to(tl.float64)).to(rx.dtype)
+    if KEEP_R:
+        # the Ewald factors from the distance: within the real-space cutoffs in a cell, one otherwise
+        keep = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 12).to(R.dtype), 1.0, 0.0), 1.0).to(R.dtype)
+        keep_d = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 13).to(R.dtype), 1.0, 0.0), 1.0).to(R.dtype)
     if MIXED:
         # the ladders in the working precision (Tinker9's mixed precision)
         R64 = R
@@ -1266,23 +1363,32 @@ def _pairs_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q_
 def pairs_backward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Tensor, keep_d: Tensor, per: Tensor,
                    q: Tensor, d: Tensor, Q: Tensor, params: Tensor, scalars: Tensor, polar: bool, expol: bool,
                    switch_modes: tuple, g_node: Tensor, g_field_d=None, g_field_p=None, g_du=None,
-                   g_expol=None, count=None, mixed: bool = False) -> dict:
-    """Launch the backward kernel: the gradients of ``sum(g_node * e_node) + g_field_d . field_d +
-    g_field_p . field_p + g_du . du + g_expol : expol`` with respect to the pair vectors ``(M, 3)``
+                   g_expol=None, count=None, mixed: bool = False, select: Optional[Tensor] = None,
+                   tangents: Optional[tuple] = None) -> dict:
+    """Launch the backward kernel: the gradients of ``sum(g_node * e_node) + sum(g_field_d * field_d)
+    + sum(g_field_p * field_p) + sum(g_du * du) + sum(g_expol * expol)`` with respect to the pair vectors ``(M, 3)``
     and the per-atom charges ``(N,)``, dipoles ``(N, 3)`` and quadrupoles ``(N, 3, 3)``.
-    The inputs are those of :func:`pairs_forward` (``count`` and ``mixed`` included); a missing
-    incoming gradient counts as zero."""
+    The inputs are those of :func:`pairs_forward` (``count``, ``mixed``, ``select`` and ``tangents``
+    included: with tangents the gradients' derivatives along them come back as ``<key>_t``, the
+    Hessian-vector products of a second derivative); a missing incoming gradient counts as zero."""
     M, N = int(i_.shape[0]), int(q.shape[0])
     dtype, device = r_vec.dtype, r_vec.device
-    out = {"grad_r": torch.zeros(M, 3, dtype=dtype, device=device),
-           "grad_q": torch.zeros(N, dtype=torch.float64, device=device),
-           "grad_d": torch.zeros(N, 3, dtype=torch.float64, device=device),
-           "grad_Q": torch.zeros(N, 9, dtype=torch.float64, device=device)}
+    widths = {"grad_q": 1, "grad_d": 3, "grad_Q": 9}
+    out, flat = _segments(N, widths, device)
+    out["grad_r"] = torch.zeros(M, 3, dtype=dtype, device=device)
+
+    keys = ("grad_r", "grad_q", "grad_d", "grad_Q")
+    if tangents is not None:
+        out.update({k + "_t": torch.zeros_like(out[k]) for k in keys})
 
     def finish(out):
-        for key in ("grad_q", "grad_d", "grad_Q"):
-            out[key] = out[key].to(dtype)
-        out["grad_Q"] = out["grad_Q"].view(N, 3, 3)
+        out.update(_cast_segments(flat, N, widths, dtype))
+        for key in ("grad_q_t", "grad_d_t", "grad_Q_t"):
+            if key in out:
+                out[key] = out[key].to(dtype)
+        for key in ("grad_Q", "grad_Q_t"):
+            if key in out:
+                out[key] = out[key].view(N, 3, 3)
         return out
 
     if M == 0:
@@ -1291,63 +1397,117 @@ def pairs_backward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: 
     def given(t, shape):
         return torch.zeros(shape, dtype=dtype, device=device) if t is None else t.reshape(shape).contiguous()
 
-    args = (i_, k_, r_vec.contiguous(), scales.contiguous(), keep.contiguous(), keep_d.contiguous(),
+    args = (i_, k_, r_vec.contiguous(), scales.contiguous(),
+            out["grad_r"] if keep is None else keep.contiguous(),
+            out["grad_r"] if keep_d is None else keep_d.contiguous(),
             per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
             constants(device), scalars, given(g_node, (N, 4)), given(g_field_d, (N, 3)), given(g_field_p, (N, 3)),
             given(g_du, (M, 2)), given(g_expol, (N, 9)), out["grad_r"], out["grad_q"], out["grad_d"], out["grad_Q"],
-            _count(count, M, device))
+            _count(count, M, device), out["grad_r"] if select is None else select)
+    kernel = _pairs_backward
+    if tangents is not None:
+        from . import amoeba_tangents as tg
+        kernel = tg._pairs_backward_t
+        r_t, q_t, d_t, Q_t = (t.contiguous() for t in tangents)
+        args = args + (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), *[out[k + "_t"] for k in keys])
     groups = ((1, 2, 3) if polar else (1, 3)) if dtype in SPLIT_BACKWARD else (0,)
     for group in groups:
-        _pairs_backward[(triton.cdiv(M, TILE),)](
-            *args, POLAR=bool(polar), EXPOL=bool(polar and expol), SW_REP=int(switch_modes[0]),
+        kernel[(triton.cdiv(M, TILE),)](
+            *args, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar), EXPOL=bool(polar and expol),
+            SW_REP=int(switch_modes[0]),
             SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed),
             BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
     return finish(out)
 
 
-@triton.jit
-def _mutual_field(i_ptr, k_ptr, r_ptr, du_ptr, mu_ptr, f_ptr, n_ptr, BLOCK: tl.constexpr):
-    """The real-space field of the dipoles ``mu`` at both ends of every pair through the mutual
-    ladder: ``f[k] += D1 mu[i] + D2 (r . mu[i]) r`` and the same with ``i`` and ``k`` swapped."""
-    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
-    m = e < tl.load(n_ptr)
-    i = tl.load(i_ptr + e, mask=m, other=0)
-    k = tl.load(k_ptr + e, mask=m, other=0)
-    # the pairs of a plan are sorted by i: the lanes of a block's first atom add their sums in one
-    # operation each (_add_sorted); the k side spreads over the atoms on its own
-    i0 = tl.load(i_ptr + tl.program_id(0) * BLOCK)
-    i1 = tl.load(i_ptr + tl.minimum(tl.program_id(0) * BLOCK + BLOCK - 1, tl.maximum(tl.load(n_ptr) - 1, 0)))
-    same = m & (i == i0)
-    tail = m & (i == i1) & (i1 != i0)
-    rest = m & (i != i0) & (i != i1)
-    rx = tl.load(r_ptr + e * 3, mask=m, other=0.0)
-    ry = tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0)
-    rz = tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0)
-    D1 = tl.load(du_ptr + e * 2, mask=m, other=0.0)
-    D2 = tl.load(du_ptr + e * 2 + 1, mask=m, other=0.0)
-    mix = tl.load(mu_ptr + i * 3, mask=m, other=0.0)
-    miy = tl.load(mu_ptr + i * 3 + 1, mask=m, other=0.0)
-    miz = tl.load(mu_ptr + i * 3 + 2, mask=m, other=0.0)
-    mkx = tl.load(mu_ptr + k * 3, mask=m, other=0.0)
-    mky = tl.load(mu_ptr + k * 3 + 1, mask=m, other=0.0)
-    mkz = tl.load(mu_ptr + k * 3 + 2, mask=m, other=0.0)
-    rmi = D2 * (rx * mix + ry * miy + rz * miz)
-    rmk = D2 * (rx * mkx + ry * mky + rz * mkz)
-    tl.atomic_add(f_ptr + k * 3, D1 * mix + rmi * rx, mask=m, sem="relaxed")
-    tl.atomic_add(f_ptr + k * 3 + 1, D1 * miy + rmi * ry, mask=m, sem="relaxed")
-    tl.atomic_add(f_ptr + k * 3 + 2, D1 * miz + rmi * rz, mask=m, sem="relaxed")
-    _add_sorted(f_ptr, i0 * 3, i1 * 3, i * 3, D1 * mkx + rmk * rx, same, tail, rest, TAIL=1)
-    _add_sorted(f_ptr + 1, i0 * 3, i1 * 3, i * 3, D1 * mky + rmk * ry, same, tail, rest, TAIL=1)
-    _add_sorted(f_ptr + 2, i0 * 3, i1 * 3, i * 3, D1 * mkz + rmk * rz, same, tail, rest, TAIL=1)
+def pairs_param_grad(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Tensor, keep_d: Tensor, per: Tensor,
+                     q: Tensor, d: Tensor, Q: Tensor, params: Tensor, scalars: Tensor, polar: bool, expol: bool,
+                     switch_modes: tuple, g_node: Tensor, g_field_d=None, g_field_p=None, g_du=None, g_expol=None,
+                     count=None, mixed: bool = False, select: Optional[Tensor] = None,
+                     tangents: Optional[tuple] = None):
+    """The gradient ``(N, NP)`` of ``sum(g_node * e_node) + sum(g_field_d * field_d) + ...`` (the outputs of
+    :func:`pairs_forward`) with respect to the per-atom parameter table, from the generated adjoint of the
+    forward kernel (:mod:`.amoeba_tangents`); the inputs are those of :func:`pairs_backward`. With
+    ``tangents`` (of the pair vectors and multipoles) it returns the gradient and its derivative along them
+    (the parameter part of a force loss's gradient)."""
+    from . import amoeba_tangents as tg
+    M, N = int(i_.shape[0]), int(q.shape[0])
+    dtype, device = r_vec.dtype, r_vec.device
+    grad = torch.zeros(N, NP, dtype=torch.float64, device=device)
+    grad_t = None if tangents is None else torch.zeros_like(grad)
+    if M:
+        def given(t, shape):
+            return torch.zeros(shape, dtype=dtype, device=device) if t is None else t.reshape(shape).contiguous()
+
+        dummy = torch.zeros(1, dtype=dtype, device=device)
+        kernel, extra = tg._pairs_forward_r, ()
+        if tangents is not None:
+            r_t, q_t, d_t, Q_t = (x.contiguous() for x in tangents)
+            kernel, extra = tg._pairs_forward_r_t, (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), grad_t)
+        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
+            kernel[(triton.cdiv(M, TILE),)](
+                i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
+                dummy if keep_d is None else keep_d.contiguous(), per.contiguous(), q.contiguous(), d.contiguous(),
+                Q.reshape(N, 9).contiguous(), params.contiguous(), constants(device), scalars, dummy, dummy, dummy,
+                dummy, dummy, dummy, _count(count, M, device), dummy if select is None else select,
+                given(g_node, (N, 4)), given(g_field_d, (N, 3)), given(g_field_p, (N, 3)), given(g_du, (M, 2)),
+                given(g_expol, (N, 9)), grad, *extra, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar),
+                EXPOL=bool(polar and expol), WRITE_PAIRS=False, SW_REP=int(switch_modes[0]),
+                SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed),
+                BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+    return grad.to(dtype) if tangents is None else (grad.to(dtype), grad_t.to(dtype))
+
+
+def amoeba_param_grad(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Optional[Tensor], per: Tensor,
+                      q: Tensor, d: Tensor, Q: Tensor, params: Tensor, offsets: Tensor, scalars: Tensor, polar: bool,
+                      modes: tuple, g_node: Tensor, g_field_d=None, g_field_p=None, g_du=None, count=None,
+                      select: Optional[Tensor] = None, tangents: Optional[tuple] = None):
+    """The gradient ``(N, AMOEBA_NP)`` of the AMOEBA pair outputs' weighted sum with respect to the per-atom
+    table (:func:`pairs_param_grad` for :func:`amoeba_pairs_forward`)."""
+    from . import amoeba_tangents as tg
+    M, N = int(i_.shape[0]), int(q.shape[0])
+    dtype, device = r_vec.dtype, r_vec.device
+    grad = torch.zeros(N, AMOEBA_NP, dtype=torch.float64, device=device)
+    grad_t = None if tangents is None else torch.zeros_like(grad)
+    if M:
+        def given(t, shape):
+            return torch.zeros(shape, dtype=dtype, device=device) if t is None else t.reshape(shape).contiguous()
+
+        dummy = torch.zeros(1, dtype=dtype, device=device)
+        kernel, extra = tg._amoeba_forward_r, ()
+        if tangents is not None:
+            r_t, q_t, d_t, Q_t, off_t = (x.contiguous() for x in tangents)
+            kernel, extra = tg._amoeba_forward_r_t, (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t, grad_t)
+        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
+            kernel[(triton.cdiv(M, TILE),)](
+                i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
+                per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
+                offsets.contiguous(), scalars, dummy, dummy, dummy, dummy, dummy, _count(count, M, device),
+                dummy if select is None else select, given(g_node, (N, 2)), given(g_field_d, (N, 3)),
+                given(g_field_p, (N, 3)), given(g_du, (M, 2)), grad, *extra, SELECT=select is not None,
+                KEEP_R=keep is None, POLAR=bool(polar), WRITE_PAIRS=False, SW_VDW=int(modes[0]),
+                RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=TILE,
+                num_warps=WARPS, maxnreg=MAXNREG)
+    return grad.to(dtype) if tangents is None else (grad.to(dtype), grad_t.to(dtype))
 
 
 @triton.jit
-def _mutual_backward(i_ptr, k_ptr, r_ptr, du_ptr, mu_ptr, lam_ptr, gr_ptr, gdu_ptr, n_ptr, BLOCK: tl.constexpr):
+def _mutual_backward(i_ptr, k_ptr, r_ptr, du_ptr, mu_ptr, lam_ptr, gr_ptr, gdu_ptr, n_ptr, sel_ptr,
+                     SELECT: tl.constexpr, BLOCK: tl.constexpr):
     """The gradients of ``lam . T mu`` summed over both directions of every pair: with respect to
     the pair vector, ``D2 [(r . mu) lam + (r . lam) mu]``, and to the ladder members,
-    ``lam . mu`` and ``(r . mu)(r . lam)`` (the products of the implicit backward)."""
-    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
-    m = e < tl.load(n_ptr)
+    ``lam . mu`` and ``(r . mu)(r . lam)`` (the products of the implicit backward). ``SELECT`` as in
+    the pair kernels."""
+    start = tl.program_id(0) * BLOCK
+    n = tl.load(n_ptr)
+    if start >= n:
+        return
+    lane = (start + tl.arange(0, BLOCK)).to(tl.int64)
+    m = lane < n
+    if SELECT:
+        e = tl.load(sel_ptr + lane, mask=m, other=0)
+    else:
+        e = lane
     i = tl.load(i_ptr + e, mask=m, other=0)
     k = tl.load(k_ptr + e, mask=m, other=0)
     rx = tl.load(r_ptr + e * 3, mask=m, other=0.0)
@@ -1428,17 +1588,52 @@ def _pair_scatter(g_ptr, i_ptr, k_ptr, out_ptr, n_ptr, BLOCK: tl.constexpr):
     _add_sorted(out_ptr + 2, i0 * 3, i1 * 3, i * 3, -gz, same, tail, rest, TAIL=1)
 
 
+@triton.jit
+def _rows_scatter(ptr_ptr, pair_ptr, other_ptr, i_ptr, g_ptr, out_ptr, n_ptr, CHUNK: tl.constexpr):
+    """:func:`_pair_scatter` on compressed rows (:func:`pair_rows`): one program per atom ``a`` sums
+    ``g`` of the pairs of its row, ``+g`` where it is the second atom and ``-g`` where it is the first,
+    and stores ``out[a]`` once (no atomic adds, no zeroed buffer). A pair of an atom with its own image
+    lies twice in the row and adds nothing. Pairs at or beyond the count ``n`` are skipped."""
+    a = tl.program_id(0).to(tl.int64)
+    start = tl.load(ptr_ptr + a)
+    end = tl.load(ptr_ptr + a + 1)
+    count = tl.load(n_ptr)
+    acc = out_ptr.dtype.element_ty
+    sx = tl.zeros((CHUNK,), dtype=acc)
+    sy = tl.zeros((CHUNK,), dtype=acc)
+    sz = tl.zeros((CHUNK,), dtype=acc)
+    j = start
+    # a while loop: its bound comes from memory (Triton's interpreter takes no tensor range)
+    while j < end:
+        o = j + tl.arange(0, CHUNK)
+        m = o < end
+        e = tl.load(pair_ptr + o, mask=m, other=0)
+        m = m & (e < count)
+        e = e.to(tl.int64)
+        b = tl.load(other_ptr + o, mask=m, other=0).to(tl.int64)
+        first = tl.load(i_ptr + e, mask=m, other=0) == a
+        sign = tl.where(b == a, 0.0, tl.where(first, -1.0, 1.0))
+        sx += sign * tl.load(g_ptr + e * 3, mask=m, other=0.0).to(acc)
+        sy += sign * tl.load(g_ptr + e * 3 + 1, mask=m, other=0.0).to(acc)
+        sz += sign * tl.load(g_ptr + e * 3 + 2, mask=m, other=0.0).to(acc)
+        j += CHUNK
+    tl.store(out_ptr + a * 3, tl.sum(sx, 0))
+    tl.store(out_ptr + a * 3 + 1, tl.sum(sy, 0))
+    tl.store(out_ptr + a * 3 + 2, tl.sum(sz, 0))
+
+
 class PairDifference(torch.autograd.Function):
     """``pos[k] - pos[i]`` ``(M, 3)`` of the pairs, plus ``shift @ cell`` of their image shifts
     ``(M, 3)`` with the one cell ``(3, 3)`` when given, computed in the precision of ``pos`` and
     stored in ``dtype`` (the model's) by one kernel, with the gradient scattered back to the atoms
-    by one kernel (``index_add`` serializes the adds of a list sorted by atom). Differentiable
-    once, in the positions only; ``count`` as in :func:`pairs_forward`."""
+    by one kernel (``index_add`` serializes the adds of a list sorted by atom), over the compressed
+    ``rows`` of the pairs (:func:`pair_rows`) when given. Differentiable once, in the positions only;
+    ``count`` as in :func:`pairs_forward`."""
 
     @staticmethod
-    def forward(ctx, pos, i_, k_, count=None, shift=None, cell=None, dtype=None):
+    def forward(ctx, pos, i_, k_, count=None, shift=None, cell=None, dtype=None, rows=None):
         ctx.save_for_backward(i_, k_)
-        ctx.count, ctx.n, ctx.dtype = count, int(pos.shape[0]), pos.dtype
+        ctx.count, ctx.n, ctx.dtype, ctx.rows = count, int(pos.shape[0]), pos.dtype, rows
         M = int(i_.shape[0])
         out = torch.empty(M, 3, dtype=dtype or pos.dtype, device=pos.device)
         if M:
@@ -1453,37 +1648,294 @@ class PairDifference(torch.autograd.Function):
     def backward(ctx, g):
         i_, k_ = ctx.saved_tensors
         M = int(i_.shape[0])
+        if ctx.rows is not None and M:
+            ptr, pair, other = ctx.rows
+            out = torch.empty(ctx.n, 3, dtype=ctx.dtype, device=g.device)
+            _rows_scatter[(ctx.n,)](ptr, pair, other, i_, g.contiguous(), out, _count(ctx.count, M, g.device),
+                                    CHUNK=ROWS_CHUNK, num_warps=ROWS_WARPS)
+            return out, None, None, None, None, None, None, None
         out = torch.zeros(ctx.n, 3, dtype=ctx.dtype, device=g.device)
         if M:
             _pair_scatter[(triton.cdiv(M, TILE),)](g.contiguous(), i_, k_, out, _count(ctx.count, M, g.device),
                                                    BLOCK=TILE, num_warps=WARPS)
-        return out, None, None, None, None, None, None
+        return out, None, None, None, None, None, None, None
 
 
-def mutual_field(mu: Tensor, r_vec: Tensor, du: Tensor, i_: Tensor, k_: Tensor, N: int, count=None) -> Tensor:
-    """The real-space field ``(N, 3)`` of dipoles ``mu`` ``(N, 3)`` through the mutual ladders
-    ``du`` ``(M, 2)`` of the pairs (``mutual_field_real`` of the eager path); ``count`` as in
-    :func:`pairs_forward`."""
+@triton.jit
+def _mutual_rows(ptr_ptr, pair_ptr, other_ptr, r_ptr, du_ptr, mu_ptr, f_ptr, n_ptr, guard_ptr, n_atoms,
+                 GUARD: tl.constexpr, PAIRED: tl.constexpr, CHUNK: tl.constexpr):
+    """The real-space field of the dipoles ``mu`` through the mutual ladders on compressed rows: one
+    program per atom ``a`` walks the pairs of its row (``pair`` the pair, ``other`` the atom at its
+    other end) and sums ``D1 mu[b] + D2 (r . mu[b]) r`` in registers, then stores ``f[a]`` once: no
+    atomic adds, no zeroed buffer. Pairs at or beyond the count ``n`` (a plan's padding) are skipped.
+    With ``GUARD`` the kernel does nothing once the conjugate-gradient scalars ``guard`` (a row of
+    :func:`pcg_scalars`) say the solve has converged. With ``PAIRED`` the dipoles are two sets
+    stacked ``(2 n_atoms, 3)`` (the paired solve) and both fields are formed from one pass over the
+    row's pairs."""
+    if GUARD:
+        if tl.load(guard_ptr + 4) != 0.0:
+            return
+    a = tl.program_id(0).to(tl.int64)
+    start = tl.load(ptr_ptr + a)
+    end = tl.load(ptr_ptr + a + 1)
+    count = tl.load(n_ptr)
+    acc = f_ptr.dtype.element_ty
+    sx = tl.zeros((CHUNK,), dtype=acc)
+    sy = tl.zeros((CHUNK,), dtype=acc)
+    sz = tl.zeros((CHUNK,), dtype=acc)
+    if PAIRED:
+        px = tl.zeros((CHUNK,), dtype=acc)
+        py = tl.zeros((CHUNK,), dtype=acc)
+        pz = tl.zeros((CHUNK,), dtype=acc)
+    j = start
+    # a while loop: its bound comes from memory (Triton's interpreter takes no tensor range)
+    while j < end:
+        o = j + tl.arange(0, CHUNK)
+        m = o < end
+        e = tl.load(pair_ptr + o, mask=m, other=0)
+        m = m & (e < count)
+        e = e.to(tl.int64)
+        b = tl.load(other_ptr + o, mask=m, other=0).to(tl.int64)
+        rx = tl.load(r_ptr + e * 3, mask=m, other=0.0)
+        ry = tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0)
+        rz = tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0)
+        D1 = tl.load(du_ptr + e * 2, mask=m, other=0.0)
+        D2 = tl.load(du_ptr + e * 2 + 1, mask=m, other=0.0)
+        mbx = tl.load(mu_ptr + b * 3, mask=m, other=0.0)
+        mby = tl.load(mu_ptr + b * 3 + 1, mask=m, other=0.0)
+        mbz = tl.load(mu_ptr + b * 3 + 2, mask=m, other=0.0)
+        rm = D2 * (rx * mbx + ry * mby + rz * mbz)
+        sx += (D1 * mbx + rm * rx).to(acc)
+        sy += (D1 * mby + rm * ry).to(acc)
+        sz += (D1 * mbz + rm * rz).to(acc)
+        if PAIRED:
+            nbx = tl.load(mu_ptr + (b + n_atoms) * 3, mask=m, other=0.0)
+            nby = tl.load(mu_ptr + (b + n_atoms) * 3 + 1, mask=m, other=0.0)
+            nbz = tl.load(mu_ptr + (b + n_atoms) * 3 + 2, mask=m, other=0.0)
+            rn = D2 * (rx * nbx + ry * nby + rz * nbz)
+            px += (D1 * nbx + rn * rx).to(acc)
+            py += (D1 * nby + rn * ry).to(acc)
+            pz += (D1 * nbz + rn * rz).to(acc)
+        j += CHUNK
+    tl.store(f_ptr + a * 3, tl.sum(sx, 0))
+    tl.store(f_ptr + a * 3 + 1, tl.sum(sy, 0))
+    tl.store(f_ptr + a * 3 + 2, tl.sum(sz, 0))
+    if PAIRED:
+        tl.store(f_ptr + (a + n_atoms) * 3, tl.sum(px, 0))
+        tl.store(f_ptr + (a + n_atoms) * 3 + 1, tl.sum(py, 0))
+        tl.store(f_ptr + (a + n_atoms) * 3 + 2, tl.sum(pz, 0))
+
+
+def pair_rows(i_: Tensor, k_: Tensor, N: int, valid=None, sorted_i: bool = False) -> tuple:
+    """The compressed rows of the unique pairs ``(i, k)`` over the ``N`` atoms, for
+    :func:`mutual_field`: every pair appears in the row of each of its atoms. The pairs from
+    ``valid`` on (a plan's padding) go to an extra row ``N`` that no program walks: in the rows
+    of their atoms they would make one program walk the whole padding. Returns the row
+    pointers ``(N + 2,)``, the pair of every entry and the atom at its other end ``(2 M,)``,
+    all int32. ``valid`` may be a count on the device (no host read). With ``sorted_i`` (a plan's pairs,
+    sorted by their first atom) the first atoms' entries are in place already and only the second atoms'
+    are sorted: the same rows, from a sort of half the entries."""
     M = int(i_.shape[0])
-    f = torch.zeros(N, 3, dtype=mu.dtype, device=mu.device)
-    if M:
-        _mutual_field[(triton.cdiv(M, MUTUAL_BLOCK),)](i_, k_, r_vec.contiguous(), du.contiguous(), mu.contiguous(), f,
-                                               _count(count, M, mu.device), BLOCK=MUTUAL_BLOCK, num_warps=MUTUAL_WARPS)
+    if sorted_i:
+        return _sorted_pair_rows(i_, k_, N, valid)
+    centers = torch.cat([i_, k_])
+    if valid is not None and (torch.is_tensor(valid) or valid < M):
+        pad = (torch.arange(M, device=i_.device) >= valid).repeat(2)
+        centers = torch.where(pad, torch.full_like(centers, N), centers)
+    order, ptr = compressed(centers, N + 1)
+    pair = torch.arange(M, dtype=torch.int32, device=i_.device).repeat(2)[order]
+    other = torch.cat([k_, i_])[order].to(torch.int32)
+    return ptr.to(torch.int32), pair, other
+
+
+def _sorted_pair_rows(i_: Tensor, k_: Tensor, N: int, valid=None) -> tuple:
+    """:func:`pair_rows` for pairs sorted by ``i``: a row holds its atom's pairs as first atom (in pair
+    order, as they lie) and then as second atom (in pair order, a stable sort of ``k``), the order the
+    stable sort of both directions gives."""
+    device = i_.device
+    M = int(i_.shape[0])
+    at = torch.arange(M, device=device)
+    ci, ck = i_, k_
+    if valid is not None:
+        pad = at >= valid
+        ci = torch.where(pad, torch.full_like(i_, N), i_)
+        ck = torch.where(pad, torch.full_like(k_, N), k_)
+    count_i = torch.bincount(ci, minlength=N + 1)
+    count_k = torch.bincount(ck, minlength=N + 1)
+    ptr = torch.zeros(N + 2, dtype=torch.int64, device=device)
+    ptr[1:] = torch.cumsum(count_i + count_k, 0)
+    first_i = torch.cumsum(count_i, 0) - count_i
+    first_k = torch.cumsum(count_k, 0) - count_k
+    by_k = torch.argsort(narrow_keys(ck, N + 1), stable=True)
+    ck_sorted = ck.index_select(0, by_k)
+    put_i = ptr.index_select(0, ci) + at - first_i.index_select(0, ci)
+    put_k = (ptr.index_select(0, ck_sorted) + count_i.index_select(0, ck_sorted) + at
+             - first_k.index_select(0, ck_sorted))
+    pair = torch.empty(2 * M, dtype=torch.int32, device=device)
+    other = torch.empty(2 * M, dtype=torch.int32, device=device)
+    pair.index_copy_(0, put_i, at.to(torch.int32))
+    other.index_copy_(0, put_i, k_.to(torch.int32))
+    pair.index_copy_(0, put_k, by_k.to(torch.int32))
+    other.index_copy_(0, put_k, i_.index_select(0, by_k).to(torch.int32))
+    return ptr.to(torch.int32), pair, other
+
+
+def mutual_field(mu: Tensor, r_vec: Tensor, du: Tensor, i_: Tensor, k_: Tensor, N: int, count=None,
+                 guard: Optional[Tensor] = None, rows: Optional[tuple] = None) -> Tensor:
+    """The real-space field ``(N, 3)`` of dipoles ``mu`` ``(N, 3)`` through the mutual ladders
+    ``du`` ``(M, 2)`` of the pairs (``mutual_field_real`` of the eager path), summed per atom over
+    the compressed rows ``rows`` of :func:`pair_rows` (built here when not given); ``count`` as in
+    :func:`pairs_forward`. With the scalars ``guard`` of a conjugate-gradient iteration the kernel
+    does nothing once the solve has converged, and the field is left unset (no update reads it).
+    Two sets of dipoles stacked ``(2 N, 3)`` give their two fields stacked, from one launch."""
+    ptr, pair, other = pair_rows(i_, k_, N) if rows is None else rows
+    paired = int(mu.shape[0]) == 2 * N
+    f = torch.empty(mu.shape[0], 3, dtype=mu.dtype, device=mu.device)
+    if N:
+        M = int(r_vec.shape[0])
+        _mutual_rows[(N,)](ptr, pair, other, r_vec.contiguous(), du.contiguous(), mu.contiguous(), f,
+                           _count(count, M, mu.device), f if guard is None else guard, N, GUARD=guard is not None,
+                           PAIRED=paired, CHUNK=ROWS_CHUNK, num_warps=ROWS_WARPS)
     return f
 
 
 def mutual_backward(mu: Tensor, lam: Tensor, r_vec: Tensor, du: Tensor, i_: Tensor, k_: Tensor,
-                    count=None) -> tuple:
-    """``grad_r`` ``(M, 3)`` and ``grad_du`` ``(M, 2)`` of ``lam . T mu`` over the pairs (the
-    products of the implicit backward of the induction); ``count`` as in :func:`pairs_forward`."""
+                    count=None, select: Optional[Tensor] = None) -> tuple:
+    """``grad_r`` ``(M, 3)`` and ``grad_du`` ``(M, 2)`` of ``sum(lam * (T mu))`` over the pairs (the
+    products of the implicit backward of the induction); ``count`` and ``select`` as in
+    :func:`pairs_forward` (the pairs not visited have zero ladders and get zero gradients)."""
     M = int(i_.shape[0])
     gr = torch.zeros(M, 3, dtype=mu.dtype, device=mu.device)
     gdu = torch.zeros(M, 2, dtype=mu.dtype, device=mu.device)
     if M:
         _mutual_backward[(triton.cdiv(M, TILE),)](i_, k_, r_vec.contiguous(), du.contiguous(), mu.contiguous(),
                                                   lam.contiguous(), gr, gdu, _count(count, M, mu.device),
+                                                  gr if select is None else select, SELECT=select is not None,
                                                   BLOCK=TILE, num_warps=WARPS)
     return gr, gdu
+
+
+def select_pairs(active: Tensor) -> tuple:
+    """The pairs the kernels visit: the indices of the ``active`` ones ``(M,)`` in increasing
+    order, followed by zeros up to ``M + 1`` entries, and their number as an int32 tensor
+    ``(1,)``, both on the device without a host read (a CUDA graph records them)."""
+    M = int(active.shape[0])
+    rank = torch.cumsum(active, 0)
+    sel = torch.zeros(M + 1, dtype=torch.int64, device=active.device)
+    # the inactive pairs all go to the last entry, past the ones a kernel reads
+    sel.scatter_(0, torch.where(active, rank - 1, M), torch.arange(M, device=active.device))
+    return sel, rank[-1:].to(torch.int32)
+
+
+@triton.jit
+def _pair_inside(r_ptr, valid_ptr, cut_ptr, R_ptr, flag_ptr, n_pairs, tiny, VALID: tl.constexpr,
+                 BLOCK: tl.constexpr):
+    """The distances ``sqrt(r . r + tiny)`` of the pair vectors and the flags of the pairs within the
+    cutoff (``r . r`` below the squared cutoff ``cut``, in the precision of ``r``) and valid."""
+    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+    m = e < n_pairs
+    x = tl.load(r_ptr + e * 3, mask=m, other=0.0)
+    y = tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0)
+    z = tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0)
+    r2 = x * x + y * y + z * z
+    tl.store(R_ptr + e, tl.sqrt(r2 + tiny), mask=m)
+    inside = r2 < tl.load(cut_ptr)
+    if VALID:
+        inside = inside & (tl.load(valid_ptr + e, mask=m, other=0.0) > 0)
+    tl.store(flag_ptr + e, inside.to(tl.int32), mask=m)
+
+
+@triton.jit
+def _pair_compact(flag_ptr, rank_ptr, sel_ptr, n_ptr, n_pairs, BLOCK: tl.constexpr):
+    """``sel[rank - 1] = e`` for the flagged pairs ``e`` (``rank`` the inclusive count of the flags),
+    and their number."""
+    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+    m = e < n_pairs
+    flag = tl.load(flag_ptr + e, mask=m, other=0)
+    rank = tl.load(rank_ptr + e, mask=m, other=0).to(tl.int64)
+    tl.store(sel_ptr + rank - 1, e, mask=m & (flag != 0))
+    if tl.program_id(0) == 0:
+        tl.store(n_ptr, tl.load(rank_ptr + n_pairs - 1))
+
+
+def select_pairs_within(r: Tensor, cutoff_sq: Tensor, valid: Optional[Tensor] = None) -> tuple:
+    """The distances ``(M,)`` of the pair vectors ``r`` ``(M, 3)`` (no gradient) and
+    :func:`select_pairs` of the pairs within the cutoff (``r . r`` below ``cutoff_sq``, a tensor of
+    one entry in the precision of ``r``) and valid (``valid > 0``): two kernels and one scan."""
+    M = int(r.shape[0])
+    R = torch.empty(M, dtype=r.dtype, device=r.device)
+    flag = torch.empty(M, dtype=torch.int32, device=r.device)
+    sel = torch.zeros(M + 1, dtype=torch.int64, device=r.device)
+    count = torch.zeros(1, dtype=torch.int32, device=r.device)
+    if M:
+        grid = (triton.cdiv(M, 256),)
+        r = r.detach().contiguous()
+        _pair_inside[grid](r, r if valid is None else valid.contiguous(), cutoff_sq, R, flag, M, TINY,
+                           VALID=valid is not None, BLOCK=256, num_warps=4)
+        rank = torch.cumsum(flag, 0, dtype=torch.int32)
+        _pair_compact[grid](flag, rank, sel, count, M, BLOCK=256, num_warps=4)
+    return R, sel, count
+
+
+@triton.jit
+def _plan_checks(pos_ptr, ref_ptr, last_ptr, conv_ptr, need_ptr, out_ptr, n_atoms, n_need, half_bits, half_sq_bits,
+                 steps1, BLOCK: tl.constexpr):
+    """The rebuild tests of a step plan in one pass over the atoms (float64): ``out[0]`` whether an
+    atom moved by more than half the skin since the pairs were found, ``out[1]`` whether it will
+    after ``steps1 - 1`` more steps like the one from ``last``; ``last`` then takes the positions.
+    The first program copies the solves' convergence and needed iterations to ``out[2:]``. The
+    thresholds come as the bits of float64 numbers; ``out[:2]`` must be zero before."""
+    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+    m = e < n_atoms
+    # the bits as int64 (a zero comes as int32)
+    half = half_bits.to(tl.int64).to(tl.float64, bitcast=True)
+    half_sq = half_sq_bits.to(tl.int64).to(tl.float64, bitcast=True)
+    px = tl.load(pos_ptr + e * 3, mask=m, other=0.0)
+    py = tl.load(pos_ptr + e * 3 + 1, mask=m, other=0.0)
+    pz = tl.load(pos_ptr + e * 3 + 2, mask=m, other=0.0)
+    lx = tl.load(last_ptr + e * 3, mask=m, other=0.0).to(tl.float64)
+    ly = tl.load(last_ptr + e * 3 + 1, mask=m, other=0.0).to(tl.float64)
+    lz = tl.load(last_ptr + e * 3 + 2, mask=m, other=0.0).to(tl.float64)
+    dx = px.to(tl.float64) - tl.load(ref_ptr + e * 3, mask=m, other=0.0)
+    dy = py.to(tl.float64) - tl.load(ref_ptr + e * 3 + 1, mask=m, other=0.0)
+    dz = pz.to(tl.float64) - tl.load(ref_ptr + e * 3 + 2, mask=m, other=0.0)
+    d2 = dx * dx + dy * dy + dz * dz
+    sx = px.to(tl.float64) - lx
+    sy = py.to(tl.float64) - ly
+    sz = pz.to(tl.float64) - lz
+    ahead = tl.sqrt(d2) + steps1.to(tl.float64) * tl.sqrt(sx * sx + sy * sy + sz * sz)
+    outdated = tl.max(tl.where(m & (d2 > half_sq), 1, 0), 0)
+    due = tl.max(tl.where(m & (ahead > half), 1, 0), 0)
+    # every program that finds an atom stores the same 1
+    if outdated > 0:
+        tl.store(out_ptr, 1.0)
+    if due > 0:
+        tl.store(out_ptr + 1, 1.0)
+    tl.store(last_ptr + e * 3, px.to(last_ptr.dtype.element_ty), mask=m)
+    tl.store(last_ptr + e * 3 + 1, py.to(last_ptr.dtype.element_ty), mask=m)
+    tl.store(last_ptr + e * 3 + 2, pz.to(last_ptr.dtype.element_ty), mask=m)
+    if tl.program_id(0) == 0:
+        tl.store(out_ptr + 2, tl.load(conv_ptr).to(tl.float64))
+        for j in range(n_need):
+            tl.store(out_ptr + 3 + j, tl.load(need_ptr + j).to(tl.float64))
+
+
+def plan_checks(pos: Tensor, reference: Tensor, last: Tensor, converged: Tensor, needed: Tensor, skin: float,
+                steps: int) -> Tensor:
+    """``[outdated, due, converged, *needed]`` of a step plan as one float64 tensor from one kernel
+    (see :meth:`~xnn.ffnn.models.amoeba.StepPlan.checks`), with ``last`` set to ``pos``."""
+    import struct
+    n = int(pos.shape[0])
+    out = torch.zeros(3 + int(needed.numel()), dtype=torch.float64, device=pos.device)
+
+    def bits(x: float) -> int:
+        return struct.unpack("<q", struct.pack("<d", float(x)))[0]
+
+    _plan_checks[(triton.cdiv(max(n, 1), 256),)](pos.detach().contiguous(), reference.contiguous(), last,
+                                                  converged.reshape(-1), needed.reshape(-1).contiguous(), out, n,
+                                                  int(needed.numel()), bits(0.5 * skin), bits((0.5 * skin) ** 2),
+                                                  steps + 1, BLOCK=256, num_warps=4)
+    return out
 
 
 class HippoPairs(torch.autograd.Function):
@@ -1494,27 +1946,827 @@ class HippoPairs(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, r_vec, q, d, Q, i_, k_, scales, keep, keep_d, per, params, scalars, polar, expol, modes,
-                write_pairs, count=None, mixed=False):
+                write_pairs, count=None, mixed=False, select=None):
         out = pairs_forward(i_, k_, r_vec, scales, keep, keep_d, per, q, d, Q, params, scalars, polar, expol, modes,
-                            write_pairs, count, mixed)
+                            write_pairs, count, mixed, select)
         ctx.save_for_backward(r_vec, q, d, Q, i_, k_, scales, keep, keep_d, per, params, scalars)
-        ctx.flags = (polar, expol, modes, count, mixed)
+        ctx.flags = (polar, expol, modes, count, mixed, select)
         empty = r_vec.new_zeros(0)
         return (out["e_node"], out["field_d"], out["field_p"], out["du"],
                 empty if out["expol"] is None else out["expol"], empty if out["e_pair"] is None else out["e_pair"])
 
     @staticmethod
-    @once_differentiable
     def backward(ctx, g_enode, g_fd, g_fp, g_du, g_expol, g_epair):
         r_vec, q, d, Q, i_, k_, scales, keep, keep_d, per, params, scalars = ctx.saved_tensors
-        polar, expol, modes, count, mixed = ctx.flags
+        polar, expol, modes, count, mixed, select = ctx.flags
+        use_expol = polar and expol and g_expol is not None and g_expol.numel() > 0
+        consts = (i_, k_, scales, keep, keep_d, per, scalars, polar, expol, modes, count, mixed, select)
+        zero = r_vec.new_zeros(0)
+        grads = _HippoPairsGrad.apply(r_vec, q, d, Q, params, g_enode, g_fd if polar else zero,
+                                      g_fp if polar else zero, g_du if polar else zero,
+                                      g_expol if use_expol else zero, consts)
+        g_params = None
+        if ctx.needs_input_grad[10]:
+            # the per-atom parameters (training): the generated adjoint of the forward kernel
+            g_params = pairs_param_grad(i_, k_, r_vec.detach(), scales, keep, keep_d, per, q.detach(), d.detach(),
+                                        Q.detach(), params.detach(), scalars, polar, expol, modes, g_enode.detach(),
+                                        _given(g_fd if polar else zero), _given(g_fp if polar else zero),
+                                        _given(g_du if polar else zero), _given(g_expol if use_expol else zero),
+                                        count, mixed, select)
+        return (*grads, None, None, None, None, None, None, g_params, None, None, None, None, None, None, None, None)
+
+
+def _given(t: Optional[Tensor]) -> Optional[Tensor]:
+    """An incoming gradient, ``None`` when absent (an empty placeholder)."""
+    return None if t is None or t.numel() == 0 else t
+
+
+class _HippoPairsGrad(torch.autograd.Function):
+    """The backward kernel of :class:`HippoPairs` as a function of the pair vectors, the multipoles and the
+    incoming gradients, differentiable once more (force training, Hessians): its backward runs the
+    generated tangent kernels along the incoming directions, the forward's for the gradients of the
+    incoming gradients and the backward's for the second derivatives."""
+
+    @staticmethod
+    def forward(ctx, r_vec, q, d, Q, params, g_enode, g_fd, g_fp, g_du, g_expol, consts):
+        i_, k_, scales, keep, keep_d, per, scalars, polar, expol, modes, count, mixed, select = consts
         grads = pairs_backward(i_, k_, r_vec, scales, keep, keep_d, per, q, d, Q, params, scalars, polar, expol, modes,
-                               g_node=g_enode, g_field_d=g_fd if polar else None, g_field_p=g_fp if polar else None,
-                               g_du=g_du if polar else None,
-                               g_expol=g_expol if (polar and expol and g_expol is not None and g_expol.numel())
-                               else None, count=count, mixed=mixed)
-        return (grads["grad_r"], grads["grad_q"], grads["grad_d"], grads["grad_Q"], None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None)
+                               g_node=g_enode, g_field_d=_given(g_fd), g_field_p=_given(g_fp), g_du=_given(g_du),
+                               g_expol=_given(g_expol), count=count, mixed=mixed, select=select)
+        ctx.save_for_backward(r_vec, q, d, Q, params, g_enode, g_fd, g_fp, g_du, g_expol)
+        ctx.consts = consts
+        return grads["grad_r"], grads["grad_q"], grads["grad_d"], grads["grad_Q"]
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, u_r, u_q, u_d, u_Q):
+        r_vec, q, d, Q, params, g_enode, g_fd, g_fp, g_du, g_expol = ctx.saved_tensors
+        i_, k_, scales, keep, keep_d, per, scalars, polar, expol, modes, count, mixed, select = ctx.consts
+        tangents = tuple(torch.zeros_like(x) if u is None else u
+                         for u, x in ((u_r, r_vec), (u_q, q), (u_d, d), (u_Q, Q)))
+        fwd = pairs_forward(i_, k_, r_vec, scales, keep, keep_d, per, q, d, Q, params, scalars, polar, expol, modes,
+                            False, count, mixed, select, tangents=tangents)
+        bwd = pairs_backward(i_, k_, r_vec, scales, keep, keep_d, per, q, d, Q, params, scalars, polar, expol, modes,
+                             g_node=g_enode, g_field_d=_given(g_fd), g_field_p=_given(g_fp), g_du=_given(g_du),
+                             g_expol=_given(g_expol), count=count, mixed=mixed, select=select, tangents=tangents)
+
+        def matching(t, like):
+            return None if like.numel() == 0 or t is None else t.reshape(like.shape)
+
+        g_params = None
+        if ctx.needs_input_grad[4]:
+            # the parameter part: the derivative of the table's gradient along the same directions
+            g_params = pairs_param_grad(i_, k_, r_vec, scales, keep, keep_d, per, q, d, Q, params, scalars, polar,
+                                        expol, modes, g_enode, _given(g_fd), _given(g_fp), _given(g_du),
+                                        _given(g_expol), count, mixed, select, tangents=tangents)[1]
+        return (bwd["grad_r_t"], bwd["grad_q_t"], bwd["grad_d_t"], bwd["grad_Q_t"], g_params, fwd["e_node_t"],
+                matching(fwd["field_d_t"], g_fd), matching(fwd["field_p_t"], g_fp), matching(fwd["du_t"], g_du),
+                matching(fwd["expol_t"], g_expol), None)
+
+
+# the AMOEBA pair kernels: the per-atom table (the van der Waals radius and well depth of the atom's
+# class, the polarizability and Thole factor of its type) and the float64 scalars of an evaluation
+AMOEBA_PARAMS = ("vdw_rmin", "vdw_eps", "polarizability", "thole")
+AMOEBA_NP = len(AMOEBA_PARAMS)
+AMOEBA_SCALARS = ("coulomb", "inv_sqrt_pi", "alpha_e", "alpha_p", "vdw_taper", "vdw_cutoff", "ewald_cutoff",
+                  "delta", "gamma", "tiny", "sixth", "thole7", "thole9a", "thole9b")
+
+
+@triton.jit
+def _thole(R, ai, ak, ti, tk, sc_ptr):
+    """The Thole factors ``lambda_3, lambda_5, lambda_7, lambda_9`` of a pair (``thole_ladder``; the
+    ninth order is the next member of the ladder, ``(1/R d/dR) D_3 = D_4``), in the precision of
+    ``R``: ``d = a (R / (alpha_i alpha_k)^(1/6))^3`` capped at 50, ``a`` the smaller Thole factor
+    (the other when one is zero, undamped when both are)."""
+    a = tl.where(ti > 0.0, tl.where(tk > 0.0, tl.minimum(ti, tk), ti), tk)
+    scale = tl.maximum(libdevice.pow(ai * ak, tl.load(sc_ptr + 10).to(R.dtype)), 1e-12)
+    x = R / scale
+    d = tl.minimum(a * x * x * x, 50.0)
+    ex = libdevice.exp(-d)
+    undamped = a <= 0.0
+    l3 = tl.where(undamped, 1.0, 1.0 - ex)
+    l5 = tl.where(undamped, 1.0, 1.0 - (1.0 + d) * ex)
+    l7 = tl.where(undamped, 1.0, 1.0 - (1.0 + d + tl.load(sc_ptr + 11).to(R.dtype) * d * d) * ex)
+    l9 = tl.where(undamped, 1.0, 1.0 - (1.0 + d + (tl.load(sc_ptr + 12).to(R.dtype)
+                                                   + tl.load(sc_ptr + 13).to(R.dtype) * d) * d * d) * ex)
+    return l3, l5, l7, l9
+
+
+@triton.jit
+def _halgren(rv, rmin, eps, delta, gamma):
+    """Halgren's buffered 14-7 energy (``buffered_14_7``) and its derivative with respect to ``rv``."""
+    rho = rv / rmin
+    rho3 = rho * rho * rho
+    rho6 = rho3 * rho3
+    rho7 = rho6 * rho
+    a = (1.0 + delta) / (rho + delta)
+    a3 = a * a * a
+    a7 = a3 * a3 * a
+    b = (1.0 + gamma) / (rho7 + gamma)
+    e = eps * a7 * (b - 2.0)
+    de = eps / rmin * a7 * (-7.0 * (b - 2.0) / (rho + delta) - 7.0 * rho6 * b / (rho7 + gamma))
+    return e, de
+
+
+@triton.jit
+def _vdw_pair(r_ptr, off_ptr, par_ptr, sc_ptr, e, i, k, m, NP: tl.constexpr, RADIUS: tl.constexpr,
+              EPSILON: tl.constexpr):
+    """The van der Waals site vector of a pair (``r + off_k - off_i``), its length and the combined
+    radius and well depth, in float64 (the combining rules: ``RADIUS`` 0 arithmetic, 1 geometric,
+    2 cubic mean; ``EPSILON`` 0 geometric, 1 arithmetic, 2 HHG)."""
+    vx = (tl.load(r_ptr + e * 3, mask=m, other=1.0) + tl.load(off_ptr + k * 3, mask=m, other=0.0)
+          - tl.load(off_ptr + i * 3, mask=m, other=0.0)).to(tl.float64)
+    vy = (tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0) + tl.load(off_ptr + k * 3 + 1, mask=m, other=0.0)
+          - tl.load(off_ptr + i * 3 + 1, mask=m, other=0.0)).to(tl.float64)
+    vz = (tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0) + tl.load(off_ptr + k * 3 + 2, mask=m, other=0.0)
+          - tl.load(off_ptr + i * 3 + 2, mask=m, other=0.0)).to(tl.float64)
+    tiny = tl.load(sc_ptr + 9)
+    rv = tl.sqrt(vx * vx + vy * vy + vz * vz + tiny)
+    ri = tl.load(par_ptr + i * NP, mask=m, other=1.0).to(tl.float64)
+    rk = tl.load(par_ptr + k * NP, mask=m, other=1.0).to(tl.float64)
+    ei = tl.load(par_ptr + i * NP + 1, mask=m, other=0.0).to(tl.float64)
+    ek = tl.load(par_ptr + k * NP + 1, mask=m, other=0.0).to(tl.float64)
+    if RADIUS == 2:
+        rmin = (ri * ri * ri + rk * rk * rk) / (ri * ri + rk * rk + tiny)
+    elif RADIUS == 1:
+        rmin = tl.sqrt(ri * rk)
+    else:
+        rmin = 0.5 * (ri + rk)
+    if EPSILON == 2:
+        si = tl.sqrt(tl.maximum(ei, 0.0))
+        sk = tl.sqrt(tl.maximum(ek, 0.0))
+        eps = 4.0 * ei * ek / ((si + sk) * (si + sk) + tiny)
+    elif EPSILON == 1:
+        eps = 0.5 * (ei + ek)
+    else:
+        eps = tl.sqrt(tl.maximum(ei * ek, 0.0))
+    return vx, vy, vz, rv, rmin, eps
+
+
+@triton.jit
+def _amoeba_forward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, per_ptr, q_ptr, d_ptr, Q_ptr, par_ptr, off_ptr, sc_ptr,
+                    enode_ptr, epair_ptr, fd_ptr, fp_ptr, du_ptr, n_ptr, sel_ptr,
+                    SELECT: tl.constexpr, KEEP_R: tl.constexpr, POLAR: tl.constexpr, WRITE_PAIRS: tl.constexpr,
+                    SW_VDW: tl.constexpr, RADIUS: tl.constexpr, EPSILON: tl.constexpr, NP: tl.constexpr,
+                    GROUP: tl.constexpr, BLOCK: tl.constexpr):
+    """The AMOEBA pair terms of one block of pairs: the permanent multipole energy (``amoeba_pair_block``),
+    the buffered 14-7 energy between the van der Waals sites, and with ``POLAR`` the direct- and
+    polar-scaled real-space permanent fields and the mutual ladder members of the induction
+    (``_real_space_fields``). ``GROUP`` selects the terms of a launch: 1 the electrostatics, 2 the van
+    der Waals term, 0 both. ``SW_VDW`` switches the van der Waals energy: 0 not, 1 on the pairs of
+    cells, 2 on every pair. ``KEEP_R`` and ``SELECT`` as in :func:`_pairs_forward`."""
+    acc = enode_ptr.dtype.element_ty
+    start = tl.program_id(0) * BLOCK
+    n = tl.load(n_ptr)
+    if start >= n:
+        return
+    lane = (start + tl.arange(0, BLOCK)).to(tl.int64)
+    m = lane < n
+    last = tl.minimum(start + BLOCK - 1, n - 1)
+    if SELECT:
+        e = tl.load(sel_ptr + lane, mask=m, other=0)
+        first = tl.load(sel_ptr + start)
+        last = tl.load(sel_ptr + last)
+    else:
+        e = lane
+        first = start
+    i = tl.load(i_ptr + e, mask=m, other=0)
+    k = tl.load(k_ptr + e, mask=m, other=0)
+    i0 = tl.load(i_ptr + first)
+    i1 = tl.load(i_ptr + last)
+    same = m & (i == i0)
+    tail = m & (i == i1) & (i1 != i0)
+    rest = m & (i != i0) & (i != i1)
+    rx = tl.load(r_ptr + e * 3, mask=m, other=1.0)
+    ry = tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0)
+    rz = tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0)
+    per = tl.load(per_ptr + e, mask=m, other=0.0)
+    dtype = rx.dtype
+    if GROUP != 1:
+        # van der Waals between the reduced sites, in float64 as a whole
+        vx, vy, vz, rv, rmin, eps = _vdw_pair(r_ptr, off_ptr, par_ptr, sc_ptr, e, i, k, m, NP, RADIUS, EPSILON)
+        e_vdw, de_vdw = _halgren(rv, rmin, eps, tl.load(sc_ptr + 7), tl.load(sc_ptr + 8))
+        e_vdw = e_vdw * tl.load(s_ptr + e * 8, mask=m, other=0.0).to(tl.float64)
+        if SW_VDW > 0:
+            sw = _switch(rv, tl.load(sc_ptr + 4), tl.load(sc_ptr + 5))
+            if SW_VDW == 1:
+                sw = tl.where(per > 0.0, sw, 1.0)
+            e_vdw = e_vdw * sw
+        e_vdw = e_vdw.to(dtype)
+        if WRITE_PAIRS:
+            tl.store(epair_ptr + e * 2 + 1, e_vdw, mask=m)
+        _add_sorted(enode_ptr + 1, i0 * 2, i1 * 2, i * 2, (0.5 * e_vdw).to(acc), same, tail, rest, TAIL=0)
+        tl.atomic_add(enode_ptr + k * 2 + 1, (0.5 * e_vdw).to(acc), mask=m, sem="relaxed")
+    if GROUP != 2:
+        s1 = tl.load(s_ptr + e * 8 + 1, mask=m, other=0.0)
+        coulomb = tl.load(sc_ptr)
+        inv_sqrt_pi = tl.load(sc_ptr + 1).to(dtype)
+        qi = tl.load(q_ptr + i, mask=m, other=0.0)
+        qk = tl.load(q_ptr + k, mask=m, other=0.0)
+        dix = tl.load(d_ptr + i * 3, mask=m, other=0.0)
+        diy = tl.load(d_ptr + i * 3 + 1, mask=m, other=0.0)
+        diz = tl.load(d_ptr + i * 3 + 2, mask=m, other=0.0)
+        dkx = tl.load(d_ptr + k * 3, mask=m, other=0.0)
+        dky = tl.load(d_ptr + k * 3 + 1, mask=m, other=0.0)
+        dkz = tl.load(d_ptr + k * 3 + 2, mask=m, other=0.0)
+        qixx = tl.load(Q_ptr + i * 9, mask=m, other=0.0)
+        qixy = tl.load(Q_ptr + i * 9 + 1, mask=m, other=0.0)
+        qixz = tl.load(Q_ptr + i * 9 + 2, mask=m, other=0.0)
+        qiyy = tl.load(Q_ptr + i * 9 + 4, mask=m, other=0.0)
+        qiyz = tl.load(Q_ptr + i * 9 + 5, mask=m, other=0.0)
+        qizz = tl.load(Q_ptr + i * 9 + 8, mask=m, other=0.0)
+        qkxx = tl.load(Q_ptr + k * 9, mask=m, other=0.0)
+        qkxy = tl.load(Q_ptr + k * 9 + 1, mask=m, other=0.0)
+        qkxz = tl.load(Q_ptr + k * 9 + 2, mask=m, other=0.0)
+        qkyy = tl.load(Q_ptr + k * 9 + 4, mask=m, other=0.0)
+        qkyz = tl.load(Q_ptr + k * 9 + 5, mask=m, other=0.0)
+        qkzz = tl.load(Q_ptr + k * 9 + 8, mask=m, other=0.0)
+        # the float32 square root and division of the GPU are approximate and biased: both through float64
+        R = tl.sqrt((rx * rx + ry * ry + rz * rz).to(tl.float64)).to(dtype)
+        inv = (1.0 / R.to(tl.float64)).to(dtype)
+        if KEEP_R:
+            keep = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 6).to(dtype), 1.0, 0.0), 1.0).to(dtype)
+        else:
+            keep = tl.load(keep_ptr + e, mask=m, other=0.0)
+        c0, c1, c2, c3, c4, c5 = _coulomb6(inv)
+        ae = (tl.load(sc_ptr + 2) * per.to(tl.float64)).to(dtype)
+        e0, e1, e2, e3, e4, e5 = _ewald6(R, inv, ae, inv_sqrt_pi)
+        # the point ladder: the Coulomb ladder scaled by s1, in a cell the Ewald interaction minus the
+        # excluded fraction of the bare one; the whole on the kept pairs
+        u0 = s1 * c0 + (e0 - c0) * per
+        u1 = s1 * c1 + (e1 - c1) * per
+        u2 = s1 * c2 + (e2 - c2) * per
+        u3 = s1 * c3 + (e3 - c3) * per
+        u4 = s1 * c4 + (e4 - c4) * per
+        e_mp = _energy(qi * qk * u0, dix, diy, diz, qixx, qixy, qixz, qiyy, qiyz, qizz,
+                       dkx, dky, dkz, qkxx, qkxy, qkxz, qkyy, qkyz, qkzz, rx, ry, rz,
+                       qk * u1, qk * u2, qi * u1, qi * u2, u1, u2, u3, u4) * keep * coulomb.to(dtype)
+        if WRITE_PAIRS:
+            tl.store(epair_ptr + e * 2, e_mp, mask=m)
+        _add_sorted(enode_ptr, i0 * 2, i1 * 2, i * 2, (0.5 * e_mp).to(acc), same, tail, rest, TAIL=0)
+        tl.atomic_add(enode_ptr + k * 2, (0.5 * e_mp).to(acc), mask=m, sem="relaxed")
+        if POLAR:
+            # the Thole-damped ladder (in float64, cast) and the fields of each set at the other atom
+            R64 = R.to(tl.float64)
+            l3, l5, l7, l9 = _thole(R64, tl.load(par_ptr + i * NP + 2, mask=m, other=0.0).to(tl.float64),
+                                    tl.load(par_ptr + k * NP + 2, mask=m, other=0.0).to(tl.float64),
+                                    tl.load(par_ptr + i * NP + 3, mask=m, other=0.0).to(tl.float64),
+                                    tl.load(par_ptr + k * NP + 3, mask=m, other=0.0).to(tl.float64), sc_ptr)
+            t1 = l3.to(dtype) * c1
+            t2 = l5.to(dtype) * c2
+            t3 = l7.to(dtype) * c3
+            fkx, fky, fkz = _field(qi * t1, dix, diy, diz, qixx, qixy, qixz, qiyy, qiyz, qizz, rx, ry, rz,
+                                   t1, t2, t3, -1.0)
+            fix, fiy, fiz = _field(qk * t1, dkx, dky, dkz, qkxx, qkxy, qkxz, qkyy, qkyz, qkzz, rx, ry, rz,
+                                   t1, t2, t3, 1.0)
+            # the Ewald field of the multipoles minus their bare field, on the kept pairs of a cell
+            ap = (tl.load(sc_ptr + 3) * per.to(tl.float64)).to(dtype)
+            p0, p1, p2, p3, p4, p5 = _ewald6(R, inv, ap, inv_sqrt_pi)
+            v1 = (p1 - c1) * keep * per
+            v2 = (p2 - c2) * keep * per
+            v3 = (p3 - c3) * keep * per
+            ewkx, ewky, ewkz = _field(qi * v1, dix, diy, diz, qixx, qixy, qixz, qiyy, qiyz, qizz, rx, ry, rz,
+                                      v1, v2, v3, -1.0)
+            ewix, ewiy, ewiz = _field(qk * v1, dkx, dky, dkz, qkxx, qkxy, qkxz, qkyy, qkyz, qkzz, rx, ry, rz,
+                                      v1, v2, v3, 1.0)
+            sd = tl.load(s_ptr + e * 8 + 6, mask=m, other=0.0) * keep
+            sp = tl.load(s_ptr + e * 8 + 2, mask=m, other=0.0) * keep
+            tl.atomic_add(fd_ptr + k * 3, (ewkx + fkx * sd).to(acc), mask=m, sem="relaxed")
+            tl.atomic_add(fd_ptr + k * 3 + 1, (ewky + fky * sd).to(acc), mask=m, sem="relaxed")
+            tl.atomic_add(fd_ptr + k * 3 + 2, (ewkz + fkz * sd).to(acc), mask=m, sem="relaxed")
+            _add_sorted(fd_ptr, i0 * 3, i1 * 3, i * 3, (ewix + fix * sd).to(acc), same, tail, rest, TAIL=0)
+            _add_sorted(fd_ptr + 1, i0 * 3, i1 * 3, i * 3, (ewiy + fiy * sd).to(acc), same, tail, rest, TAIL=0)
+            _add_sorted(fd_ptr + 2, i0 * 3, i1 * 3, i * 3, (ewiz + fiz * sd).to(acc), same, tail, rest, TAIL=0)
+            tl.atomic_add(fp_ptr + k * 3, (ewkx + fkx * sp).to(acc), mask=m, sem="relaxed")
+            tl.atomic_add(fp_ptr + k * 3 + 1, (ewky + fky * sp).to(acc), mask=m, sem="relaxed")
+            tl.atomic_add(fp_ptr + k * 3 + 2, (ewkz + fkz * sp).to(acc), mask=m, sem="relaxed")
+            _add_sorted(fp_ptr, i0 * 3, i1 * 3, i * 3, (ewix + fix * sp).to(acc), same, tail, rest, TAIL=0)
+            _add_sorted(fp_ptr + 1, i0 * 3, i1 * 3, i * 3, (ewiy + fiy * sp).to(acc), same, tail, rest, TAIL=0)
+            _add_sorted(fp_ptr + 2, i0 * 3, i1 * 3, i * 3, (ewiz + fiz * sp).to(acc), same, tail, rest, TAIL=0)
+            # the mutual ladder of the solve: the damped ladder scaled, plus the Ewald difference
+            us = tl.load(s_ptr + e * 8 + 7, mask=m, other=0.0) * tl.load(s_ptr + e * 8 + 3, mask=m, other=0.0)
+            tl.store(du_ptr + e * 2, ((p1 - c1) * per + t1 * us) * keep, mask=m)
+            tl.store(du_ptr + e * 2 + 1, ((p2 - c2) * per + t2 * us) * keep, mask=m)
+
+
+@triton.jit
+def _amoeba_backward(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, per_ptr, q_ptr, d_ptr, Q_ptr, par_ptr, off_ptr, sc_ptr,
+                     ge_ptr, gfd_ptr, gfp_ptr, gdu_ptr, gr_ptr, gq_ptr, gd_ptr, gQ_ptr, goff_ptr, n_ptr, sel_ptr,
+                     SELECT: tl.constexpr, KEEP_R: tl.constexpr, POLAR: tl.constexpr, SW_VDW: tl.constexpr,
+                     RADIUS: tl.constexpr, EPSILON: tl.constexpr, NP: tl.constexpr, GROUP: tl.constexpr,
+                     BLOCK: tl.constexpr):
+    """The gradients of the AMOEBA pair terms for incoming gradients of every output of the forward
+    kernel: per pair with respect to the pair vector (stored), per atom with respect to the charges,
+    dipoles, quadrupoles and van der Waals site offsets (atomic adds). ``GROUP`` selects the terms
+    of a launch: 1 the permanent multipole energy, 2 the fields and mutual ladders, 3 the van der
+    Waals term, 0 all; the groups after the first add to the stored pair-vector gradient."""
+    acc = gq_ptr.dtype.element_ty
+    start = tl.program_id(0) * BLOCK
+    n = tl.load(n_ptr)
+    if start >= n:
+        return
+    lane = (start + tl.arange(0, BLOCK)).to(tl.int64)
+    m = lane < n
+    last = tl.minimum(start + BLOCK - 1, n - 1)
+    if SELECT:
+        e = tl.load(sel_ptr + lane, mask=m, other=0)
+        first = tl.load(sel_ptr + start)
+        last = tl.load(sel_ptr + last)
+    else:
+        e = lane
+        first = start
+    i = tl.load(i_ptr + e, mask=m, other=0)
+    k = tl.load(k_ptr + e, mask=m, other=0)
+    i0 = tl.load(i_ptr + first)
+    i1 = tl.load(i_ptr + last)
+    same = m & (i == i0)
+    tail = m & (i == i1) & (i1 != i0)
+    rest = m & (i != i0) & (i != i1)
+    rx = tl.load(r_ptr + e * 3, mask=m, other=1.0)
+    ry = tl.load(r_ptr + e * 3 + 1, mask=m, other=0.0)
+    rz = tl.load(r_ptr + e * 3 + 2, mask=m, other=0.0)
+    per = tl.load(per_ptr + e, mask=m, other=0.0)
+    dtype = rx.dtype
+    zero = rx * 0.0
+    grx = zero
+    gry = zero
+    grz = zero
+    gsr = zero
+    if GROUP == 0 or GROUP == 3:
+        # van der Waals: a radial function of the site vector, whose gradient goes to the pair vector
+        # and to the offsets of both sites
+        g_vdw = 0.5 * (tl.load(ge_ptr + i * 2 + 1, mask=m, other=0.0)
+                       + tl.load(ge_ptr + k * 2 + 1, mask=m, other=0.0)).to(tl.float64)
+        vx, vy, vz, rv, rmin, eps = _vdw_pair(r_ptr, off_ptr, par_ptr, sc_ptr, e, i, k, m, NP, RADIUS, EPSILON)
+        e_vdw, de_vdw = _halgren(rv, rmin, eps, tl.load(sc_ptr + 7), tl.load(sc_ptr + 8))
+        if SW_VDW > 0:
+            sw = _switch(rv, tl.load(sc_ptr + 4), tl.load(sc_ptr + 5))
+            dsw = _switch_derivative(rv, tl.load(sc_ptr + 4), tl.load(sc_ptr + 5))
+            if SW_VDW == 1:
+                sw = tl.where(per > 0.0, sw, 1.0)
+                dsw = tl.where(per > 0.0, dsw, 0.0)
+            de_vdw = de_vdw * sw + e_vdw * dsw
+        gv = g_vdw * tl.load(s_ptr + e * 8, mask=m, other=0.0).to(tl.float64) * de_vdw / rv
+        gvx = (gv * vx).to(dtype)
+        gvy = (gv * vy).to(dtype)
+        gvz = (gv * vz).to(dtype)
+        grx += gvx
+        gry += gvy
+        grz += gvz
+        tl.atomic_add(goff_ptr + k * 3, gvx.to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(goff_ptr + k * 3 + 1, gvy.to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(goff_ptr + k * 3 + 2, gvz.to(acc), mask=m, sem="relaxed")
+        _add_sorted(goff_ptr, i0 * 3, i1 * 3, i * 3, (-gvx).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(goff_ptr + 1, i0 * 3, i1 * 3, i * 3, (-gvy).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(goff_ptr + 2, i0 * 3, i1 * 3, i * 3, (-gvz).to(acc), same, tail, rest, TAIL=1)
+    if GROUP != 3:
+        inv_sqrt_pi = tl.load(sc_ptr + 1).to(dtype)
+        qi = tl.load(q_ptr + i, mask=m, other=0.0)
+        qk = tl.load(q_ptr + k, mask=m, other=0.0)
+        dix = tl.load(d_ptr + i * 3, mask=m, other=0.0)
+        diy = tl.load(d_ptr + i * 3 + 1, mask=m, other=0.0)
+        diz = tl.load(d_ptr + i * 3 + 2, mask=m, other=0.0)
+        dkx = tl.load(d_ptr + k * 3, mask=m, other=0.0)
+        dky = tl.load(d_ptr + k * 3 + 1, mask=m, other=0.0)
+        dkz = tl.load(d_ptr + k * 3 + 2, mask=m, other=0.0)
+        qixx = tl.load(Q_ptr + i * 9, mask=m, other=0.0)
+        qixy = tl.load(Q_ptr + i * 9 + 1, mask=m, other=0.0)
+        qixz = tl.load(Q_ptr + i * 9 + 2, mask=m, other=0.0)
+        qiyy = tl.load(Q_ptr + i * 9 + 4, mask=m, other=0.0)
+        qiyz = tl.load(Q_ptr + i * 9 + 5, mask=m, other=0.0)
+        qizz = tl.load(Q_ptr + i * 9 + 8, mask=m, other=0.0)
+        qkxx = tl.load(Q_ptr + k * 9, mask=m, other=0.0)
+        qkxy = tl.load(Q_ptr + k * 9 + 1, mask=m, other=0.0)
+        qkxz = tl.load(Q_ptr + k * 9 + 2, mask=m, other=0.0)
+        qkyy = tl.load(Q_ptr + k * 9 + 4, mask=m, other=0.0)
+        qkyz = tl.load(Q_ptr + k * 9 + 5, mask=m, other=0.0)
+        qkzz = tl.load(Q_ptr + k * 9 + 8, mask=m, other=0.0)
+        R = tl.sqrt((rx * rx + ry * ry + rz * rz).to(tl.float64)).to(dtype)
+        inv = (1.0 / R.to(tl.float64)).to(dtype)
+        if KEEP_R:
+            keep = tl.where(per > 0.0, tl.where(R < tl.load(sc_ptr + 6).to(dtype), 1.0, 0.0), 1.0).to(dtype)
+        else:
+            keep = tl.load(keep_ptr + e, mask=m, other=0.0)
+        c0, c1, c2, c3, c4, c5 = _coulomb6(inv)
+        gqi = zero
+        gqk = zero
+        gdix = zero
+        gdiy = zero
+        gdiz = zero
+        gdkx = zero
+        gdky = zero
+        gdkz = zero
+        gQixx = zero
+        gQixy = zero
+        gQixz = zero
+        gQiyx = zero
+        gQiyy = zero
+        gQiyz = zero
+        gQizx = zero
+        gQizy = zero
+        gQizz = zero
+        gQkxx = zero
+        gQkxy = zero
+        gQkxz = zero
+        gQkyx = zero
+        gQkyy = zero
+        gQkyz = zero
+        gQkzx = zero
+        gQkzy = zero
+        gQkzz = zero
+    if GROUP == 0 or GROUP == 1:
+        # permanent multipoles: the adjoint of the contraction and the chains to the charges and to
+        # R (every member of the point ladder to the next order)
+        g_mp = 0.5 * (tl.load(ge_ptr + i * 2, mask=m, other=0.0) + tl.load(ge_ptr + k * 2, mask=m, other=0.0))
+        s1 = tl.load(s_ptr + e * 8 + 1, mask=m, other=0.0)
+        ae = (tl.load(sc_ptr + 2) * per.to(tl.float64)).to(dtype)
+        e0, e1, e2, e3, e4, e5 = _ewald6(R, inv, ae, inv_sqrt_pi)
+        w_mp = g_mp * tl.load(sc_ptr).to(dtype) * keep
+        u0 = s1 * c0 + (e0 - c0) * per
+        u1 = s1 * c1 + (e1 - c1) * per
+        u2 = s1 * c2 + (e2 - c2) * per
+        u3 = s1 * c3 + (e3 - c3) * per
+        u4 = s1 * c4 + (e4 - c4) * per
+        u5 = s1 * c5 + (e5 - c5) * per
+        (a_dix, a_diy, a_diz, a_dkx, a_dky, a_dkz, a_qixx, a_qixy, a_qixz, a_qiyx, a_qiyy, a_qiyz, a_qizx, a_qizy,
+         a_qizz, a_qkxx, a_qkxy, a_qkxz, a_qkyx, a_qkyy, a_qkyz, a_qkzx, a_qkzy, a_qkzz, a_rx, a_ry, a_rz,
+         a_Li1, a_Li2, a_Lk1, a_Lk2, a_L1, a_L2, a_L3, a_L4) = _energy_adjoint(
+            w_mp, dix, diy, diz, qixx, qixy, qixz, qiyy, qiyz, qizz, dkx, dky, dkz, qkxx, qkxy, qkxz, qkyy, qkyz,
+            qkzz, rx, ry, rz, qk * u1, qk * u2, qi * u1, qi * u2, u1, u2, u3, u4)
+        gqi += w_mp * qk * u0 + a_Lk1 * u1 + a_Lk2 * u2
+        gqk += w_mp * qi * u0 + a_Li1 * u1 + a_Li2 * u2
+        gdix += a_dix
+        gdiy += a_diy
+        gdiz += a_diz
+        gdkx += a_dkx
+        gdky += a_dky
+        gdkz += a_dkz
+        gQixx += a_qixx
+        gQixy += a_qixy
+        gQixz += a_qixz
+        gQiyx += a_qiyx
+        gQiyy += a_qiyy
+        gQiyz += a_qiyz
+        gQizx += a_qizx
+        gQizy += a_qizy
+        gQizz += a_qizz
+        gQkxx += a_qkxx
+        gQkxy += a_qkxy
+        gQkxz += a_qkxz
+        gQkyx += a_qkyx
+        gQkyy += a_qkyy
+        gQkyz += a_qkyz
+        gQkzx += a_qkzx
+        gQkzy += a_qkzy
+        gQkzz += a_qkzz
+        grx += a_rx
+        gry += a_ry
+        grz += a_rz
+        gsr += (w_mp * qi * qk * u1 + (a_Li1 * qk + a_Lk1 * qi) * u2 + (a_Li2 * qk + a_Lk2 * qi) * u3
+                + a_L1 * u2 + a_L2 * u3 + a_L3 * u4 + a_L4 * u5)
+    if POLAR and (GROUP == 0 or GROUP == 2):
+        gfdkx = tl.load(gfd_ptr + k * 3, mask=m, other=0.0)
+        gfdky = tl.load(gfd_ptr + k * 3 + 1, mask=m, other=0.0)
+        gfdkz = tl.load(gfd_ptr + k * 3 + 2, mask=m, other=0.0)
+        gfdix = tl.load(gfd_ptr + i * 3, mask=m, other=0.0)
+        gfdiy = tl.load(gfd_ptr + i * 3 + 1, mask=m, other=0.0)
+        gfdiz = tl.load(gfd_ptr + i * 3 + 2, mask=m, other=0.0)
+        gfpkx = tl.load(gfp_ptr + k * 3, mask=m, other=0.0)
+        gfpky = tl.load(gfp_ptr + k * 3 + 1, mask=m, other=0.0)
+        gfpkz = tl.load(gfp_ptr + k * 3 + 2, mask=m, other=0.0)
+        gfpix = tl.load(gfp_ptr + i * 3, mask=m, other=0.0)
+        gfpiy = tl.load(gfp_ptr + i * 3 + 1, mask=m, other=0.0)
+        gfpiz = tl.load(gfp_ptr + i * 3 + 2, mask=m, other=0.0)
+        sd = tl.load(s_ptr + e * 8 + 6, mask=m, other=0.0) * keep
+        sp = tl.load(s_ptr + e * 8 + 2, mask=m, other=0.0) * keep
+        gkx = gfdkx * sd + gfpkx * sp
+        gky = gfdky * sd + gfpky * sp
+        gkz = gfdkz * sd + gfpkz * sp
+        gix = gfdix * sd + gfpix * sp
+        giy = gfdiy * sd + gfpiy * sp
+        giz = gfdiz * sd + gfpiz * sp
+        R64 = R.to(tl.float64)
+        l3, l5, l7, l9 = _thole(R64, tl.load(par_ptr + i * NP + 2, mask=m, other=0.0).to(tl.float64),
+                                tl.load(par_ptr + k * NP + 2, mask=m, other=0.0).to(tl.float64),
+                                tl.load(par_ptr + i * NP + 3, mask=m, other=0.0).to(tl.float64),
+                                tl.load(par_ptr + k * NP + 3, mask=m, other=0.0).to(tl.float64), sc_ptr)
+        t1 = l3.to(dtype) * c1
+        t2 = l5.to(dtype) * c2
+        t3 = l7.to(dtype) * c3
+        t4 = l9.to(dtype) * c4
+        (b_C, b_dx, b_dy, b_dz, b_qxx, b_qxy, b_qxz, b_qyx, b_qyy, b_qyz, b_qzx, b_qzy, b_qzz, b_rx, b_ry, b_rz,
+         b_D1, b_D2, b_D3) = _field_adjoint(gkx, gky, gkz, qi * t1, dix, diy, diz, qixx, qixy, qixz, qiyy, qiyz,
+                                            qizz, rx, ry, rz, t1, t2, t3, -1.0)
+        gqi += b_C * t1
+        gdix += b_dx
+        gdiy += b_dy
+        gdiz += b_dz
+        gQixx += b_qxx
+        gQixy += b_qxy
+        gQixz += b_qxz
+        gQiyx += b_qyx
+        gQiyy += b_qyy
+        gQiyz += b_qyz
+        gQizx += b_qzx
+        gQizy += b_qzy
+        gQizz += b_qzz
+        grx += b_rx
+        gry += b_ry
+        grz += b_rz
+        gsr += b_C * qi * t2 + b_D1 * t2 + b_D2 * t3 + b_D3 * t4
+        (b_C, b_dx, b_dy, b_dz, b_qxx, b_qxy, b_qxz, b_qyx, b_qyy, b_qyz, b_qzx, b_qzy, b_qzz, b_rx, b_ry, b_rz,
+         b_D1, b_D2, b_D3) = _field_adjoint(gix, giy, giz, qk * t1, dkx, dky, dkz, qkxx, qkxy, qkxz, qkyy, qkyz,
+                                            qkzz, rx, ry, rz, t1, t2, t3, 1.0)
+        gqk += b_C * t1
+        gdkx += b_dx
+        gdky += b_dy
+        gdkz += b_dz
+        gQkxx += b_qxx
+        gQkxy += b_qxy
+        gQkxz += b_qxz
+        gQkyx += b_qyx
+        gQkyy += b_qyy
+        gQkyz += b_qyz
+        gQkzx += b_qzx
+        gQkzy += b_qzy
+        gQkzz += b_qzz
+        grx += b_rx
+        gry += b_ry
+        grz += b_rz
+        gsr += b_C * qk * t2 + b_D1 * t2 + b_D2 * t3 + b_D3 * t4
+        # the Ewald difference of the multipoles, both ways, unscaled in both fields
+        ap = (tl.load(sc_ptr + 3) * per.to(tl.float64)).to(dtype)
+        p0, p1, p2, p3, p4, p5 = _ewald6(R, inv, ap, inv_sqrt_pi)
+        kp = keep * per
+        v1 = (p1 - c1) * kp
+        v2 = (p2 - c2) * kp
+        v3 = (p3 - c3) * kp
+        v4 = (p4 - c4) * kp
+        (b_C, b_dx, b_dy, b_dz, b_qxx, b_qxy, b_qxz, b_qyx, b_qyy, b_qyz, b_qzx, b_qzy, b_qzz, b_rx, b_ry, b_rz,
+         b_D1, b_D2, b_D3) = _field_adjoint(gfdkx + gfpkx, gfdky + gfpky, gfdkz + gfpkz, qi * v1, dix, diy, diz,
+                                            qixx, qixy, qixz, qiyy, qiyz, qizz, rx, ry, rz, v1, v2, v3, -1.0)
+        gqi += b_C * v1
+        gdix += b_dx
+        gdiy += b_dy
+        gdiz += b_dz
+        gQixx += b_qxx
+        gQixy += b_qxy
+        gQixz += b_qxz
+        gQiyx += b_qyx
+        gQiyy += b_qyy
+        gQiyz += b_qyz
+        gQizx += b_qzx
+        gQizy += b_qzy
+        gQizz += b_qzz
+        grx += b_rx
+        gry += b_ry
+        grz += b_rz
+        gsr += b_C * qi * v2 + b_D1 * v2 + b_D2 * v3 + b_D3 * v4
+        (b_C, b_dx, b_dy, b_dz, b_qxx, b_qxy, b_qxz, b_qyx, b_qyy, b_qyz, b_qzx, b_qzy, b_qzz, b_rx, b_ry, b_rz,
+         b_D1, b_D2, b_D3) = _field_adjoint(gfdix + gfpix, gfdiy + gfpiy, gfdiz + gfpiz, qk * v1, dkx, dky, dkz,
+                                            qkxx, qkxy, qkxz, qkyy, qkyz, qkzz, rx, ry, rz, v1, v2, v3, 1.0)
+        gqk += b_C * v1
+        gdkx += b_dx
+        gdky += b_dy
+        gdkz += b_dz
+        gQkxx += b_qxx
+        gQkxy += b_qxy
+        gQkxz += b_qxz
+        gQkyx += b_qyx
+        gQkyy += b_qyy
+        gQkyz += b_qyz
+        gQkzx += b_qzx
+        gQkzy += b_qzy
+        gQkzz += b_qzz
+        grx += b_rx
+        gry += b_ry
+        grz += b_rz
+        gsr += b_C * qk * v2 + b_D1 * v2 + b_D2 * v3 + b_D3 * v4
+        # the mutual ladder members: radial only
+        us = tl.load(s_ptr + e * 8 + 7, mask=m, other=0.0) * tl.load(s_ptr + e * 8 + 3, mask=m, other=0.0)
+        gdu1 = tl.load(gdu_ptr + e * 2, mask=m, other=0.0)
+        gdu2 = tl.load(gdu_ptr + e * 2 + 1, mask=m, other=0.0)
+        gsr += gdu1 * ((p2 - c2) * per + t2 * us) * keep
+        gsr += gdu2 * ((p3 - c3) * per + t3 * us) * keep
+    if GROUP >= 2:
+        grx += tl.load(gr_ptr + e * 3, mask=m, other=0.0)
+        gry += tl.load(gr_ptr + e * 3 + 1, mask=m, other=0.0)
+        grz += tl.load(gr_ptr + e * 3 + 2, mask=m, other=0.0)
+    tl.store(gr_ptr + e * 3, grx + gsr * rx, mask=m)
+    tl.store(gr_ptr + e * 3 + 1, gry + gsr * ry, mask=m)
+    tl.store(gr_ptr + e * 3 + 2, grz + gsr * rz, mask=m)
+    if GROUP != 3:
+        _add_sorted(gq_ptr, i0, i1, i, (gqi).to(acc), same, tail, rest, TAIL=1)
+        tl.atomic_add(gq_ptr + k, (gqk).to(acc), mask=m, sem="relaxed")
+        _add_sorted(gd_ptr, i0 * 3, i1 * 3, i * 3, (gdix).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gd_ptr + 1, i0 * 3, i1 * 3, i * 3, (gdiy).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gd_ptr + 2, i0 * 3, i1 * 3, i * 3, (gdiz).to(acc), same, tail, rest, TAIL=1)
+        tl.atomic_add(gd_ptr + k * 3, (gdkx).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gd_ptr + k * 3 + 1, (gdky).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gd_ptr + k * 3 + 2, (gdkz).to(acc), mask=m, sem="relaxed")
+        _add_sorted(gQ_ptr, i0 * 9, i1 * 9, i * 9, (gQixx).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 1, i0 * 9, i1 * 9, i * 9, (gQixy).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 2, i0 * 9, i1 * 9, i * 9, (gQixz).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 3, i0 * 9, i1 * 9, i * 9, (gQiyx).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 4, i0 * 9, i1 * 9, i * 9, (gQiyy).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 5, i0 * 9, i1 * 9, i * 9, (gQiyz).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 6, i0 * 9, i1 * 9, i * 9, (gQizx).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 7, i0 * 9, i1 * 9, i * 9, (gQizy).to(acc), same, tail, rest, TAIL=1)
+        _add_sorted(gQ_ptr + 8, i0 * 9, i1 * 9, i * 9, (gQizz).to(acc), same, tail, rest, TAIL=1)
+        tl.atomic_add(gQ_ptr + k * 9, (gQkxx).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 1, (gQkxy).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 2, (gQkxz).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 3, (gQkyx).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 4, (gQkyy).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 5, (gQkyz).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 6, (gQkzx).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 7, (gQkzy).to(acc), mask=m, sem="relaxed")
+        tl.atomic_add(gQ_ptr + k * 9 + 8, (gQkzz).to(acc), mask=m, sem="relaxed")
+
+
+def amoeba_pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Optional[Tensor], per: Tensor,
+                         q: Tensor, d: Tensor, Q: Tensor, params: Tensor, offsets: Tensor, scalars: Tensor,
+                         polar: bool, modes: tuple, write_pairs: bool = False, count=None,
+                         select: Optional[Tensor] = None, tangents: Optional[tuple] = None) -> dict:
+    """Launch the AMOEBA pair kernel.
+
+    The inputs are those of :func:`pairs_forward` with the AMOEBA tables: ``params`` the per-atom
+    table ``(N, AMOEBA_NP)`` (:data:`AMOEBA_PARAMS`), ``offsets`` the van der Waals site of every
+    atom minus its position ``(N, 3)``, ``scalars`` the float64 scalars (:data:`AMOEBA_SCALARS`),
+    ``modes`` the van der Waals switch (0 none, 1 cells, 2 every pair) and combining rules of the
+    radius (0 arithmetic, 1 geometric, 2 cubic mean) and the well depth (0 geometric, 1
+    arithmetic, 2 HHG). ``tangents`` (directions of the pair vectors, charges, dipoles, quadrupoles and
+    site offsets) add the outputs' derivatives along them (``<key>_t``).
+
+    Returns
+    -------
+    dict
+        ``e_node`` ``(N, 2)`` (multipoles, van der Waals), ``field_d`` / ``field_p`` ``(N, 3)``,
+        ``du`` ``(M, 2)`` and ``e_pair`` ``(M, 2)`` (or ``None``).
+    """
+    M, N = int(i_.shape[0]), int(q.shape[0])
+    dtype, device = r_vec.dtype, r_vec.device
+    widths = {"e_node": 2, "field_d": 3, "field_p": 3}
+    out, flat = _segments(N, widths, device)
+    out.update({"du": torch.zeros(M, 2, dtype=dtype, device=device),
+                "e_pair": ((torch.empty if select is None else torch.zeros)(M, 2, dtype=dtype, device=device)
+                           if write_pairs else None)})
+    keys = ("e_node", "e_pair", "field_d", "field_p", "du")
+    if tangents is not None:
+        out.update({k + "_t": None if out[k] is None else torch.zeros_like(out[k]) for k in keys})
+    if M > 0:
+        dummy = out["du"]
+        kernel, extra = _amoeba_forward, ()
+        if tangents is not None:
+            from . import amoeba_tangents as tg
+            kernel = tg._amoeba_forward_t
+            r_t, q_t, d_t, Q_t, off_t = (t.contiguous() for t in tangents)
+            extra = (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t,
+                     *[dummy if out[k + "_t"] is None else out[k + "_t"] for k in keys])
+        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
+            kernel[(triton.cdiv(M, TILE),)](
+                i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
+                per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
+                offsets.contiguous(), scalars, out["e_node"], out["e_pair"] if write_pairs else dummy,
+                out["field_d"], out["field_p"], out["du"], _count(count, M, device),
+                dummy if select is None else select, *extra, SELECT=select is not None, KEEP_R=keep is None,
+                POLAR=bool(polar), WRITE_PAIRS=bool(write_pairs), SW_VDW=int(modes[0]), RADIUS=int(modes[1]),
+                EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+    out.update(_cast_segments(flat, N, widths, dtype))
+    for key in ("e_node_t", "field_d_t", "field_p_t"):
+        if out.get(key) is not None:
+            out[key] = out[key].to(dtype)
+    return out
+
+
+def amoeba_pairs_backward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: Optional[Tensor], per: Tensor,
+                          q: Tensor, d: Tensor, Q: Tensor, params: Tensor, offsets: Tensor, scalars: Tensor,
+                          polar: bool, modes: tuple, g_node: Tensor, g_field_d=None, g_field_p=None, g_du=None,
+                          count=None, select: Optional[Tensor] = None, tangents: Optional[tuple] = None) -> dict:
+    """Launch the AMOEBA backward kernel: the gradients of ``sum(g_node * e_node) + sum(g_field_d *
+    field_d) + sum(g_field_p * field_p) + sum(g_du * du)`` with respect to the pair vectors ``(M, 3)``,
+    the charges ``(N,)``, dipoles ``(N, 3)``, quadrupoles ``(N, 3, 3)`` and site offsets ``(N, 3)``.
+    The inputs are those of :func:`amoeba_pairs_forward` (with ``tangents``, the gradients' derivatives
+    along them as ``<key>_t``); a missing incoming gradient counts as zero."""
+    M, N = int(i_.shape[0]), int(q.shape[0])
+    dtype, device = r_vec.dtype, r_vec.device
+    widths = {"grad_q": 1, "grad_d": 3, "grad_Q": 9, "grad_off": 3}
+    out, flat = _segments(N, widths, device)
+    out["grad_r"] = torch.zeros(M, 3, dtype=dtype, device=device)
+    keys = ("grad_r", "grad_q", "grad_d", "grad_Q", "grad_off")
+    if tangents is not None:
+        out.update({k + "_t": torch.zeros_like(out[k]) for k in keys})
+    if M > 0:
+        def given(t, shape):
+            return torch.zeros(shape, dtype=dtype, device=device) if t is None else t.reshape(shape).contiguous()
+
+        args = (i_, k_, r_vec.contiguous(), scales.contiguous(), out["grad_r"] if keep is None else keep.contiguous(),
+                per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
+                offsets.contiguous(), scalars, given(g_node, (N, 2)), given(g_field_d, (N, 3)),
+                given(g_field_p, (N, 3)), given(g_du, (M, 2)), out["grad_r"], out["grad_q"], out["grad_d"],
+                out["grad_Q"], out["grad_off"], _count(count, M, device), out["grad_r"] if select is None else select)
+        kernel = _amoeba_backward
+        if tangents is not None:
+            from . import amoeba_tangents as tg
+            kernel = tg._amoeba_backward_t
+            r_t, q_t, d_t, Q_t, off_t = (t.contiguous() for t in tangents)
+            args = args + (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t, *[out[k + "_t"] for k in keys])
+        groups = ((1, 2, 3) if polar else (1, 3)) if dtype in SPLIT_BACKWARD else (0,)
+        tile, warps = AMOEBA_BACKWARD_LAUNCH.get(dtype, (TILE, WARPS))
+        for group in groups:
+            kernel[(triton.cdiv(M, tile),)](
+                *args, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar), SW_VDW=int(modes[0]),
+                RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=tile,
+                num_warps=warps, maxnreg=MAXNREG)
+    out.update(_cast_segments(flat, N, widths, dtype))
+    for key in ("grad_q_t", "grad_d_t", "grad_Q_t", "grad_off_t"):
+        if key in out:
+            out[key] = out[key].to(dtype)
+    for key in ("grad_Q", "grad_Q_t"):
+        if key in out:
+            out[key] = out[key].view(N, 3, 3)
+    return out
+
+
+class AmoebaPairs(torch.autograd.Function):
+    """The AMOEBA pair kernels as one autograd function (see :class:`HippoPairs`): gradients with
+    respect to the pair vectors, the per-atom multipoles and the van der Waals site offsets.
+    Differentiable once."""
+
+    @staticmethod
+    def forward(ctx, r_vec, q, d, Q, offsets, i_, k_, scales, keep, per, params, scalars, polar, modes, write_pairs,
+                count=None, select=None):
+        out = amoeba_pairs_forward(i_, k_, r_vec, scales, keep, per, q, d, Q, params, offsets, scalars, polar, modes,
+                                   write_pairs, count, select)
+        ctx.save_for_backward(r_vec, q, d, Q, offsets, i_, k_, scales, keep, per, params, scalars)
+        ctx.flags = (polar, modes, count, select)
+        empty = r_vec.new_zeros(0)
+        return (out["e_node"], out["field_d"], out["field_p"], out["du"],
+                empty if out["e_pair"] is None else out["e_pair"])
+
+    @staticmethod
+    def backward(ctx, g_enode, g_fd, g_fp, g_du, g_epair):
+        r_vec, q, d, Q, offsets, i_, k_, scales, keep, per, params, scalars = ctx.saved_tensors
+        polar, modes, count, select = ctx.flags
+        consts = (i_, k_, scales, keep, per, scalars, polar, modes, count, select)
+        zero = r_vec.new_zeros(0)
+        grads = _AmoebaPairsGrad.apply(r_vec, q, d, Q, offsets, params, g_enode, g_fd if polar else zero,
+                                       g_fp if polar else zero, g_du if polar else zero, consts)
+        g_params = None
+        if ctx.needs_input_grad[10]:
+            g_params = amoeba_param_grad(i_, k_, r_vec.detach(), scales, keep, per, q.detach(), d.detach(), Q.detach(),
+                                         params.detach(), offsets.detach(), scalars, polar, modes, g_enode.detach(),
+                                         _given(g_fd if polar else zero), _given(g_fp if polar else zero),
+                                         _given(g_du if polar else zero), count, select)
+        return (*grads, None, None, None, None, None, g_params, None, None, None, None, None, None)
+
+
+class _AmoebaPairsGrad(torch.autograd.Function):
+    """The backward kernel of :class:`AmoebaPairs`, differentiable once more (see :class:`_HippoPairsGrad`)."""
+
+    @staticmethod
+    def forward(ctx, r_vec, q, d, Q, offsets, params, g_enode, g_fd, g_fp, g_du, consts):
+        i_, k_, scales, keep, per, scalars, polar, modes, count, select = consts
+        grads = amoeba_pairs_backward(i_, k_, r_vec, scales, keep, per, q, d, Q, params, offsets, scalars, polar,
+                                      modes, g_node=g_enode, g_field_d=_given(g_fd), g_field_p=_given(g_fp),
+                                      g_du=_given(g_du), count=count, select=select)
+        ctx.save_for_backward(r_vec, q, d, Q, offsets, params, g_enode, g_fd, g_fp, g_du)
+        ctx.consts = consts
+        return grads["grad_r"], grads["grad_q"], grads["grad_d"], grads["grad_Q"], grads["grad_off"]
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, u_r, u_q, u_d, u_Q, u_off):
+        r_vec, q, d, Q, offsets, params, g_enode, g_fd, g_fp, g_du = ctx.saved_tensors
+        i_, k_, scales, keep, per, scalars, polar, modes, count, select = ctx.consts
+        tangents = tuple(torch.zeros_like(x) if u is None else u
+                         for u, x in ((u_r, r_vec), (u_q, q), (u_d, d), (u_Q, Q), (u_off, offsets)))
+        fwd = amoeba_pairs_forward(i_, k_, r_vec, scales, keep, per, q, d, Q, params, offsets, scalars, polar, modes,
+                                   False, count, select, tangents=tangents)
+        bwd = amoeba_pairs_backward(i_, k_, r_vec, scales, keep, per, q, d, Q, params, offsets, scalars, polar, modes,
+                                    g_node=g_enode, g_field_d=_given(g_fd), g_field_p=_given(g_fp), g_du=_given(g_du),
+                                    count=count, select=select, tangents=tangents)
+
+        def matching(t, like):
+            return None if like.numel() == 0 or t is None else t.reshape(like.shape)
+
+        g_params = None
+        if ctx.needs_input_grad[5]:
+            g_params = amoeba_param_grad(i_, k_, r_vec, scales, keep, per, q, d, Q, params, offsets, scalars, polar,
+                                         modes, g_enode, _given(g_fd), _given(g_fp), _given(g_du), count, select,
+                                         tangents=tangents)[1]
+        return (bwd["grad_r_t"], bwd["grad_q_t"], bwd["grad_d_t"], bwd["grad_Q_t"], bwd["grad_off_t"], g_params,
+                fwd["e_node_t"], matching(fwd["field_d_t"], g_fd), matching(fwd["field_p_t"], g_fp),
+                matching(fwd["du_t"], g_du), None)
+
+
+def amoeba_scalar_table(coulomb: float, alpha_e: float, alpha_p: float, vdw_window: tuple, ewald_cutoff: float,
+                        delta: float, gamma: float, tiny: float, device: torch.device) -> Tensor:
+    """The float64 scalars of an AMOEBA evaluation (:data:`AMOEBA_SCALARS`); ``vdw_window`` is the
+    ``(taper, cutoff)`` of the van der Waals switch (zeros without one)."""
+    values = [coulomb, 1.0 / math.sqrt(math.pi), alpha_e, alpha_p, *vdw_window, ewald_cutoff, delta, gamma, tiny,
+              1.0 / 6.0, 0.6, 18.0 / 35.0, 9.0 / 35.0]
+    return torch.tensor(values, dtype=torch.float64, device=device)
 
 
 def available() -> bool:
@@ -2090,13 +3342,19 @@ def _load_multipoles(q_ptr, d_ptr, Q_ptr, j_ptr, batch_ptr, n, m, ORD: tl.conste
 
 
 @triton.jit
-def _spread_c(q_ptr, d_ptr, Q_ptr, j_ptr, w_ptr, start_ptr, batch_ptr, grid_ptr, n_atoms,
+def _spread_c(q_ptr, d_ptr, Q_ptr, j_ptr, w_ptr, start_ptr, batch_ptr, grid_ptr, n_atoms, guard_ptr,
               K1: tl.constexpr, K2: tl.constexpr, K3: tl.constexpr, P: tl.constexpr, ORD: tl.constexpr,
-              BLOCK: tl.constexpr, SP: tl.constexpr):
+              BLOCK: tl.constexpr, SP: tl.constexpr, GUARD: tl.constexpr):
     """:func:`_spread` of Cartesian multipoles ``q``, ``d`` ``(N, 3)``, ``Q`` ``(N, 9)``: ``BLOCK`` atoms
     by ``SP`` lanes, one per stencil point (``P^3`` padded to a power of two), so that the adds of one
     atom's z-row go to consecutive addresses in one instruction instead of a loop of serialized adds
-    per lane."""
+    per lane.
+    With ``GUARD`` the kernel does nothing once the conjugate-gradient scalars ``guard`` (a row of
+    :func:`pcg_scalars`) say the solve has converged: a solve of fixed length then pays little for
+    the iterations it did not need."""
+    if GUARD:
+        if tl.load(guard_ptr + 4) != 0.0:
+            return
     acc = grid_ptr.dtype.element_ty
     n = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
     m = n < n_atoms
@@ -2141,14 +3399,20 @@ def _spread_c(q_ptr, d_ptr, Q_ptr, j_ptr, w_ptr, start_ptr, batch_ptr, grid_ptr,
 
 @triton.jit
 def _gather_c(grid_ptr, j_ptr, w_ptr, start_ptr, batch_ptr, phi_ptr, grad_ptr, hess_ptr, d_ptr, coef_ptr, n_atoms,
-              K1: tl.constexpr, K2: tl.constexpr, K3: tl.constexpr, P: tl.constexpr, DERIV: tl.constexpr,
-              FIELD: tl.constexpr, BLOCK: tl.constexpr, SP: tl.constexpr):
+              guard_ptr, K1: tl.constexpr, K2: tl.constexpr, K3: tl.constexpr, P: tl.constexpr, DERIV: tl.constexpr,
+              FIELD: tl.constexpr, BLOCK: tl.constexpr, SP: tl.constexpr, GUARD: tl.constexpr):
     """:func:`_gather` with the potential, its Cartesian gradient ``(N, 3)`` and Hessian ``(N, 9)``
     written to their own arrays, one lane per stencil point as in :func:`_spread_c`. With ``FIELD``
     (``DERIV`` 1) the kernel writes the mesh field of the dipoles ``d`` instead,
     ``grad_ptr += coef d - gradient``, in place on the accumulator ``grad_ptr`` (the real-space field
     of the induction solve), and stores no potential; ``coef`` is read from a float64 scalar on the
-    device (a float argument would be a float32 constant)."""
+    device (a float argument would be a float32 constant).
+    With ``GUARD`` the kernel does nothing once the conjugate-gradient scalars ``guard`` (a row of
+    :func:`pcg_scalars`) say the solve has converged: a solve of fixed length then pays little for
+    the iterations it did not need."""
+    if GUARD:
+        if tl.load(guard_ptr + 4) != 0.0:
+            return
     n = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
     m = n < n_atoms
     ix = tl.load(start_ptr + n * 3, mask=m, other=0)
@@ -2278,16 +3542,19 @@ def _multipole_args(q: Tensor, d, Q, order: int) -> tuple:
 
 
 def spread_cartesian(q: Tensor, d, Q, jac: Tensor, w: Tensor, start: Tensor, batch: Tensor, mesh: list,
-                     groups: int, order: int) -> Tensor:
-    """:func:`spread` of Cartesian multipoles with the structures' Jacobians ``jac`` ``(G, 3, 3)``."""
+                     groups: int, order: int, guard: Optional[Tensor] = None) -> Tensor:
+    """:func:`spread` of Cartesian multipoles with the structures' Jacobians ``jac`` ``(G, 3, 3)``; with
+    the scalars ``guard`` of a conjugate-gradient iteration the grid stays zero once the solve has
+    converged."""
     N, P = int(w.shape[0]), int(w.shape[-1])
     K1, K2, K3 = (int(k) for k in mesh)
     grid = torch.zeros(groups * K1 * K2 * K3, dtype=w.dtype, device=w.device)
     if N:
         q_, d_, Q_ = _multipole_args(q, d, Q, order)
         _spread_c[(triton.cdiv(N, SPREAD_BLOCK),)](q_, d_, Q_, jac.contiguous(), w, start, batch.contiguous(), grid,
-                                                   N, K1=K1, K2=K2, K3=K3, P=P, ORD=int(order), BLOCK=SPREAD_BLOCK,
-                                                   SP=_lanes(P), num_warps=SPREAD_WARPS)
+                                                   N, grid if guard is None else guard, K1=K1, K2=K2, K3=K3, P=P,
+                                                   ORD=int(order), BLOCK=SPREAD_BLOCK, SP=_lanes(P),
+                                                   GUARD=guard is not None, num_warps=SPREAD_WARPS)
     return grid.view(groups, K1, K2, K3)
 
 
@@ -2302,23 +3569,26 @@ def gather_cartesian(grid: Tensor, jac: Tensor, w: Tensor, start: Tensor, batch:
     hess = (torch.empty if deriv >= 2 else torch.zeros)(N, 9, dtype=w.dtype, device=w.device)
     if N:
         _gather_c[(triton.cdiv(N, SPREAD_BLOCK),)](grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(),
-                                                 phi, grad, hess, phi, phi, N, K1=K1, K2=K2, K3=K3, P=P,
+                                                 phi, grad, hess, phi, phi, N, phi, K1=K1, K2=K2, K3=K3, P=P,
                                                  DERIV=int(deriv), FIELD=False, BLOCK=SPREAD_BLOCK, SP=_lanes(P),
-                                                 num_warps=SPREAD_WARPS)
+                                                 GUARD=False, num_warps=SPREAD_WARPS)
     return phi, grad, hess.view(N, 3, 3)
 
 
 def gather_field(grid: Tensor, jac: Tensor, w: Tensor, start: Tensor, batch: Tensor, mesh: list, acc: Tensor,
-                 d: Tensor, coef: float) -> Tensor:
+                 d: Tensor, coef: float, guard: Optional[Tensor] = None) -> Tensor:
     """``acc += coef d - grad(potential)`` in place: the mesh part of the field of the dipoles ``d``
-    (``acc`` ``(N, 3)`` holds their real-space field) with the self-field coefficient ``coef``."""
+    (``acc`` ``(N, 3)`` holds their real-space field) with the self-field coefficient ``coef``; with
+    the scalars ``guard`` of a conjugate-gradient iteration ``acc`` is left alone once the solve has
+    converged."""
     N, P = int(w.shape[0]), int(w.shape[-1])
     K1, K2, K3 = (int(k) for k in mesh)
     if N:
         _gather_c[(triton.cdiv(N, SPREAD_BLOCK),)](grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(),
                                                  acc, acc, acc, d.contiguous(), _scalar(float(coef), acc.device), N,
-                                                 K1=K1, K2=K2, K3=K3, P=P, DERIV=1, FIELD=True, BLOCK=SPREAD_BLOCK,
-                                                 SP=_lanes(P), num_warps=SPREAD_WARPS)
+                                                 acc if guard is None else guard, K1=K1, K2=K2, K3=K3, P=P, DERIV=1,
+                                                 FIELD=True, BLOCK=SPREAD_BLOCK, SP=_lanes(P), GUARD=guard is not None,
+                                                 num_warps=SPREAD_WARPS)
     return acc
 
 
@@ -2431,7 +3701,10 @@ class MeshConvolutionCartesian(torch.autograd.Function):
 @triton.jit
 def _pcg_apply(p_ptr, f_ptr, ap_ptr, inv_ptr, expol_ptr, mask_ptr, scal_ptr, n_atoms, EXPOL: tl.constexpr,
                BLOCK: tl.constexpr):
-    """``ap = ((I + K) p / alpha - field) mask`` and ``scal[0] += p . ap``."""
+    """``ap = ((I + K) p / alpha - field) mask`` and ``scal[0] += p . ap``; nothing once the solve has
+    converged (``ap`` then unset, read by no update)."""
+    if tl.load(scal_ptr + 4) != 0.0:
+        return
     n = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     m = n < n_atoms
     px = tl.load(p_ptr + n * 3, mask=m, other=0.0)
@@ -2470,14 +3743,16 @@ def _pcg_apply(p_ptr, f_ptr, ap_ptr, inv_ptr, expol_ptr, mask_ptr, scal_ptr, n_a
 @triton.jit
 def _pcg_step(x_ptr, r_ptr, z_ptr, p_ptr, ap_ptr, diag_ptr, blocks_ptr, scal_ptr, n_atoms, BLOCKS: tl.constexpr,
               BLOCK: tl.constexpr):
-    """``a = rz / (p . ap)``; unless done, ``x += a p`` and ``r -= a ap``; ``z = M r`` with the diagonal
+    """``a = rz / (p . ap)``; ``x += a p`` and ``r -= a ap``; ``z = M r`` with the diagonal
     preconditioner (``alpha mask`` per atom, or its 3 x 3 blocks); ``scal[2] += r . z``,
-    ``scal[3] += |a p|^2``."""
+    ``scal[3] += |a p|^2``. Nothing once the solve has converged: ``x``, ``r`` and ``z`` keep their
+    values, and the direction keeps ``rz``."""
+    if tl.load(scal_ptr + 4) != 0.0:
+        return
     n = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     m = n < n_atoms
     denom = tl.load(scal_ptr)
     rz = tl.load(scal_ptr + 1)
-    done = tl.load(scal_ptr + 4) != 0.0
     a = tl.where(denom != 0.0, rz / tl.where(denom != 0.0, denom, 1.0), 0.0)
     px = tl.load(p_ptr + n * 3, mask=m, other=0.0)
     py = tl.load(p_ptr + n * 3 + 1, mask=m, other=0.0)
@@ -2495,12 +3770,12 @@ def _pcg_step(x_ptr, r_ptr, z_ptr, p_ptr, ap_ptr, diag_ptr, blocks_ptr, scal_ptr
     sx = a * px
     sy = a * py
     sz = a * pz
-    xx = tl.where(done, xx, xx + sx)
-    xy = tl.where(done, xy, xy + sy)
-    xz = tl.where(done, xz, xz + sz)
-    rx = tl.where(done, rx, rx - a * apx)
-    ry = tl.where(done, ry, ry - a * apy)
-    rz_ = tl.where(done, rz_, rz_ - a * apz)
+    xx = xx + sx
+    xy = xy + sy
+    xz = xz + sz
+    rx = rx - a * apx
+    ry = ry - a * apy
+    rz_ = rz_ - a * apz
     if BLOCKS:
         b00 = tl.load(blocks_ptr + n * 9, mask=m, other=0.0)
         b01 = tl.load(blocks_ptr + n * 9 + 1, mask=m, other=0.0)
@@ -2546,16 +3821,19 @@ def _pcg_direction(p_ptr, z_ptr, in_ptr, out_ptr, n_atoms, bound, BLOCK: tl.cons
     taken = tl.load(in_ptr + 5)
     now = done | (change < bound)
     beta = rz_new / tl.where(rz != 0.0, rz, 1.0)
-    px = tl.load(p_ptr + n * 3, mask=m, other=0.0)
-    py = tl.load(p_ptr + n * 3 + 1, mask=m, other=0.0)
-    pz = tl.load(p_ptr + n * 3 + 2, mask=m, other=0.0)
-    zx = tl.load(z_ptr + n * 3, mask=m, other=0.0)
-    zy = tl.load(z_ptr + n * 3 + 1, mask=m, other=0.0)
-    zz = tl.load(z_ptr + n * 3 + 2, mask=m, other=0.0)
-    b = beta.to(px.dtype)
-    tl.store(p_ptr + n * 3, tl.where(now, px, zx + b * px), mask=m)
-    tl.store(p_ptr + n * 3 + 1, tl.where(now, py, zy + b * py), mask=m)
-    tl.store(p_ptr + n * 3 + 2, tl.where(now, pz, zz + b * pz), mask=m)
+    # a direction that no longer changes is neither read nor written
+    if change >= bound:
+        if tl.load(in_ptr + 4) == 0.0:
+            px = tl.load(p_ptr + n * 3, mask=m, other=0.0)
+            py = tl.load(p_ptr + n * 3 + 1, mask=m, other=0.0)
+            pz = tl.load(p_ptr + n * 3 + 2, mask=m, other=0.0)
+            zx = tl.load(z_ptr + n * 3, mask=m, other=0.0)
+            zy = tl.load(z_ptr + n * 3 + 1, mask=m, other=0.0)
+            zz = tl.load(z_ptr + n * 3 + 2, mask=m, other=0.0)
+            b = beta.to(px.dtype)
+            tl.store(p_ptr + n * 3, zx + b * px, mask=m)
+            tl.store(p_ptr + n * 3 + 1, zy + b * py, mask=m)
+            tl.store(p_ptr + n * 3 + 2, zz + b * pz, mask=m)
     if tl.program_id(0) == 0:
         tl.store(out_ptr, rz * 0.0)
         tl.store(out_ptr + 1, tl.where(now, rz, rz_new))
@@ -2566,14 +3844,14 @@ def _pcg_direction(p_ptr, z_ptr, in_ptr, out_ptr, n_atoms, bound, BLOCK: tl.cons
 
 
 def pcg_scalars(rz: Tensor) -> Tensor:
-    """The two scalar buffers ``(2, 6)`` of a solve, the first holding ``r . z`` of the start."""
+    """The two scalar buffers ``(2, 6)`` of a solve, the first holding ``sum(r * z)`` of the start."""
     scal = torch.zeros(2, 6, dtype=torch.float64, device=rz.device)
     scal[0, 1] = rz
     return scal
 
 
 def pcg_apply(p: Tensor, field: Tensor, inv_alpha: Tensor, expol, mask: Tensor, scal: Tensor) -> Tensor:
-    """The operator on ``p`` ``(N, 3)`` given its field, accumulating ``p . A p`` into ``scal[0]``."""
+    """The operator on ``p`` ``(N, 3)`` given its field, accumulating ``sum(p * (A p))`` into ``scal[0]``."""
     N = int(p.shape[0])
     ap = torch.empty_like(p)
     if N:
@@ -2601,12 +3879,13 @@ def pcg_direction(p: Tensor, z: Tensor, scal_in: Tensor, scal_out: Tensor, bound
 
 
 def scalar_table(coulomb: float, alpha_e: float, alpha_p: float, alpha_d: float, windows: dict, cutoff: float,
-                 device: torch.device) -> Tensor:
+                 device: torch.device, ewald_cutoffs: tuple = (0.0, 0.0)) -> Tensor:
     """The float64 scalars of an evaluation (:data:`SCALARS`); ``windows`` maps ``"rep"``, ``"ct"``,
-    ``"disp"`` to ``(taper, cutoff)`` pairs (zeros when the term has no switch)."""
+    ``"disp"`` to ``(taper, cutoff)`` pairs (zeros when the term has no switch), ``ewald_cutoffs`` holds
+    the real-space cutoffs of the electrostatics and the dispersion."""
     rep, ct, disp = windows.get("rep", (0.0, 0.0)), windows.get("ct", (0.0, 0.0)), windows.get("disp", (0.0, 0.0))
     values = [coulomb, 1.0 / math.sqrt(math.pi), alpha_e, alpha_p, alpha_d, rep[0], rep[1], ct[0], ct[1],
-              disp[0], disp[1], cutoff]
+              disp[0], disp[1], cutoff, *ewald_cutoffs]
     return torch.tensor(values, dtype=torch.float64, device=device)
 
 
