@@ -19,11 +19,13 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.common.models.ops import make_activation
 from xnn.gnn.featurizers import (
     BesselRBF,
     PolynomialCutoff,
     SphericalBesselBasis,
     spherical_bessel_jn,
+    spherical_bessel_rows,
     spherical_bessel_zeros,
     zonal_harmonics,
 )
@@ -141,6 +143,28 @@ def test_spherical_bessel_functions():
     j32 = spherical_bessel_jn(6, x.float())
     assert j32.dtype == torch.float32
     assert torch.allclose(j32.double(), spherical_bessel_jn(6, x)[:, :7], atol=1e-6)
+
+
+def test_spherical_bessel_rows():
+    """One order per row: the values of spherical_bessel_jn bitwise, and the
+    recurrence-identity derivative to second order (force training)."""
+    x = torch.linspace(0.0, 25.0, 7 * 40, dtype=torch.float64).reshape(40, 7)
+    x = x.T.reshape(1, 7, 40).expand(3, 7, 40).contiguous()
+    for first in (0, 2):
+        rows = spherical_bessel_rows(x, first)
+        for r in range(7):
+            ref = spherical_bessel_jn(first + r, x[:, r, :])[..., first + r]
+            assert torch.equal(rows[:, r, :], ref), (first, r)
+    assert spherical_bessel_rows(x.float()).dtype == torch.float32
+    with torch.enable_grad():          # the gradient path keeps the same values
+        assert torch.equal(spherical_bessel_rows(x.clone().requires_grad_()).detach(), spherical_bessel_rows(x))
+    xg = (torch.rand(2, 5, 4, dtype=torch.float64) * 12 + 0.1).requires_grad_()
+    for first in (0, 1):
+        def rows(t, first=first):
+            return spherical_bessel_rows(t, first)
+        assert torch.autograd.gradcheck(rows, (xg,))
+        assert torch.autograd.gradgradcheck(rows, (xg,))
+        assert torch.autograd.gradgradcheck(rows, (xg,), gen_non_contig_grad_outputs=True)
 
 
 def test_spherical_bessel_zeros():
@@ -664,3 +688,29 @@ def test_fidelity_vs_reference_pretrained():
     four molecules: energies 1e-7 relative (float32 epsilon), forces 1.5e-5
     of the largest force component (gradients of a 4-block float32 net)."""
     assert _fidelity("pretrained") < 1e-4
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_silu_fused_derivative(device, monkeypatch):
+    """make_activation("silu"): torch's values and derivative kernel, derivatives to third order, scriptable."""
+    from xnn.common.models import ops
+    from xnn.common.models.ops import SiLU
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    act = make_activation("silu")
+    monkeypatch.setattr(ops, "FUSED_SLOPE_MIN_ELEMENTS", 1)        # the fused path on a small input
+    assert isinstance(act, SiLU) and isinstance(act, torch.nn.SiLU)
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(7, 3, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    assert torch.equal(act(x), torch.nn.functional.silu(x))
+    probe = torch.randn(7, 3, dtype=torch.float64, generator=gen).to(device)
+    a, = torch.autograd.grad((act(x) * probe).sum(), x, create_graph=True)
+    assert torch.equal(a.detach(), torch.ops.aten.silu_backward(probe, x.detach()))
+    assert torch.autograd.gradgradcheck(act, (x,))
+
+    def slope(t):
+        g, = torch.autograd.grad(act(t).sum(), t, create_graph=True)
+        return g
+    assert torch.autograd.gradgradcheck(slope, (x,))
+    assert torch.equal(torch.jit.script(SiLU())(x), act(x))

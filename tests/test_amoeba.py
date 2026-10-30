@@ -686,6 +686,28 @@ def test_dipole_predictor_coefficients_and_history():
         P("lsq")
 
 
+def test_a_rewound_predictor_holds_each_step_once():
+    """A rewind takes back the last push, whether it grew the history or shifted a full one in place."""
+    pred = am.DipolePredictor("aspc", 3)
+    sets = [torch.full((2, 3), float(t), dtype=torch.float64) for t in range(5)]
+    for mu in sets[:2]:
+        pred.push(mu)
+    pred.push(sets[2])
+    pred.rewind()
+    assert [float(m[0, 0]) for m in pred._sets] == [1.0, 0.0]
+    for mu in sets[2:]:
+        pred.push(mu)
+    # full: the step pushed twice (a replayed step evaluated again) is taken back in place
+    held = [m.data_ptr() for m in pred._sets]
+    pred.push(torch.full((2, 3), 9.0, dtype=torch.float64))
+    pred.rewind()
+    assert [float(m[0, 0]) for m in pred._sets] == [4.0, 3.0, 2.0]
+    assert [m.data_ptr() for m in pred._sets] == held
+    # a second rewind without a push changes nothing
+    pred.rewind()
+    assert [float(m[0, 0]) for m in pred._sets] == [4.0, 3.0, 2.0]
+
+
 def test_trainable_selection_and_gradients():
     model = ForceStressOutput(_model(Amoeba, trainable=("vdw", "polarizability", "dipole")))
     P = model.model.ff.params

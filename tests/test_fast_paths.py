@@ -276,3 +276,17 @@ def test_compile_twice_differentiable():
         assert torch.allclose(got, ref, rtol=0, atol=1e-14)
     assert torch.autograd.gradcheck(compiled, args)
     assert torch.autograd.gradgradcheck(compiled, args)
+
+
+def test_gnn_models_name_their_auto_policies():
+    """Every equivariant GNN reads one policy per mode from xnn.gnn.fast; NequIP has its own."""
+    import xnn.gnn.fast as fast
+    from xnn.common.models.fast import AutoPolicy
+    from xnn.gnn.models.base import EquivariantGNN
+    from xnn.gnn.models.nequip import NequIP
+
+    default = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    assert getattr(EquivariantGNN, "fast_policies", default) == default
+    for name in default + NequIP.fast_policies:
+        assert isinstance(getattr(fast, name), AutoPolicy)
+    assert NequIP.fast_policies != default

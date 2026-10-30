@@ -33,7 +33,7 @@ from xnn.common.models import (  # noqa: E402
     register_pretrained,
 )
 from xnn.common.models.d3 import D3Dispersion  # noqa: E402
-from xnn.common.models.electrostatics import COULOMB_CONSTANT  # noqa: E402
+from xnn.common.models.electrostatics import COULOMB_CONSTANT, coulomb_direct  # noqa: E402
 from xnn.common.models.hub import registry  # noqa: E402
 from xnn.gnn.models import aimnet2_foundation as foundation  # noqa: E402
 from xnn.gnn.models.aimnet2 import AIMNet2, ShellConvolution  # noqa: E402
@@ -262,7 +262,7 @@ def test_shell_convolution_matches_dense_equations():
     basis = torch.randn(g.num_edges, 4)
     unit = -vec / r[:, None]
     feats = torch.randn(g.num_nodes, 3, 4)
-    out = conv(feats[src], basis, basis[:, :, None] * unit[:, None, :], dst, g.num_nodes)
+    out = conv(feats, basis, basis[:, :, None] * unit[:, None, :], g.edge_index)
     # paper eqs 4-5 written atom by atom
     for i in range(g.num_nodes):
         edges = (dst == i).nonzero().flatten()
@@ -967,3 +967,160 @@ def test_published_model_reproduces_periodic_reference_values(tag):
     assert abs(float(out["energy"]) - ref["energy"]) < 2e-3
     assert np.abs(out["forces"].detach().numpy() - np.array(ref["forces"])).max() < 2e-3
     assert np.abs(out["charges"].detach().numpy() - np.array(ref["charges"])).max() < 1e-4
+
+
+def test_coulomb_direct_one_structure_pair_matrix():
+    """One structure sums its pair matrix: the values of the pair list, derivatives to second order."""
+    torch.manual_seed(0)
+    pos = (torch.rand(9, 3, dtype=torch.float64) * 4).requires_grad_()
+    q = torch.randn(9, dtype=torch.float64).requires_grad_()
+    batch = torch.zeros(9, dtype=torch.long)
+    pairs = coulomb_direct(q, pos, batch)
+    dense = coulomb_direct(q, pos, batch, num_graphs=1)
+    assert torch.allclose(dense, pairs, rtol=1e-13, atol=1e-13)
+
+    def energy(p, c):
+        return coulomb_direct(c, p, batch, num_graphs=1)
+    assert torch.autograd.gradcheck(energy, (pos, q))
+    assert torch.autograd.gradgradcheck(energy, (pos, q))
+
+
+def test_neighbor_matrix_and_shell_sum_derivatives():
+    """The padded neighbor rows hold every edge once; the shell sums' first and second derivatives."""
+    from xnn.gnn.models.aimnet2 import neighbor_matrix, shell_sums
+    torch.manual_seed(0)
+    n, e, c, s_, h = 5, 14, 3, 4, 2
+    edge_index = torch.stack([torch.randint(0, n, (e,)), torch.randint(0, n, (e,))])
+    nb_edge, nb_src = neighbor_matrix(edge_index, n)
+    real = nb_edge < e
+    assert sorted(nb_edge[real].tolist()) == list(range(e))
+    rows = torch.arange(n)[:, None].expand_as(nb_edge)
+    assert torch.equal(edge_index[1][nb_edge[real]], rows[real])
+    assert torch.equal(edge_index[0][nb_edge[real]], nb_src[real])
+    nodes = torch.randn(n, c, s_, dtype=torch.float64, requires_grad=True)
+    gsv = torch.randn(e, s_, 4, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(c, s_, h, dtype=torch.float64, requires_grad=True)
+    expect = torch.zeros(n, c, s_, 4, dtype=torch.float64).index_add(
+        0, edge_index[1], nodes[edge_index[0]][..., None] * gsv[:, None])
+    scalar, _ = shell_sums(nodes, gsv, nb_edge, nb_src, weight)
+    assert torch.allclose(scalar, expect[..., 0], rtol=0, atol=1e-13)
+
+    def run(f, g, w):
+        a, b = shell_sums(f, g, nb_edge, nb_src, w)
+        return a.sum(-1) * b.sum(-1)
+    assert torch.autograd.gradcheck(run, (nodes, gsv, weight))
+    assert torch.autograd.gradgradcheck(run, (nodes, gsv, weight))
+
+def test_gelu_fused_derivative(monkeypatch):
+    """The MLP activation: torch's GELU values and derivative kernel, derivatives to third order, scriptable."""
+    from xnn.common.models import ops
+    from xnn.common.models.ops import GELU
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(7, 3, dtype=torch.float64, generator=gen).requires_grad_(True)
+    act = GELU()
+    monkeypatch.setattr(ops, "FUSED_SLOPE_MIN_ELEMENTS", 1)        # the fused path on a small input
+    assert isinstance(act, torch.nn.GELU)
+    assert torch.equal(act(x), torch.nn.functional.gelu(x))
+    probe = torch.randn(7, 3, dtype=torch.float64, generator=gen)
+    a, = torch.autograd.grad((act(x) * probe).sum(), x, create_graph=True)
+    assert torch.equal(a.detach(), torch.ops.aten.gelu_backward(probe, x.detach()))
+    assert torch.autograd.gradgradcheck(act, (x,))
+
+    def slope(t):
+        g, = torch.autograd.grad(act(t).sum(), t, create_graph=True)
+        return g
+    assert torch.autograd.gradgradcheck(slope, (x,))
+    assert torch.equal(torch.jit.script(GELU())(x), act(x))
+
+
+def _check_fast_shell_sums(kernels, device):
+    """The fused shell sums against the gathered reference, and every first and second derivative."""
+    gen = torch.Generator().manual_seed(4)
+    n, n_edges, c, s = 5, 14, 3, 4
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+
+    a, g = rand(n, c, s), rand(n_edges, s, 4)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).to(device)
+
+    def f(a, g):
+        return kernels.shell_sums(a, g, edge_index)
+
+    with torch.no_grad():
+        expect = torch.zeros(n, c, s, 4, dtype=torch.float64, device=device).index_add(
+            0, edge_index[1], a[edge_index[0]][..., None] * g[:, None])
+        assert torch.allclose(f(a, g), expect, rtol=0, atol=1e-13)
+    assert torch.autograd.gradcheck(f, (a, g))
+    assert torch.autograd.gradgradcheck(f, (a, g))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_shell_sums_gradients():
+    """Values and every first and second derivative of the fused shell sums."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import aimnet2_kernels
+    _check_fast_shell_sums(aimnet2_kernels, "cuda")
+
+
+def test_fast_shell_sums_gradients_interpreted():
+    """The same under Triton's interpreter (chosen by conftest.py on machines without CUDA)."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import aimnet2_kernels
+    _check_fast_shell_sums(aimnet2_kernels, "cpu")
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.aimnet2 import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fast_batch(dtype, mult=None):
+    graphs = [_molecule(n=11, seed=5, charge=1.0, mult=mult), _molecule(n=7, seed=6, mult=mult)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("channels", [1, 2])
+def test_fast_path_parity(dtype, channels):
+    """The fused shell convolutions give the reference energies, forces and charges."""
+    pytest.importorskip("triton")
+    model = _build(seed=1, n_rbf=8, charge_channels=channels).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype, mult=2.0 if channels == 2 else None))
+        assert model.conv_a.fast_active == use_fast
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces", "charges")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_training(dtype):
+    """Force training through the fused shell convolutions gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = _build(seed=2, n_rbf=8).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype))
+        assert model.conv_a.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))

@@ -859,3 +859,98 @@ def test_fidelity_vs_reference_pretrained():
     """The published GemNet-Q and GemNet-T weights give the same energies and
     forces in xnn (float32)."""
     assert _fidelity("pretrained") < 1e-3
+
+
+def _check_neighbor_sums(kernels, device):
+    """The fused neighbor sums against the dense sum, and every first and second derivative."""
+    gen = torch.Generator().manual_seed(7)
+    n_rows, n_items, n_out, a, f = 6, 17, 5, 3, 4
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+
+    x, s = rand(n_rows, f), rand(n_items, a)
+    in_idx = torch.randint(0, n_rows, (n_items,), generator=gen).to(device)
+    out_idx = torch.sort(torch.randint(0, n_out, (n_items,), generator=gen))[0].to(device)
+
+    def fn(x, s):
+        return kernels.neighbor_sums(x, s, in_idx, out_idx, n_out)
+
+    with torch.no_grad():
+        expect = torch.zeros(n_out, a, f, dtype=torch.float64, device=device).index_add_(
+            0, out_idx, s[:, :, None] * x[in_idx][:, None, :])
+        assert torch.allclose(fn(x, s), expect, rtol=0, atol=1e-13)
+    assert torch.autograd.gradcheck(fn, (x, s))
+    assert torch.autograd.gradgradcheck(fn, (x, s))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_neighbor_sums_gradients():
+    """Values and every first and second derivative of the fused neighbor sums."""
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import gemnet_kernels
+    _check_neighbor_sums(gemnet_kernels, "cuda")
+
+
+def test_fast_neighbor_sums_gradients_interpreted():
+    """The same under Triton's interpreter (chosen by conftest.py on machines without CUDA)."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import gemnet_kernels
+    _check_neighbor_sums(gemnet_kernels, "cpu")
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.gemnet import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fast_batch(dtype, cutoff):
+    graphs = [_graph(_structure(n=9, seed=3), cutoff), _graph(_structure(n=6, seed=4), cutoff)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("quadruplets", [False, True])
+def test_fast_path_parity(dtype, quadruplets):
+    """The fused bilinear layers give the reference energies and forces (GemNet-T and -Q)."""
+    pytest.importorskip("triton")
+    model = _small(seed=5, quadruplets=quadruplets).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype, model.cutoff))
+        assert model.interactions[0].trip.fast_active == use_fast
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("quadruplets", [False, True])
+def test_fast_path_training(dtype, quadruplets):
+    """Force training through the fused bilinear layers gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = _small(seed=6, quadruplets=quadruplets).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype, model.cutoff))
+        assert model.interactions[0].trip.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
