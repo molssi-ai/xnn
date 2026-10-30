@@ -278,9 +278,10 @@ def make_activation(activation) -> nn.Module:
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum rows of ``src`` into ``dim_size`` buckets given by ``index`` (dim 0).
 
-    This is the canonical edge -> node aggregation for message passing,
-    implemented with :meth:`torch.Tensor.index_add`. For each row ``e`` it
-    accumulates ``out[index[e]] += src[e]``.
+    This is the canonical edge -> node aggregation for message passing. For
+    each row ``e`` it accumulates ``out[index[e]] += src[e]``, with
+    :meth:`torch.Tensor.scatter_add` on CUDA (the faster kernel there) and
+    :meth:`torch.Tensor.index_add` elsewhere. The values are the same.
 
     Parameters
     ----------
@@ -310,16 +311,19 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
         return src.sum(0, keepdim=True)
     shape = [dim_size] + list(src.shape[1:])
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
+    if src.is_cuda:
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        return out.scatter_add(0, index.reshape(view).expand(src.shape), src)
     return out.index_add(0, index, src)
 
 
 def gather_rows(src: Tensor, index: Tensor) -> Tensor:
-    """Rows ``src[index]`` (dim 0), with the faster backward of the device.
+    """Rows ``src[index]`` (dim 0), with the faster kernels of the device.
 
     The node -> edge gather of message passing, the counterpart of
-    :func:`scatter_sum`. On CUDA it indexes (``src[index]``), whose backward
-    sorts the indices and accumulates without atomics, and whose second
-    derivative keeps less memory; elsewhere it uses
+    :func:`scatter_sum`. On CUDA it is a :meth:`torch.Tensor.gather` over an
+    expanded index, faster than indexing in both directions (its backward is
+    the scatter of :func:`scatter_sum`); elsewhere it uses
     :func:`torch.index_select`, whose backward (an ``index_add``) is the faster
     one on CPUs. The values are the same.
 
@@ -341,7 +345,9 @@ def gather_rows(src: Tensor, index: Tensor) -> Tensor:
     Compatible with :func:`torch.jit.script`.
     """
     if src.is_cuda:
-        return src[index]
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        shape = [index.shape[0]] + list(src.shape[1:])
+        return src.gather(0, index.reshape(view).expand(shape))
     return src.index_select(0, index)
 
 

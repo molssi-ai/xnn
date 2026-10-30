@@ -11,11 +11,20 @@ import torch
 from torch import Tensor
 
 
+def narrow_keys(index: Tensor, n: int) -> Tensor:
+    """``index`` as sort keys over ``n`` values: int32 when they fit, which halves
+    the passes of the radix sort and, stable, gives the same order."""
+    return index.to(torch.int32) if n <= torch.iinfo(torch.int32).max else index
+
+
 def compressed(index: Tensor, n: int) -> Tuple[Tensor, Tensor]:
     """The pairs sorted by ``index`` (stable) and the row pointers ``(n + 1,)``."""
-    order = torch.argsort(index, stable=True)
+    order = torch.argsort(narrow_keys(index, n), stable=True)
+    # counted with an index add: bincount reads its maximum back to the host
+    ones = torch.ones(index.shape, dtype=torch.int64, device=index.device)
+    counts = torch.zeros(n, dtype=torch.int64, device=index.device).index_add_(0, index, ones)
     ptr = torch.zeros(n + 1, dtype=torch.int64, device=index.device)
-    ptr[1:] = torch.cumsum(torch.bincount(index, minlength=n), 0)
+    ptr[1:] = torch.cumsum(counts, 0)
     return order, ptr
 
 
