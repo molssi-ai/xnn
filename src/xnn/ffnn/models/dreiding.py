@@ -537,7 +537,7 @@ class Dreiding(InteratomicPotential):
                   for _, j, _ in top.angles]
         buf("angle_linear", linear, (-1,), torch.bool)
 
-        # --- torsions: rule per dihedral, total barrier per central bond -
+        # torsions: the rule per dihedral, the total barrier per central bond
         n_shared: dict[tuple[int, int], int] = {}
         for _i, j, k, _l in top.dihedrals:
             key = (min(j, k), max(j, k))
@@ -560,7 +560,7 @@ class Dreiding(InteratomicPotential):
         buf("dihedral_rule", d_rule, (-1,))
         buf("dihedral_weight", d_w, (-1,), dtype)
 
-        # --- inversions: three axis choices per listed 3-coordinate center
+        # inversions: three axis choices per listed 3-coordinate center
         neighbors: dict[int, list[int]] = {}
         for i, j in top.bonds:
             neighbors.setdefault(i, []).append(j)

@@ -739,8 +739,8 @@ class TorchScriptPotential(nn.Module):
         pos = pos.to(dtype)
         cell = cell.to(dtype)
         # Forces and stress come from autograd, so the physics must run with
-        # grad enabled even when the caller wraps the call in torch.no_grad()
-        # -- which MD drivers and ordinary inference loops routinely do. The
+        # grad enabled even when the caller wraps the call in torch.no_grad(),
+        # which MD drivers and ordinary inference loops routinely do. The
         # caller's grad mode is restored as soon as the gradients are in hand.
         # (torch.enable_grad() as a context manager is not scriptable; this
         # save/set/restore is the supported equivalent.)
