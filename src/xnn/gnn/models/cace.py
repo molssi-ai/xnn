@@ -50,11 +50,14 @@ uses the regular eager ``forward``).
 """
 from __future__ import annotations
 
+from typing import Callable, List, Optional
+
 import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import gather_rows, scatter_sum
 from xnn.common.models.registry import register_model
 
 from ..featurizers import BesselRBF, PolynomialCutoff
@@ -288,6 +291,10 @@ class _MessageAr(nn.Module):
         self.inv_r0 = nn.Parameter(
             (torch.rand(l_max + 1, n_radial_basis, channels) + 0.5) / cutoff)
         self.register_buffer("l_of_entry", l_of_entry.clone(), persistent=False)
+        # entries per l (grouped contiguously, ascending): the decay multiplies each
+        # group by broadcasting, so autograd keeps it per l, not per entry
+        counts = torch.bincount(l_of_entry.to(torch.long), minlength=l_max + 1)
+        self.l_sizes: List[int] = [int(c) for c in counts]
 
     def forward(self, node_feat_a: Tensor, lengths: Tensor, envelope: Tensor,
                 sender: Tensor) -> Tensor:
@@ -305,8 +312,25 @@ class _MessageAr(nn.Module):
             Sender (neighbor) node index of each edge, shape ``(E,)``.
         """
         decay = (torch.exp(-lengths[:, None, None, None] * self.inv_r0)
-                 * self.prefactor * envelope[:, None, None, None])
-        return node_feat_a[sender] * decay[:, self.l_of_entry].transpose(1, 2)
+                 * self.prefactor * envelope[:, None, None, None]).transpose(1, 2)
+        parts = torch.split(gather_rows(node_feat_a, sender), self.l_sizes, dim=2)
+        out: List[Tensor] = []
+        for l, part in enumerate(parts):
+            out.append(part * decay[:, :, l:l + 1])
+        return torch.cat(out, dim=2)
+
+    def summed_fast(self, node_feat_a: Tensor, lengths: Tensor, envelope: Tensor,
+                    edge_index: Tensor) -> Tensor:
+        """The messages summed onto their receivers by the fused kernels, ``(N, R, L, C)``:
+        the gathered features of every edge are never formed."""
+        from xnn.gnn.fast.cace_kernels import message_sums
+        n, r, n_l, c = node_feat_a.shape
+        decay = (torch.exp(-lengths[:, None, None, None] * self.inv_r0)
+                 * self.prefactor * envelope[:, None, None, None])               # (E, G, R, C)
+        a = node_feat_a.permute(0, 2, 1, 3).reshape(n, n_l, r * c)
+        summed = message_sums(a, decay.reshape(lengths.shape[0], decay.shape[1], r * c),
+                              self.l_of_entry, edge_index)
+        return summed.view(n, n_l, r, c).permute(0, 2, 1, 3)
 
 
 class _MessageBchi(nn.Module):
@@ -335,6 +359,38 @@ class _MessageBchi(nn.Module):
         """
         weight = self.h(node_feat_b.flatten(1))  # (N, 1)
         return edge_attr * weight[sender][:, :, None, None]
+
+
+class _EdgeBasisSums(FastPathModule, nn.Module):
+    """The edge-basis sums by the fused kernels (:mod:`xnn.gnn.fast.cace`).
+
+    ``sum_{e -> i} w_j R(r_e) (x) L(u_e) (x) theta_j (x) theta_i``: the sums of
+    ``chi`` (weighted by a per-sender ``w_j`` for the ``Bchi`` messages) without
+    forming ``chi``. Selected per evaluation (:meth:`CACE.set_use_fast`).
+    """
+
+    fast_active: bool
+
+    def __init__(self):
+        super().__init__()
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.cace import supported
+        return supported(device, dtype)
+
+    def forward(self, radial: Tensor, angular: Tensor, sender_embed: Tensor, receiver_embed: Tensor,
+                receiver: Tensor, items: Tensor, num_nodes: int) -> Tensor:
+        """``(N, n_rbf, L, C)`` from ``radial (E, n_rbf)``, ``angular (E, L)``, the (weighted)
+        sender embedding per edge ``(E, d)``, the receiver embedding per atom ``(N, d)``,
+        the receivers and ``items`` (``arange(E)``, the kernels' row of every edge)."""
+        from xnn.gnn.fast.gemnet_kernels import neighbor_sums
+        n_edges, n_rbf = radial.shape
+        n_l, d_s, d_r = angular.shape[1], sender_embed.shape[1], receiver_embed.shape[1]
+        p = (radial[:, :, None] * angular[:, None, :]).reshape(n_edges, n_rbf * n_l)
+        sums = neighbor_sums(sender_embed, p, items, receiver, num_nodes)    # (N, n_rbf * L, d)
+        return (sums.view(num_nodes, n_rbf, n_l, d_s, 1)
+                * receiver_embed[:, None, None, None, :]).reshape(num_nodes, n_rbf, n_l, d_s * d_r)
 
 
 class _CaceInteraction(nn.Module):
@@ -370,8 +426,9 @@ class _CaceInteraction(nn.Module):
                              if "Bchi" in message_types else None)
 
     def forward(self, node_feat_a: Tensor, node_feat_b: Tensor,
-                edge_attr: Tensor, lengths: Tensor, envelope: Tensor,
-                edge_index: Tensor, radial_transform: nn.Module) -> Tensor:
+                edge_attr: Optional[Tensor], lengths: Tensor, envelope: Tensor,
+                edge_index: Tensor, radial_transform: nn.Module,
+                chi_sums: Optional[Callable[[Tensor], Tensor]] = None, fast: bool = False) -> Tensor:
         """Compute the updated ``A`` features ``(N, R, L, C)``.
 
         Parameters
@@ -388,17 +445,29 @@ class _CaceInteraction(nn.Module):
         radial_transform : nn.Module
             The model's shared radial coupling, applied to the aggregated
             ``Bchi`` messages (raw radial -> mixed radial channels).
+        chi_sums : callable, optional
+            The fused sums of ``chi`` weighted per sender (fast path): given
+            the weights ``(N, 1)``, the aggregated ``Bchi`` messages; then
+            ``edge_attr`` is not used.
+        fast : bool, optional
+            The ``Ar`` messages summed by the fused kernels.
         """
         sender, receiver = edge_index[0], edge_index[1]
         n_nodes = node_feat_a.shape[0]
         new_a = torch.zeros_like(node_feat_a)
         if self.message_ar is not None:
-            messages = self.message_ar(node_feat_a, lengths, envelope, sender)
-            new_a = new_a + scatter_sum(messages, receiver, n_nodes)
+            if fast:
+                new_a = new_a + self.message_ar.summed_fast(node_feat_a, lengths, envelope, edge_index)
+            else:
+                messages = self.message_ar(node_feat_a, lengths, envelope, sender)
+                new_a = new_a + scatter_sum(messages, receiver, n_nodes)
         if self.message_bchi is not None:
-            messages = self.message_bchi(node_feat_b, edge_attr, sender)
-            new_a = new_a + radial_transform(
-                scatter_sum(messages, receiver, n_nodes))
+            if chi_sums is not None:
+                summed = chi_sums(self.message_bchi.h(node_feat_b.flatten(1)))
+            else:
+                assert edge_attr is not None
+                summed = scatter_sum(self.message_bchi(node_feat_b, edge_attr, sender), receiver, n_nodes)
+            new_a = new_a + radial_transform(summed)
         new_a = new_a * self.mp_norm
         if self.memory is not None:
             new_a = new_a + self.memory(node_feat_a)
@@ -542,6 +611,9 @@ class CACE(GNNPotential):
         for w_in, w_out in zip(widths[:-1], widths[1:]):
             layers += [nn.Linear(w_in, w_out), nn.SiLU()]
         layers.append(nn.Linear(widths[-1], 1))
+        self.edge_sums = _EdgeBasisSums()
+        # the fused edge-basis sums (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
         self.readout_mlp = nn.Sequential(*layers)
         self.readout_linear = nn.Linear(feat_dim, 1)
 
@@ -577,27 +649,39 @@ class CACE(GNNPotential):
 
         # edge type T = theta_i (x) theta_j (paper eq 1)
         one_hot = self.node_attr(atomic_numbers)
-        theta_sender = (one_hot @ self.embed_sender)[sender]
-        theta_receiver = (one_hot @ self.embed_receiver)[receiver]
-        edge_type = (theta_sender.unsqueeze(2)
-                     * theta_receiver.unsqueeze(1)).flatten(1)  # (E, C)
-
-        # edge basis chi = T * R(r) * L(r_hat), shape (E, n_rbf, L, C)
         envelope = self.envelope(lengths)
         radial = self.rbf(lengths) * envelope.unsqueeze(-1)
         angular = self.angular(unit_vec)
-        edge_attr = (radial.unsqueeze(2).unsqueeze(3)
-                     * angular.unsqueeze(1).unsqueeze(3)
-                     * edge_type.unsqueeze(1).unsqueeze(2))
+        edge_attr: Optional[Tensor] = None
+        chi_sums: Optional[Callable[[Tensor], Tensor]] = None
+        if self.edge_sums.fast_active:
+            # the sums of chi by the fused kernels, chi itself never formed
+            theta_sender = gather_rows(one_hot @ self.embed_sender, sender)
+            theta_receiver_node = one_hot @ self.embed_receiver
+            items = torch.arange(sender.shape[0], device=sender.device)
+
+            def chi_sums(weight: Optional[Tensor] = None) -> Tensor:
+                embed = theta_sender if weight is None else theta_sender * gather_rows(weight, sender)
+                return self.edge_sums(radial, angular, embed, theta_receiver_node, receiver, items, n_nodes)
+            summed = chi_sums()
+        else:
+            theta_sender = (one_hot @ self.embed_sender)[sender]
+            theta_receiver = (one_hot @ self.embed_receiver)[receiver]
+            edge_type = (theta_sender.unsqueeze(2)
+                         * theta_receiver.unsqueeze(1)).flatten(1)  # (E, C)
+            # edge basis chi = T * R(r) * L(r_hat), shape (E, n_rbf, L, C)
+            edge_attr = (radial.unsqueeze(2).unsqueeze(3)
+                         * angular.unsqueeze(1).unsqueeze(3)
+                         * edge_type.unsqueeze(1).unsqueeze(2))
+            summed = scatter_sum(edge_attr, receiver, n_nodes)
 
         # A basis (eq 6) with mixed radial channels (eq 5), then B (eqs 7-10)
-        node_feat_a = self.radial_transform(
-            scatter_sum(edge_attr, receiver, n_nodes))
+        node_feat_a = self.radial_transform(summed)
         node_feats = [self.symmetrizer(node_feat_a)]
         for interaction in self.interactions:
             node_feat_a = interaction(node_feat_a, node_feats[-1], edge_attr,
                                       lengths, envelope, edge_index,
-                                      self.radial_transform)
+                                      self.radial_transform, chi_sums, chi_sums is not None)
             node_feats.append(self.symmetrizer(node_feat_a))
 
         features = torch.stack(node_feats, dim=-1).flatten(1)
@@ -609,6 +693,42 @@ class CACE(GNNPotential):
         """Per-atom energies from raw graph tensors (thin wrapper over
         :meth:`node_features_energy`)."""
         return self.node_features_energy(atomic_numbers, edge_index, edge_vec)[1]
+
+    def set_use_fast(self, use_fast) -> "CACE":
+        """Choose the implementation of the edge-basis sums.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.cace` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            differentiable at any order and reach the weights, so force
+            training takes them as well.
+
+        Returns
+        -------
+        CACE
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused edge-basis sums on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.cace import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.embed_sender
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict per-node and total energy for an atomic graph.
@@ -625,6 +745,7 @@ class CACE(GNNPotential):
             (per-structure totals) and ``"node_features"`` (the invariant
             ``B`` features, shape ``(N, node_feature_dim)``).
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         return {"node_energy": node_energy,
