@@ -9,7 +9,7 @@ Requires e3nn.
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies the
 # annotations that TorchScript needs to resolve, breaking `torch.jit.script`.
 import math
-from typing import Final, List, Tuple
+from typing import Final, List, Optional, Tuple
 
 import torch
 from e3nn import nn as e3nn_nn
@@ -228,6 +228,11 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
     output is kept and the hidden layers run again in the backward, giving the
     same values. TorchScript always keeps the activations.
 
+    With ``out_index`` and ``out_scale`` it returns the output columns
+    ``out_index`` times ``out_scale``, mapping the last layer's matrix once
+    instead of every output row (the column order and scale of a fused tensor
+    product's weights; equal to mapping the output, to round-off).
+
     Attributes
     ----------
     recompute : str
@@ -241,13 +246,27 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
     def __init__(self, hs, act=None, variance_in=1, variance_out=1, out_act=False):
         super().__init__(hs, act, variance_in, variance_out, out_act)
         self.recompute = "auto"
+        # the (ignored) input of the matrix products that carry a scalar factor
+        self.register_buffer("_zero", torch.zeros(()), persistent=False)
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Apply the network to ``x`` of shape ``(E, hs[0])``."""
-        if not torch.jit.is_scripting() and self._recomputes(x):
-            return self._forward_recomputed(x)
+    def forward(self, x: Tensor, out_index: Optional[Tensor] = None,
+                out_scale: Optional[Tensor] = None) -> Tensor:
+        """Apply the network to ``x`` of shape ``(E, hs[0])``; with ``out_scale``
+        (and ``out_index``), its output columns mapped as in the class notes.
+
+        Each layer is one matrix product whose scalar factor carries the layer's
+        normalization and the constant of the previous activation, then the
+        activation: the same values as the layers applied one by one, in fewer
+        kernels. TorchScript applies the layers one by one.
+        """
+        if not torch.jit.is_scripting():
+            return self._forward_folded(x, out_index, out_scale)
         for layer in self:
             x = layer(x)
+        if out_scale is not None:
+            if out_index is not None:
+                x = x.index_select(1, out_index)
+            x = x * out_scale
         return x
 
     @torch.jit.unused
@@ -260,18 +279,113 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
             return True
         return not self.training and x.shape[0] >= RECOMPUTE_MIN_EDGES
 
+    @staticmethod
+    def _parts(layer: nn.Module):
+        """``(weight, activation, constant after it, h_in var_in)`` of an e3nn layer.
+
+        A LoRA wrapper gives its adapted weight. e3nn's layer computes
+        ``act(x @ w / sqrt(h_in var_in)) * sqrt(var_out)`` with ``act = cst * f``,
+        or ``x @ w / sqrt(h_in var_in / var_out)`` without an activation.
+        """
+        weight = layer.adapted_weight() if hasattr(layer, "adapted_weight") else layer.weight
+        act, const = layer.act, math.sqrt(layer.var_out)
+        if act is not None and hasattr(act, "cst") and hasattr(act, "f"):
+            const *= 1.0 if act._is_id else float(act.cst)
+            act = act.f
+        return weight, act, const, layer.h_in * layer.var_in
+
     @torch.jit.unused
-    def _forward_recomputed(self, x: Tensor) -> Tensor:
-        from torch.utils.checkpoint import checkpoint
-        layers = list(self)
+    def _matmul(self, x: Tensor, w: Tensor, alpha: float) -> Tensor:
+        if self.training and torch.is_grad_enabled():
+            # training: the factor on the (small) matrix, so the gradients are plain
+            # products (addmm's backward multiplies each by alpha in a kernel of its
+            # own, which a force loss records and differentiates again)
+            return torch.mm(x, w * alpha if alpha != 1.0 else w)
+        zero = self._zero if self._zero.dtype == x.dtype else self._zero.to(x.dtype)
+        return torch.addmm(zero, x, w, beta=0, alpha=alpha)
 
-        def hidden(h: Tensor) -> Tensor:
+    @torch.jit.unused
+    def _plan(self):
+        """The folded layers, or ``None`` when they are not e3nn's (a replaced block).
+
+        ``(hidden, last)``: per hidden layer ``(layer, adapted, activation, factor)``
+        and for the last one ``(layer, adapted, activation, constant after it,
+        factor)``, the factor carrying the layer's normalization and the constant
+        of the previous activation. Built once for the current layer objects
+        (replacing a layer, as a LoRA wrapper does, builds it again); the weights
+        are read at every call.
+        """
+        layers = tuple(self._modules.values())
+        key = tuple(id(layer) for layer in layers)
+        hit = self.__dict__.get("_plan_cache")
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        plan = None
+        if all(hasattr(layer, "h_in") and hasattr(layer, "act") for layer in layers):
+            hidden = []
+            c = 1.0
             for layer in layers[:-1]:
-                h = layer(h)
-            return h
+                _, act, const, d = self._parts(layer)
+                hidden.append((layer, hasattr(layer, "adapted_weight"), act, c / math.sqrt(d)))
+                c = const
+            _, act, const, d = self._parts(layers[-1])
+            plan = (hidden, (layers[-1], hasattr(layers[-1], "adapted_weight"), act, const, c / math.sqrt(d)))
+        # the layers themselves are held, so their ids stay theirs while cached
+        self.__dict__["_plan_cache"] = (key, plan)
+        return plan
 
-        return layers[-1](checkpoint(hidden, x, use_reentrant=False))
+    @staticmethod
+    def _weight(layer: nn.Module, adapted: bool) -> Tensor:
+        return layer.adapted_weight() if adapted else layer.weight
 
+    @torch.jit.unused
+    def _hidden(self, x: Tensor) -> Tensor:
+        """The output of the hidden layers, owing the constant of the last activation."""
+        for layer, adapted, act, factor in self._plan()[0]:
+            x = self._matmul(x, self._weight(layer, adapted), factor)
+            if act is not None:
+                x = act(x)
+        return x
+
+    @torch.jit.unused
+    def _forward_folded(self, x: Tensor, out_index: Optional[Tensor],
+                        out_scale: Optional[Tensor]) -> Tensor:
+        plan = self._plan()
+        if plan is None:
+            # not e3nn's layers (a replaced block): as written, the output mapped
+            for layer in self:
+                x = layer(x)
+            if out_scale is not None:
+                if out_index is not None:
+                    x = x.index_select(1, out_index)
+                x = x * out_scale
+            return x
+        lead = x.shape[:-1]
+        x = x.reshape(-1, x.shape[-1])
+        if self._recomputes(x):
+            from torch.utils.checkpoint import checkpoint
+            h = checkpoint(self._hidden, x, use_reentrant=False)
+        else:
+            h = self._hidden(x)
+        layer, adapted, act, const, alpha = plan[1]
+        w = self._weight(layer, adapted)
+        if act is None:
+            # the output scale folds into the product as well; a column map
+            # (order and scale) applies to the last matrix, once
+            if out_scale is not None:
+                if out_index is not None:
+                    w = w.index_select(1, out_index)
+                w = w * out_scale
+            y = self._matmul(h, w, alpha * const)
+        else:
+            y = act(self._matmul(h, w, alpha))
+            if const != 1.0:
+                y = y * const
+            if out_scale is not None:
+                if out_index is not None:
+                    y = y.index_select(1, out_index)
+                y = y * out_scale
+        return y.reshape(lead + y.shape[-1:])
 
 def set_recompute_radial(model: nn.Module, recompute="auto") -> nn.Module:
     """Choose when the radial networks of ``model`` recompute their hidden layers.
