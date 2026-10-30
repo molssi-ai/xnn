@@ -14,7 +14,8 @@ Currently, the fast paths exist for the message phase and the symmetric
 contraction of MACE and NequIP (where we use `cuEquivariance
 <https://github.com/NVIDIA/cuEquivariance>`_), the continuous-filter
 convolution of SchNet, the message block of PaiNN, the embedding and
-interaction layers of TensorNet, the three-body term of D3
+interaction layers of TensorNet, the shell convolutions of AIMNet2, the neighbor sums of
+GemNet's bilinear layers, the edge-basis sums and ``Ar`` messages of CACE, the three-body term of D3
 and D4 and the large-system EEQ solve of D4 (where we use the Triton kernels,
 shipped with CUDA builds of PyTorch), and the reciprocal sum of the LES
 long-range term (for which, we use plain PyTorch).
@@ -51,21 +52,35 @@ to use the fast kernels wherever available:
 The xnn's ``XNNCalculator.from_pretrained(..., use_fast=...)`` and ``xnn mdi --fast
 auto|on|off`` allow for the same choices. 
 
-Note the ``"auto"`` option for the ``use_fast`` argument: it selects a kernel on
-a CUDA device when it is installed and when the system is large enough for it to
-be faster. The thresholds per GPU and precision are based on our own
-experimental benchmarks with measured crossovers
-(:data:`xnn.gnn.fast.AUTO_POLICY`, :data:`xnn.gnn.fast.schnet.AUTO_POLICY`,
-:data:`xnn.gnn.fast.painn.AUTO_POLICY`, :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
-:data:`xnn.common.models.les.AUTO_POLICY`).
-A model in training mode has its own thresholds, since a training step has its
-own crossover (:data:`xnn.gnn.fast.schnet.AUTO_POLICY_TRAINING`,
-:data:`xnn.gnn.fast.painn.AUTO_POLICY_TRAINING`,
-:data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`).
-These thresholds are subject to change in any release. So, make sure to clarify
-the xnn's version in your reports if you choose to use the ``"auto"`` option. The
-dispersion and PaiNN kernels are faster at every system size, so they are always
-selected on a GPU.
+With ``"auto"``, a model takes the fast path on a CUDA device when the kernels
+are installed and the system is large enough for them to be faster. We measured
+the crossovers per GPU model and precision, separately for evaluation and
+training, and store them as minimum edge counts (atom counts for LES):
+
+- MACE: :data:`xnn.gnn.fast.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.AUTO_POLICY_TRAINING`
+- NequIP: :data:`xnn.gnn.fast.NEQUIP_AUTO_POLICY`,
+  :data:`xnn.gnn.fast.NEQUIP_AUTO_POLICY_TRAINING`
+- SchNet: :data:`xnn.gnn.fast.schnet.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.schnet.AUTO_POLICY_TRAINING`
+- PaiNN: :data:`xnn.gnn.fast.painn.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.painn.AUTO_POLICY_TRAINING`
+- TensorNet: :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`
+- AIMNet2: :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY_TRAINING`
+- GemNet: :data:`xnn.gnn.fast.gemnet.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.gemnet.AUTO_POLICY_TRAINING`, and for the quadruplet
+  variants :data:`xnn.gnn.fast.gemnet.QUADRUPLET_AUTO_POLICY`,
+  :data:`xnn.gnn.fast.gemnet.QUADRUPLET_AUTO_POLICY_TRAINING`
+- CACE: :data:`xnn.gnn.fast.cace.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.cace.AUTO_POLICY_TRAINING`
+- LES: :data:`xnn.common.models.les.AUTO_POLICY`
+
+The dispersion, PaiNN, TensorNet and AIMNet2 kernels are faster at every system
+size, so ``"auto"`` always selects them on a GPU. The thresholds may change in
+any release as we rerun our benchmarks, so report the xnn version with results
+obtained with ``"auto"``.
 
 What to expect from fast implementations
 ========================================
@@ -83,8 +98,8 @@ What to expect from fast implementations
   does. It is ten to thirty percent faster per MD step, depending on the GPU.
   The energies stay at the float32 round-off, the forces lose up to one digit.
   ``use_fast`` alone never changes the numbers.
-- **Training.** The MACE, NequIP, LES, SchNet, PaiNN and TensorNet fast paths
-  are twice differentiable. So, the force training runs through them, LoRA
+- **Training.** The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet and
+  CACE fast paths are twice differentiable. So, the force training runs through them, LoRA
   adapters included. The three-body kernels in dispersion module are
   differentiable once. Thus, a training step or a model with trainable damping
   parameters falls back to the exact reference term.
@@ -94,7 +109,8 @@ What to expect from fast implementations
   (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model; ``True``
   helps on small GPUs). For PaiNN this needs about a third of the memory of an
   evaluation for 25 to 60 % more time. The SchNet, PaiNN and TensorNet kernels
-  need about half the memory of their reference counterparts. The LES fast path
+  need about half the memory of their reference counterparts, the AIMNet2 kernels
+  a quarter to three quarters, the CACE kernels under half. The LES fast path
   needs 10 to 30 times less memory than its reference counterpart on large
   periodic cells.
 - **Export.** TorchScript and LAMMPS export frameworks always script the

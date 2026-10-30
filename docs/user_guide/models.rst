@@ -783,10 +783,14 @@ from the last steps, which saves a fifth to a third of the iterations. Every
 backward solve starts from the previous one.
 
 ``use_fast=True`` runs the pair terms, the fields, the induction solve and
-the mesh sums on fused GPU kernels. It applies to evaluation on a GPU, while
-training keeps the reference path. The first evaluations pay for the
-compilation. The kernels give the numbers of the reference implementation to
-round-off in float64 and in float32. For that, a float32 HIPPO model
+the mesh sums on fused GPU kernels, in evaluation and in training. In training
+the pair kernels give the second derivatives of a force loss and the parameter
+gradients; the mesh and the solver's products run eagerly there. The first
+evaluations pay for the compilation. The kernels give the numbers of the reference implementation to
+round-off in float64 and in float32. When forces follow, AMOEBA solves its
+two dipole sets, those of the direct and of the polar field, together in one
+set of iterations, as Tinker does; its dipoles and forces then agree with the
+reference to the solver tolerance. A float32 HIPPO model
 evaluates the radial ladders of its pair terms in float64 and casts.
 ``mixed_precision=True`` evaluates them in float32 throughout, as Tinker9's
 mixed precision does. That is ten to thirty percent faster per MD step,

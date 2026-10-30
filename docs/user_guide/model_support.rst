@@ -13,8 +13,11 @@ Model support
 .. |N| replace:: :cross-red:`✘`
 
 The table shows which deployment routes and implementations each model
-supports. |Y| means that the feature is complete and available, |N| that it
-is not available yet.
+supports. |Y| means that the feature is complete and available, |O| that it
+is available with a limit given below the table, and |N| that it is not
+available yet. A |Y| in the Reference-Path column means that the reference
+implementation matches its upstream code to round-off in float32 and float64
+and is at least as fast, for evaluation and for a training step.
 
 .. list-table::
    :header-rows: 1
@@ -38,16 +41,16 @@ is not available yet.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |O|
      - |N|
      - |N|
    * - GemNet
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - PaiNN
      - |Y|
      - |Y|
@@ -66,37 +69,37 @@ is not available yet.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - MACE
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - Allegro
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |N|
      - |N|
    * - CACE
      - |Y|
      - |N|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - AIMNet2
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - ANI
      - |Y|
      - |N|
@@ -172,14 +175,14 @@ is not available yet.
      - |N|
      - |Y|
      - |N|
-     - |N|
+     - |Y|
      - |Y|
    * - HIPPO
      - |Y|
      - |N|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
      - |Y|
    * - ET
      - |Y|
@@ -286,6 +289,16 @@ are the same as above.
      - |Y|
      - |Y|
 
+- DimeNet and DimeNet++ match the TensorFlow upstream to round-off and are
+  faster for evaluation at every size. A training step is faster from a few
+  hundred atoms on. For smaller molecules it is slower than the upstream's
+  graph executor, because the step is bound by kernel launches there.
+- The GemNet fast path runs in float32 and float64. In float64, ``"auto"``
+  keeps the reference except for evaluation on the largest graphs: Triton has
+  no float64 tile product, and the reference's padded batched products run on
+  the GPU's float64 matrix units.
+- DREIDING / X6 has no upstream code. Its reference follows the paper, so its
+  speed has no upstream to compare with.
 - The D3, D4 and LES terms match their upstream codes to round-off. Their
   speed against those codes has not been compared yet.
 - The dispersion kernels are differentiable once. A training step therefore
