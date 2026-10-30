@@ -839,7 +839,12 @@ class Trainer:
                                   if k not in ("forces", "stress", "virials")
                                   and torch.is_tensor(v) and v.requires_grad)
             self.opt.zero_grad()
-            loss.backward()
+            if self.distributed:
+                loss.backward()
+            else:
+                # the trainable parameters only: the positions of a force loss need no
+                # gradient of their own (a second derivative of every geometric term)
+                loss.backward(inputs=self._params)
             if o.clip_grad > 0:
                 torch.nn.utils.clip_grad_norm_(self._params, o.clip_grad)
             self.opt.step()
