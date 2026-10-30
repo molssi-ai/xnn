@@ -59,7 +59,8 @@ two-layer linear maps (``N_rbf -> N_basis -> F`` and
 ``N_triplet`` features before the aggregation and up-projected after it, the
 output block up-projects the atom features to ``N_out`` before its dense
 layers, and four blocks replace the six of DimeNet. The activation is the
-self-gated swish ``sigma(x) = x sigmoid(x)`` throughout (``torch.nn.SiLU``).
+self-gated swish ``sigma(x) = x sigmoid(x)`` throughout (``torch.nn.SiLU``, as
+:class:`~xnn.common.models.ops.SiLU`).
 
 Conventions shared with the reference implementation, for transplantable
 weights: the atom embedding is indexed by the atomic number; the columns of
@@ -97,7 +98,7 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import glorot_orthogonal_, make_activation, scatter_sum
+from xnn.common.models.ops import gather_rows, glorot_orthogonal_, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 
 from ..featurizers import BesselRBF, PolynomialCutoff, SphericalBesselBasis
@@ -157,13 +158,14 @@ def directed_triplets(edge_index: Tensor, edge_vec: Tensor,
     starts = torch.cumsum(counts, 0) - counts                   # first position of each group
     n_in = counts[src]                                          # candidates k -> j per edge j -> i
     total = int(n_in.sum())
-    ji = torch.repeat_interleave(torch.arange(num_edges, device=src.device), n_in)
-    first = torch.repeat_interleave(torch.cumsum(n_in, 0) - n_in, n_in)
+    ji = torch.repeat_interleave(torch.arange(num_edges, device=src.device), n_in, output_size=total)
+    first = torch.repeat_interleave(torch.cumsum(n_in, 0) - n_in, n_in, output_size=total)
     local = torch.arange(total, device=src.device) - first
     kj = order[starts[src[ji]] + local]
     # the reverse edge i -> j of the same image: same atom and the exact
     # negative of the edge vector
-    reverse = (src[kj] == dst[ji]) & ((edge_vec[kj] + edge_vec[ji]) == 0).all(dim=-1)
+    vec = edge_vec.detach()
+    reverse = (src[kj] == dst[ji]) & ((vec[kj] + vec[ji]) == 0).all(dim=-1)
     keep = ~reverse
     return kj[keep], ji[keep]
 
@@ -222,7 +224,8 @@ class _Embedding(nn.Module):
     def forward(self, atomic_numbers: Tensor, edge_index: Tensor, rbf: Tensor) -> Tensor:
         h = self.embedding(atomic_numbers)
         e = self.act(self.lin_rbf(rbf))
-        x = torch.cat([h[edge_index[0]], h[edge_index[1]], e], dim=-1)   # [h_j || h_i || e]
+        x = torch.cat([gather_rows(h, edge_index[0]), gather_rows(h, edge_index[1]), e],
+                      dim=-1)                                       # [h_j || h_i || e]
         return self.act(self.lin(x))
 
 
@@ -275,12 +278,19 @@ class _Interaction(nn.Module):
         x_ji = self.act(self.lin_ji(m))
         x_kj = self.act(self.lin_kj(m))
         gate = self.lin_rbf(rbf)
-        if self.radial_gate == "ji":
-            x_kj = x_kj[kj] * gate[ji]           # eq 4 as written: e_RBF(d_ji)
-        else:
-            x_kj = (x_kj * gate)[kj]             # the reference code: e_RBF(d_kj)
+        s = self.lin_sbf(sbf)                                   # (T, N_bilinear)
         # bilinear contraction per triplet: sum_{b,f} s_b x_f W_{bfg}
-        msg = torch.einsum("tb,tf,bfg->tg", self.lin_sbf(sbf), x_kj, self.bilinear)
+        if self.radial_gate == "ji":
+            x_kj = gather_rows(x_kj, kj) * gather_rows(gate, ji)   # eq 4 as written: e_RBF(d_ji)
+            msg = torch.einsum("tb,tf,bfg->tg", s, x_kj, self.bilinear)
+        else:
+            # the reference code: e_RBF(d_kj), so x_f belongs to the edge k -> j and
+            # the sum over f runs once per edge before the gather onto the triplets
+            n_b, n_f, n_g = self.bilinear.shape
+            weight = self.bilinear.permute(1, 0, 2).reshape(n_f, n_b * n_g)
+            proj = (x_kj * gate) @ weight                           # (E, N_bilinear * F)
+            per_triplet = gather_rows(proj, kj).view(-1, n_b, n_g)  # (T, N_bilinear, F)
+            msg = torch.bmm(s.unsqueeze(1), per_triplet).squeeze(1)
         x = x_ji + scatter_sum(msg, ji, m.shape[0])
         for block in self.before_skip:
             x = block(x)
@@ -340,9 +350,9 @@ class _InteractionPP(nn.Module):
         x_kj = self.act(self.lin_kj(m))
         gate = self.lin_rbf2(self.lin_rbf1(rbf))
         if self.radial_gate == "ji":
-            x_kj = self.act(self.lin_down(x_kj[kj] * gate[ji]))     # eq 4 as written
+            x_kj = self.act(self.lin_down(gather_rows(x_kj, kj) * gather_rows(gate, ji)))   # eq 4 as written
         else:
-            x_kj = self.act(self.lin_down(x_kj * gate))[kj]         # the reference code
+            x_kj = gather_rows(self.act(self.lin_down(x_kj * gate)), kj)   # the reference code
         msg = x_kj * self.lin_sbf2(self.lin_sbf1(sbf))
         agg = self.act(self.lin_up(scatter_sum(msg, ji, m.shape[0])))
         x = x_ji + agg
@@ -602,11 +612,12 @@ class DimeNet(InteratomicPotential):
         rbf = self.rbf(r) * env[:, None]                               # eq 7 x eq 8
         # triplets k -> j -> i and the angle alpha_(kj,ji) at j (paper section 4)
         kj, ji = directed_triplets(edge_index, edge_vec, num_nodes)
-        cos_alpha = -(edge_vec[kj] * edge_vec[ji]).sum(dim=-1) / (r[kj] * r[ji])
+        cos_alpha = (-(gather_rows(edge_vec, kj) * gather_rows(edge_vec, ji)).sum(dim=-1)
+                     / (gather_rows(r, kj) * gather_rows(r, ji)))
         cos_alpha = cos_alpha.clamp(-1.0, 1.0)
         env_sbf = env * (self.cutoff / r) if self.reference_basis else env
         radial = self.sbf.radial(r) * env_sbf[:, None, None]           # eq 6 x eq 8, per edge
-        sbf = radial[kj] * self.sbf.angular(cos_alpha)[:, :, None]
+        sbf = gather_rows(radial, kj) * self.sbf.angular(cos_alpha)[:, :, None]
         sbf = sbf.reshape(kj.shape[0], self.n_sbf)
 
         m = self.embedding(atomic_numbers, edge_index, rbf)           # eq 9

@@ -14,6 +14,7 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import he_orthogonal_, scatter_sum
 from xnn.common.models.registry import register_model
 
@@ -187,17 +188,29 @@ def _padded_bilinear(x: Tensor, out_idx: Tensor, k_idx: Tensor, num_out: int, km
     Tensor
         Shape ``(num_out, F_out)``.
     """
-    n_feat = x.shape[1]
-    padded = x.new_zeros(num_out, kmax, n_feat)
+    padded = x.new_zeros(num_out, kmax, x.shape[1])
     padded[out_idx, k_idx] = x
-    summed = torch.bmm(sph, padded)                         # (E, A, F): sum over neighbors
+    return _mix_sums(torch.bmm(sph, padded), rad, weight)      # (E, A, F): sum over neighbors
+
+
+def _mix_sums(summed: Tensor, rad: Tensor, weight: Tensor) -> Tensor:
+    """The rest of the bilinear layer from the neighbor sums ``(E, A, F)``: the radial
+    contraction ``(E, J, F)`` and the weights."""
     mixed = torch.bmm(rad, summed)                          # (E, J, F): sum over the basis
-    j = weight.shape[0]
-    return mixed.reshape(num_out, j * n_feat) @ weight.reshape(j * n_feat, weight.shape[2])
+    j, n_feat = weight.shape[0], summed.shape[2]
+    return mixed.reshape(summed.shape[0], j * n_feat) @ weight.reshape(j * n_feat, weight.shape[2])
 
 
-class _TripletInteraction(nn.Module):
-    """One-hop geometric message passing (T-MP of Fig. 4) with symmetric output."""
+class _TripletInteraction(FastPathModule, nn.Module):
+    """One-hop geometric message passing (T-MP of Fig. 4) with symmetric output.
+
+    With :attr:`fast_active` (see :meth:`GemNet.set_use_fast`) the neighbor sums
+    of the bilinear layer run as a fused kernel (:mod:`xnn.gnn.fast.gemnet`) and
+    ``cbf_sph`` is the angular basis per triplet, ``(T, A)``, instead of the
+    padded ``(E, A, K_max)``.
+    """
+
+    fast_active: bool
 
     def __init__(self, n_edge: int, n_trip: int, n_rbf_emb: int, n_cbf_emb: int,
                  n_bilinear: int):
@@ -212,20 +225,36 @@ class _TripletInteraction(nn.Module):
         self.up_ca = _Dense(n_bilinear, n_edge, activation=True)
         self.up_ac = _Dense(n_bilinear, n_edge, activation=True)
         self.inv_sqrt2 = 1.0 / math.sqrt(2.0)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.gemnet import supported
+        return supported(device, dtype)
 
     def forward(self, m: Tensor, rbf: Tensor, cbf_rad: Tensor, cbf_sph: Tensor,
                 t_out: Tensor, t_in: Tensor, t_k: Tensor, rev: Tensor) -> Tensor:
         x = self.dense_ba(m)
         x = self.scale_rbf(x, x * self.lin_rbf(rbf))                # e_RBF(x_ba)
-        x = self.down(x)[t_in]
-        y = _padded_bilinear(x, t_out, t_k, m.shape[0], cbf_sph.shape[2],
-                             cbf_sph, cbf_rad, self.bilinear)       # e_CBF(x_ca, phi_cab)
+        if self.fast_active and not torch.jit.is_scripting():
+            x = self.down(x)
+            y = _mix_sums(_neighbor_sums_fast(x, cbf_sph, t_in, t_out, m.shape[0]),
+                          cbf_rad, self.bilinear)
+        else:
+            x = self.down(x)[t_in]
+            y = _padded_bilinear(x, t_out, t_k, m.shape[0], cbf_sph.shape[2],
+                                 cbf_sph, cbf_rad, self.bilinear)   # e_CBF(x_ca, phi_cab)
         y = self.scale_cbf_sum(x, y)
         return (self.up_ca(y) + self.up_ac(y)[rev]) * self.inv_sqrt2
 
 
-class _QuadrupletInteraction(nn.Module):
-    """Two-hop geometric message passing (Q-MP of Fig. 4, eq 11) with symmetric output."""
+class _QuadrupletInteraction(FastPathModule, nn.Module):
+    """Two-hop geometric message passing (Q-MP of Fig. 4, eq 11) with symmetric output.
+
+    With :attr:`fast_active` the neighbor sums run as a fused kernel and
+    ``sbf_sph`` is the angular basis per quadruplet, ``(Q, A)``.
+    """
+
+    fast_active: bool
 
     def __init__(self, n_edge: int, n_quad: int, n_rbf_emb: int, n_cbf_emb: int,
                  n_sbf_emb: int, n_bilinear: int):
@@ -242,6 +271,11 @@ class _QuadrupletInteraction(nn.Module):
         self.up_ca = _Dense(n_bilinear, n_edge, activation=True)
         self.up_ac = _Dense(n_bilinear, n_edge, activation=True)
         self.inv_sqrt2 = 1.0 / math.sqrt(2.0)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.gemnet import supported
+        return supported(device, dtype)
 
     def forward(self, m: Tensor, rbf: Tensor, cbf: Tensor, sbf_rad: Tensor, sbf_sph: Tensor,
                 intm_db: Tensor, q_out: Tensor, q_intm: Tensor, q_k: Tensor,
@@ -250,11 +284,23 @@ class _QuadrupletInteraction(nn.Module):
         x = self.scale_rbf(x, x * self.lin_rbf(rbf))                # e_RBF(x_db)
         x = self.down(x)[intm_db]
         x = self.scale_cbf(x, x * self.lin_cbf(cbf))                # e_CBF(x_ba, phi_abd)
-        x = x[q_intm]
-        y = _padded_bilinear(x, q_out, q_k, m.shape[0], sbf_sph.shape[2],
-                             sbf_sph, sbf_rad, self.bilinear)       # e_SBF(x_ca, phi_cab, theta_cabd)
+        if self.fast_active and not torch.jit.is_scripting():
+            y = _mix_sums(_neighbor_sums_fast(x, sbf_sph, q_intm, q_out, m.shape[0]),
+                          sbf_rad, self.bilinear)
+        else:
+            x = x[q_intm]
+            y = _padded_bilinear(x, q_out, q_k, m.shape[0], sbf_sph.shape[2],
+                                 sbf_sph, sbf_rad, self.bilinear)   # e_SBF(x_ca, phi_cab, theta_cabd)
         y = self.scale_sbf_sum(x, y)
         return (self.up_ca(y) + self.up_ac(y)[rev]) * self.inv_sqrt2
+
+
+@torch.jit.unused
+def _neighbor_sums_fast(x: Tensor, sph: Tensor, in_idx: Tensor, out_idx: Tensor,
+                        num_out: int) -> Tensor:
+    """The neighbor sums ``(E, A, F)`` of the bilinear layer by the fused kernel."""
+    from xnn.gnn.fast.gemnet_kernels import neighbor_sums
+    return neighbor_sums(x, sph, in_idx, out_idx, num_out)
 
 
 def _bilinear_init_(weight: Tensor) -> None:
@@ -539,6 +585,8 @@ class GemNet(InteratomicPotential):
                     output_init, self.direct_forces)
             for _ in range(n_interactions + 1)])
         self.atom_ref = nn.Embedding(_MAX_Z, 1)
+        # the fused bilinear layers (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
         nn.init.zeros_(self.atom_ref.weight)
         self.register_buffer("scaling_fitted", torch.tensor(False))
         if atomic_energies is not None:
@@ -658,10 +706,16 @@ class GemNet(InteratomicPotential):
         # triplets c -> a <- b: angle phi_cab, circular basis e_CBF(x_ca, phi_cab)
         t_out, t_in, t_k = triplets(torch.stack([src, dst]), num_nodes)
         cos_cab = ((vec[t_out] * vec[t_in]).sum(-1) / (r[t_out] * r[t_in])).clamp(-1.0, 1.0)
-        kmax3 = int(t_k.max()) + 1 if t_k.shape[0] > 0 else 0
-        sph3 = vec.new_zeros(num_emb, kmax3, L)
-        sph3[t_out, t_k] = zonal_harmonics(L - 1, cos_cab)
-        cbf3_sph = sph3.transpose(1, 2)
+        # the fused bilinear layer takes the basis per item, the reference padded per edge
+        fast3 = (len(self.interactions) > 0 and self.interactions[0].trip.fast_active
+                 and not torch.jit.is_scripting())
+        if fast3:
+            cbf3_sph = zonal_harmonics(L - 1, cos_cab)                # (T, L)
+        else:
+            kmax3 = int(t_k.max()) + 1 if t_k.shape[0] > 0 else 0
+            sph3 = vec.new_zeros(num_emb, kmax3, L)
+            sph3[t_out, t_k] = zonal_harmonics(L - 1, cos_cab)
+            cbf3_sph = sph3.transpose(1, 2)
         # the down-projection acts on the radial part only (App. D); its effective
         # weight comes from the layer itself, so adapters such as LoRA apply
         eye = torch.eye(L * N, dtype=rad.dtype, device=rad.device)
@@ -683,10 +737,15 @@ class GemNet(InteratomicPotential):
             y_abd = zonal_harmonics(L - 1, cos_abd.clamp(-1.0, 1.0))
             cbf4 = self.lin_cbf4((rad_ba[intm_q] * y_abd[:, :, None]).reshape(-1, L * N))
             # e_SBF(x_ca, phi_cab, theta_cabd): radial part per edge, angular per quadruplet
-            kmax4 = int(q_k.max()) + 1 if q_k.shape[0] > 0 else 0
-            pad4 = vec.new_zeros(num_emb, kmax4, L * L)
-            pad4[q_out, q_k] = sph4
-            sbf_sph = pad4.transpose(1, 2)
+            quad = self.interactions[0].quad if len(self.interactions) > 0 else None
+            fast4 = quad is not None and quad.fast_active and not torch.jit.is_scripting()
+            if fast4:
+                sbf_sph = sph4                                           # (Q, L * L)
+            else:
+                kmax4 = int(q_k.max()) + 1 if q_k.shape[0] > 0 else 0
+                pad4 = vec.new_zeros(num_emb, kmax4, L * L)
+                pad4[q_out, q_k] = sph4
+                sbf_sph = pad4.transpose(1, 2)
             eye4 = torch.eye(L * L * N, dtype=rad.dtype, device=rad.device)
             sbf_rad = torch.einsum("ekn,jkn->ejk", rad[:, self.sbf_degree],
                                    self.lin_sbf4(eye4).t().reshape(-1, L * L, N))
@@ -769,6 +828,7 @@ class GemNet(InteratomicPotential):
             ``"node_features"`` ``(N, node_feature_dim)`` and, with
             ``direct_forces``, ``"forces"`` ``(N, 3)``.
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         features, node_energy, forces = self._evaluate(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         out = {"node_energy": node_energy,
@@ -830,6 +890,9 @@ class GemNet(InteratomicPotential):
         batches = list(batches)
         fitted: Dict[str, float] = {}
         was_training = self.training
+        use_fast = self.use_fast
+        # the statistics are those of the reference's per-item inputs
+        self.use_fast = False
         self.eval()
         for name, factor in self.scale_factors().items():
             factor.stats.zero_()
@@ -847,8 +910,57 @@ class GemNet(InteratomicPotential):
                 factor.scale_factor.mul_(math.sqrt(var_ref / var_y))
             fitted[name] = float(factor.scale_factor)
         self.scaling_fitted.fill_(True)
+        self.use_fast = use_fast
         self.train(was_training)
         return fitted
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "GemNet":
+        """Choose the implementation of the bilinear layers' neighbor sums.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.gemnet` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``; the quadruplet layers by
+            ``QUADRUPLET_AUTO_POLICY``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            differentiable at any order and reach the weights, so force
+            training takes them as well.
+
+        Returns
+        -------
+        GemNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused bilinear layers on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.gemnet import (
+            AUTO_POLICY,
+            AUTO_POLICY_TRAINING,
+            QUADRUPLET_AUTO_POLICY,
+            QUADRUPLET_AUTO_POLICY_TRAINING,
+        )
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            modules = fast_modules(self)
+            blocks = ([m for m in modules if isinstance(m, _TripletInteraction)],
+                      [m for m in modules if isinstance(m, _QuadrupletInteraction)])
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.atom_ref.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks[0], self.use_fast, policy, like.device, like.dtype, num_edges)
+        quad_policy = QUADRUPLET_AUTO_POLICY_TRAINING if self.training else QUADRUPLET_AUTO_POLICY
+        select(blocks[1], self.use_fast, quad_policy, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def load_scaling_factors(self, factors) -> None:
