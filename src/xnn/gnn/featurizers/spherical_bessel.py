@@ -37,6 +37,58 @@ _SERIES_TERMS = 30
 def spherical_bessel_jn(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> Tensor:
     """Spherical Bessel functions of the first kind, orders 0 to ``l_max``.
 
+    See :func:`_spherical_bessel_values` for the evaluation. With a gradient
+    to track, the derivative comes from the identity
+    ``j_l' = (l j_{l-1} - (l+1) j_{l+1}) / (2l+1)``: autograd then keeps ``x``
+    only, not the intermediates of the series, and higher derivatives
+    (force training) come from the same identity. TorchScript evaluates
+    :func:`_spherical_bessel_values` directly.
+
+    Parameters
+    ----------
+    l_max : int
+        Highest order.
+    x : Tensor
+        Arguments of any shape, ``x >= 0``.
+    n_terms : int, optional
+        Terms of the power series, by default 30.
+
+    Returns
+    -------
+    Tensor
+        ``j_l(x)`` stacked along a new last axis, shape ``(..., l_max + 1)``,
+        in the dtype of ``x``.
+    """
+    if not torch.jit.is_scripting():
+        if torch.is_grad_enabled() and x.requires_grad:
+            return _SphericalBessel.apply(l_max, x, n_terms)
+    return _spherical_bessel_values(l_max, x, n_terms)
+
+
+class _SphericalBessel(torch.autograd.Function):
+    """``j_0 .. j_{l_max}`` of ``x`` whose derivative is the recurrence identity."""
+
+    @staticmethod
+    def forward(ctx, l_max: int, x: Tensor, n_terms: int) -> Tensor:
+        ctx.l_max, ctx.n_terms = l_max, n_terms
+        ctx.save_for_backward(x)
+        return _spherical_bessel_values(l_max, x, n_terms)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        (x,) = ctx.saved_tensors
+        l_max = ctx.l_max
+        # differentiable: the second derivative comes through this same function
+        j = spherical_bessel_jn(l_max + 1, x, ctx.n_terms)
+        orders = torch.arange(l_max + 1, dtype=j.dtype, device=j.device)
+        lower = torch.cat([torch.zeros_like(j[..., :1]), j[..., :l_max]], dim=-1)
+        deriv = (orders * lower - (orders + 1.0) * j[..., 1:]) / (2.0 * orders + 1.0)
+        return None, (grad * deriv).sum(-1), None
+
+
+def _spherical_bessel_values(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> Tensor:
+    """Spherical Bessel functions of the first kind, orders 0 to ``l_max``.
+
     Parameters
     ----------
     l_max : int
@@ -61,22 +113,30 @@ def spherical_bessel_jn(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> 
     ``j_{l+1} = (2l+1)/x j_l - j_{l-1}`` from ``j_0 = sin x / x`` and
     ``j_1 = (sin x / x - cos x) / x`` beyond; the recurrence loses digits for
     ``x`` below the order, the series needs more terms above it, and the
-    switch at ``l + 2`` keeps both at double precision. The arithmetic is
-    float64 internally.
+    switch at ``l + 2`` keeps both at double precision. The series of all
+    orders is evaluated at once by Horner's scheme in ``-x^2 / 2`` (one fused
+    multiply-add per term). The arithmetic is float64 internally.
     """
     x64 = x.to(torch.float64)
-    # the power series of every order
-    minus_half_x2 = -0.5 * x64 * x64
-    series: List[Tensor] = []
-    double_factorial = 1.0
-    for l in range(l_max + 1):
-        double_factorial *= 2 * l + 1
-        term = x64 ** l / double_factorial
-        total = term
-        for k in range(1, n_terms):
-            term = term * minus_half_x2 / float(k * (2 * l + 2 * k + 1))
-            total = total + term
-        series.append(total)
+    n_l = l_max + 1
+    orders = torch.arange(n_l, dtype=torch.float64, device=x.device)
+    # the power series of every order at once, by Horner's scheme in y = -x^2/2:
+    # sum_k a_k(l) y^k with a_k(l) = prod_{i <= k} 1 / (i (2l + 2i + 1))
+    i = torch.arange(1, n_terms, dtype=torch.float64, device=x.device).unsqueeze(-1)
+    coef = torch.cat([torch.ones(1, n_l, dtype=torch.float64, device=x.device),
+                      torch.cumprod(1.0 / (i * (2.0 * orders + 2.0 * i + 1.0)), dim=0)])
+    y = (-0.5 * x64 * x64).unsqueeze(-1)
+    total = coef[n_terms - 1].expand(list(x64.shape) + [n_l])
+    for k in range(n_terms - 2, -1, -1):
+        total = torch.addcmul(coef[k], total, y)
+    # x^l / (2l+1)!!, the powers by repeated products (finite gradients at x = 0;
+    # a scan over the short last axis is slow on large inputs)
+    power = torch.ones_like(x64)
+    powers: List[Tensor] = [power]
+    for _ in range(l_max):
+        power = power * x64
+        powers.append(power)
+    series = total * torch.stack(powers, dim=-1) / torch.cumprod(2.0 * orders + 1.0, dim=0)
     # the upward recurrence (the argument stays away from zero: this branch
     # is only selected at x >= l + 2 >= 2)
     xs = x64.clamp(min=1.0)
@@ -87,10 +147,128 @@ def spherical_bessel_jn(l_max: int, x: Tensor, n_terms: int = _SERIES_TERMS) -> 
         j_next = (2 * l + 1) / xs * j_curr - j_prev
         recurrence.append(j_next)
         j_prev, j_curr = j_curr, j_next
-    out: List[Tensor] = []
-    for l in range(l_max + 1):
-        out.append(torch.where(x64 < float(l + 2), series[l], recurrence[l]))
-    return torch.stack(out, dim=-1).to(x.dtype)
+    rec = torch.stack(recurrence[:n_l], dim=-1)
+    return torch.where(x64.unsqueeze(-1) < orders + 2.0, series, rec).to(x.dtype)
+
+
+def spherical_bessel_rows(x: Tensor, first: int = 0, n_terms: int = _SERIES_TERMS) -> Tensor:
+    """Spherical Bessel functions with one order per row: ``j_{first + r}(x[..., r, :])``.
+
+    The radial factors of the 2D basis evaluate ``j_l`` at the zeros of the
+    same order only, so the order runs along the row axis (``-2``) of ``x``.
+    One evaluation for all rows gives the values of :func:`spherical_bessel_jn`
+    bitwise, without the orders a row does not use. With a gradient to track,
+    the same evaluation also takes the neighboring orders and keeps the
+    derivative ``j_l' = (l j_{l-1} - (l+1) j_{l+1}) / (2l+1)``; the second
+    derivative follows from the spherical Bessel equation,
+    ``j_l'' = -2 j_l' / x - (1 - l(l+1) / x^2) j_l``, so no derivative order
+    evaluates the series again.
+
+    Parameters
+    ----------
+    x : Tensor
+        Arguments of shape ``(..., R, N)``, ``x >= 0`` (``x > 0`` where
+        differentiated twice).
+    first : int, optional
+        Order of row 0, by default 0; row ``r`` has order ``first + r``.
+    n_terms : int, optional
+        Terms of the power series, by default 30.
+
+    Returns
+    -------
+    Tensor
+        Same shape and dtype as ``x``.
+    """
+    if not torch.jit.is_scripting():
+        if torch.is_grad_enabled() and x.requires_grad:
+            with torch.no_grad():
+                both = _spherical_bessel_row_values(x, first, n_terms, True)   # (..., 3, R, N)
+                order = torch.arange(first, first + x.shape[-2], dtype=x.dtype,
+                                     device=x.device).unsqueeze(-1)
+                value = both[..., 1, :, :]
+                slope = (order * both[..., 0, :, :] - (order + 1.0) * both[..., 2, :, :]) / (2.0 * order + 1.0)
+            return _BesselRows.apply(x, value, slope, first)
+    return _spherical_bessel_row_values(x, first, n_terms, False)[..., 0, :, :]
+
+
+class _BesselRows(torch.autograd.Function):
+    """``j_l`` per row from its precomputed value; the derivative is :class:`_BesselRowsSlope`."""
+
+    @staticmethod
+    def forward(ctx, x: Tensor, value: Tensor, slope: Tensor, first: int) -> Tensor:
+        ctx.first = first
+        ctx.save_for_backward(x, value, slope)
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        x, value, slope = ctx.saved_tensors
+        return grad * _BesselRowsSlope.apply(x, value, slope, ctx.first), None, None, None
+
+
+class _BesselRowsSlope(torch.autograd.Function):
+    """``j_l'`` per row; its derivative from the spherical Bessel equation (differentiable again)."""
+
+    @staticmethod
+    def forward(ctx, x: Tensor, value: Tensor, slope: Tensor, first: int) -> Tensor:
+        ctx.first = first
+        ctx.save_for_backward(x, value, slope)
+        return slope.clone()
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        x, value, slope = ctx.saved_tensors
+        first = ctx.first
+        order = torch.arange(first, first + x.shape[-2], dtype=x.dtype, device=x.device).unsqueeze(-1)
+        j = _BesselRows.apply(x, value, slope, first)
+        dj = _BesselRowsSlope.apply(x, value, slope, first)
+        curvature = -2.0 / x * dj - (1.0 - order * (order + 1.0) / (x * x)) * j
+        return grad * curvature, None, None, None
+
+
+def _spherical_bessel_row_values(x: Tensor, first: int, n_terms: int = _SERIES_TERMS,
+                                 neighbors: bool = False) -> Tensor:
+    """:func:`spherical_bessel_rows` evaluated: the series and recurrence of
+    :func:`_spherical_bessel_values` with the order taken per row.
+
+    Returns shape ``(..., S, R, N)``: ``S = 1`` (order ``first + r``) or, with
+    ``neighbors``, ``S = 3`` (orders ``first + r - 1``, ``first + r`` and
+    ``first + r + 1``; an order below zero is evaluated as order zero).
+    """
+    x64 = x.to(torch.float64).unsqueeze(-3)                                   # (..., 1, R, N)
+    n_rows = x.shape[-2]
+    low = -1 if neighbors else 0
+    high = 1 if neighbors else 0
+    last = first + n_rows - 1 + high
+    order = (torch.arange(low, high + 1, device=x.device).view(-1, 1, 1)
+             + torch.arange(first, first + n_rows, device=x.device).view(1, -1, 1)).clamp(min=0)
+    order_f = order.to(torch.float64)                                         # (S, R, 1)
+    i = torch.arange(1, n_terms, dtype=torch.float64, device=x.device).view(-1, 1, 1, 1)
+    coef = torch.cat([torch.ones_like(order_f).unsqueeze(0),
+                      torch.cumprod(1.0 / (i * (2.0 * order_f + 2.0 * i + 1.0)), dim=0)])
+    y = -0.5 * x64 * x64
+    total = coef[n_terms - 1]                                  # broadcast by the first step
+    for k in range(n_terms - 2, -1, -1):
+        total = torch.addcmul(coef[k], total, y)
+    power = torch.ones_like(x64)
+    x_l = power
+    for l in range(1, last + 1):
+        power = power * x64
+        x_l = torch.where(order == l, power, x_l)
+    all_orders = torch.arange(last + 1, dtype=torch.float64, device=x.device)
+    double_factorial = torch.cumprod(2.0 * all_orders + 1.0, dim=0)[order]
+    series = total * x_l / double_factorial
+    xs = x64.clamp(min=1.0)
+    j_prev = torch.sin(xs) / xs
+    j_curr = (j_prev - torch.cos(xs)) / xs
+    rec = j_prev
+    if last >= 1:
+        rec = torch.where(order == 1, j_curr, rec)
+    for l in range(1, last):
+        j_next = (2 * l + 1) / xs * j_curr - j_prev
+        rec = torch.where(order == l + 1, j_next, rec)
+        j_prev, j_curr = j_curr, j_next
+    return torch.where(x64 < order_f + 2.0, series, rec).to(x.dtype)
 
 
 def spherical_bessel_zeros(l_max: int, n: int) -> np.ndarray:
@@ -293,10 +471,7 @@ class SphericalBesselBasis(nn.Module):
             Shape ``(E, n_spherical, n_radial)``, in the dtype of ``r``.
         """
         x = (r.to(torch.float64) / self.cutoff)[:, None, None] * self.zeros.to(torch.float64)
-        parts: List[Tensor] = []
-        for l in range(self.n_spherical):
-            parts.append(spherical_bessel_jn(l, x[:, l, :])[..., l])
-        j = torch.stack(parts, dim=1)                                 # (E, L, N)
+        j = spherical_bessel_rows(x)                                  # (E, L, N), order l in row l
         return (self.norm.to(torch.float64) * j).to(r.dtype)
 
     def angular(self, cos_alpha: Tensor) -> Tensor:
