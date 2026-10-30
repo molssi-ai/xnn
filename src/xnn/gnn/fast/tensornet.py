@@ -35,15 +35,9 @@ from xnn.common.models.fast import AutoPolicy, compile_twice_differentiable
 AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
 
 #: The same for training mode (a step with a force loss, second derivatives included): every
-#: size on an A100, where the fused layers were faster than the reference from a single small
-#: molecule on; on a T4 from a few thousand edges, below which a step is bound by kernel
-#: launches.
-AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"T4": 5_000},
-    min_edges_float64={"T4": 2_000},
-    default_min_edges=0,
-    default_min_edges_float64=0,
-)
+#: size, since the fused layers were faster than the reference from a single small molecule
+#: on (A100, A30, V100 and T4), in both precisions.
+AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
 
 
 def supported(device: torch.device, dtype: torch.dtype) -> bool:

@@ -22,7 +22,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
-from ._csr import orderings
+from xnn.common.models.csr import orderings
 
 #: rows per atom: scalar, vector (3), symmetric (6)
 ROWS = 10
