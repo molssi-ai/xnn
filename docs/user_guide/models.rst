@@ -691,6 +691,16 @@ correction of later CHARMM sets is not implemented, so ``charmm22`` is the
    rings, and 0 on all but one of the terms that share a quadruple. The
    fidelity notebook derives those weights from xnn's pair list.
 
+Classical force fields on GPUs and in LAMMPS
+============================================
+On a GPU, OPLS, AMBER, CHARMM and DREIDING evaluate every term on fused
+kernels (``use_fast="auto"``), in evaluation and in training. The numbers
+are those of the eager terms to round-off. For MD,
+:class:`~xnn.ffnn.models.ClassicalStepper` keeps a neighbor list with a skin
+and replays each step as a CUDA graph (:ref:`howto-fast-paths`).
+:func:`~xnn.ffnn.models.write_lammps_input` writes the inputs that evaluate
+a model, ReaxFF included, with LAMMPS's own styles (:ref:`howto-lammps`).
+
 AMOEBA and HIPPO
 ================
 :class:`~xnn.ffnn.models.amoeba.Amoeba` is the polarizable multipole force

@@ -85,6 +85,7 @@ training configuration in YAML format, with the default values for each section.
      early_stopping_min_delta: 0.0
      early_stopping_threshold: null
      progress_bar: false
+     cuda_graph: false          # Replay each training step as one CUDA graph (DimeNet, GemNet)
 
    device: auto                 # auto / cpu / cuda / cuda:0
    seed: 1234

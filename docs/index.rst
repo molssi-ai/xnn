@@ -163,7 +163,7 @@ Models at a glance
 Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every model trains,
 evaluates and runs under ASE deployment interface. SchNet, DimeNet, GemNet,
-PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP, MACE, Allegro and AIMNet2 also export
+PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP, MACE, Allegro, CACE and AIMNet2 also export
 to TorchScript for LAMMPS, and any checkpoint can also serve as an MDI engine (:ref:`deployment`).
 
 xnn is developed by Mohammad Mostafanejad at `The Molecular Sciences Software

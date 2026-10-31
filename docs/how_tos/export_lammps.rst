@@ -56,3 +56,27 @@ function, which implements the pair-style interface of the ``pair_nequip`` /
 neighbor list. One structure is processed per call with no batch dimension.
 Using ``torch.no_grad()`` is fine but using ``torch.inference_mode()`` is not
 (because forces are computed with autograd).
+
+Classical force fields
+======================
+OPLS, AMBER, CHARMM, DREIDING and classical ReaxFF models export to LAMMPS's
+own styles instead of a TorchScript file. :func:`~xnn.ffnn.models.write_lammps_input`
+writes a data file with the bound topology and an input script with the
+model's parameters, trained ones included:
+
+.. code-block:: python
+
+   from xnn.ffnn.models import write_lammps_input
+
+   script = write_lammps_input(model, pos, cell, "lammps_run", name="box")
+   # lammps_run/box.data and lammps_run/in.box; run with: lmp -in in.box
+
+LAMMPS then evaluates the same energy function to round-off. The charges
+are scaled so that LAMMPS's Coulomb constant reproduces the model's. The
+cell must be orthorhombic, and a structure without a cell becomes a
+shrink-wrapped box no smaller than its extent plus the cutoff. A switched cutoff (``switch_width > 0``) has no LAMMPS
+style and is refused. OPLS's torsion constants ``V0`` have no LAMMPS term:
+the script states their sum as an energy offset. A ReaxFF model with
+``conventions="lammps"`` also writes its field as ``<name>.ffield`` and needs
+the atomic numbers (``atomic_numbers=z``). LAMMPS solves its charges with
+``fix qeq/reaxff`` for a neutral system.

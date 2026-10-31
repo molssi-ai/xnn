@@ -41,9 +41,9 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |O|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - GemNet
      - |Y|
      - |Y|
@@ -84,11 +84,11 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
    * - CACE
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
      - |Y|
@@ -137,39 +137,39 @@ and is at least as fast, for evaluation and for a training step.
      - |N|
    * - ReaxFF / ReaxFF-nn
      - |Y|
-     - |N|
+     - |O|
      - |Y|
      - |N|
      - |N|
      - |N|
    * - OPLS-AA / L-OPLS
      - |Y|
-     - |N|
+     - |O|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - DREIDING / X6
      - |Y|
-     - |N|
-     - |Y|
      - |O|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
    * - AMBER (ff94)
      - |Y|
-     - |N|
+     - |O|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - CHARMM22
      - |Y|
-     - |N|
+     - |O|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - AMOEBA
      - |Y|
      - |N|
@@ -188,21 +188,21 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - Equiformer
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |N|
      - |N|
    * - EquiformerV2
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |N|
      - |N|
    * - BAMBOO
@@ -289,17 +289,30 @@ are the same as above.
      - |Y|
      - |Y|
 
-- DimeNet and DimeNet++ match the TensorFlow upstream to round-off and are
-  faster for evaluation at every size. A training step is faster from a few
-  hundred atoms on. For smaller molecules it is slower than the upstream's
-  graph executor, because the step is bound by kernel launches there.
-- The GemNet fast path runs in float32 and float64. In float64, ``"auto"``
-  keeps the reference except for evaluation on the largest graphs: Triton has
-  no float64 tile product, and the reference's padded batched products run on
-  the GPU's float64 matrix units.
-- DREIDING / X6 has no upstream code. Its reference follows the paper, so its
-  speed has no upstream to compare with.
-- The D3, D4 and LES terms match their upstream codes to round-off. Their
-  speed against those codes has not been compared yet.
-- The dispersion kernels are differentiable once. A training step therefore
-  uses the reference three-body term, and the fast path serves evaluation.
+- **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
+  Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
+  :ref:`howto-fast-paths`), which runs the same reference implementation and
+  is faster than the upstream at every size.
+- **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and
+  float64, but Triton has no float64 matrix products. In float64, ``"auto"``
+  keeps the reference for DimeNet++ (its fast path is slower there but needs
+  half the memory). For GemNet, it keeps the reference in training and for the
+  quadruplet layers, and takes the fast path for evaluation from a few hundred
+  atoms on.
+- **OPLS, AMBER, CHARMM and DREIDING.** All four match LAMMPS to round-off.
+  DREIDING / X6 has no code from its authors, so LAMMPS serves as its upstream.
+  On a GPU, all four evaluate and train on fused kernels. An MD step with
+  :class:`~xnn.ffnn.models.ClassicalStepper` is faster than with the GPU build
+  of LAMMPS, list rebuilds included. A training step is two to two and a half
+  times faster than on the eager terms, which still handle stress losses.
+- **ReaxFF.** It matches LAMMPS to round-off but is slower than LAMMPS's GPU
+  build, as it has no fused kernels yet. Above 2048 atoms, it solves for the
+  charges by conjugate gradients instead of a dense solve.
+- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
+  ReaxFF deploy as inputs for LAMMPS's own styles
+  (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
+  These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
+- **D3, D4 and LES.** All three match their upstream codes to round-off. We
+  have not compared their speed with those codes yet. The dispersion kernels
+  are differentiable only once, so training uses the reference three-body term
+  and the dispersion fast path serves evaluation only.
