@@ -47,6 +47,7 @@ from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.constants import register_constant, restore_exact
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import gather_rows, scatter_sum
 from xnn.common.models.registry import register_model
 
@@ -122,13 +123,15 @@ class _ChannelWeighter(nn.Module):
         return edge_attr.unsqueeze(-2) * w
 
 
-class _Contracter(nn.Module):
+class _Contracter(FastPathModule, nn.Module):
     """Per-channel ("uuu") weightless tensor product (allegro's ``Contracter``).
 
     Contracts the strided features ``x1[z,u,i]`` with ``x2[z,u,j]`` through a
     block Wigner-3j tensor -- one output block per instruction, each scaled by
     ``sqrt(2 l_out + 1)`` (component normalization; every output block has a
-    single path, exactly as in the upstream strided codegen).
+    single path, exactly as in the upstream strided codegen). With
+    :attr:`fast_active` (see :meth:`Allegro.set_use_fast`) the sparse kernels of
+    :mod:`xnn.gnn.fast.allegro` sum the nonzero couplings without the outer product.
 
     Parameters
     ----------
@@ -139,6 +142,7 @@ class _Contracter(nn.Module):
     """
 
     _diagonal: Final[bool]
+    fast_active: bool
 
     def __init__(self, irs_in1: List[o3.Irrep], irs_in2: List[o3.Irrep],
                  instructions: List[Tuple[int, int, o3.Irrep]]):
@@ -164,8 +168,12 @@ class _Contracter(nn.Module):
         # a coupling with nonzero entries only at i == j (a layer that keeps only
         # scalars) is an inner product: the inputs multiply elementwise, no outer
         self._diagonal = False
+        w3j64 = self._block_w3j(torch.float64)
+        # the nonzero entries (k, i, j) and the shape: the pattern of the fast kernels
+        self.__dict__["_pattern"] = (tuple(tuple(t) for t in w3j64.nonzero().tolist()),
+                                     (self.dim_out, dim1, dim2))
+        self.fast_active = False
         if dim1 == dim2:
-            w3j64 = self._block_w3j(torch.float64)
             off_diagonal = w3j64 - torch.diag_embed(torch.diagonal(w3j64, dim1=1, dim2=2))
             self._diagonal = bool((off_diagonal == 0).all())
 
@@ -186,12 +194,18 @@ class _Contracter(nn.Module):
             return False
         return restore_exact(self._w3j, self._block_w3j(torch.float64))
 
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.allegro import supported
+        return supported(device, dtype)
+
     def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
         """Contract ``(E, mul, dim1) x (E, mul, dim2) -> (E, mul, dim_out)``.
 
         The outer product of the two inputs per edge and channel, then one
         matrix product with the coupling block over both input axes.
         """
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x1, x2)
         z, u, d1 = x1.shape[0], x1.shape[1], x1.shape[2]
         d2 = x2.shape[2]
         if self._diagonal:
@@ -200,6 +214,22 @@ class _Contracter(nn.Module):
         outer = (x1.unsqueeze(3) * x2.unsqueeze(2)).reshape(z * u, d1 * d2)
         out = torch.mm(outer, self._w3j.reshape(self._w3j.shape[0], d1 * d2).t())
         return out.reshape(z, u, -1)
+
+    @torch.jit.unused
+    def _forward_fast(self, x1: Tensor, x2: Tensor) -> Tensor:
+        from xnn.gnn.fast.allegro_kernels import contract
+        pattern = self.__dict__["_pattern"]
+        w3j = self._w3j
+        # the coefficients of the nonzero entries, gathered again only when the tensor changes
+        key = (w3j.data_ptr(), w3j.dtype, w3j._version)
+        cached = self.__dict__.get("_coefficients")
+        if cached is None or cached[0] != key:
+            k, i, j = torch.tensor(pattern[0], device=w3j.device).unbind(1)
+            cached = (key, w3j[k, i, j].contiguous())
+            self.__dict__["_coefficients"] = cached
+        z, u = x1.shape[0], x1.shape[1]
+        out = contract(x1.reshape(z * u, -1), x2.reshape(z * u, -1), cached[1], pattern)
+        return out.view(z, u, -1)
 
 
 class _StridedLinear(nn.Module):
@@ -399,7 +429,7 @@ class Allegro(EquivariantGNN):
         self.latent_resnet = latent_resnet
         self.avg_num_neighbors = avg_num_neighbors
 
-        # -- two-body radial x chemical product embedding (ProductTypeEmbedding)
+        # the two-body radial x chemical product embedding (ProductTypeEmbedding)
         embed_dim = initial_scalar_embedding_dim or two_body_latent[0]
         if embed_dim % 2 != 0:
             raise ValueError("initial_scalar_embedding_dim must be even")
@@ -407,8 +437,8 @@ class Allegro(EquivariantGNN):
             torch.randn(2, len(self.species), embed_dim // 2))
         self.basis_embed = RadialNet([n_rbf, embed_dim], None)
 
-        # -- irreps of the tensor track: forward growth + backward pruning of
-        #    unreachable/unneeded paths, exactly as upstream
+        # the irreps of the tensor track: forward growth and backward pruning of
+        # unreachable or unneeded paths, as upstream
         env_irs: List[o3.Irrep] = [ir for _, ir in self.irreps_sh]
         if parity == "o3_full":
             allowed = [o3.Irrep(l, p) for l in range(l_max + 1) for p in (1, -1)]
@@ -430,7 +460,7 @@ class Allegro(EquivariantGNN):
             out_irs = keep
         tps_irreps = list(reversed(pruned))
 
-        # -- weighters, TPs, linears, MLPs
+        # the weighters, tensor products, linears and MLPs
         self._edge_weighter = _ChannelWeighter(self.irreps_sh, num_tensor_features)
         env_alpha = 1.0
         if avg_num_neighbors is not None:
@@ -506,6 +536,44 @@ class Allegro(EquivariantGNN):
             self.atom_scale[torch.tensor(self.species)] = sc
         if atomic_energies is not None:
             self.set_atomic_energies(atomic_energies)
+        # the sparse tensor-product kernels (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+
+    def set_use_fast(self, use_fast) -> "Allegro":
+        """Choose the implementation of the tensor products.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the sparse GPU kernels of
+            :mod:`xnn.gnn.fast.allegro` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            differentiable at any order, so force training takes them as well.
+
+        Returns
+        -------
+        Allegro
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the sparse tensor-product kernels on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.allegro import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.tps[0]._w3j
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.export
     def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
@@ -616,6 +684,7 @@ class Allegro(EquivariantGNN):
             ``"node_energy"`` (per-atom energies) and ``"energy"``
             (per-structure totals).
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         features, node_energy = self.node_features_energy(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
         return {"node_energy": node_energy,

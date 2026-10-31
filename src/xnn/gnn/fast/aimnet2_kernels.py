@@ -94,7 +94,7 @@ def _rows_kernel(u_ptr, order_ptr, ptr_ptr, ga_ptr, CS: tl.constexpr, CSP: tl.co
 
 
 #: Warps per program of the sums, the gradients and the row pass of the gradients.
-WARPS = {"sums": 4, "grads": 4, "rows": 2}
+WARPS = {"sums": 4, "grads": 2, "rows": 2}
 
 
 def _shape(a: Tensor) -> Tuple[int, int, int]:
