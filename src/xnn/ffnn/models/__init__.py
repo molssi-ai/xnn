@@ -8,15 +8,18 @@ from .charmm import Charmm, CharmmForceField
 from .charmmlib import CharmmLibrary, read_charmm
 from .charmmlib import builtin_library as builtin_charmm
 from .charmmlib import place_impropers as place_charmm_impropers
+from .classical_step import ClassicalStepper
 from .dreiding import Dreiding, DreidingForceField
 from .dreidinglib import TORSION_RULES, DreidingLibrary, hybridization, read_dreiding, torsion_rule
 from .ffield import FFieldLibrary, read_ffield, template_library
+from .lammps_input import lammps_input, write_lammps_input
 from .opls import OPLS, OPLSForceField
 from .oplslib import OPLSLibrary, builtin_library, fourier_to_rb, rb_to_fourier, read_opls
 from .reaxff import ReaxFF
 from .topology import MolecularTopology, guess_bonds, read_topology
 
-__all__ = ["FFieldLibrary", "read_ffield", "template_library", "ReaxFF",
+__all__ = ["ClassicalStepper", "lammps_input", "write_lammps_input", "FFieldLibrary", "read_ffield",
+           "template_library", "ReaxFF",
            "OPLSLibrary", "read_opls", "builtin_library", "fourier_to_rb",
            "rb_to_fourier", "MolecularTopology", "read_topology",
            "guess_bonds", "OPLS", "OPLSForceField", "DreidingLibrary",

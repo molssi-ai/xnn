@@ -1860,7 +1860,7 @@ def _pair_compact(flag_ptr, rank_ptr, sel_ptr, n_ptr, n_pairs, BLOCK: tl.constex
 
 def select_pairs_within(r: Tensor, cutoff_sq: Tensor, valid: Optional[Tensor] = None) -> tuple:
     """The distances ``(M,)`` of the pair vectors ``r`` ``(M, 3)`` (no gradient) and
-    :func:`select_pairs` of the pairs within the cutoff (``r . r`` below ``cutoff_sq``, a tensor of
+    :func:`select_pairs` of the pairs within the cutoff (``r * r`` summed below ``cutoff_sq``, a tensor of
     one entry in the precision of ``r``) and valid (``valid > 0``): two kernels and one scan."""
     M = int(r.shape[0])
     R = torch.empty(M, dtype=r.dtype, device=r.device)

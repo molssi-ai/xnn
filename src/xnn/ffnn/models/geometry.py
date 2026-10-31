@@ -203,7 +203,61 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor, shift: Optional[Tensor
     return (vec + (shift[:, :, None] * cells).sum(1)).to(data.model_dtype)
 
 
-def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
+def half_edges(data: AtomicGraph, excl_index: Tensor, n: int, module) -> tuple:
+    """The neighbor list's pairs once each, with the exclusions of a bound topology.
+
+    The directed list holds every pair in both directions; this keeps
+    ``src <= dst``, so a pair term is evaluated once and its energy split
+    between its two atoms. An atom's own periodic images (``src = dst``, a cell
+    shorter than the cutoff) keep both directions at half weight each. The
+    excluded pairs are looked up in the sorted keys of the batch's exclusions
+    (made once per batch size and device, cached on ``module``).
+
+    Parameters
+    ----------
+    data : AtomicGraph
+        The batched graph (copies of one topology of ``n`` atoms).
+    excl_index : Tensor
+        The excluded pairs ``(2, E)`` of one structure.
+    n : int
+        Atoms per structure.
+    module : torch.nn.Module
+        The model holding the cache.
+
+    Returns
+    -------
+    tuple of Tensor
+        ``src``, ``dst`` ``(P,)``, the vectors ``(P, 3)`` (differentiable in
+        the positions and the cell), their squared lengths ``(P,)``, the
+        weights ``(P,)`` (one half for an own image, one otherwise), whether
+        each pair is not excluded ``(P,)`` and the integer image shifts
+        ``(P, 3)`` (``None`` without a cell).
+    """
+    N, B = data.num_nodes, data.num_graphs
+    src, dst = data.edge_index[0], data.edge_index[1]
+    once = (src <= dst).nonzero()[:, 0]
+    src, dst = src.index_select(0, once), dst.index_select(0, once)
+    shift = None if data.cell is None else data.cell_shifts.index_select(0, once)
+    vec = pair_vectors(data, src, dst, shift)
+    r2 = (vec * vec).sum(1)
+    half = torch.where(src == dst, 0.5, 1.0).to(r2.dtype)
+    if excl_index.shape[1] > 0:
+        cache = module.__dict__.setdefault("_exclusion_keys", {})
+        ck = (B, N, str(excl_index.device))
+        if ck not in cache:
+            ex = (excl_index.unsqueeze(1) + (torch.arange(B, device=excl_index.device) * n).view(1, B, 1)
+                  ).reshape(2, -1)
+            cache[ck] = torch.sort(torch.minimum(ex[0], ex[1]) * N + torch.maximum(ex[0], ex[1])).values
+        keys = cache[ck]
+        key = src * N + dst
+        at = torch.searchsorted(keys, key).clamp_(max=keys.shape[0] - 1)
+        included = keys.index_select(0, at) != key
+    else:
+        included = torch.ones_like(r2, dtype=torch.bool)
+    return src, dst, vec, r2, half, included, shift
+
+
+def dihedral_cos(data: AtomicGraph, idx: Tensor, shifts: Optional[Tensor] = None) -> Tensor:
     """Cosine of the dihedral angle over each atom quadruple.
 
     Uses the plane-normal formula with ``phi = 0`` at *cis*. Only
@@ -218,22 +272,25 @@ def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
         The batched graph.
     idx : Tensor
         Atom indices of shape ``(4, M)``.
+    shifts : Tensor, optional
+        The image shifts ``(3, M, 3)`` of the three bond vectors (see
+        :func:`pair_vectors`), when already found.
 
     Returns
     -------
     Tensor
         ``cos phi`` of shape ``(M,)``.
     """
-    b1 = pair_vectors(data, idx[0], idx[1])
-    b2 = pair_vectors(data, idx[1], idx[2])
-    b3 = pair_vectors(data, idx[2], idx[3])
+    b1, b2, b3 = (pair_vectors(data, idx[j], idx[j + 1], None if shifts is None else shifts[j])
+                  for j in range(3))
     n1 = torch.cross(b1, b2, dim=1)
     n2 = torch.cross(b2, b3, dim=1)
     denom = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)
     return (n1 * n2).sum(1) / denom
 
 
-def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tensor, Tensor]:
+def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None,
+                     shifts: Optional[Tensor] = None) -> tuple[Tensor, Tensor]:
     """Cosine and sine of the signed dihedral angle over each atom quadruple.
 
     The same plane-normal construction as :func:`dihedral_cos` (``phi = 0``
@@ -251,6 +308,9 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tens
     vectors : callable, optional
         ``vectors(a, b)`` returns the bond vectors; :func:`pair_vectors` by
         default.
+    shifts : Tensor, optional
+        The image shifts ``(3, M, 3)`` of the three bond vectors for the
+        default ``vectors``, when already found.
 
     Returns
     -------
@@ -260,11 +320,12 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tens
         the far bond when looking along the central bond).
     """
     if vectors is None:
-        def vectors(a, b):
-            return pair_vectors(data, a, b)
-    b1 = vectors(idx[0], idx[1])
-    b2 = vectors(idx[1], idx[2])
-    b3 = vectors(idx[2], idx[3])
+        b1, b2, b3 = (pair_vectors(data, idx[j], idx[j + 1], None if shifts is None else shifts[j])
+                      for j in range(3))
+    else:
+        b1 = vectors(idx[0], idx[1])
+        b2 = vectors(idx[1], idx[2])
+        b3 = vectors(idx[2], idx[3])
     n1 = torch.cross(b1, b2, dim=1)
     n2 = torch.cross(b2, b3, dim=1)
     norm = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)

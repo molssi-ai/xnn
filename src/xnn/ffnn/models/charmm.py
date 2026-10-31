@@ -62,11 +62,13 @@ from torch.nn import Parameter, ParameterDict
 from xnn.common.data import AtomicGraph
 from xnn.common.data.elements import CHEMICAL_SYMBOLS
 from xnn.common.models import InteratomicPotential, register_model
+from xnn.common.models.fast import resolve_use_fast
 from xnn.common.models.ops import scatter_sum
 
 from .amber import _exact_trig, multiple_angles
 from .charmmlib import KCAL_TO_EV, MAX_TERMS, CharmmLibrary, place_impropers, read_charmm, resolve_improper_type
-from .geometry import TINY, dihedral_cos_sin, geometric_mean, pair_vectors
+from .classical_fast import ClassicalFastPath, evaluate_spec, image_shifts, lj_table, used_types, wants_fast
+from .geometry import TINY, dihedral_cos_sin, geometric_mean, half_edges, pair_vectors
 from .oplslib import resolve_angle_type, resolve_bond_type, resolve_dihedral_type
 from .topology import MolecularTopology, read_topology, residue_name_list
 
@@ -400,7 +402,7 @@ class CharmmForceField(nn.Module):
 
 
 @register_model("charmm")
-class Charmm(InteratomicPotential):
+class Charmm(ClassicalFastPath, InteratomicPotential):
     """The CHARMM fixed-topology force field (MacKerell *et al.* 1998 form).
 
     An instance binds a parameter library to one molecular topology; the
@@ -453,6 +455,14 @@ class Charmm(InteratomicPotential):
         Hold the bound system's total charge when ``charge`` trains:
         ``True`` (default) keeps the sum of the initial charges, a number
         fixes that value in e, ``False`` registers no constraint.
+    use_fast : bool or "auto", optional
+        Evaluate the terms with the fused GPU kernels of
+        :mod:`~xnn.ffnn.models.classical_kernels` (the same numbers to
+        round-off). ``"auto"`` (default) and ``True`` take them on a CUDA
+        device with Triton, in evaluation and in training; ``False``
+        evaluates every term eagerly. The kernels are differentiable twice
+        (force training, Hessians), and once with a cell gradient (stress);
+        training with a stress loss evaluates every term eagerly.
     atomic_energies : mapping, optional
         Per-element reference energies in eV, ``{Z or symbol: E0}``, loaded
         into ``atom_ref``. All zero by default.
@@ -488,6 +498,7 @@ class Charmm(InteratomicPotential):
                  keep_intermediates: bool = False,
                  auto_impropers: bool = True,
                  constrain_charge: Union[bool, float] = True,
+                 use_fast: Union[bool, str] = "auto",
                  atomic_energies=None):
         super().__init__()
         groups, model_groups = _split_trainable(trainable)
@@ -508,6 +519,7 @@ class Charmm(InteratomicPotential):
         self.keep_intermediates = bool(keep_intermediates)
         self.intermediates: dict = {}
         self.node_feature_dim = 1
+        self.use_fast = resolve_use_fast(use_fast)
         self._bind_topology(
             topology if isinstance(topology, MolecularTopology)
             else read_topology(topology), charges)
@@ -685,6 +697,77 @@ class Charmm(InteratomicPotential):
         x = (rmin * rmin / (r2 + TINY)) ** 3
         return eps * (x * x - 2.0 * x)
 
+    def _fast_spec(self, B: int, n: int, q: Tensor, ke: float, tables: tuple) -> dict:
+        """The terms of a batch of ``B`` copies for the kernels of :mod:`.classical_kernels` (see
+        :func:`~xnn.ffnn.models.classical_fast.evaluate_spec`): bonds, angles, Urey-Bradley terms, the phased
+        Fourier torsions, the harmonic impropers, the 1,4 pairs and the neighbor list's pairs; ``tables`` the
+        pair tables of the force field."""
+        P, ff = self.ff.params, self.ff
+        rmin_tab, eps_tab, rmin14_tab, eps14_tab = tables
+        starts = torch.arange(B, device=q.device) * n
+
+        def expand(idx: Tensor) -> Tensor:
+            return (idx.unsqueeze(1) + starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
+        bi, ai, ui = expand(self.bond_index), expand(self.angle_index), expand(self.ub_index)
+        di, ii = expand(self.dihedral_index), expand(self.improper_index)
+        bt, at, ut = self.bond_type.repeat(B), self.angle_type.repeat(B), self.ub_type.repeat(B)
+        dt, it = self.dihedral_type.repeat(B), self.improper_type.repeat(B)
+        nmax = self._nmax(q.device)
+        k = P["dihedral_k"][dt] * ff.dihedral_mask[dt]
+        ki = P["improper_k"][it][:, None]
+        used, compact = used_types(self, self.top_type)
+        return {
+            "bonded": [
+                ("e_bond_node", "bond", bi, (P["bond_k"][bt], P["bond_r0"][bt]), None),
+                ("e_angle_node", "angle", ai, (torch.zeros_like(at, dtype=torch.int32), P["angle_k"][at],
+                                               P["angle_theta0"][at]), None),
+                ("e_ub_node", "bond", ui, (P["ub_k"][ut], P["ub_s0"][ut]), None),
+                ("e_tors_node", "torsion", di, (di[1], k, ff.dihedral_n[dt].to(torch.int32), ff.dihedral_cos[dt],
+                                                ff.dihedral_sin[dt], torch.zeros_like(k[:, 0])),
+                 dict(FORM=1, S=int(k.shape[1]), NMAX=nmax)),
+                ("e_impr_node", "torsion", ii, (ii[0], ki, torch.ones_like(ki, dtype=torch.int32),
+                                                ff.improper_cos[it][:, None], ff.improper_sin[it][:, None],
+                                                torch.zeros_like(ki[:, 0])), dict(FORM=2, S=1, NMAX=1)),
+            ],
+            "pairs14": (("e_vdw14_node", "e_coul14_node"), expand(self.pair14_index), compact, q,
+                        lj_table(eps14_tab[used][:, used], 2.0, rmin14_tab[used][:, used]), ke * self.fudge_qq),
+            "nonbonded": (("e_vdw_node", "e_coul_node"), compact, q,
+                          lj_table(eps_tab[used][:, used], 2.0, rmin_tab[used][:, used]), ke, self.excl_index, n,
+                          self.cutoff, self.switch_width, 0),
+        }
+
+    def _nmax(self, device: torch.device) -> int:
+        """The largest multiplicity of the library's torsions (at least 1), read once per device."""
+        nmax = self.__dict__.setdefault("_nmax_cache", {})
+        key = str(device)
+        if key not in nmax:
+            n = self.ff.dihedral_n
+            nmax[key] = max(int(n.max()), 1) if n.numel() else 1
+        return nmax[key]
+
+    def _eager_nonbonded(self, data: AtomicGraph, N: int, B: int, t: Tensor, q: Tensor, ke: float, rmin_tab: Tensor,
+                         eps_tab: Tensor, expand, nb: dict) -> tuple[Tensor, Tensor]:
+        """The per-atom van der Waals and Coulomb energies of the neighbor list's pairs (each pair once,
+        half to each atom, :func:`~.geometry.half_edges`), without the excluded pairs, switched; the
+        reference."""
+        src, dst, vec, r2, half, included, _ = half_edges(data, self.excl_index, N // B, self)
+        r = torch.sqrt(r2 + TINY)
+        ts, td = t[src], t[dst]
+        vdw_e = self._lj(rmin_tab[ts, td], eps_tab[ts, td], r2)
+        coul_e = ke * q[src] * q[dst] / r
+        w = included.to(r.dtype) * half
+        if self.switch_width > 0.0:
+            x = torch.clamp((r - (self.cutoff - self.switch_width)) / self.switch_width,
+                            0.0, 1.0)
+            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
+        h_vdw, h_coul = 0.5 * w * vdw_e, 0.5 * w * coul_e
+        e_vdw_node = scatter_sum(h_vdw, src, N) + scatter_sum(h_vdw, dst, N)
+        e_coul_node = scatter_sum(h_coul, src, N) + scatter_sum(h_coul, dst, N)
+        if self.keep_intermediates:
+            nb.update(nb_r=r, nb_weight=w, nb_vdw=vdw_e, nb_coulomb=coul_e)
+        return e_vdw_node, e_coul_node
+
     # forward
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Evaluate the CHARMM energy on a (batched) atomic graph.
@@ -733,92 +816,84 @@ class Charmm(InteratomicPotential):
             """Tile per-interaction type rows ``(m,)`` to ``(B*m,)``."""
             return v.repeat(B)
 
-        # bonds
-        bi = expand(self.bond_index)
-        bt = tile(self.bond_type)
-        bvec = pair_vectors(data, bi[0], bi[1])
-        br = torch.sqrt((bvec * bvec).sum(1) + TINY)
-        e_bond = P["bond_k"][bt] * (br - P["bond_r0"][bt]) ** 2
-        e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
-            + scatter_sum(0.5 * e_bond, bi[1], N)
-
-        # angles
-        ai = expand(self.angle_index)
-        at = tile(self.angle_type)
-        u = pair_vectors(data, ai[1], ai[0])
-        v = pair_vectors(data, ai[1], ai[2])
-        cos_th = (u * v).sum(1) / torch.sqrt((u * u).sum(1) * (v * v).sum(1) + TINY)
-        bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
-        theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
-        e_angle = P["angle_k"][at] * (theta - P["angle_theta0"][at]) ** 2
-        e_angle_node = scatter_sum(e_angle, ai[1], N)
-
-        # Urey-Bradley 1,3 terms
-        ui = expand(self.ub_index)
-        ut = tile(self.ub_type)
-        uvec = pair_vectors(data, ui[0], ui[1])
-        ur = torch.sqrt((uvec * uvec).sum(1) + TINY)
-        e_ub = P["ub_k"][ut] * (ur - P["ub_s0"][ut]) ** 2
-        e_ub_node = scatter_sum(0.5 * e_ub, ui[0], N) + scatter_sum(0.5 * e_ub, ui[1], N)
-
-        # proper dihedrals
-        di = expand(self.dihedral_index)
-        dt = tile(self.dihedral_type)
-        c1, s1 = dihedral_cos_sin(data, di)
-        n_per = self.ff.dihedral_n[dt]
-        n_max = int(n_per.max()) if n_per.numel() else 1
-        cos_n, sin_n = multiple_angles(c1, s1, n_max)
-        cn = torch.gather(cos_n, 1, n_per - 1)
-        sn = torch.gather(sin_n, 1, n_per - 1)
-        e_tors = (P["dihedral_k"][dt] * self.ff.dihedral_mask[dt]
-                  * (1.0 + self.ff.dihedral_cos[dt] * cn + self.ff.dihedral_sin[dt] * sn)).sum(1)
-        e_tors_node = scatter_sum(e_tors, di[1], N)
-
-        # impropers: K (phi - phi0)^2 on the signed dihedral over the atoms as listed
-        ii = expand(self.improper_index)
-        it = tile(self.improper_type)
-        ci, si = dihedral_cos_sin(data, ii)
-        c0, s0 = self.ff.improper_cos[it], self.ff.improper_sin[it]
-        dphi = torch.atan2(si * c0 - ci * s0, ci * c0 + si * s0)
-        e_impr = P["improper_k"][it] * dphi * dphi
-        e_impr_node = scatter_sum(e_impr, ii[0], N)
-
-        # nonbonded: neighbor list minus exclusions, pair tables with overrides
         rmin_tab, eps_tab, rmin14_tab, eps14_tab = self.ff.pair_tables()
-        src, dst = data.edge_index[0], data.edge_index[1]
-        vec = data.edge_vectors()
-        r2 = (vec * vec).sum(1)
-        r = torch.sqrt(r2 + TINY)
         q = self.charges.repeat(B)
         ke = self.coulomb_constant * KCAL_TO_EV
-        ts, td = t[src], t[dst]
-        vdw_e = self._lj(rmin_tab[ts, td], eps_tab[ts, td], r2)
-        coul_e = ke * q[src] * q[dst] / r
-        lo = torch.minimum(src, dst)
-        hi = torch.maximum(src, dst)
-        edge_key = lo * N + hi
-        if self.excl_index.shape[1] > 0:
-            ex = expand(self.excl_index)
-            w = (~torch.isin(edge_key, ex[0] * N + ex[1])).to(r.dtype)
+        fast = wants_fast(self, self.use_fast, data, q, rmin_tab, eps_tab, rmin14_tab, eps14_tab)
+        if fast:
+            ev = evaluate_spec(data, self._fast_spec(B, n, q, ke, (rmin_tab, eps_tab, rmin14_tab, eps14_tab)), self)
+            e_bond_node, e_angle_node, e_ub_node, e_tors_node, e_impr_node, e_vdw14_node, e_coul14_node = (
+                ev[k] for k in ("e_bond_node", "e_angle_node", "e_ub_node", "e_tors_node", "e_impr_node",
+                                "e_vdw14_node", "e_coul14_node"))
         else:
-            w = torch.ones_like(r)
-        if self.switch_width > 0.0:
-            x = torch.clamp((r - (self.cutoff - self.switch_width)) / self.switch_width,
-                            0.0, 1.0)
-            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
-        e_vdw_node = scatter_sum(0.5 * w * vdw_e, dst, N)
-        e_coul_node = scatter_sum(0.5 * w * coul_e, dst, N)
+            bi, ai, ui = expand(self.bond_index), expand(self.angle_index), expand(self.ub_index)
+            di, ii, pi = expand(self.dihedral_index), expand(self.improper_index), expand(self.pair14_index)
+            # the image shifts of every bonded vector from one search
+            sb, sa, su, sd, si_, sp = (([None] * 3) if s is None else s for s in image_shifts(
+                data, [(bi, "bond"), (ai, "angle"), (ui, "bond"), (di, "torsion"), (ii, "torsion"),
+                       (pi, "bond")]))
 
-        # 1,4 pairs (exact, cutoff-independent) with their own LJ parameters
-        pi = expand(self.pair14_index)
-        p0, p1 = t[pi[0]], t[pi[1]]
-        pvec = pair_vectors(data, pi[0], pi[1])
-        pr2 = (pvec * pvec).sum(1)
-        pr = torch.sqrt(pr2 + TINY)
-        vdw14 = self._lj(rmin14_tab[p0, p1], eps14_tab[p0, p1], pr2)
-        coul14 = self.fudge_qq * ke * q[pi[0]] * q[pi[1]] / pr
-        e_vdw14_node = scatter_sum(0.5 * vdw14, pi[0], N) + scatter_sum(0.5 * vdw14, pi[1], N)
-        e_coul14_node = scatter_sum(0.5 * coul14, pi[0], N) + scatter_sum(0.5 * coul14, pi[1], N)
+            # bonds
+            bt = tile(self.bond_type)
+            bvec = pair_vectors(data, bi[0], bi[1], sb[0])
+            br = torch.sqrt((bvec * bvec).sum(1) + TINY)
+            e_bond = P["bond_k"][bt] * (br - P["bond_r0"][bt]) ** 2
+            e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
+                + scatter_sum(0.5 * e_bond, bi[1], N)
+
+            # angles
+            at = tile(self.angle_type)
+            u = pair_vectors(data, ai[1], ai[0], sa[0])
+            v = pair_vectors(data, ai[1], ai[2], sa[1])
+            cos_th = (u * v).sum(1) / torch.sqrt((u * u).sum(1) * (v * v).sum(1) + TINY)
+            bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
+            theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
+            e_angle = P["angle_k"][at] * (theta - P["angle_theta0"][at]) ** 2
+            e_angle_node = scatter_sum(e_angle, ai[1], N)
+
+            # Urey-Bradley 1,3 terms
+            ut = tile(self.ub_type)
+            uvec = pair_vectors(data, ui[0], ui[1], su[0])
+            ur = torch.sqrt((uvec * uvec).sum(1) + TINY)
+            e_ub = P["ub_k"][ut] * (ur - P["ub_s0"][ut]) ** 2
+            e_ub_node = scatter_sum(0.5 * e_ub, ui[0], N) + scatter_sum(0.5 * e_ub, ui[1], N)
+
+            # proper dihedrals
+            dt = tile(self.dihedral_type)
+            c1, s1 = dihedral_cos_sin(data, di, shifts=sd)
+            n_per = self.ff.dihedral_n[dt]
+            cos_n, sin_n = multiple_angles(c1, s1, self._nmax(data.pos.device))
+            cn = torch.gather(cos_n, 1, n_per - 1)
+            sn = torch.gather(sin_n, 1, n_per - 1)
+            e_tors = (P["dihedral_k"][dt] * self.ff.dihedral_mask[dt]
+                      * (1.0 + self.ff.dihedral_cos[dt] * cn + self.ff.dihedral_sin[dt] * sn)).sum(1)
+            e_tors_node = scatter_sum(e_tors, di[1], N)
+
+            # impropers: K (phi - phi0)^2 on the signed dihedral over the atoms as listed
+            it = tile(self.improper_type)
+            ci, si = dihedral_cos_sin(data, ii, shifts=si_)
+            c0, s0 = self.ff.improper_cos[it], self.ff.improper_sin[it]
+            dphi = torch.atan2(si * c0 - ci * s0, ci * c0 + si * s0)
+            e_impr = P["improper_k"][it] * dphi * dphi
+            e_impr_node = scatter_sum(e_impr, ii[0], N)
+
+        # nonbonded: neighbor list minus exclusions, pair tables with overrides
+        nb: dict = {}
+        if fast:
+            e_vdw_node, e_coul_node = ev["e_vdw_node"], ev["e_coul_node"]
+        else:
+            e_vdw_node, e_coul_node = self._eager_nonbonded(data, N, B, t, q, ke, rmin_tab, eps_tab, expand, nb)
+
+        if not fast:
+            # 1,4 pairs (exact, cutoff-independent) with their own LJ parameters
+            p0, p1 = t[pi[0]], t[pi[1]]
+            pvec = pair_vectors(data, pi[0], pi[1], sp[0])
+            pr2 = (pvec * pvec).sum(1)
+            pr = torch.sqrt(pr2 + TINY)
+            vdw14 = self._lj(rmin14_tab[p0, p1], eps14_tab[p0, p1], pr2)
+            coul14 = self.fudge_qq * ke * q[pi[0]] * q[pi[1]] / pr
+            e_vdw14_node = scatter_sum(0.5 * vdw14, pi[0], N) + scatter_sum(0.5 * vdw14, pi[1], N)
+            e_coul14_node = scatter_sum(0.5 * coul14, pi[0], N) + scatter_sum(0.5 * coul14, pi[1], N)
 
         e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
         node_energy = (e_bond_node + e_angle_node + e_ub_node + e_tors_node
@@ -830,9 +905,8 @@ class Charmm(InteratomicPotential):
             self.intermediates = dict(
                 bond_r=br, e_bond=e_bond, angle_theta=theta, e_angle=e_angle,
                 ub_r=ur, e_urey_bradley=e_ub, dihedral_cos=c1, dihedral_sin=s1,
-                e_torsion=e_tors, improper_dphi=dphi, e_improper=e_impr, nb_r=r,
-                nb_weight=w, nb_vdw=vdw_e, nb_coulomb=coul_e, pair14_r=pr,
-                e_vdw14=vdw14, e_coulomb14=coul14, type_index=t)
+                e_torsion=e_tors, improper_dphi=dphi, e_improper=e_impr, pair14_r=pr,
+                e_vdw14=vdw14, e_coulomb14=coul14, type_index=t, **nb)
 
         return {
             "node_energy": node_energy,
