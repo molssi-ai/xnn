@@ -248,8 +248,9 @@ class SiLU(nn.SiLU):
 
     def forward(self, x: Tensor) -> Tensor:
         if not torch.jit.is_scripting():
+            # compiled code differentiates the plain function itself
             if (self.training and x.requires_grad and torch.is_grad_enabled()
-                    and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS):
+                    and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS and not torch.compiler.is_compiling()):
                 return _SiLU.apply(x)
         return torch.nn.functional.silu(x)
 
@@ -295,7 +296,8 @@ class GELU(nn.GELU):
     def forward(self, x: Tensor) -> Tensor:
         if not torch.jit.is_scripting():
             if (self.approximate == "none" and self.training and x.requires_grad
-                    and torch.is_grad_enabled() and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS):
+                    and torch.is_grad_enabled() and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS
+                    and not torch.compiler.is_compiling()):
                 return _GELU.apply(x)
         return torch.nn.functional.gelu(x, approximate=self.approximate)
 
