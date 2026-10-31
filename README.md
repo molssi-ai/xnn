@@ -149,7 +149,7 @@ the MolSSI Driver Interface.
 
 Each model is checked against its reference code or paper
 (`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP,
-MACE, Allegro and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
+MACE, Allegro, CACE and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
 ## Examples and tests
