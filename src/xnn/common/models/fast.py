@@ -114,12 +114,22 @@ class AutoPolicy:
         earlier).
     default_min_edges, default_min_edges_float64 : int
         The thresholds of a GPU in neither table.
+    max_edges, max_edges_float64 : dict of str to int
+        Upper bounds, for fast paths that win only on small inputs (compiled
+        blocks, which save kernel launches): the fast path is taken below them.
+        A GPU in neither table has none unless the defaults set one.
+    default_max_edges, default_max_edges_float64 : int, optional
+        The upper bounds of a GPU in neither table (``None``: no bound).
     """
 
     min_edges: Dict[str, int] = field(default_factory=dict)
     min_edges_float64: Dict[str, int] = field(default_factory=dict)
     default_min_edges: int = 0
     default_min_edges_float64: int = 0
+    max_edges: Dict[str, int] = field(default_factory=dict)
+    max_edges_float64: Dict[str, int] = field(default_factory=dict)
+    default_max_edges: Optional[int] = None
+    default_max_edges_float64: Optional[int] = None
 
     def threshold(self, device: torch.device, dtype: torch.dtype = torch.float32) -> int:
         """The minimum edge count for ``device`` and ``dtype``."""
@@ -133,7 +143,20 @@ class AutoPolicy:
 
     def decide(self, device: torch.device, dtype: torch.dtype, num_edges: int) -> bool:
         """Whether a graph with ``num_edges`` edges takes the fast path."""
-        return device.type == "cuda" and num_edges >= self.threshold(device, dtype)
+        if device.type != "cuda" or num_edges < self.threshold(device, dtype):
+            return False
+        bound = self.upper_bound(device, dtype)
+        return bound is None or num_edges < bound
+
+    def upper_bound(self, device: torch.device, dtype: torch.dtype = torch.float32) -> Optional[int]:
+        """The edge count from which the fast path is no longer taken (``None``: no bound)."""
+        f64 = dtype == torch.float64
+        table = self.max_edges_float64 if f64 else self.max_edges
+        name = torch.cuda.get_device_name(device).lower()
+        for key, value in table.items():
+            if key.lower() in name:
+                return int(value)
+        return self.default_max_edges_float64 if f64 else self.default_max_edges
 
 
 def select(modules: List[FastPathModule], use_fast: UseFast, policy: Optional[AutoPolicy],
@@ -201,7 +224,8 @@ def iter_fast_capable(model: nn.Module, device: torch.device,
             yield m
 
 
-def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int) -> Callable[..., Any]:
+def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
+                                 n_constants: int = 0) -> Callable[..., Any]:
     """``fn`` compiled by :func:`torch.compile` and differentiable twice.
 
     Compiled code has a first derivative but no second, which a force loss
@@ -217,7 +241,10 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int) -> Calla
         A function of ``n_inputs`` tensors returning a tensor or a tuple of
         tensors, written in differentiable torch operations.
     n_inputs : int
-        The number of its tensor arguments.
+        The number of its tensor arguments that are differentiated.
+    n_constants : int, optional
+        The number of further arguments, after the inputs, that are not
+        differentiated (index tensors, sizes). Default 0.
 
     Returns
     -------
@@ -226,19 +253,29 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int) -> Calla
     """
     from torch.func import vjp
 
+    m = n_inputs + n_constants
+
     def as_tuple(*xs):
         out = fn(*xs)
         return tuple(out) if isinstance(out, (tuple, list)) else (out,)
 
     def first(*args):
-        _, pull = vjp(as_tuple, *args[:n_inputs])
-        return pull(tuple(args[n_inputs:]))
+        # inputs, constants, then one incoming gradient per output
+        consts = args[n_inputs:m]
+        _, pull = vjp(lambda *xs: as_tuple(*xs, *consts), *args[:n_inputs])
+        return pull(tuple(args[m:]))
 
     def second(*args):
-        # the arguments of first (inputs and incoming gradients), then one cotangent per input
+        # the arguments of first (inputs, constants, incoming gradients), then one cotangent per input
         k = len(args) - n_inputs
-        _, pull = vjp(first, *args[:k])
-        return pull(tuple(args[k:]))
+        consts = args[n_inputs:m]
+
+        def first_of(*xs):
+            return first(*xs[:n_inputs], *consts, *xs[n_inputs:])
+
+        _, pull = vjp(first_of, *args[:n_inputs], *args[m:k])
+        out = pull(tuple(args[k:]))
+        return out[:n_inputs], out[n_inputs:]
 
     # torch.compile keeps a few compiled versions per code object; the closures of every call
     # here share theirs, so each wrapped function gets its own copies (named after it)
@@ -252,23 +289,28 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int) -> Calla
     class Grad(torch.autograd.Function):
         @staticmethod
         def forward(ctx, *args):
-            ctx.save_for_backward(*args)
+            ctx.save_for_backward(*args[:n_inputs], *args[m:])
+            ctx.consts = args[n_inputs:m]
             return tuple(first_c(*args))
 
         @staticmethod
         @torch.autograd.function.once_differentiable
         def backward(ctx, *cotangents):
-            return tuple(second_c(*ctx.saved_tensors, *cotangents))
+            saved = ctx.saved_tensors
+            g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:], *cotangents)
+            return (*g_inputs, *([None] * n_constants), *g_grads)
 
     class Stage(torch.autograd.Function):
         @staticmethod
         def forward(ctx, *xs):
-            ctx.save_for_backward(*xs)
+            ctx.save_for_backward(*xs[:n_inputs])
+            ctx.consts = xs[n_inputs:]
             return forward(*xs)
 
         @staticmethod
         def backward(ctx, *grads):
-            return Grad.apply(*ctx.saved_tensors, *grads)
+            g = Grad.apply(*ctx.saved_tensors, *ctx.consts, *grads)
+            return (*g, *([None] * n_constants))
 
     def apply(*xs):
         out = Stage.apply(*xs)
