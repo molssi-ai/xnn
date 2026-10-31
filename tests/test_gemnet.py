@@ -18,7 +18,7 @@ from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.gnn.featurizers import real_spherical_harmonics, zonal_harmonics
-from xnn.gnn.models.gemnet import GemNet, reverse_edges, triplets
+from xnn.gnn.models.gemnet import GemNet, quadruplet_indices, reverse_edges, triplets
 
 SPECIES = [1, 6, 8]
 
@@ -204,9 +204,11 @@ def _geometry(model, g):
     emb_ids = torch.nonzero(r_all <= model.emb_cutoff).squeeze(-1)
     int_ids = torch.nonzero(r_all <= model.int_cutoff).squeeze(-1)
     src, dst = g.edge_index[0][emb_ids], g.edge_index[1][emb_ids]
-    out = model._quadruplet_geometry(src, dst, vec[emb_ids], r_all[emb_ids], emb_ids,
-                                     g.edge_index, vec, r_all, rev_all, g.num_nodes)
-    intm_db, intm_q, _, _, ca, q_intm, q_k, sph = out
+    plan = quadruplet_indices(src, dst, vec[emb_ids], emb_ids, g.edge_index, vec, r_all,
+                              rev_all, g.num_nodes, model.int_cutoff)
+    _, sph = model._quadruplet_angles(vec[emb_ids], r_all[emb_ids], vec[plan["int_ids"]],
+                                      r_all[plan["int_ids"]], plan)
+    intm_db, intm_q, ca, q_intm, q_k = (plan[k] for k in ("intm_db", "intm_q", "q_out", "q_intm", "q_k"))
     quads = list(zip(emb_ids[ca].tolist(), int_ids[intm_q[q_intm]].tolist(),
                      emb_ids[intm_db[q_intm]].tolist()))
     return quads, ca, q_k, sph

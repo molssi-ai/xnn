@@ -1033,10 +1033,10 @@ def test_gelu_fused_derivative(monkeypatch):
     assert torch.equal(torch.jit.script(GELU())(x), act(x))
 
 
-def _check_fast_shell_sums(kernels, device):
+def _check_fast_shell_sums(kernels, device, c=3):
     """The fused shell sums against the gathered reference, and every first and second derivative."""
     gen = torch.Generator().manual_seed(4)
-    n, n_edges, c, s = 5, 14, 3, 4
+    n, n_edges, s = 5, 14, 4
 
     def rand(*shape):
         return torch.randn(*shape, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
@@ -1056,11 +1056,12 @@ def _check_fast_shell_sums(kernels, device):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_fast_shell_sums_gradients():
-    """Values and every first and second derivative of the fused shell sums."""
+@pytest.mark.parametrize("channels", [3, 17])
+def test_fast_shell_sums_gradients(channels):
+    """Values and every first and second derivative of the fused shell sums (17 channels in two passes)."""
     pytest.importorskip("triton")
     from xnn.gnn.fast import aimnet2_kernels
-    _check_fast_shell_sums(aimnet2_kernels, "cuda")
+    _check_fast_shell_sums(aimnet2_kernels, "cuda", channels)
 
 
 def test_fast_shell_sums_gradients_interpreted():

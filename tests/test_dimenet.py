@@ -714,3 +714,67 @@ def test_silu_fused_derivative(device, monkeypatch):
         return g
     assert torch.autograd.gradgradcheck(slope, (x,))
     assert torch.equal(torch.jit.script(SiLU())(x), act(x))
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.dimenet import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fast_batch(dtype):
+    batch = collate([_graph(n=9, seed=3), _graph(n=7, seed=4, periodic=True)]).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+_FAST_CASES = [(False, "kj"), (False, "ji"), (True, "kj")]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_parity(dtype, pp, radial_gate):
+    """The triplet-sum kernels give the reference energies and forces."""
+    pytest.importorskip("triton")
+    model = _small(pp=pp, radial_gate=radial_gate).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_training(dtype, pp, radial_gate):
+    """Force training through the triplet-sum kernels gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = _small(pp=pp, seed=1, radial_gate=radial_gate).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+def test_fast_path_pp_ji_gate_keeps_reference():
+    """DimeNet++ with the gate of the edge j -> i has no edge sums: never the kernels."""
+    model = _small(pp=True, radial_gate="ji")
+    assert not any(b.fast_supported(torch.device("cuda"), torch.float64) for b in model.interactions)

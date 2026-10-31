@@ -305,3 +305,21 @@ def test_fast_message_sums_gradients():
         assert torch.allclose(fn(a, d), expect, rtol=0, atol=1e-13)
     assert torch.autograd.gradcheck(fn, (a, d))
     assert torch.autograd.gradgradcheck(fn, (a, d))
+
+
+@pytest.mark.parametrize("num_mp", [1, 2])
+def test_scriptable_and_lammps_export(tmp_path, num_mp):
+    """The TorchScript core equals the eager model, and the LAMMPS export gives its energy and forces."""
+    from xnn.common.deploy import export_to_lammps
+    model = _build(num_mp=num_mp).eval()
+    g = _graph(n=7, periodic=True, seed=2)
+    scripted = torch.jit.script(model)
+    d = (scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+         - model.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors()))
+    assert d.abs().max() < 1e-12
+    path = str(tmp_path / "cace_lammps.pt")
+    export_to_lammps(model, 4.5, path)
+    out = torch.jit.load(path)(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, g.cell[0])
+    ref = ForceStressOutput(model)(g)
+    assert abs(float(out["total_energy"]) - float(ref["energy"])) < 1e-10
+    assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-10
