@@ -493,6 +493,12 @@ def test_hydrogen_bond_minimum_and_angle_factor():
     # switching the term off removes it entirely
     off = Dreiding("dreiding", top, cutoff=14.0, hbond=False)
     assert float(off(_graph(pos, z, 14.0))["e_hbond"]) == 0.0
+    # the donor-acceptor pairs come from the neighbor list: a pair beyond the hydrogen-bond cutoff is not
+    # counted, and that cutoff cannot exceed the neighbor list's
+    short = Dreiding("dreiding", top, cutoff=14.0, hbond_cutoff=3.0)
+    assert float(short(_graph(pos, z, 14.0))["e_hbond"]) == 0.0
+    with pytest.raises(ValueError, match="hbond_cutoff"):
+        Dreiding("dreiding", top, cutoff=10.0, hbond_cutoff=12.0)
 
 
 def test_fourteen_pairs_are_included_in_full():
@@ -505,8 +511,8 @@ def test_fourteen_pairs_are_included_in_full():
     model(_graph(_ethane_pos(0.0), z, 14.0))
     w = model.intermediates["nb_weight"]
     assert float(w.min()) == 0.0 and float(w.max()) == 1.0
-    # the nine 1,4 H-H pairs survive (each direction of the edge list)
-    assert int((w > 0).sum()) == 2 * len(top.pairs14)
+    # the nine 1,4 H-H pairs survive (each pair once)
+    assert int((w > 0).sum()) == len(top.pairs14)
 
 
 # invariances, batching, periodicity
