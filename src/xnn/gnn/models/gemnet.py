@@ -444,6 +444,159 @@ def triplets(edge_index: Tensor, num_nodes: int) -> Tuple[Tensor, Tensor, Tensor
     return ca, ba, _group_slots(ca, num_edges)
 
 
+def quadruplet_indices(src: Tensor, dst: Tensor, vec: Tensor, emb_ids: Tensor, edge_index: Tensor,
+                       edge_vec: Tensor, r_all: Tensor, rev_all: Tensor, num_nodes: int,
+                       int_cutoff: float) -> Dict[str, Tensor]:
+    """The quadruplets ``c -> a - b <- d`` (paper section 5): the interaction edges, the
+    intermediate triplets ``a - b <- d`` (their interaction edge and edge ``d -> b``) and,
+    per quadruplet (grouped by ``c -> a``), the interaction edge, the edge ``c -> a``, the
+    intermediate triplet and the slot."""
+    num_emb = src.shape[0]
+    int_ids = torch.nonzero(r_all <= int_cutoff).squeeze(-1)
+    b, a = edge_index[0][int_ids], edge_index[1][int_ids]
+    v_ba = edge_vec[int_ids]
+    order = torch.sort(dst, stable=True)[1]                    # embedding edges by atom
+    counts = torch.bincount(dst, minlength=num_nodes)
+    starts = torch.cumsum(counts, 0) - counts
+    n_a, n_b = counts[a], counts[b]
+    arange_int = torch.arange(int_ids.shape[0], device=src.device)
+    # intermediate triplets a - b <- d: every interaction edge with every d -> b
+    intm_q = torch.repeat_interleave(arange_int, n_b)
+    intm_first = torch.cumsum(n_b, 0) - n_b
+    intm_local = torch.arange(intm_q.shape[0], device=src.device) - intm_first[intm_q]
+    intm_db = order[starts[b][intm_q] + intm_local]
+    # quadruplets: every interaction edge with every pair (c -> a, d -> b)
+    n_q = n_a * n_b
+    quad_q = torch.repeat_interleave(arange_int, n_q)
+    local = torch.arange(quad_q.shape[0], device=src.device) - (torch.cumsum(n_q, 0) - n_q)[quad_q]
+    nb_q = n_b[quad_q]
+    ia, ib = torch.div(local, nb_q, rounding_mode="floor"), torch.remainder(local, nb_q)
+    ca = order[starts[a][quad_q] + ia]
+    q_intm = intm_first[quad_q] + ib
+    db = intm_db[q_intm]
+    # four distinct atoms (periodic images count as distinct): c != b and
+    # d != a are the same edges; c != d compares positions
+    cd = v_ba[quad_q] + vec[db] - vec[ca]                       # x_c - x_d
+    same_cd = (src[ca] == src[db]) & ((cd * cd).sum(-1) < 1e-8)
+    keep = ((emb_ids[ca] != int_ids[quad_q]) & (emb_ids[db] != rev_all[int_ids][quad_q])
+            & ~same_cd)
+    ca, quad_q, q_intm = ca[keep], quad_q[keep], q_intm[keep]
+    perm = torch.sort(ca, stable=True)[1]
+    ca, quad_q, q_intm = ca[perm], quad_q[perm], q_intm[perm]
+    return {"int_ids": int_ids, "intm_q": intm_q, "intm_db": intm_db, "quad_q": quad_q,
+            "q_out": ca, "q_intm": q_intm, "q_k": _group_slots(ca, num_emb)}
+
+
+def index_plan(edge_index: Tensor, edge_vec: Tensor, num_nodes: int, emb_cutoff: float,
+               int_cutoff: float, quadruplets: bool) -> Dict[str, Tensor]:
+    """The index work of a GemNet evaluation: the embedding edges (within the embedding
+    cutoff), their reverse edges, the triplets and (quadruplet variants) the quadruplets.
+
+    Its sizes depend on the data; a captured training step builds it beforehand
+    (:class:`GemNetPlanner`).
+
+    Parameters
+    ----------
+    edge_index, edge_vec : Tensor
+        The edges within the model cutoff and their vectors.
+    num_nodes : int
+        Number of atoms.
+    emb_cutoff, int_cutoff : float
+        The embedding and interaction cutoffs.
+    quadruplets : bool
+        Whether to build the quadruplets.
+
+    Returns
+    -------
+    dict of str to Tensor
+        ``emb_ids``, ``rev``, ``t_out``, ``t_in``, ``t_k`` and, with
+        quadruplets, those of :func:`quadruplet_indices`.
+    """
+    r_all = torch.linalg.norm(edge_vec, dim=-1)
+    rev_all = reverse_edges(edge_index, edge_vec)
+    emb_ids = torch.nonzero(r_all <= emb_cutoff).squeeze(-1)
+    in_emb = torch.full_like(r_all, -1, dtype=torch.long)
+    in_emb[emb_ids] = torch.arange(emb_ids.shape[0], device=emb_ids.device)
+    src, dst = edge_index[0][emb_ids], edge_index[1][emb_ids]
+    t_out, t_in, t_k = triplets(torch.stack([src, dst]), num_nodes)
+    plan: Dict[str, Tensor] = {"emb_ids": emb_ids, "rev": in_emb[rev_all[emb_ids]],
+                               "t_out": t_out, "t_in": t_in, "t_k": t_k}
+    if quadruplets:
+        plan.update(quadruplet_indices(src, dst, edge_vec[emb_ids], emb_ids, edge_index, edge_vec,
+                                       r_all, rev_all, num_nodes, int_cutoff))
+    return plan
+
+
+class GemNetPlanner:
+    """The index plan of a batch (:func:`index_plan`), built outside the model step for a
+    captured training step (:mod:`xnn.common.train.graphed`).
+
+    A data-loader worker builds it on the CPU and pads it to fixed counts:
+    the padding entries all refer to the first padding edge (an edge between
+    padding atoms) and to the first padding entry of each list, so they form
+    finite, inert geometry. The neighbor-slot widths ``kmax3`` / ``kmax4`` of
+    the reference bilinear layers are maxima over single edges, not sums
+    (:attr:`maxima`).
+
+    Parameters
+    ----------
+    emb_cutoff, int_cutoff : float
+        The model's embedding and interaction cutoffs.
+    quadruplets : bool
+        Whether the model has quadruplet interactions.
+    """
+
+    #: The sizes that a batch takes as a maximum over its structures.
+    maxima = ("kmax3", "kmax4")
+
+    #: The count each plan entry indexes (for batching the plans of single structures);
+    #: ``None``: a slot within its group.
+    offsets = {"emb_ids": "edges", "rev": "emb_edges", "t_out": "emb_edges", "t_in": "emb_edges",
+               "t_k": None, "int_ids": "edges", "intm_q": "int_edges", "intm_db": "emb_edges",
+               "quad_q": "int_edges", "q_out": "emb_edges", "q_intm": "intm", "q_k": None}
+
+    def __init__(self, emb_cutoff: float, int_cutoff: float, quadruplets: bool):
+        self.emb_cutoff = float(emb_cutoff)
+        self.int_cutoff = float(int_cutoff)
+        self.quadruplets = bool(quadruplets)
+
+    def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        return index_plan(data.edge_index, data.edge_vectors().detach(), data.num_nodes,
+                          self.emb_cutoff, self.int_cutoff, self.quadruplets)
+
+    def sizes(self, plan: Dict[str, Tensor]) -> Dict[str, int]:
+        """The counts a padded batch fixes."""
+        out = {"emb_edges": int(plan["emb_ids"].shape[0]), "triplets": int(plan["t_out"].shape[0]),
+               "kmax3": max(int(plan["t_k"].max()) + 1 if plan["t_k"].numel() else 0, 1)}
+        if self.quadruplets:
+            out.update({"int_edges": int(plan["int_ids"].shape[0]), "intm": int(plan["intm_q"].shape[0]),
+                        "quads": int(plan["q_out"].shape[0]),
+                        "kmax4": max(int(plan["q_k"].max()) + 1 if plan["q_k"].numel() else 0, 1)})
+        return out
+
+    def pad(self, plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:
+        """``plan`` filled up to ``sizes`` with entries of the padding edge ``dummy_edge``."""
+        def fill(t: Tensor, n: int, value: int) -> Tensor:
+            return torch.cat([t, t.new_full((n - t.shape[0],), value)])
+        e = int(plan["emb_ids"].shape[0])
+        out = {"emb_ids": fill(plan["emb_ids"], sizes["emb_edges"], dummy_edge)}
+        # a padding embedding edge is its own reverse
+        out["rev"] = torch.cat([plan["rev"], torch.arange(e, sizes["emb_edges"], dtype=plan["rev"].dtype)])
+        out["t_out"] = fill(plan["t_out"], sizes["triplets"], e)
+        out["t_in"] = fill(plan["t_in"], sizes["triplets"], e)
+        out["t_k"] = fill(plan["t_k"], sizes["triplets"], 0)
+        if self.quadruplets:
+            i, m = int(plan["int_ids"].shape[0]), int(plan["intm_q"].shape[0])
+            out["int_ids"] = fill(plan["int_ids"], sizes["int_edges"], dummy_edge)
+            out["intm_q"] = fill(plan["intm_q"], sizes["intm"], i)
+            out["intm_db"] = fill(plan["intm_db"], sizes["intm"], e)
+            out["quad_q"] = fill(plan["quad_q"], sizes["quads"], i)
+            out["q_out"] = fill(plan["q_out"], sizes["quads"], e)
+            out["q_intm"] = fill(plan["q_intm"], sizes["quads"], m)
+            out["q_k"] = fill(plan["q_k"], sizes["quads"], 0)
+        return out
+
+
 @register_model("gemnet")
 class GemNet(InteratomicPotential):
     """GemNet: geometric message passing (Gasteiger, Becker, Guennemann, NeurIPS 2021).
@@ -617,53 +770,14 @@ class GemNet(InteratomicPotential):
         with torch.no_grad():
             self.atom_ref.weight[torch.tensor(list(species)), 0] = ae
 
-    def _quadruplet_geometry(self, src: Tensor, dst: Tensor, vec: Tensor, r: Tensor,
-                             emb_ids: Tensor, edge_index: Tensor, edge_vec: Tensor,
-                             r_all: Tensor, rev_all: Tensor, num_nodes: int
-                             ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
-                                        Tensor]:
-        """Quadruplets ``c -> a - b <- d`` and their bases (paper section 5).
-
-        Returns the intermediate triplets ``a - b <- d`` (their edge ``d -> b``
-        and interaction edge), the interaction-edge distances, the angles
-        ``phi_abd`` and, per quadruplet (grouped by ``c -> a``), the edge
-        ``c -> a``, the intermediate triplet, the slot, and the spherical
-        harmonics of ``(phi_cab, theta_cabd)``.
-        """
-        num_emb = src.shape[0]
-        int_ids = torch.nonzero(r_all <= self.int_cutoff).squeeze(-1)
-        b, a = edge_index[0][int_ids], edge_index[1][int_ids]
-        v_ba, r_ba = edge_vec[int_ids], r_all[int_ids]
-        order = torch.sort(dst, stable=True)[1]                    # embedding edges by atom
-        counts = torch.bincount(dst, minlength=num_nodes)
-        starts = torch.cumsum(counts, 0) - counts
-        n_a, n_b = counts[a], counts[b]
-        arange_int = torch.arange(int_ids.shape[0], device=src.device)
-        # intermediate triplets a - b <- d: every interaction edge with every d -> b
-        intm_q = torch.repeat_interleave(arange_int, n_b)
-        intm_first = torch.cumsum(n_b, 0) - n_b
-        intm_local = torch.arange(intm_q.shape[0], device=src.device) - intm_first[intm_q]
-        intm_db = order[starts[b][intm_q] + intm_local]
+    def _quadruplet_angles(self, vec: Tensor, r: Tensor, v_ba: Tensor, r_ba: Tensor,
+                           plan: Dict[str, Tensor]) -> Tuple[Tensor, Tensor]:
+        """The angles ``phi_abd`` of the intermediate triplets and the spherical harmonics of
+        ``(phi_cab, theta_cabd)`` per quadruplet."""
+        intm_q, intm_db, quad_q = plan["intm_q"], plan["intm_db"], plan["quad_q"]
+        ca = plan["q_out"]
+        db = intm_db[plan["q_intm"]]
         cos_abd = -(v_ba[intm_q] * vec[intm_db]).sum(-1) / (r_ba[intm_q] * r[intm_db])
-        # quadruplets: every interaction edge with every pair (c -> a, d -> b)
-        n_q = n_a * n_b
-        quad_q = torch.repeat_interleave(arange_int, n_q)
-        local = torch.arange(quad_q.shape[0], device=src.device) - (torch.cumsum(n_q, 0) - n_q)[quad_q]
-        nb_q = n_b[quad_q]
-        ia, ib = torch.div(local, nb_q, rounding_mode="floor"), torch.remainder(local, nb_q)
-        ca = order[starts[a][quad_q] + ia]
-        q_intm = intm_first[quad_q] + ib
-        db = intm_db[q_intm]
-        # four distinct atoms (periodic images count as distinct): c != b and
-        # d != a are the same edges; c != d compares positions
-        cd = v_ba[quad_q] + vec[db] - vec[ca]                       # x_c - x_d
-        same_cd = (src[ca] == src[db]) & ((cd * cd).sum(-1) < 1e-8)
-        keep = ((emb_ids[ca] != int_ids[quad_q]) & (emb_ids[db] != rev_all[int_ids][quad_q])
-                & ~same_cd)
-        ca, db, quad_q, q_intm = ca[keep], db[keep], quad_q[keep], q_intm[keep]
-        perm = torch.sort(ca, stable=True)[1]
-        ca, db, quad_q, q_intm = ca[perm], db[perm], quad_q[perm], q_intm[perm]
-        q_k = _group_slots(ca, num_emb)
         # angles: polar phi_cab about the axis a -> b, azimuth theta_cabd
         # from the plane of d (unsigned)
         axis = -v_ba[quad_q] / r_ba[quad_q][:, None]                # a -> b
@@ -680,21 +794,33 @@ class GemNet(InteratomicPotential):
         flat = norm_d <= 1e-9
         x = torch.where(flat, torch.zeros_like(x), x)
         y = torch.where(flat, torch.sqrt(torch.clamp(1.0 - z * z, min=1e-18)), y)
-        sph = real_spherical_harmonics(self.n_spherical - 1, x, y, z)
-        return intm_db, intm_q, r_ba, cos_abd, ca, q_intm, q_k, sph
+        return cos_abd, real_spherical_harmonics(self.n_spherical - 1, x, y, z)
+
+    def _plan(self, edge_index: Tensor, edge_vec: Tensor, num_nodes: int) -> Dict[str, Tensor]:
+        """The index work of an evaluation (see :func:`index_plan`)."""
+        quadruplets = (self.lin_rbf4 is not None and self.lin_cbf4 is not None
+                       and self.lin_sbf4 is not None)
+        return index_plan(edge_index, edge_vec, num_nodes, self.emb_cutoff, self.int_cutoff, quadruplets)
 
     def _evaluate(self, atomic_numbers: Tensor, edge_index: Tensor,
                   edge_vec: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Features, per-atom energies and (direct variants) per-atom forces."""
+        plan = self._plan(edge_index, edge_vec, atomic_numbers.shape[0])
+        return self._evaluate_planned(atomic_numbers, edge_index, edge_vec, plan, -1, -1)
+
+    def _evaluate_planned(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                          plan: Dict[str, Tensor], kmax3: int, kmax4: int
+                          ) -> Tuple[Tensor, Tensor, Tensor]:
+        """:meth:`_evaluate` on a given index plan. ``kmax3`` / ``kmax4`` are the widths of the
+        padded neighbor slots of the reference bilinear layers; ``-1`` takes them from the plan
+        (a read-back to the host), a captured step passes fixed ones."""
         num_nodes = atomic_numbers.shape[0]
         r_all = torch.linalg.norm(edge_vec, dim=-1)
-        rev_all = reverse_edges(edge_index, edge_vec)
-        emb_ids = torch.nonzero(r_all <= self.emb_cutoff).squeeze(-1)
-        in_emb = torch.full_like(r_all, -1, dtype=torch.long)
-        in_emb[emb_ids] = torch.arange(emb_ids.shape[0], device=emb_ids.device)
+        emb_ids = plan["emb_ids"]
         src, dst = edge_index[0][emb_ids], edge_index[1][emb_ids]
         vec, r = edge_vec[emb_ids], r_all[emb_ids]
-        rev = in_emb[rev_all[emb_ids]]
+        rev = plan["rev"]
+        t_out, t_in, t_k = plan["t_out"], plan["t_in"], plan["t_k"]
         num_emb = src.shape[0]
         L, N = self.n_spherical, self.n_rbf
 
@@ -704,7 +830,6 @@ class GemNet(InteratomicPotential):
         rad = self.cbf.radial(r) * env[:, None, None]                # (E, L, N)
 
         # triplets c -> a <- b: angle phi_cab, circular basis e_CBF(x_ca, phi_cab)
-        t_out, t_in, t_k = triplets(torch.stack([src, dst]), num_nodes)
         cos_cab = ((vec[t_out] * vec[t_in]).sum(-1) / (r[t_out] * r[t_in])).clamp(-1.0, 1.0)
         # the fused bilinear layer takes the basis per item, the reference padded per edge
         fast3 = (len(self.interactions) > 0 and self.interactions[0].trip.fast_active
@@ -712,7 +837,8 @@ class GemNet(InteratomicPotential):
         if fast3:
             cbf3_sph = zonal_harmonics(L - 1, cos_cab)                # (T, L)
         else:
-            kmax3 = int(t_k.max()) + 1 if t_k.shape[0] > 0 else 0
+            if kmax3 < 0:
+                kmax3 = int(t_k.max()) + 1 if t_k.shape[0] > 0 else 0
             sph3 = vec.new_zeros(num_emb, kmax3, L)
             sph3[t_out, t_k] = zonal_harmonics(L - 1, cos_cab)
             cbf3_sph = sph3.transpose(1, 2)
@@ -730,8 +856,11 @@ class GemNet(InteratomicPotential):
         intm_db, q_out, q_intm, q_k = empty_long, empty_long, empty_long, empty_long
         if (self.lin_rbf4 is not None and self.lin_cbf4 is not None
                 and self.lin_sbf4 is not None):
-            intm_db, intm_q, r_ba, cos_abd, q_out, q_intm, q_k, sph4 = self._quadruplet_geometry(
-                src, dst, vec, r, emb_ids, edge_index, edge_vec, r_all, rev_all, num_nodes)
+            int_ids = plan["int_ids"]
+            v_ba, r_ba = edge_vec[int_ids], r_all[int_ids]
+            intm_db, intm_q = plan["intm_db"], plan["intm_q"]
+            q_out, q_intm, q_k = plan["q_out"], plan["q_intm"], plan["q_k"]
+            cos_abd, sph4 = self._quadruplet_angles(vec, r, v_ba, r_ba, plan)
             # e_CBF(x_ba, phi_abd) with the interaction cutoff, per intermediate triplet
             rad_ba = self.cbf_int.radial(r_ba) * self.int_envelope(r_ba)[:, None, None]
             y_abd = zonal_harmonics(L - 1, cos_abd.clamp(-1.0, 1.0))
@@ -742,7 +871,8 @@ class GemNet(InteratomicPotential):
             if fast4:
                 sbf_sph = sph4                                           # (Q, L * L)
             else:
-                kmax4 = int(q_k.max()) + 1 if q_k.shape[0] > 0 else 0
+                if kmax4 < 0:
+                    kmax4 = int(q_k.max()) + 1 if q_k.shape[0] > 0 else 0
                 pad4 = vec.new_zeros(num_emb, kmax4, L * L)
                 pad4[q_out, q_k] = sph4
                 sbf_sph = pad4.transpose(1, 2)
@@ -829,14 +959,32 @@ class GemNet(InteratomicPotential):
             ``direct_forces``, ``"forces"`` ``(N, 3)``.
         """
         self._select_fast(int(data.edge_index.shape[1]))
-        features, node_energy, forces = self._evaluate(
-            data.atomic_numbers, data.edge_index, data.edge_vectors())
+        plan = getattr(data, "index_plan", None)
+        if plan is not None:
+            # a padded batch of a captured training step: the plan built beforehand, fixed
+            # neighbor-slot widths, the reference layers (whose shapes follow the plan alone)
+            from xnn.common.models.fast import deactivate
+            deactivate(self)
+            sizes = data.index_sizes
+            features, node_energy, forces = self._evaluate_planned(
+                data.atomic_numbers, data.edge_index, data.edge_vectors(), plan,
+                sizes["kmax3"], sizes.get("kmax4", 0))
+        else:
+            features, node_energy, forces = self._evaluate(
+                data.atomic_numbers, data.edge_index, data.edge_vectors())
         out = {"node_energy": node_energy,
                "energy": self.aggregate_energy(node_energy, data),
                "node_features": features}
         if self.direct_forces:
             out["forces"] = forces.to(data.pos.dtype)
         return out
+
+    @torch.jit.unused
+    def index_planner(self) -> "GemNetPlanner":
+        """The index plan of a captured training step (see :class:`GemNetPlanner`)."""
+        quadruplets = (self.lin_rbf4 is not None and self.lin_cbf4 is not None
+                       and self.lin_sbf4 is not None)
+        return GemNetPlanner(self.emb_cutoff, self.int_cutoff, quadruplets)
 
     @torch.jit.ignore
     def scale_factors(self) -> Dict[str, ScaleFactor]:

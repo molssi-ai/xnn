@@ -21,23 +21,24 @@ from xnn.common.models.fast import AutoPolicy
 
 #: Edge counts above which ``use_fast="auto"`` takes the kernels in evaluation
 #: mode (energy and forces). On an A100 they were faster than the reference
-#: from about 20k edges (a few hundred water atoms) on, a third of its time and
-#: under half its memory from 100k edges. A GPU in neither table takes the
-#: largest measured thresholds.
+#: from about 15k edges (a few hundred water atoms) on in float32 and 8k in
+#: float64, under half its time and memory from 100k edges. The A30, T4, V100
+#: and L40S were measured the same way; a GPU in neither table takes the A100's
+#: thresholds.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"A100": 20_000},
-    min_edges_float64={"A100": 20_000},
-    default_min_edges=20_000,
-    default_min_edges_float64=20_000,
+    min_edges={"A100": 15_000, "L40S": 12_000, "V100": 12_000, "A30": 5_000, "T4": 5_000},
+    min_edges_float64={"A100": 8_000, "L40S": 5_000, "V100": 5_000, "A30": 5_000, "T4": 2_000},
+    default_min_edges=15_000,
+    default_min_edges_float64=8_000,
 )
 
 #: The same for training mode (a step with a force loss, second derivatives
-#: included): faster from about 8k edges.
+#: included): faster from about 12k edges in float32 and 5k in float64.
 AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"A100": 8_000},
-    min_edges_float64={"A100": 8_000},
-    default_min_edges=8_000,
-    default_min_edges_float64=8_000,
+    min_edges={"A100": 12_000, "L40S": 5_000, "V100": 5_000, "A30": 5_000, "T4": 2_000},
+    min_edges_float64={"A100": 5_000, "L40S": 5_000, "V100": 5_000, "A30": 2_000, "T4": 2_000},
+    default_min_edges=12_000,
+    default_min_edges_float64=5_000,
 )
 
 

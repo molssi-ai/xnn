@@ -98,6 +98,7 @@ from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import gather_rows, glorot_orthogonal_, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 
@@ -229,7 +230,7 @@ class _Embedding(nn.Module):
         return self.act(self.lin(x))
 
 
-class _Interaction(nn.Module):
+class _Interaction(FastPathModule, nn.Module):
     """DimeNet interaction block (ICLR paper Fig. 4, middle).
 
     ``x_ji = sigma(W m_ji + b)`` and ``x_kj = sigma(W m_kj + b) o (W_RBF e_RBF(d))``
@@ -242,7 +243,9 @@ class _Interaction(nn.Module):
     Appendix D eq 12-14) and summed over ``k``. The sum is added to ``x_ji``,
     refined by ``n_before_skip`` residual blocks and a dense layer, added to
     the block input ``m_ji`` (skip connection) and refined by
-    ``n_after_skip`` residual blocks.
+    ``n_after_skip`` residual blocks. With :attr:`fast_active` (see
+    :meth:`DimeNet.set_use_fast`) the triplet sums run in the kernels of
+    :mod:`xnn.gnn.fast.dimenet`.
 
     Parameters
     ----------
@@ -257,6 +260,8 @@ class _Interaction(nn.Module):
     act : torch.nn.Module
         The activation.
     """
+
+    fast_active: bool
 
     def __init__(self, n_features: int, n_rbf: int, n_sbf: int, n_bilinear: int,
                  n_before_skip: int, n_after_skip: int, act: nn.Module,
@@ -273,12 +278,33 @@ class _Interaction(nn.Module):
         self.after_skip = nn.ModuleList([_Residual(n_features, act) for _ in range(n_after_skip)])
         self.act = act
         self.radial_gate = radial_gate
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.dimenet import supported
+        return supported(device, dtype)
+
+    @torch.jit.unused
+    def _triplet_sums_fast(self, x_kj: Tensor, gate: Tensor, s: Tensor, kj: Tensor, ji: Tensor,
+                           num_edges: int) -> Tensor:
+        """``sum_{k} sum_{b,f} s_b x_f W_{bfg}`` per edge by the neighbor-sum kernels: the sums
+        ``S[e, b, f] = sum_t s[t, b] x[kj_t, f]``, then one product with the bilinear tensor."""
+        from xnn.gnn.fast.gemnet_kernels import neighbor_sums
+        n_b, n_f, n_g = self.bilinear.shape
+        if self.radial_gate == "ji":
+            # the gate of the edge j -> i is common to all its triplets
+            sums = neighbor_sums(x_kj, s, kj, ji, num_edges) * gate[:, None, :]
+        else:
+            sums = neighbor_sums(x_kj * gate, s, kj, ji, num_edges)
+        return sums.reshape(num_edges, n_b * n_f) @ self.bilinear.reshape(n_b * n_f, n_g)
 
     def forward(self, m: Tensor, rbf: Tensor, sbf: Tensor, kj: Tensor, ji: Tensor) -> Tensor:
         x_ji = self.act(self.lin_ji(m))
         x_kj = self.act(self.lin_kj(m))
         gate = self.lin_rbf(rbf)
         s = self.lin_sbf(sbf)                                   # (T, N_bilinear)
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._finish(x_ji + self._triplet_sums_fast(x_kj, gate, s, kj, ji, m.shape[0]), m)
         # bilinear contraction per triplet: sum_{b,f} s_b x_f W_{bfg}
         if self.radial_gate == "ji":
             x_kj = gather_rows(x_kj, kj) * gather_rows(gate, ji)   # eq 4 as written: e_RBF(d_ji)
@@ -291,7 +317,10 @@ class _Interaction(nn.Module):
             proj = (x_kj * gate) @ weight                           # (E, N_bilinear * F)
             per_triplet = gather_rows(proj, kj).view(-1, n_b, n_g)  # (T, N_bilinear, F)
             msg = torch.bmm(s.unsqueeze(1), per_triplet).squeeze(1)
-        x = x_ji + scatter_sum(msg, ji, m.shape[0])
+        return self._finish(x_ji + scatter_sum(msg, ji, m.shape[0]), m)
+
+    def _finish(self, x: Tensor, m: Tensor) -> Tensor:
+        """The residual blocks around the skip connection."""
         for block in self.before_skip:
             x = block(x)
         m = m + self.act(self.lin_skip(x))
@@ -300,7 +329,7 @@ class _Interaction(nn.Module):
         return m
 
 
-class _InteractionPP(nn.Module):
+class _InteractionPP(FastPathModule, nn.Module):
     """DimeNet++ interaction block (NeurIPS-W paper Fig. 1, middle; section 2).
 
     The bilinear layer of :class:`_Interaction` is replaced by a Hadamard
@@ -309,7 +338,10 @@ class _InteractionPP(nn.Module):
     the "MLPs for the basis representations" that recover the expressiveness),
     and the triplet branch is down-projected to ``N_triplet`` features before
     the gather onto the triplets and up-projected to ``F`` after the sum over
-    ``k`` (the "embedding hierarchy"). Skip structure as in DimeNet.
+    ``k`` (the "embedding hierarchy"). Skip structure as in DimeNet. With
+    :attr:`fast_active` (see :meth:`DimeNet.set_use_fast`) the triplet sums run in
+    the kernels of :mod:`xnn.gnn.fast.dimenet` (the reference-code gate,
+    ``radial_gate="kj"``, only).
 
     Parameters
     ----------
@@ -326,6 +358,8 @@ class _InteractionPP(nn.Module):
     act : torch.nn.Module
         The activation.
     """
+
+    fast_active: bool
 
     def __init__(self, n_features: int, n_rbf: int, n_sbf: int, n_triplet: int,
                  n_basis: int, n_before_skip: int, n_after_skip: int, act: nn.Module,
@@ -344,18 +378,41 @@ class _InteractionPP(nn.Module):
         self.after_skip = nn.ModuleList([_Residual(n_features, act) for _ in range(n_after_skip)])
         self.act = act
         self.radial_gate = radial_gate
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.gnn.fast.dimenet import supported
+        # with the gate of the edge j -> i the activation acts per triplet: no edge sums
+        return self.radial_gate == "kj" and supported(device, dtype)
+
+    @torch.jit.unused
+    def _triplet_sums_fast(self, x_kj: Tensor, sbf: Tensor, kj: Tensor, ji: Tensor,
+                           num_edges: int) -> Tensor:
+        """``sum_k x[kj] o (W2 W1 a_SBF)`` per edge by the neighbor-sum kernels: the sums
+        ``S[e, b, f] = sum_t (W1 a_SBF)[t, b] x[kj_t, f]``, then ``sum_b W2[f, b] S[e, b, f]``
+        (both basis layers are bias-free)."""
+        from xnn.gnn.fast.gemnet_kernels import neighbor_sums
+        sums = neighbor_sums(x_kj, self.lin_sbf1(sbf), kj, ji, num_edges)
+        return (sums * self.lin_sbf2.weight.t()).sum(1)
 
     def forward(self, m: Tensor, rbf: Tensor, sbf: Tensor, kj: Tensor, ji: Tensor) -> Tensor:
         x_ji = self.act(self.lin_ji(m))
         x_kj = self.act(self.lin_kj(m))
         gate = self.lin_rbf2(self.lin_rbf1(rbf))
+        if self.fast_active and not torch.jit.is_scripting():
+            x_kj = self.act(self.lin_down(x_kj * gate))
+            agg = self.act(self.lin_up(self._triplet_sums_fast(x_kj, sbf, kj, ji, m.shape[0])))
+            return self._finish(x_ji + agg, m)
         if self.radial_gate == "ji":
             x_kj = self.act(self.lin_down(gather_rows(x_kj, kj) * gather_rows(gate, ji)))   # eq 4 as written
         else:
             x_kj = gather_rows(self.act(self.lin_down(x_kj * gate)), kj)   # the reference code
         msg = x_kj * self.lin_sbf2(self.lin_sbf1(sbf))
         agg = self.act(self.lin_up(scatter_sum(msg, ji, m.shape[0])))
-        x = x_ji + agg
+        return self._finish(x_ji + agg, m)
+
+    def _finish(self, x: Tensor, m: Tensor) -> Tensor:
+        """The residual blocks around the skip connection."""
         for block in self.before_skip:
             x = block(x)
         m = m + self.act(self.lin_skip(x))
@@ -410,6 +467,38 @@ class _Output(nn.Module):
         for lin in self.dense:
             h = self.act(lin(h))
         return h, self.final(h).squeeze(-1)
+
+
+class TripletPlanner:
+    """The triplets of a batch, built outside the model step for a captured training step.
+
+    A captured step (:mod:`xnn.common.train.graphed`) needs fixed shapes and no
+    host synchronization, and the triplet count of a batch is known only after
+    enumerating them. A data-loader worker therefore builds them on the CPU,
+    ``{"kj": ..., "ji": ...}`` (:func:`directed_triplets`), pads them to a fixed
+    count, and attaches them to the batch as ``index_plan``, where
+    :meth:`DimeNet.forward` takes them from. Holds no state, so the workers
+    receive it cheaply.
+    """
+
+    #: The count each plan entry indexes (for batching the plans of single structures).
+    offsets = {"kj": "edges", "ji": "edges"}
+
+    def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        kj, ji = directed_triplets(data.edge_index, data.edge_vectors().detach(), data.num_nodes)
+        return {"kj": kj, "ji": ji}
+
+    @staticmethod
+    def sizes(plan: Dict[str, Tensor]) -> Dict[str, int]:
+        """The sizes a padded batch fixes: the triplet count."""
+        return {"triplets": int(plan["kj"].shape[0])}
+
+    @staticmethod
+    def pad(plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:
+        """``plan`` filled up to ``sizes["triplets"]`` with triplets of the padding edge
+        ``dummy_edge`` (an edge between padding atoms, outside every real structure)."""
+        fill = plan["kj"].new_full((sizes["triplets"] - plan["kj"].shape[0],), dummy_edge)
+        return {"kj": torch.cat([plan["kj"], fill]), "ji": torch.cat([plan["ji"], fill])}
 
 
 @register_model("dimenet")
@@ -555,6 +644,61 @@ class DimeNet(InteratomicPotential):
             if species is None:
                 raise ValueError("species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
+        # the triplet-sum kernels (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "DimeNet":
+        """Choose the implementation of the interaction blocks' triplet sums.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of
+            :mod:`xnn.gnn.fast.dimenet` where they are available and faster for
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``; for DimeNet++ ``PP_AUTO_POLICY`` and
+            ``PP_AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            differentiable at any order and reach the weights, so force
+            training takes them as well.
+
+        Returns
+        -------
+        DimeNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def index_planner(self) -> "TripletPlanner":
+        """The index plan of a captured training step (see :class:`TripletPlanner`)."""
+        return TripletPlanner()
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the triplet-sum kernels on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.gnn.fast.dimenet import (
+            AUTO_POLICY,
+            AUTO_POLICY_TRAINING,
+            PP_AUTO_POLICY,
+            PP_AUTO_POLICY_TRAINING,
+        )
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            modules = fast_modules(self)
+            blocks = ([m for m in modules if isinstance(m, _Interaction)],
+                      [m for m in modules if isinstance(m, _InteractionPP)])
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.atom_ref.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks[0], self.use_fast, policy, like.device, like.dtype, num_edges)
+        policy = PP_AUTO_POLICY_TRAINING if self.training else PP_AUTO_POLICY
+        select(blocks[1], self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_atomic_energies(self, species, values) -> None:
@@ -605,13 +749,20 @@ class DimeNet(InteratomicPotential):
             blocks) and the per-atom energy ``(N,)``,
             ``sum_l t_i^(l) + atom_ref[Z_i]``.
         """
+        # triplets k -> j -> i (paper section 4)
+        kj, ji = directed_triplets(edge_index, edge_vec, atomic_numbers.shape[0])
+        return self._features_energy(atomic_numbers, edge_index, edge_vec, kj, ji)
+
+    def _features_energy(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                         kj: Tensor, ji: Tensor) -> Tuple[Tensor, Tensor]:
+        """:meth:`node_features_energy` on given triplets ``(kj, ji)``: index work only on the
+        device, no host synchronization (what a captured training step runs)."""
         num_nodes = atomic_numbers.shape[0]
         dst = edge_index[1]
         r = torch.linalg.norm(edge_vec, dim=-1)
         env = self.envelope(r)
         rbf = self.rbf(r) * env[:, None]                               # eq 7 x eq 8
-        # triplets k -> j -> i and the angle alpha_(kj,ji) at j (paper section 4)
-        kj, ji = directed_triplets(edge_index, edge_vec, num_nodes)
+        # the angle alpha_(kj,ji) at j
         cos_alpha = (-(gather_rows(edge_vec, kj) * gather_rows(edge_vec, ji)).sum(dim=-1)
                      / (gather_rows(r, kj) * gather_rows(r, ji)))
         cos_alpha = cos_alpha.clamp(-1.0, 1.0)
@@ -659,8 +810,18 @@ class DimeNet(InteratomicPotential):
             ``"node_features"`` (invariant per-atom features, shape
             ``(N, node_feature_dim)``).
         """
-        features, node_energy = self.node_features_energy(
-            data.atomic_numbers, data.edge_index, data.edge_vectors())
+        plan = getattr(data, "index_plan", None)
+        if plan is not None:
+            # precomputed triplets (a padded batch of a captured training step): the reference
+            # path, whose shapes follow the triplet count alone
+            from xnn.common.models.fast import deactivate
+            deactivate(self)
+            features, node_energy = self._features_energy(
+                data.atomic_numbers, data.edge_index, data.edge_vectors(), plan["kj"], plan["ji"])
+        else:
+            self._select_fast(int(data.edge_index.shape[1]))
+            features, node_energy = self.node_features_energy(
+                data.atomic_numbers, data.edge_index, data.edge_vectors())
         energy = self.aggregate_energy(node_energy, data)
         return {"node_energy": node_energy, "energy": energy, "node_features": features}
 

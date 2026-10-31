@@ -96,6 +96,24 @@ def _rows_kernel(u_ptr, order_ptr, ptr_ptr, ga_ptr, CS: tl.constexpr, CSP: tl.co
 #: Warps per program of the sums, the gradients and the row pass of the gradients.
 WARPS = {"sums": 4, "grads": 2, "rows": 2}
 
+#: Per GPU (a substring of the device name), the counts that differ from :data:`WARPS`:
+#: on a T4 two warps for the sums were faster.
+WARPS_BY_GPU = {"T4": {"sums": 2}}
+
+_warps_of: dict = {}
+
+
+def _warps(device: torch.device) -> dict:
+    """The warp counts on ``device`` (the defaults off CUDA: Triton's interpreter)."""
+    if device.type != "cuda":
+        return WARPS
+    key = device.index
+    if key not in _warps_of:
+        name = torch.cuda.get_device_name(device)
+        own = next((v for k, v in WARPS_BY_GPU.items() if k in name), {})
+        _warps_of[key] = dict(WARPS, **own)
+    return _warps_of[key]
+
 
 def _shape(a: Tensor) -> Tuple[int, int, int]:
     n, channels, shells = a.shape
@@ -108,7 +126,7 @@ def _sums(a: Tensor, g: Tensor, src: Tensor, rows: tuple) -> Tensor:
     n = a.shape[0]
     if n:
         _sums_kernel[(n,)](a, g, src, rows[0], rows[1], out, C=channels, CP=padded, S=shells,
-                           K=g.shape[-1], num_warps=WARPS["sums"])
+                           K=g.shape[-1], num_warps=_warps(a.device)["sums"])
     return out
 
 
@@ -120,9 +138,9 @@ def _grads(w: Tensor, a: Tensor, g: Tensor, src: Tensor, rows: tuple) -> Tuple[T
     n = a.shape[0]
     if n:
         _grads_kernel[(n,)](w, g, a, src, rows[0], rows[1], u, gg, C=channels, CP=padded, S=shells,
-                            K=g.shape[-1], num_warps=WARPS["grads"])
+                            K=g.shape[-1], num_warps=_warps(a.device)["grads"])
         _rows_kernel[(n,)](u, rows[2], rows[3], ga, CS=channels * shells,
-                           CSP=next_power_of_two(channels * shells, 16), num_warps=WARPS["rows"])
+                           CSP=next_power_of_two(channels * shells, 16), num_warps=_warps(a.device)["rows"])
     return ga, gg
 
 
@@ -174,6 +192,26 @@ class ShellGradsFunction(torch.autograd.Function):
         return dw, da, dg, None, None, None
 
 
+#: Whether channels just above a power of two run in two passes (see :func:`_split_channels`).
+#: Off: on an A100 the extra launches cost more than the padding saves at every size measured.
+SPLIT_CHANNELS = False
+
+
+def _split_channels(channels: int) -> int:
+    """The channels of a first pass when two passes pad less than one, else 0.
+
+    The kernels pad the channels to a power of two: 17 channels (the features
+    and the charge) take a tile of 32. Above a power of two by little, the
+    channels up to it and the rest pad to far fewer in two passes."""
+    head = 1 << (channels.bit_length() - 1)
+    rest = channels - head
+    if not SPLIT_CHANNELS or rest == 0 or head < 2:
+        return 0
+    one = next_power_of_two(channels, 2)
+    two = head + next_power_of_two(rest, 2)
+    return head if 2 * one >= 3 * two else 0
+
+
 def shell_sums(a: Tensor, g: Tensor, edge_index: Tensor) -> Tensor:
     """The four shell sums of the AIMNet2 convolution (see :mod:`xnn.gnn.fast.aimnet2`).
 
@@ -196,4 +234,9 @@ def shell_sums(a: Tensor, g: Tensor, edge_index: Tensor) -> Tensor:
     src, dst = edge_index[0].contiguous(), edge_index[1].contiguous()
     # the passes of one evaluation pass the same edge index: one sort for all of them
     rows = orderings(src, dst, a.shape[0], key=edge_index)
-    return ShellSumsFunction.apply(a.contiguous(), g.contiguous(), src, dst, rows)
+    g = g.contiguous()
+    head = _split_channels(a.shape[1])
+    if head:
+        return torch.cat([ShellSumsFunction.apply(a[:, :head].contiguous(), g, src, dst, rows),
+                          ShellSumsFunction.apply(a[:, head:].contiguous(), g, src, dst, rows)], dim=1)
+    return ShellSumsFunction.apply(a.contiguous(), g, src, dst, rows)

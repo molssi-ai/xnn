@@ -6,7 +6,7 @@ The neighbor sums of the efficient bilinear layer,
 ``S[e, a, f] = sum_{t: out_t = e} s[t, a] x[in_t, f]``, split the items of every
 output edge (triplets or quadruplets, in output order) into chunks of at most
 :data:`CHUNK`: one program per chunk forms the chunk's product ``s^T x`` (a
-matrix-unit tile, IEEE float32 or float64) and one program per output adds
+matrix-unit tile in IEEE float32, multiply-adds in float64) and one program per output adds
 its chunks' partial sums in order, so long rows (quadruplets) occupy the whole
 GPU. The gradients take one program per chunk as well (the output's gradient
 row read once): per item ``gs[t, a] = sum_f w[out_t, a, f] x[in_t, f]`` and the

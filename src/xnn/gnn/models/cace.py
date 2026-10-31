@@ -44,13 +44,11 @@ filter parameters; the shared radial transform applied both to the initial
 ``A`` basis and to the aggregated ``Bchi`` messages; readout = linear +
 [32, 16] SiLU MLP.
 
-Unlike the other xnn GNNs this model has no TorchScript/LAMMPS export path
--- upstream CACE has none either (MD runs through the ASE calculator, which
-uses the regular eager ``forward``).
+The tensor core (:meth:`CACE.node_features_energy`) is TorchScript-compatible,
+so the model exports to LAMMPS like the other xnn GNNs (upstream CACE runs MD
+through its ASE calculator only).
 """
-from __future__ import annotations
-
-from typing import Callable, List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -211,14 +209,20 @@ class _Symmetrizer(nn.Module):
         n, r, _, c = node_feat_a.shape
         out = node_feat_a.new_zeros(n, r, self.n_features, c)
         out[:, :, 0, :] = node_feat_a[:, :, 0, :]
-        for nu in (2, 3, 4):
-            idx = getattr(self, f"_idx{nu}")
-            if idx.numel() == 0:
-                continue
-            prods = node_feat_a[:, :, idx, :].prod(dim=3)  # (N, R, terms, C)
-            prods = prods * getattr(self, f"_pref{nu}")[None, None, :, None]
-            out.index_add_(2, getattr(self, f"_out{nu}"), prods)
+        # the body orders nu = 2, 3, 4 (named buffers: TorchScript takes no computed attribute names)
+        self._add(out, node_feat_a, self._idx2, self._pref2, self._out2)
+        self._add(out, node_feat_a, self._idx3, self._pref3, self._out3)
+        self._add(out, node_feat_a, self._idx4, self._pref4, self._out4)
         return out
+
+    @staticmethod
+    def _add(out: Tensor, node_feat_a: Tensor, idx: Tensor, pref: Tensor, group: Tensor) -> None:
+        """Add the products of one body order onto their output features."""
+        if idx.numel() == 0:
+            return
+        prods = node_feat_a[:, :, idx, :].prod(dim=3)  # (N, R, terms, C)
+        prods = prods * pref[None, None, :, None]
+        out.index_add_(2, group, prods)
 
 
 class _SharedRadialTransform(nn.Module):
@@ -319,6 +323,7 @@ class _MessageAr(nn.Module):
             out.append(part * decay[:, :, l:l + 1])
         return torch.cat(out, dim=2)
 
+    @torch.jit.unused
     def summed_fast(self, node_feat_a: Tensor, lengths: Tensor, envelope: Tensor,
                     edge_index: Tensor) -> Tensor:
         """The messages summed onto their receivers by the fused kernels, ``(N, R, L, C)``:
@@ -379,6 +384,7 @@ class _EdgeBasisSums(FastPathModule, nn.Module):
         from xnn.gnn.fast.cace import supported
         return supported(device, dtype)
 
+    @torch.jit.unused
     def forward(self, radial: Tensor, angular: Tensor, sender_embed: Tensor, receiver_embed: Tensor,
                 receiver: Tensor, items: Tensor, num_nodes: int) -> Tensor:
         """``(N, n_rbf, L, C)`` from ``radial (E, n_rbf)``, ``angular (E, L)``, the (weighted)
@@ -425,49 +431,37 @@ class _CaceInteraction(nn.Module):
         self.message_bchi = (_MessageBchi(n_b_flat)
                              if "Bchi" in message_types else None)
 
-    def forward(self, node_feat_a: Tensor, node_feat_b: Tensor,
-                edge_attr: Optional[Tensor], lengths: Tensor, envelope: Tensor,
-                edge_index: Tensor, radial_transform: nn.Module,
-                chi_sums: Optional[Callable[[Tensor], Tensor]] = None, fast: bool = False) -> Tensor:
+    def forward(self, node_feat_a: Tensor, bchi: Optional[Tensor], lengths: Tensor,
+                envelope: Tensor, edge_index: Tensor, fast: bool = False) -> Tensor:
         """Compute the updated ``A`` features ``(N, R, L, C)``.
 
         Parameters
         ----------
-        node_feat_a, node_feat_b : Tensor
-            Current ``A`` ``(N, R, L, C)`` and ``B`` ``(N, R, n_B, C)``.
-        edge_attr : Tensor
-            Layer-0 edge basis ``chi`` with raw radial channels,
-            ``(E, n_rbf, L, C)``.
+        node_feat_a : Tensor
+            Current ``A`` ``(N, R, L, C)``.
+        bchi : Tensor or None
+            The aggregated ``Bchi`` messages after the model's shared radial
+            coupling (built by the model, :meth:`CACE.node_features_energy`),
+            ``None`` without ``Bchi`` messages.
         lengths, envelope : Tensor
             Edge lengths and cutoff-envelope values, ``(E,)``.
         edge_index : Tensor
             ``(2, E)`` sender/receiver indices.
-        radial_transform : nn.Module
-            The model's shared radial coupling, applied to the aggregated
-            ``Bchi`` messages (raw radial -> mixed radial channels).
-        chi_sums : callable, optional
-            The fused sums of ``chi`` weighted per sender (fast path): given
-            the weights ``(N, 1)``, the aggregated ``Bchi`` messages; then
-            ``edge_attr`` is not used.
         fast : bool, optional
             The ``Ar`` messages summed by the fused kernels.
         """
         sender, receiver = edge_index[0], edge_index[1]
         n_nodes = node_feat_a.shape[0]
         new_a = torch.zeros_like(node_feat_a)
-        if self.message_ar is not None:
-            if fast:
-                new_a = new_a + self.message_ar.summed_fast(node_feat_a, lengths, envelope, edge_index)
+        message_ar = self.message_ar
+        if message_ar is not None:
+            if fast and not torch.jit.is_scripting():
+                new_a = new_a + message_ar.summed_fast(node_feat_a, lengths, envelope, edge_index)
             else:
-                messages = self.message_ar(node_feat_a, lengths, envelope, sender)
+                messages = message_ar(node_feat_a, lengths, envelope, sender)
                 new_a = new_a + scatter_sum(messages, receiver, n_nodes)
-        if self.message_bchi is not None:
-            if chi_sums is not None:
-                summed = chi_sums(self.message_bchi.h(node_feat_b.flatten(1)))
-            else:
-                assert edge_attr is not None
-                summed = scatter_sum(self.message_bchi(node_feat_b, edge_attr, sender), receiver, n_nodes)
-            new_a = new_a + radial_transform(summed)
+        if bchi is not None:
+            new_a = new_a + bchi
         new_a = new_a * self.mp_norm
         if self.memory is not None:
             new_a = new_a + self.memory(node_feat_a)
@@ -620,8 +614,9 @@ class CACE(GNNPotential):
         if atomic_energies is not None:
             self.set_atomic_energies(atomic_energies)
 
+    @torch.jit.export
     def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
-                             edge_vec: Tensor) -> tuple[Tensor, Tensor]:
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
         """Tensor core: invariant features and per-atom energies.
 
         Parameters
@@ -644,7 +639,7 @@ class CACE(GNNPotential):
         """
         n_nodes = atomic_numbers.shape[0]
         sender, receiver = edge_index[0], edge_index[1]
-        lengths = edge_vec.norm(dim=-1)
+        lengths = torch.linalg.norm(edge_vec, dim=-1)
         unit_vec = edge_vec / (lengths + 1e-9).unsqueeze(-1)
 
         # edge type T = theta_i (x) theta_j (paper eq 1)
@@ -653,17 +648,14 @@ class CACE(GNNPotential):
         radial = self.rbf(lengths) * envelope.unsqueeze(-1)
         angular = self.angular(unit_vec)
         edge_attr: Optional[Tensor] = None
-        chi_sums: Optional[Callable[[Tensor], Tensor]] = None
-        if self.edge_sums.fast_active:
+        fast = self.edge_sums.fast_active and not torch.jit.is_scripting()
+        theta_sender = radial.new_zeros(0)
+        theta_receiver_node = radial.new_zeros(0)
+        if fast:
             # the sums of chi by the fused kernels, chi itself never formed
             theta_sender = gather_rows(one_hot @ self.embed_sender, sender)
             theta_receiver_node = one_hot @ self.embed_receiver
-            items = torch.arange(sender.shape[0], device=sender.device)
-
-            def chi_sums(weight: Optional[Tensor] = None) -> Tensor:
-                embed = theta_sender if weight is None else theta_sender * gather_rows(weight, sender)
-                return self.edge_sums(radial, angular, embed, theta_receiver_node, receiver, items, n_nodes)
-            summed = chi_sums()
+            summed = self._chi_sums(radial, angular, theta_sender, theta_receiver_node, edge_index, None)
         else:
             theta_sender = (one_hot @ self.embed_sender)[sender]
             theta_receiver = (one_hot @ self.embed_receiver)[receiver]
@@ -679,21 +671,43 @@ class CACE(GNNPotential):
         node_feat_a = self.radial_transform(summed)
         node_feats = [self.symmetrizer(node_feat_a)]
         for interaction in self.interactions:
-            node_feat_a = interaction(node_feat_a, node_feats[-1], edge_attr,
-                                      lengths, envelope, edge_index,
-                                      self.radial_transform, chi_sums, chi_sums is not None)
+            bchi: Optional[Tensor] = None
+            message_bchi = interaction.message_bchi
+            if message_bchi is not None:
+                # the Bchi messages summed onto the receivers, then the shared radial coupling
+                if fast:
+                    weight = message_bchi.h(node_feats[-1].flatten(1))
+                    raw = self._chi_sums(radial, angular, theta_sender, theta_receiver_node, edge_index, weight)
+                else:
+                    assert edge_attr is not None
+                    raw = scatter_sum(message_bchi(node_feats[-1], edge_attr, sender), receiver, n_nodes)
+                bchi = self.radial_transform(raw)
+            node_feat_a = interaction(node_feat_a, bchi, lengths, envelope, edge_index, fast)
             node_feats.append(self.symmetrizer(node_feat_a))
 
         features = torch.stack(node_feats, dim=-1).flatten(1)
         energy = self.readout_mlp(features) + self.readout_linear(features)
         return features, energy.squeeze(-1) + self.atom_ref(atomic_numbers).squeeze(-1)
 
+    @torch.jit.unused
+    def _chi_sums(self, radial: Tensor, angular: Tensor, theta_sender: Tensor,
+                  theta_receiver_node: Tensor, edge_index: Tensor, weight: Optional[Tensor]) -> Tensor:
+        """The sums of ``chi`` onto the receivers by the fused kernels, weighted per sender
+        when ``weight`` ``(N, 1)`` is given (the ``Bchi`` messages)."""
+        sender, receiver = edge_index[0], edge_index[1]
+        embed = theta_sender if weight is None else theta_sender * gather_rows(weight, sender)
+        items = torch.arange(sender.shape[0], device=sender.device)
+        return self.edge_sums(radial, angular, embed, theta_receiver_node, receiver, items,
+                              theta_receiver_node.shape[0])
+
+    @torch.jit.export
     def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
                     edge_vec: Tensor) -> Tensor:
         """Per-atom energies from raw graph tensors (thin wrapper over
         :meth:`node_features_energy`)."""
         return self.node_features_energy(atomic_numbers, edge_index, edge_vec)[1]
 
+    @torch.jit.unused
     def set_use_fast(self, use_fast) -> "CACE":
         """Choose the implementation of the edge-basis sums.
 
@@ -718,6 +732,7 @@ class CACE(GNNPotential):
         self.use_fast = resolve_use_fast(use_fast)
         return self
 
+    @torch.jit.unused
     def _select_fast(self, num_edges: int) -> None:
         """Switch the fused edge-basis sums on or off for one evaluation."""
         from xnn.common.models.fast import fast_modules, select
@@ -730,6 +745,7 @@ class CACE(GNNPotential):
         policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
         select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict per-node and total energy for an atomic graph.
 
