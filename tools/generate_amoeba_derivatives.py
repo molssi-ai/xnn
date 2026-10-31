@@ -11,7 +11,7 @@ another device function becomes a call of its tangent twin, specialized to the a
 tangents. Inexact constants of the derivative rules come from the scope of the function (the derivative of
 ``erfc`` takes ``inv_sqrt_pi``), never from float32 literals.
 
-    python tools/generate_amoeba_derivatives.py [--out src/xnn/ffnn/models/amoeba_tangents.py]
+    python tools/generate_amoeba_derivatives.py [--target amoeba|classical] [--out <module>]
 """
 import argparse
 import ast
@@ -104,20 +104,126 @@ def _with_pointer(node, new: str):
     return node
 
 
+def _boolean(e, bools: set) -> bool:
+    """Whether ``e`` is boolean-valued: a comparison, a known boolean, a negation of one, or a bitwise
+    combination with one."""
+    if isinstance(e, ast.Compare):
+        return True
+    if isinstance(e, ast.Name):
+        return e.id in bools
+    if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.Invert, ast.Not)):
+        return _boolean(e.operand, bools)
+    if isinstance(e, ast.BinOp) and isinstance(e.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+        # the kernels combine masks bitwise: one boolean side makes the combination a mask
+        return _boolean(e.left, bools) or _boolean(e.right, bools)
+    return False
+
+
+class _SplitTuples(ast.NodeTransformer):
+    """``a, b = e1, e2`` as single assignments: in order where no element reads a name assigned before it,
+    through temporaries otherwise."""
+
+    count = 0
+
+    def visit_Assign(self, node):
+        tgt = node.targets[0]
+        if not (isinstance(tgt, ast.Tuple) and isinstance(node.value, ast.Tuple)
+                and len(tgt.elts) == len(node.value.elts) and all(isinstance(t, ast.Name) for t in tgt.elts)):
+            return node
+        names = [t.id for t in tgt.elts]
+        reads = [{n.id for n in ast.walk(v) if isinstance(n, ast.Name)} for v in node.value.elts]
+        if all(not (reads[j] & set(names[:j])) for j in range(len(names))):
+            return [ast.Assign(targets=[ast.Name(id=n, ctx=ast.Store())], value=v, lineno=0)
+                    for n, v in zip(names, node.value.elts)]
+        _SplitTuples.count += 1
+        tmp = [f"_tup{_SplitTuples.count}_{j}" for j in range(len(names))]
+        return ([ast.Assign(targets=[ast.Name(id=t, ctx=ast.Store())], value=v, lineno=0)
+                 for t, v in zip(tmp, node.value.elts)]
+                + [ast.Assign(targets=[ast.Name(id=n, ctx=ast.Store())], value=_name(t), lineno=0)
+                   for n, t in zip(names, tmp)])
+
+
+class _Unroll(ast.NodeTransformer):
+    """``for j in tl.static_range(a, b)`` with ``b`` an expression of the compile-time bounds ``bounds`` (name ->
+    largest value) as straight-line blocks ``if j < b:`` for every ``j`` up to the largest ``b`` (Triton
+    compiles each guard away), so the reverse sweep sees no loop. Loops over other bounds stay."""
+
+    def __init__(self, bounds: dict):
+        self.bounds = bounds
+
+    def _value(self, node, largest: bool):
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in self.bounds and largest:
+            return self.bounds[node.id]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            a, b = self._value(node.left, largest), self._value(node.right, largest)
+            if a is not None and b is not None:
+                return a + b if isinstance(node.op, ast.Add) else a - b
+        return None
+
+    def visit_For(self, node):
+        it = node.iter
+        if not (isinstance(it, ast.Call) and _dotted(it.func).endswith("static_range")
+                and isinstance(node.target, ast.Name) and not node.orelse):
+            return self.generic_visit(node)
+        start = it.args[0] if len(it.args) == 2 else ast.Constant(value=0)
+        stop = it.args[-1]
+        lo, hi = self._value(start, False), self._value(stop, True)
+        if lo is None or hi is None:
+            return self.generic_visit(node)
+        exact = self._value(stop, False) is not None
+        out = []
+        for v in range(lo, hi):
+            body = self._visit_all([_Substitute(node.target.id, v).visit(copy.deepcopy(b)) for b in node.body])
+            out.extend(body if exact else [ast.If(test=ast.Compare(left=ast.Constant(value=v), ops=[ast.Lt()],
+                                                                   comparators=[copy.deepcopy(stop)]),
+                                                  body=body, orelse=[])])
+        return out
+
+    def _visit_all(self, stmts):
+        res = []
+        for st in stmts:
+            r = self.visit(st)
+            res.extend(r if isinstance(r, list) else [r])
+        return res
+
+
+class _Substitute(ast.NodeTransformer):
+    """A loop variable as its value."""
+
+    def __init__(self, name: str, value: int):
+        self.name, self.value = name, value
+
+    def visit_Name(self, node):
+        if node.id == self.name and isinstance(node.ctx, ast.Load):
+            return ast.Constant(value=self.value)
+        return node
+
+
 class Registry:
     """The device functions known to the transformation and their generated tangent twins."""
 
-    def __init__(self, sources: dict):
+    def __init__(self, sources: dict, bounds: dict = None, bool_aware: bool = False):
+        self.bounds = bounds
+        self.bool_aware = bool_aware
         self.defs = {}            # name -> FunctionDef (as written)
         self.module = {}          # name -> the module prefix its callers use (e.g. "lad.")
-        for prefix, src in sources.items():
-            tree = ast.parse(textwrap.dedent(src))
-            for node in tree.body:
-                if isinstance(node, ast.FunctionDef):
-                    self.defs[node.name] = node
-                    self.module[node.name] = prefix
+        for prefix, entries in sources.items():
+            for src, only in (entries if isinstance(entries, list) else [(entries, None)]):
+                self._parse(prefix, src, only)
         self.out = {}             # (name, mask) -> generated FunctionDef
         self.order = []
+
+    def _parse(self, prefix: str, src: str, only):
+        """Register the functions of ``src`` (those named in ``only``, or all) under ``prefix``."""
+        tree = _SplitTuples().visit(ast.parse(textwrap.dedent(src)))
+        if self.bounds:
+            tree = ast.fix_missing_locations(_Unroll(self.bounds).visit(tree))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and (only is None or node.name in only):
+                self.defs[node.name] = node
+                self.module[node.name] = prefix
 
     def known(self, call: ast.Call):
         name = _dotted(call.func)
@@ -290,6 +396,25 @@ class Tangent:
         if short == "exp":
             t = self.d(e.args[0])
             return ZERO if t is ZERO else _mul(copy.deepcopy(e), t)
+        if short == "log":
+            t = self.d(e.args[0])
+            return ZERO if t is ZERO else _bin(t, ast.Div(), copy.deepcopy(e.args[0]))
+        if short == "acos":
+            u = e.args[0]
+            t = self.d(u)
+            if t is ZERO:
+                return ZERO
+            root = _call("tl.sqrt", _sub(_num(1.0), _mul(copy.deepcopy(u), copy.deepcopy(u))))
+            return _neg(_bin(t, ast.Div(), root))
+        if short == "atan2":
+            y, x = e.args
+            ty, tx = self.d(y), self.d(x)
+            if ty is ZERO and tx is ZERO:
+                return ZERO
+            num = _sub(_mul(copy.deepcopy(x), ty) if ty is not ZERO else _num(0.0),
+                       _mul(copy.deepcopy(y), tx) if tx is not ZERO else _num(0.0))
+            den = _add(_mul(copy.deepcopy(x), copy.deepcopy(x)), _mul(copy.deepcopy(y), copy.deepcopy(y)))
+            return _bin(num, ast.Div(), den)
         if short == "erfc":
             u = e.args[0]
             t = self.d(u)
@@ -570,6 +695,7 @@ class Reverse:
         self.k = 0
         self.alias = {}           # SSA name -> the parameter pointer it addresses
         self.varied = set()
+        self.bools = set()        # SSA names of boolean values (with the registry's bool_aware)
 
     def fresh(self, name):
         self.k += 1
@@ -619,6 +745,10 @@ class Reverse:
             self.alias[new] = self.param_base(e)
             out.append(ast.Assign(targets=[ast.Name(id=new + "_g", ctx=ast.Store())],
                                   value=_with_pointer(e, self.grad_of(self.param_base(e))), lineno=0))
+            return out
+        if self.reg.bool_aware and _boolean(e, self.bools):
+            # a comparison or a combination of them: no derivative, and nothing varies through it
+            self.bools.add(new)
             return out
         if self.is_param_load(e) or (_loads(e) & self.varied):
             self.varied.add(new)
@@ -845,8 +975,12 @@ class Reverse:
                 gbase = base + "_g" if base in self.alias else self.grad_of(base)
                 kw = {k.arg: k.value for k in s.value.keywords}
                 mask = {"mask": copy.deepcopy(kw["mask"])} if "mask" in kw else {}
+                adj = _name(tgt.id + "_b")
+                if "mask" not in kw:
+                    # a scalar parameter (an unmasked load): its adjoint summed over the block's lanes
+                    adj = _call("tl.sum", adj, _num(0))
                 return [ast.Expr(value=_call("tl.atomic_add", _with_pointer(s.value.args[0], gbase),
-                                             _name(tgt.id + "_b"), **mask, sem=ast.Constant(value="relaxed")))]
+                                             adj, **mask, sem=ast.Constant(value="relaxed")))]
             return self.accumulate(s.value, _name(tgt.id + "_b"))
         return []
 
@@ -904,12 +1038,25 @@ from triton.language.extra import libdevice
 '''
 
 
-def generate(requests, kernels=(), reverse=(), reverse_tangents=()) -> str:
+def generate(requests, kernels=(), reverse=(), reverse_tangents=(), target="amoeba", bool_aware=False) -> str:
     """The module source for the tangent twins ``requests`` ((function name, mask) pairs) and the tangent
-    kernels ``kernels`` ((kernel name, pointers with tangents) pairs)."""
+    kernels ``kernels`` ((kernel name, pointers with tangents) pairs) of ``target`` (``"amoeba"``: the AMOEBA
+    and HIPPO kernels; ``"classical"``: the kernels of the classical force fields)."""
     models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
-    sources = {"": (models / "amoeba_kernels.py").read_text(), "lad.": (models / "amoeba_ladders.py").read_text()}
-    reg = Registry(sources)
+    if target == "reaxff":
+        # the ReaxFF kernels, and the vector device function they share with the classical kernels
+        sources = {"": [((models / "reaxff_kernels.py").read_text(), None),
+                        ((models / "classical_kernels.py").read_text(), {"_vec"})]}
+        header, home, bounds, bool_aware = REAXFF_HEADER, ".reaxff_kernels", None, True
+    elif target == "classical":
+        # the classical kernels, and the segmented adds they import from the AMOEBA kernels
+        sources = {"": [((models / "classical_kernels.py").read_text(), None),
+                        ((models / "amoeba_kernels.py").read_text(), {"_add_sorted"})]}
+        header, home, bounds = CLASSICAL_HEADER, ".classical_kernels", CLASSICAL_BOUNDS
+    else:
+        sources = {"": (models / "amoeba_kernels.py").read_text(), "lad.": (models / "amoeba_ladders.py").read_text()}
+        header, home, bounds = HEADER, ".amoeba_kernels", None
+    reg = Registry(sources, bounds, bool_aware)
     for name, mask in requests:
         reg.tangent(name, tuple(mask))
     for name, pointers in kernels:
@@ -934,13 +1081,15 @@ def generate(requests, kernels=(), reverse=(), reverse_tangents=()) -> str:
         parts.append(ast.unparse(mod).strip("\n"))
     # the untransformed kernel helpers the tangents call
     helpers = sorted(n for n in used - defined if n in reg.defs and reg.module[n] == "")
-    imports = f"from .amoeba_kernels import {', '.join(helpers)}\n" if helpers else ""
+    imports = f"from {home} import {', '.join(helpers)}\n" if helpers else ""
+    if len(imports) > 121:
+        imports = f"from {home} import (\n" + "".join(f"    {h},\n" for h in helpers) + ")\n"
     if any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "lad"
            for key in reg.order for n in ast.walk(reg.out[key])):
         imports = "from . import amoeba_ladders as lad\n" + imports
 
     # the header ends with a blank line after the third-party imports
-    return HEADER + (imports + "\n\n" if imports else "\n") + "\n\n\n".join(parts) + "\n"
+    return header + (imports + "\n\n" if imports else "\n") + "\n\n\n".join(parts) + "\n"
 
 
 # the tangent twins the kernels need (grown with the kernels that use them)
@@ -977,10 +1126,82 @@ REVERSE_TANGENTS = [
     ("_amoeba_forward_r", _MULTIPOLES + ("off_ptr", "par_ptr_g")),
 ]
 
+CLASSICAL_HEADER = '''"""Derivatives of the Triton kernels of the classical force fields (OPLS, AMBER, CHARMM, DREIDING)
+
+Generated by ``tools/generate_amoeba_derivatives.py --target classical`` (do not edit by hand; regenerate).
+``<kernel>_t`` is the tangent of a kernel along the positions (loads of ``pos_ptr`` carry the tangents
+``pos_ptr_t``, its outputs write their tangents to ``<output>_t``); ``<kernel>_r`` is the adjoint of a
+forward kernel with respect to its parameter arrays (their gradients into ``<param>_g`` from the incoming
+gradients of the energies); ``<kernel>_r_t`` is that adjoint's tangent along the positions.
+"""
+# ruff: noqa: E501, F841
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+'''
+
+# the largest compile-time loop bounds of the classical kernels (series terms per torsion, multiplicity); the
+# loops are unrolled to them, and the training kernels refuse larger ones
+CLASSICAL_BOUNDS = {"S": 6, "NMAX": 6}
+
+# per kind: the forward kernel, its output, its float parameter arrays, the backward kernel
+CLASSICAL_KINDS = [
+    ("_pairs_forward", "e_ptr", ("q_ptr", "tab_ptr"), "_pairs_backward"),
+    ("_bonds_forward", "out_ptr", ("k_ptr", "r0_ptr"), "_bonds_backward"),
+    ("_morses_forward", "out_ptr", ("d_ptr", "al_ptr", "r0_ptr"), "_morses_backward"),
+    ("_angles_forward", "out_ptr", ("k_ptr", "x0_ptr"), "_angles_backward"),
+    ("_torsions_forward", "out_ptr", ("k_ptr", "cg_ptr", "sg_ptr", "c0_ptr"), "_torsions_backward"),
+    ("_inversions_forward", "out_ptr", ("k_ptr", "c0_ptr"), "_inversions_backward"),
+    ("_hbonds_forward", "out_ptr", ("d0_ptr", "r0_ptr"), "_hbonds_backward"),
+]
+CLASSICAL_KERNELS = ([(fwd, ("pos_ptr", out)) for fwd, out, _, _ in CLASSICAL_KINDS]
+                     + [(bwd, ("pos_ptr", "gpos_ptr")) for _, _, _, bwd in CLASSICAL_KINDS])
+CLASSICAL_REVERSE = [(fwd, params, {out: "g_ptr"}) for fwd, out, params, _ in CLASSICAL_KINDS]
+CLASSICAL_REVERSE_TANGENTS = [(fwd + "_r", ("pos_ptr",) + tuple(p + "_g" for p in params))
+                              for fwd, _, params, _ in CLASSICAL_KINDS]
+
+REAXFF_HEADER = '''"""Derivatives of the Triton kernels of ReaxFF (the fast path of xnn.ffnn.models.ReaxFF)
+
+Generated by ``tools/generate_amoeba_derivatives.py --target reaxff`` (do not edit by hand; regenerate).
+``<kernel>_r`` is the adjoint of a forward kernel with respect to the arrays it loads that are named in the
+request (the positions, the charges, the parameter tables): their gradients into ``<array>_g`` from the
+incoming gradients of the kernel's outputs.
+"""
+# ruff: noqa: E501, F401, F841
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+'''
+
+# the adjoints of the ReaxFF forward kernels: (kernel, the loaded arrays to differentiate, output -> incoming)
+REAXFF_REVERSE = [
+    ("_nonbonded_forward", ("pos_ptr", "q_ptr", "tab_ptr"), {"e_ptr": "g_ptr"}),
+    ("_bond_corrections_forward", ("bop_ptr", "bpi_ptr", "bpp_ptr", "dp_ptr", "spt_ptr", "tab_ptr", "gen_ptr"),
+     {"bo0_ptr": "g_bo0_ptr", "bosi_ptr": "g_bosi_ptr", "bopi_ptr": "g_bopi_ptr", "bopp_ptr": "g_bopp_ptr",
+      "e_ptr": "g_ptr"}),
+    ("_angles_forward", ("bv_ptr", "br_ptr", "bo_ptr", "sbo_ptr", "dang_ptr", "f9_ptr", "sig_ptr", "del_ptr",
+                         "ang_ptr", "sp_ptr", "gen_ptr"), {"out_ptr": "g_ptr"}),
+    ("_torsions_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "dang_ptr", "tor_ptr", "gen_ptr"),
+     {"out_ptr": "g_ptr"}),
+    ("_hbonds_forward", ("bv_ptr", "br_ptr", "bo_ptr", "ev_ptr", "er_ptr", "hb_ptr"), {"out_ptr": "g_ptr"}),
+]
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    default = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models/amoeba_tangents.py"
-    ap.add_argument("--out", default=str(default))
+    models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
+    ap.add_argument("--target", choices=("amoeba", "classical", "reaxff"), default="amoeba")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    Path(args.out).write_text(generate(REQUESTS, KERNELS, REVERSE, REVERSE_TANGENTS))
-    print("wrote", args.out)
+    if args.target == "reaxff":
+        out = args.out or str(models / "reaxff_tangents.py")
+        text = generate((), (), REAXFF_REVERSE, (), target="reaxff")
+    elif args.target == "classical":
+        out = args.out or str(models / "classical_tangents.py")
+        text = generate((), CLASSICAL_KERNELS, CLASSICAL_REVERSE, CLASSICAL_REVERSE_TANGENTS, target="classical")
+    else:
+        out = args.out or str(models / "amoeba_tangents.py")
+        text = generate(REQUESTS, KERNELS, REVERSE, REVERSE_TANGENTS)
+    Path(out).write_text(text)
+    print("wrote", out)
