@@ -61,7 +61,8 @@ def setup(upstream_path, warp=False):
                 keep = i != j
                 i, j, shift = i[keep], j[keep], shift[keep]
             vec = pos[i] - pos[j] + shift
-            return torch.stack([i, j]), vec.norm(dim=-1), vec
+            # a copy, as the reference search returns: ET normalizes its edge vectors in place
+            return torch.stack([i, j]), vec.norm(dim=-1), vec.clone()
         n = pos.shape[0]
         if batch is None:
             batch = torch.zeros(n, dtype=torch.long, device=pos.device)
