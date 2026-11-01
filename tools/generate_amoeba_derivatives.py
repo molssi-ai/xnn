@@ -393,6 +393,15 @@ class Tangent:
         if short == "sqrt":
             t = self.d(e.args[0])
             return ZERO if t is ZERO else _bin(_mul(_num(0.5), t), ast.Div(), copy.deepcopy(e))
+        if short == "abs":
+            u = e.args[0]
+            t = self.d(u)
+            if t is ZERO:
+                return ZERO
+            # the sign of the argument times its tangent, zero at zero (autograd's convention)
+            pos = ast.Compare(left=copy.deepcopy(u), ops=[ast.Gt()], comparators=[_num(0.0)])
+            neg = ast.Compare(left=copy.deepcopy(u), ops=[ast.Lt()], comparators=[_num(0.0)])
+            return _call("tl.where", pos, t, _call("tl.where", neg, _neg(copy.deepcopy(t)), _num(0.0)))
         if short == "exp":
             t = self.d(e.args[0])
             return ZERO if t is ZERO else _mul(copy.deepcopy(e), t)
@@ -1177,15 +1186,19 @@ from triton.language.extra import libdevice
 
 # the adjoints of the ReaxFF forward kernels: (kernel, the loaded arrays to differentiate, output -> incoming)
 REAXFF_REVERSE = [
-    ("_nonbonded_forward", ("pos_ptr", "q_ptr", "tab_ptr"), {"e_ptr": "g_ptr"}),
+    ("_nonbonded_forward", ("pos_ptr", "cell_ptr", "q_ptr", "tab_ptr"), {"e_ptr": "g_ptr"}),
     ("_bond_corrections_forward", ("bop_ptr", "bpi_ptr", "bpp_ptr", "dp_ptr", "spt_ptr", "tab_ptr", "gen_ptr"),
      {"bo0_ptr": "g_bo0_ptr", "bosi_ptr": "g_bosi_ptr", "bopi_ptr": "g_bopi_ptr", "bopp_ptr": "g_bopp_ptr",
       "e_ptr": "g_ptr"}),
-    ("_angles_forward", ("bv_ptr", "br_ptr", "bo_ptr", "sbo_ptr", "dang_ptr", "f9_ptr", "sig_ptr", "del_ptr",
+    ("_angles_forward", ("bv_ptr", "br_ptr", "bo_ptr", "fbo_ptr", "sbo_ptr", "dang_ptr", "f9_ptr", "sig_ptr", "del_ptr",
                          "ang_ptr", "sp_ptr", "gen_ptr"), {"out_ptr": "g_ptr"}),
     ("_torsions_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "dang_ptr", "tor_ptr", "gen_ptr"),
      {"out_ptr": "g_ptr"}),
     ("_hbonds_forward", ("bv_ptr", "br_ptr", "bo_ptr", "ev_ptr", "er_ptr", "hb_ptr"), {"out_ptr": "g_ptr"}),
+    ("_hbonds_nn_forward", ("bv_ptr", "br_ptr", "bo_ptr", "fhb_ptr", "ev_ptr", "er_ptr", "hb_ptr", "gen_ptr"),
+     {"out_ptr": "g_ptr"}),
+    ("_torsions_nn_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "fbo_ptr", "dang_ptr", "tor_ptr", "gen_ptr"),
+     {"out_ptr": "g_ptr"}),
 ]
 
 if __name__ == "__main__":
