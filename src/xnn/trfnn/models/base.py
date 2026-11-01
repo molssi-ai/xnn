@@ -29,6 +29,8 @@ class TransformerPotential(InteratomicPotential):
 
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
     exact_float64 = False
+    #: the module of the model's fast path (its ``AUTO_POLICY`` and ``AUTO_POLICY_TRAINING``)
+    fast_path = ""
 
     def _init_energy_terms(self, n_elements: int, energy_scale: float, energy_shift: float,
                            species=None, atomic_energies=None) -> None:
@@ -44,6 +46,52 @@ class TransformerPotential(InteratomicPotential):
         if self.exact_float64:
             from xnn.common.models.constants import exact_constants_after_load
             self.register_load_state_dict_post_hook(exact_constants_after_load)
+        # the fused kernels (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "TransformerPotential":
+        """Choose between the reference layers and the fused kernels of the fast path.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels (see the model's
+            fast-path module in :mod:`xnn.trfnn.fast`) where they are available
+            and faster for the input (a CUDA device, a graph above the size
+            crossover measured for evaluation, ``AUTO_POLICY``, or for
+            training, ``AUTO_POLICY_TRAINING``); ``True``: wherever they are
+            available; ``False``: always the reference implementation. The
+            kernels are twice differentiable, so force training takes them as
+            well.
+
+        Returns
+        -------
+        TransformerPotential
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused kernels on or off for one evaluation."""
+        if not self.fast_path:
+            return
+        import importlib
+
+        from xnn.common.models.fast import fast_modules, select
+        modules = self.__dict__.get("_fast_modules")
+        if modules is None:
+            modules = fast_modules(self)
+            self.__dict__["_fast_modules"] = modules
+        if not modules:
+            return
+        policies = importlib.import_module(self.fast_path)
+        like = self.atom_ref.weight
+        policy = policies.AUTO_POLICY_TRAINING if self.training else policies.AUTO_POLICY
+        select(modules, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     def _apply(self, fn, recurse=True):
         out = super()._apply(fn, recurse)
