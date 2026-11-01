@@ -489,3 +489,156 @@ def test_fidelity_vs_reference_float64():
 
 def test_fidelity_vs_reference_float32():
     assert _fidelity("et", "float32") < 1e-4
+
+
+# the fused update layers (fast path)
+
+def _needs_interpreter():
+    """Skip unless Triton's interpreter is on (no CUDA device) and recent enough."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    triton = pytest.importorskip("triton")
+    if tuple(int(v) for v in triton.__version__.split(".")[:2]) < (3, 2):
+        pytest.skip("Triton's interpreter before 3.2 mis-evaluates these kernels")
+
+
+def _fused_case(device, seed=0):
+    """Pairs with self pairs and random inputs of both fused functions (float64)."""
+    gen = torch.Generator().manual_seed(seed)
+    n, heads, head_dim, e = 5, 2, 3, 9
+    f = heads * head_dim
+    src = torch.cat([torch.randint(0, n, (e,), generator=gen), torch.arange(n)]).to(device)
+    dst = torch.cat([torch.randint(0, n, (e,), generator=gen), torch.arange(n)]).to(device)
+    p = src.shape[0]
+
+    def rand(*shape):
+        return torch.randn(*shape, generator=gen, dtype=torch.float64).to(device).requires_grad_()
+
+    return dict(src=src, dst=dst, n=n, heads=heads, head_dim=head_dim, q=rand(n, f), k=rand(n, f),
+                dk=rand(p, f), a=rand(p, heads), w=rand(n, 3 * f), dw=rand(p, 3 * f), cw=rand(p),
+                v=rand(n, 3, f), u=rand(p, 3))
+
+
+def _check_fused(device, fast_mode=False):
+    from torch.autograd import gradcheck, gradgradcheck
+
+    from xnn.trfnn.fast.et_kernels import attention_logits, attention_messages
+    t = _fused_case(device)
+    src, dst, n, heads, d = t["src"], t["dst"], t["n"], t["heads"], t["head_dim"]
+    p, f = src.shape[0], heads * d
+    with torch.no_grad():
+        expect = (t["q"][dst] * t["k"][src] * t["dk"]).view(p, heads, d).sum(-1)
+        assert torch.allclose(attention_logits(t["q"], t["k"], t["dk"], src, dst, heads), expect,
+                              rtol=0, atol=1e-13)
+        vals = (t["w"][src] * t["dw"] * t["cw"][:, None]).view(p, heads, 3 * d)
+        s3, s1, s2 = vals[..., :d], vals[..., d:2 * d], vals[..., 2 * d:]
+        rows = torch.cat([(s3 * t["a"][..., None]).reshape(p, 1, f),
+                          t["v"][src] * s1.reshape(p, 1, f) + s2.reshape(p, 1, f) * t["u"][:, :, None]], 1)
+        expect = torch.zeros(n, 4, f, dtype=torch.float64, device=device).index_add_(0, dst, rows)
+        got = attention_messages(t["a"], t["w"], t["dw"], t["cw"], t["v"], t["u"], src, dst, heads)
+        assert torch.allclose(got, expect, rtol=0, atol=1e-13)
+    checks = [
+        (lambda q, k, dk: attention_logits(q, k, dk, src, dst, heads), ("q", "k", "dk")),
+        (lambda q, k: attention_logits(q, k, None, src, dst, heads), ("q", "k")),
+        (lambda a, w, dw, cw, v, u: attention_messages(a, w, dw, cw, v, u, src, dst, heads),
+         ("a", "w", "dw", "cw", "v", "u")),
+        (lambda a, w, v, u: attention_messages(a, w, None, None, v, u, src, dst, heads), ("a", "w", "v", "u")),
+    ]
+    for fn, names in checks:
+        inputs = tuple(t[name] for name in names)
+        assert gradcheck(fn, inputs, fast_mode=fast_mode)
+        assert gradgradcheck(fn, inputs, fast_mode=fast_mode)
+
+
+def _fast_et_batch(dtype, device):
+    batch = collate([_graph(n=7, seed=1, periodic=True), _graph(n=5, seed=2)]).to(device)
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+def _fast_et_run(model, batch, use_fast, train):
+    """Energies, forces, stress and (in training mode) the weight gradients of a force loss."""
+    model.set_use_fast(use_fast).train(train)
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model, compute_stress=True).train(train)(batch)
+    assert all(layer.fast_active == use_fast for layer in model.layers)
+    res = {k: out[k].detach().double() for k in ("energy", "forces", "stress")}
+    if train:
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum() + out["stress"].pow(2).sum()).backward()
+        res.update({name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                    if p.grad is not None})
+    return res
+
+
+def _check_fast_parity(device, dtype, options, train, tol):
+    model = _small(**options).to(device, dtype)
+    # a fresh batch per run: the force wrapper attaches its displacement to the batch
+    ref = _fast_et_run(model, _fast_et_batch(dtype, device), False, train)
+    fast = _fast_et_run(model, _fast_et_batch(dtype, device), True, train)
+    assert ref.keys() == fast.keys()
+    for key, value in ref.items():
+        err = (fast[key] - value).abs().max() / value.abs().max().clamp_min(1e-30)
+        assert err < tol, (key, float(err))
+
+
+_FAST_OPTIONS = [{}, {"vector_cutoff": False}, {"distance_influence": "none"},
+                 {"distance_influence": "keys", "num_heads": 2}]
+
+
+def test_fast_support_needs_cuda():
+    from xnn.trfnn.fast.et import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def test_fast_kernels_gradients_interpreted():
+    """The fused functions and their first and second derivatives, run by the Triton interpreter."""
+    _needs_interpreter()
+    _check_fused("cpu", fast_mode=True)
+
+
+@pytest.mark.parametrize("train", [False, True])
+def test_fast_path_parity_interpreted(monkeypatch, train):
+    """The fused layers under Triton's interpreter give the reference outputs and weight gradients."""
+    _needs_interpreter()
+    import xnn.trfnn.fast.et as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    _check_fast_parity("cpu", torch.float64, {}, train, 1e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_kernels_gradients():
+    """Values and every first and second derivative of the fused functions (finite differences)."""
+    pytest.importorskip("triton")
+    _check_fused("cuda")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("options", _FAST_OPTIONS)
+@pytest.mark.parametrize("train", [False, True])
+def test_fast_path_parity(dtype, options, train):
+    """The fused layers give the reference energies, forces, stress and force-loss weight gradients."""
+    pytest.importorskip("triton")
+    tol = (1e-11 if train else 1e-12) if dtype == torch.float64 else (1e-4 if train else 1e-5)
+    _check_fast_parity("cuda", dtype, options, train, tol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_auto_crossover_per_mode(monkeypatch):
+    """"auto" applies the evaluation crossover in evaluation mode and the training one in training mode."""
+    pytest.importorskip("triton")
+    import xnn.trfnn.fast.et as fast
+    from xnn.common.models.fast import AutoPolicy
+    never = AutoPolicy(default_min_edges=10 ** 9, default_min_edges_float64=10 ** 9)
+    always = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+    model = _small().to("cuda", torch.float64).set_use_fast("auto")
+    names = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    for training in (False, True):
+        for policy in names:
+            with monkeypatch.context() as patch:
+                for name in names:
+                    patch.setattr(fast, name, never if name == policy else always)
+                ForceStressOutput(model.train(training)).train(training)(_fast_et_batch(torch.float64, "cuda"))
+            expect = policy != ("AUTO_POLICY_TRAINING" if training else "AUTO_POLICY")
+            assert all(layer.fast_active == expect for layer in model.layers), (training, policy)

@@ -868,3 +868,31 @@ def test_dataset_training_smoke(tmp_path):
     loss.backward()
     assert torch.isfinite(loss)
     assert model.weights["fmwi"].grad is not None
+
+
+@pytest.mark.parametrize("conventions", ["lammps", "reaxff-nn"])
+def test_matrix_free_eem_matches_the_dense_solve(conventions, monkeypatch):
+    """The conjugate-gradient EEM solve of large structures gives the dense solve's charges, energies, forces
+    and the gradients of a force loss in the EEM parameters (its derivative is the same solve again)."""
+    import xnn.ffnn.models.reaxff as rx
+    model = _model(nn=False, conventions=conventions)
+    for key in ("chi", "mu"):
+        model.params[key].requires_grad_(True)
+    pos, z = _methanol()
+    batch = collate([_graph(pos, z, model.cutoff), _graph(pos * 1.05 + 3.0, z, model.cutoff)])
+
+    def run():
+        g = batch.clone() if hasattr(batch, "clone") else batch
+        p = g.pos.detach().clone().requires_grad_(True)
+        g.pos = p
+        out = model(g)
+        (f,) = torch.autograd.grad(-out["energy"].sum(), p, create_graph=True)
+        loss = (f * f).sum()
+        grads = torch.autograd.grad(loss, [model.params["chi"], model.params["mu"]])
+        return out["energy"].detach(), out["charges"].detach(), f.detach(), grads
+
+    dense = run()
+    monkeypatch.setattr(rx, "EEM_DENSE_MAX", 0)
+    cg = run()
+    for a, b in zip(dense[:3] + tuple(dense[3]), cg[:3] + tuple(cg[3])):
+        assert torch.allclose(a, b, rtol=1e-9, atol=1e-10), float((a - b).abs().max())
