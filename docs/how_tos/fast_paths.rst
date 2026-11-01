@@ -17,7 +17,8 @@ convolution of SchNet, the message block of PaiNN, the embedding and
 interaction layers of TensorNet, the shell convolutions of AIMNet2, the neighbor sums of
 GemNet's bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products of Allegro, the edge-basis sums and ``Ar`` messages of CACE,
 the pair sums of ET's attention layers,
-every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the three-body term of D3
+every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge solve of
+classical ReaxFF fields, the three-body term of D3
 and D4 and the large-system EEQ solve of D4 (where we use the Triton kernels,
 shipped with CUDA builds of PyTorch), and the reciprocal sum of the LES
 long-range term (for which, we use plain PyTorch).

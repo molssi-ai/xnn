@@ -141,7 +141,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |N|
      - |N|
-     - |N|
+     - |O|
    * - OPLS-AA / L-OPLS
      - |Y|
      - |O|
@@ -306,8 +306,10 @@ are the same as above.
   of LAMMPS, list rebuilds included. A training step is two to two and a half
   times faster than on the eager terms, which still handle stress losses.
 - **ReaxFF.** It matches LAMMPS to round-off but is slower than LAMMPS's GPU
-  build, as it has no fused kernels yet. Above 2048 atoms, it solves for the
-  charges by conjugate gradients instead of a dense solve.
+  build. Above 2048 atoms, it solves for the charges by conjugate gradients
+  instead of a dense solve. Its fused kernels cover classical fields with the
+  LAMMPS conventions, in evaluation. ReaxFF-nn and the ReaxFF-nn conventions
+  evaluate their bonded terms eagerly, and training runs the eager terms.
 - **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
