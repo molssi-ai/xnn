@@ -120,21 +120,21 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |N|
      - |N|
-     - |N|
+     - |Y|
    * - SE(3) steerable CNN / 3D CNN
      - |Y|
      - |N|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
      - |N|
    * - Spherical CNN
      - |Y|
      - |N|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - ReaxFF / ReaxFF-nn
      - |Y|
      - |O|
@@ -210,8 +210,8 @@ and is at least as fast, for evaluation and for a training step.
      - |N|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
    * - SpookyNet
      - |Y|
      - |Y|
@@ -263,6 +263,25 @@ Notes on individual models:
   faster on small systems. A captured xnn step (``trainer.cuda_graph: true``)
   is faster than the upstream's training step at every size. The fast path
   wins from about a thousand atoms.
+- **HDNNP.** Its fast path is the symmetry functions compiled with
+  ``torch.compile``, into Triton kernels on a GPU and C++ loops on a CPU. The
+  compiled code is differentiable only once, so a training step runs the
+  reference.
+- **SE(3) steerable CNN and 3D CNN.** Their fast path runs the 3D
+  convolutions with cuDNN's algorithm search. It pays off for the second
+  derivatives of a training step, so the Fast-Path (Training) cell is green.
+  Evaluation has no faster path yet: there cuDNN's own choice of algorithm
+  is as fast as the searched one, ``"auto"`` keeps the reference, and the
+  Fast-Path (Inference) cell stays red. cuDNN searches once for every new
+  input shape, so a training run pays a few seconds for each batch size it
+  meets.
+- **Spherical CNN.** Its fast path computes the Fourier transforms on Triton
+  kernels and the products of the spectra as one matrix product per degree.
+  It is faster than the reference at every size, and faster than the
+  upstream's CUDA kernels, which run in float32 only and cannot be
+  differentiated twice, so the upstream cannot train on forces. On a single
+  molecule in float32 evaluation, it pads the spectra to take all degrees in
+  one product, which needs about a third more memory than the upstream.
 - **BAMBOO.** Its forces are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.
 - **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and
@@ -339,9 +358,10 @@ are the same as above.
   is faster than its upstream on the same GPU, for evaluation and training. The
   D3 and D4 upstreams run only on the CPU. On the same CPU, xnn's reference
   three-body term is slower than their compiled loops, so the Reference-Path
-  cells stay red. The dispersion kernels are differentiable only once, so
-  training uses the reference three-body term and the dispersion fast path
-  serves evaluation only. On a CPU the three-body term also runs compiled (see
-  :ref:`howto-fast-paths-cpu`). D3 then takes 0.44 to 0.73 of simple-dftd3's
+  cells stay red. On a GPU the three-body kernels are twice differentiable,
+  so a training step with a force loss also runs them. They do not
+  differentiate ``s9``, ``a1`` or ``a2``. When those are trained, the
+  reference three-body term runs. On a CPU the three-body term also runs
+  compiled (see :ref:`howto-fast-paths-cpu`). D3 then takes 0.44 to 0.73 of simple-dftd3's
   time from about 375 atoms. D4 matches dftd4 for large molecules and stays
   slower for cells and small systems.

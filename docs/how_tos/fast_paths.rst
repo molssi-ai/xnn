@@ -18,8 +18,11 @@ TensorNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
-(compiled with ``torch.compile``), the atomic environment vectors of ANI, the
-message sums of PhysNet, the local message sums of SpookyNet, the attention
+(compiled with ``torch.compile``), the 3D convolutions of the SE(3) steerable
+CNN and the 3D CNN (with cuDNN's algorithm search), the Fourier transforms and
+spectral products of the spherical CNN, the atomic environment
+vectors of ANI, the message sums of PhysNet, the symmetry functions of HDNNP (compiled with
+``torch.compile``), the local message sums of SpookyNet, the attention
 messages of BAMBOO, every energy term of the OPLS, AMBER, CHARMM and
 DREIDING force fields, the terms and the charge solve of ReaxFF and ReaxFF-nn,
 the three-body term of D3 and D4 and the large-system EEQ solve of D4 (where we
@@ -96,10 +99,17 @@ training, and store them as minimum edge counts (atom counts for LES):
 - EquiformerV2: :data:`xnn.trfnn.fast.equiformer_v2.AUTO_POLICY`,
   :data:`xnn.trfnn.fast.equiformer_v2.AUTO_POLICY_TRAINING` (maximum edge
   counts: the compiled blocks are faster on small systems only)
+- SE(3) steerable CNN and 3D CNN: :data:`xnn.cnn.fast.AUTO_POLICY`,
+  :data:`xnn.cnn.fast.AUTO_POLICY_TRAINING` (training only: in evaluation
+  cuDNN's own choice of algorithm is already the fastest)
+- Spherical CNN: :data:`xnn.cnn.fast.spherical.AUTO_POLICY`,
+  :data:`xnn.cnn.fast.spherical.AUTO_POLICY_TRAINING`
 - ANI: :data:`xnn.dnn.fast.aev.AUTO_POLICY`,
   :data:`xnn.dnn.fast.aev.AUTO_POLICY_TRAINING`
 - PhysNet: :data:`xnn.dnn.fast.physnet.AUTO_POLICY`,
   :data:`xnn.dnn.fast.physnet.AUTO_POLICY_TRAINING`
+- HDNNP: :data:`xnn.dnn.fast.acsf.AUTO_POLICY`,
+  :data:`xnn.dnn.fast.acsf.AUTO_POLICY_TRAINING`
 - SpookyNet: :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY`,
   :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY_TRAINING`
 - BAMBOO: :data:`xnn.hybnn.fast.bamboo.AUTO_POLICY`,
@@ -113,7 +123,10 @@ for training on small systems on an A30 or an L40S. The ANI kernels are faster
 at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
 float64 throughput is low. The PhysNet kernels win on large systems, from about
-20k to 300k edges depending on the GPU. The thresholds may change in
+20k to 300k edges depending on the GPU, and the BAMBOO kernels from about 5k to
+60k. The compiled HDNNP symmetry functions are faster at every size; they serve
+evaluation, and a training step keeps the reference. ``"auto"`` keeps the
+reference for SpookyNet, whose fused local sums are not faster. The thresholds may change in
 any release as we rerun our benchmarks, so report the xnn version with results
 obtained with ``"auto"``.
 
@@ -159,9 +172,10 @@ What to expect from fast implementations
   ``use_fast`` alone never changes the numbers.
 - **Training.** The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet,
   DimeNet, Allegro and CACE fast paths are twice differentiable. So, the force training runs through them, LoRA
-  adapters included. The three-body kernels in dispersion module are
-  differentiable once. Thus, a training step or a model with trainable damping
-  parameters falls back to the exact reference term. The kernels of the
+  adapters included. The three-body kernels of D3 and D4 are twice
+  differentiable on a GPU, stress included, so force training runs through
+  them. With trainable damping parameters (``s9``, ``a1``, ``a2``), the
+  reference three-body term runs. The kernels of the
   classical force fields are twice differentiable, so force training and
   Hessians run through them. With a cell gradient (stress) they are
   differentiable once, so a stress loss trains on the reference terms.
@@ -223,6 +237,13 @@ graph:
 Each call returns the energy and forces at new positions of the same atoms and
 cell. The numbers are those of the model's evaluation to round-off.
 
+On a CPU, pass a model on the CPU. The stepper then runs the same kernels as C++
+loops over the CPU threads (:mod:`xnn.common.cpu_kernels`), so the machine needs a
+C++ compiler. The first call compiles each kernel and keeps it in
+``~/.cache/xnn/cpu_kernels`` (or ``XNN_CPU_KERNELS_DIR``). Later runs reuse it.
+``stepper(struct, energy=False)`` returns the forces alone. Use it between the steps
+that report the energy: the kernels then skip the energy sums.
+
 Molecular dynamics with ReaxFF
 ==============================
 :class:`~xnn.ffnn.models.ReaxFFStepper` does the same for a classical ReaxFF
@@ -243,7 +264,8 @@ previous steps' charges, and replays the kernels as CUDA graphs:
 ``tol`` is the relative residual of the charge solve. LAMMPS's
 ``fix qeq/reaxff`` commonly takes 1e-6. The default is the model's tighter
 one. The numbers are those of the model's evaluation, with the charges
-converged to ``tol``.
+converged to ``tol``. On a CPU it runs as :class:`~xnn.ffnn.models.ClassicalStepper`
+does, without graphs.
 
 The ``notebooks/parity_checks/`` notebooks compare every fast paths with their
 reference implementations on real systems.
