@@ -28,6 +28,10 @@ from ._triton import available, supported
 #: measured on A100, A30 and V100 in float32 and float64, the fast paths win at
 #: every size, from 1.2-2x on 24-atom clusters to 3-11x at 1536 atoms and
 #: 7-15x above 10k atoms
-AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0,
+                         # on a CPU the compiled three-body tiles (D3 and D4): faster than the reference
+                         # at every size measured (0.06-0.94 on 8 threads), but the first call compiles for
+                         # 10-20 s, which only pays from a few thousand edges (about 75 atoms) on
+                         cpu_min_edges=5000, cpu_min_edges_float64=5000)
 
 __all__ = ["AUTO_POLICY", "available", "supported"]
