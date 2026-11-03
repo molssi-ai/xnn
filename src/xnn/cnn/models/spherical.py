@@ -48,6 +48,7 @@ import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
+from xnn.common.models.multilinear import MultilinearBlock, multilinear
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
 
@@ -153,6 +154,22 @@ def _complex(real: Tensor, imag: Tensor) -> Tensor:
     return torch.complex(real, imag)
 
 
+def _band(x: Tensor, b_spec: int, dim: int) -> Tensor:
+    """The frequencies ``-(b_spec - 1) .. b_spec - 1`` of an FFT axis, in that order."""
+    n = x.shape[dim]
+    return torch.cat([x.narrow(dim, n - (b_spec - 1), b_spec - 1), x.narrow(dim, 0, b_spec)], dim)
+
+
+def _unband(x: Tensor, size: int, dim: int) -> Tensor:
+    """The inverse of :func:`_band`: the frequencies placed on an FFT axis of ``size`` samples."""
+    b_spec = (x.shape[dim] + 1) // 2
+    shape = list(x.shape)
+    shape[dim] = size - (2 * b_spec - 1)
+    return torch.cat([x.narrow(dim, b_spec - 1, b_spec), x.new_zeros(shape), x.narrow(dim, 0, b_spec - 1)], dim)
+
+
+
+
 class S2Transform(nn.Module):
     """Spherical harmonic transform between the ``S^2`` grid of bandwidth
     ``b_grid`` and spectra of bandwidth ``b_spec`` (``b_spec <= b_grid``).
@@ -177,19 +194,21 @@ class S2Transform(nn.Module):
         self.register_buffer("d", wigner_d_table(b_grid, b_spec)[:, :, :, b_spec - 1].to(dtype))
         self.register_buffer("weights", (quadrature_weights(b_grid) * (2 * b_grid)).to(dtype))
         self.register_buffer("degree", (2 * torch.arange(b_spec) + 1).to(dtype))
+        # positions of the band on the FFT axis (part of the saved state; the transforms slice it)
         self.register_buffer("m_index", _frequency_index(b_spec, 2 * b_grid))
+        # the tables with the quadrature weights and the degrees folded in (derived, not saved)
+        self.register_buffer("d_weighted", self.d * self.weights[:, None, None], persistent=False)
+        self.register_buffer("d_degree", self.d * self.degree[None, :, None], persistent=False)
 
     def analyze(self, x: Tensor) -> Tensor:
         """Spectrum ``f^l_m = int f conj(Y^l_m) dx`` of grid signals ``(..., 2b, 2b)``."""
-        spec = torch.fft.fft(x, dim=-1)[..., self.m_index]                # (..., beta, m)
-        return torch.einsum("...jm,jlm,j->...lm", spec, self.d.to(spec.dtype), self.weights.to(spec.dtype))
+        spec = _band(torch.fft.fft(x, dim=-1), self.b_spec, -1)            # (..., beta, m)
+        return torch.einsum("...jm,jlm->...lm", spec, self.d_weighted.to(spec.dtype))
 
     def synthesize(self, f_hat: Tensor, real: bool = True) -> Tensor:
         """Grid signal ``f = sum_l (2l + 1) sum_m f^l_m Y^l_m`` of spectra ``(..., b_spec, 2 b_spec - 1)``."""
-        rows = torch.einsum("...lm,jlm,l->...jm", f_hat, self.d.to(f_hat.dtype), self.degree.to(f_hat.dtype))
-        full = rows.new_zeros(*rows.shape[:-1], 2 * self.b_grid)
-        full[..., self.m_index] = rows
-        out = torch.fft.ifft(full, dim=-1) * (2 * self.b_grid)
+        rows = torch.einsum("...lm,jlm->...jm", f_hat, self.d_degree.to(f_hat.dtype))
+        out = torch.fft.ifft(_unband(rows, 2 * self.b_grid, -1), dim=-1) * (2 * self.b_grid)
         return out.real if real else out
 
 
@@ -218,18 +237,20 @@ class SO3Transform(nn.Module):
         self.register_buffer("weights", quadrature_weights(b_grid).to(dtype))
         self.register_buffer("degree", (2 * torch.arange(b_spec) + 1).to(dtype))
         self.register_buffer("m_index", _frequency_index(b_spec, 2 * b_grid))
+        self.register_buffer("d_weighted", self.d * self.weights[:, None, None, None], persistent=False)
+        self.register_buffer("d_degree", self.d * self.degree[None, :, None, None], persistent=False)
 
     def analyze(self, x: Tensor) -> Tensor:
         """Spectrum ``f^l_{mn} = int f conj(D^l_{mn}) dR`` of grid signals ``(..., 2b, 2b, 2b)``."""
-        spec = torch.fft.fft2(x, dim=(-2, -1))[..., self.m_index, :][..., :, self.m_index]
-        return torch.einsum("...jmn,jlmn,j->...lmn", spec, self.d.to(spec.dtype), self.weights.to(spec.dtype))
+        spec = _band(_band(torch.fft.fft2(x, dim=(-2, -1)), self.b_spec, -2), self.b_spec, -1)
+        return torch.einsum("...jmn,jlmn->...lmn", spec, self.d_weighted.to(spec.dtype))
 
     def synthesize(self, f_hat: Tensor, real: bool = True) -> Tensor:
         """Grid signal ``f = sum_l (2l + 1) sum_{mn} f^l_{mn} D^l_{mn}`` (eq 9)."""
-        rows = torch.einsum("...lmn,jlmn,l->...jmn", f_hat, self.d.to(f_hat.dtype), self.degree.to(f_hat.dtype))
-        full = rows.new_zeros(*rows.shape[:-2], 2 * self.b_grid, 2 * self.b_grid)
-        full[..., self.m_index[:, None], self.m_index[None, :]] = rows
-        out = torch.fft.ifft2(full, dim=(-2, -1)) * (2 * self.b_grid) ** 2
+        rows = torch.einsum("...lmn,jlmn->...jmn", f_hat, self.d_degree.to(f_hat.dtype))
+        size = 2 * self.b_grid
+        full = _unband(_unband(rows, size, -2), size, -1)
+        out = torch.fft.ifft2(full, dim=(-2, -1)) * size ** 2
         return out.real if real else out
 
 
@@ -336,6 +357,70 @@ def so3_kernel_basis(points: Tensor, b: int) -> Tuple[Tensor, Tensor]:
     return full.real.contiguous(), full.imag.contiguous()
 
 
+@lru_cache(maxsize=None)
+def _compact_index(b: int, so3: bool) -> Tensor:
+    """Positions of the entries ``|m| (, |n|) <= l`` in the flattened padded
+    spectrum ``(b, 2b - 1[, 2b - 1])``."""
+    w = 2 * b - 1
+    index = []
+    for l in range(b):
+        span = range(b - 1 - l, b + l)
+        for m in span:
+            if so3:
+                index.extend(l * w * w + m * w + n for n in span)
+            else:
+                index.append(l * w + m)
+    return torch.tensor(index, dtype=torch.long)
+
+
+class _SpectralProduct(MultilinearBlock):
+    """``z = einsum(equation, f, w)`` of two spectra given compactly.
+
+    The operands are the real views ``(..., K, 2)`` of the entries of
+    :func:`_compact_index` of each spectrum (``w`` is the conjugated filter
+    spectrum), so the backward pass keeps those entries only, not the padded
+    spectra; the block is bilinear in the real sense and its adjoints are
+    ``g conj(w)`` and ``conj(f) g`` contracted back.
+    """
+
+    def __init__(self, equation: str, index: Tensor, n_tail: int, b: int):
+        self.equation = equation
+        inputs, self.out = equation.split("->")
+        self.f_sub, self.w_sub = inputs.split(",")
+        self.index, self.n_tail, self.b = index, n_tail, b
+
+    def _expand(self, c: Tensor) -> Tensor:
+        w = 2 * self.b - 1
+        tail = (self.b,) + (w,) * (self.n_tail - 1)
+        flat = c.new_zeros(*c.shape[:-2], math.prod(tail), 2)
+        flat.index_copy_(c.dim() - 2, self.index, c)
+        return torch.view_as_complex(flat).reshape(*c.shape[:-2], *tail)
+
+    def _compact(self, z: Tensor) -> Tensor:
+        flat = torch.view_as_real(z.resolve_conj().reshape(*z.shape[:-self.n_tail], -1))
+        return flat.index_select(flat.dim() - 2, self.index)
+
+    def value(self, ops, only: int = -1) -> Tensor:
+        return torch.view_as_real(torch.einsum(self.equation, self._expand(ops[0]), self._expand(ops[1])))
+
+    def adjoints(self, g, ops, needs, only: int = -1):
+        gc = torch.view_as_complex(g)
+        grads = [None, None]
+        if needs[0]:
+            grads[0] = self._compact(torch.einsum(f"{self.out},{self.w_sub}->{self.f_sub}", gc,
+                                                  self._expand(ops[1]).conj()))
+        if needs[1]:
+            grads[1] = self._compact(torch.einsum(f"{self.out},{self.f_sub}->{self.w_sub}", gc,
+                                                  self._expand(ops[0]).conj()))
+        return grads
+
+
+def _spectral_product(equation: str, f_hat: Tensor, psi: Tensor, index: Tensor, n_tail: int) -> Tensor:
+    """``einsum(equation, f_hat, conj(psi))`` of padded spectra; the backward pass keeps compact copies."""
+    block = _SpectralProduct(equation, index, n_tail, f_hat.shape[-n_tail])
+    return torch.view_as_complex(multilinear(block, block._compact(f_hat), block._compact(psi.conj())))
+
+
 class S2Convolution(nn.Module):
     """``S^2`` correlation layer (eq 4, computed by the Fourier theorem of Appendix D).
 
@@ -369,6 +454,7 @@ class S2Convolution(nn.Module):
         self.register_buffer("basis_real", real.to(dtype))
         self.register_buffer("basis_imag", imag.to(dtype))
         self.register_buffer("points", points.to(dtype))
+        self.register_buffer("compact", _compact_index(self.b_out, False).clone(), persistent=False)
         self.kernel = nn.Parameter(torch.empty(n_in, n_out, points.shape[0]).uniform_(-1, 1))
         self.bias = nn.Parameter(torch.zeros(1, n_out, 1, 1, 1))
         self.scaling = 1.0 / math.sqrt(points.shape[0] * n_in * self.b_out ** 4 / self.b_in ** 2)
@@ -381,7 +467,7 @@ class S2Convolution(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         """``(B, n_in, 2 b_in, 2 b_in)`` -> ``(B, n_out, 2 b_out, 2 b_out, 2 b_out)``."""
         f_hat = self.analysis.analyze(x)                                    # (B, i, l, m)
-        z = torch.einsum("bilm,ioln->bolmn", f_hat, self.filter_spectrum().conj())
+        z = _spectral_product("bilm,ioln->bolmn", f_hat, self.filter_spectrum(), self.compact, 2)
         return self.synthesis.synthesize(z) + self.bias
 
     def extra_repr(self) -> str:
@@ -413,6 +499,7 @@ class SO3Convolution(nn.Module):
         self.register_buffer("basis_real", real.to(dtype))
         self.register_buffer("basis_imag", imag.to(dtype))
         self.register_buffer("points", points.to(dtype))
+        self.register_buffer("compact", _compact_index(self.b_out, True).clone(), persistent=False)
         self.kernel = nn.Parameter(torch.empty(n_in, n_out, points.shape[0]).uniform_(-1, 1))
         self.bias = nn.Parameter(torch.zeros(1, n_out, 1, 1, 1))
         self.scaling = 1.0 / math.sqrt(points.shape[0] * n_in * self.b_out ** 3 / self.b_in ** 3)
@@ -425,7 +512,7 @@ class SO3Convolution(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         """``(B, n_in, 2 b_in, 2 b_in, 2 b_in)`` -> ``(B, n_out, 2 b_out, 2 b_out, 2 b_out)``."""
         f_hat = self.analysis.analyze(x)                                    # (B, i, l, m, n)
-        z = torch.einsum("bilmn,iolkn->bolmk", f_hat, self.filter_spectrum().conj())
+        z = _spectral_product("bilmn,iolkn->bolmk", f_hat, self.filter_spectrum(), self.compact, 3)
         return self.synthesis.synthesize(z) + self.bias
 
     def extra_repr(self) -> str:

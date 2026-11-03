@@ -541,12 +541,16 @@ class GatedBlock(nn.Module):
             if self.bias is not None:
                 gates = gates + self.bias[b0:b0 + self.n_gates].view(1, -1, 1, 1, 1)
             gates = self.gate_act(gates)
+            # one copy of the gated fields: the products would otherwise keep views of y, and with
+            # them the whole convolution output (scalars and gates too), for the backward pass
+            fields = y[:, self.n_scalar:n_out].contiguous()
             g0 = 0
             for l, start, stop in field_slices(self.fields_out):
                 if l == 0:
                     continue
                 m = (stop - start) // (2 * l + 1)
-                field = y[:, start:stop].reshape(y.shape[0], m, 2 * l + 1, *y.shape[2:])
+                field = fields[:, start - self.n_scalar:stop - self.n_scalar].reshape(
+                    y.shape[0], m, 2 * l + 1, *y.shape[2:])
                 gate = gates[:, g0:g0 + m].unsqueeze(2)
                 g0 += m
                 pieces.append((field * gate).reshape(y.shape[0], stop - start, *y.shape[2:]))
