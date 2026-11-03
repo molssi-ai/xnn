@@ -699,7 +699,11 @@ class DFTD4(nn.Module, FastPathModule):
 
     @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA."""
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA; on CPUs
+        where ``torch.compile`` produces code the three-body term runs on compiled tiles."""
+        if device.type == "cpu":
+            from .dispersion_fast.atm_cpu import available
+            return dtype in (torch.float32, torch.float64) and available()
         from .dispersion_fast import supported
         return supported(device, dtype)
 
@@ -756,7 +760,8 @@ class DFTD4(nn.Module, FastPathModule):
         # the system's identity for the reuse: atom count and element sequence
         signature = (int(z.shape[0]), int(z.sum()),
                      int((z * torch.arange(1, z.shape[0] + 1, device=z.device)).sum()))
-        fast = self.fast_active
+        # the fast EEQ system is GPU code (a CPU fast request covers the three-body term only)
+        fast = self.fast_active and pos.is_cuda
         if fast:
             from .dispersion_fast.eeq import FastEEQSystem
         if periodic:
@@ -802,6 +807,16 @@ class DFTD4(nn.Module, FastPathModule):
         return energy
 
     @torch.jit.unused
+    def _three_body_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor, c6_neutral: Tensor,
+                        n_atoms: int) -> Tensor:
+        """The ATM term on the compiled CPU tiles of
+        :mod:`~xnn.common.models.dispersion_fast.atm_cpu` (the dense reference's values)."""
+        from .dispersion_fast.atm_cpu import three_body_energy_cpu
+        return three_body_energy_cpu(z, edge_index, edge_vec, r, c6_neutral, self.pair_radius_table(), self.s9,
+                                     self.alp / 3.0, self.cutoff_triple / self.bohr,
+                                     self.switch_width_triple / self.bohr, n_atoms)
+
+    @torch.jit.unused
     def _three_body_chunked(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
                             r: Tensor, alpha_neutral: Tensor, cell: Tensor, batch: Tensor,
                             n_atoms: int) -> Tensor:
@@ -824,7 +839,7 @@ class DFTD4(nn.Module, FastPathModule):
                                              c6_edge=c6_edge, edge_shift=shifts,
                                              chunk=self.triplet_chunk, triplet_cache=cache)
 
-        if self.fast_active and self._fast_three_body_allowed():
+        if self.fast_active and pos.is_cuda and self._fast_three_body_allowed():
             from .dispersion_fast.atm import ATMConstants, atm_energy
             # C6_AB = (3 / pi) sum_w cp_w alpha_A(iw) alpha_B(iw) = <f_A, f_B>
             feat = alpha_neutral * torch.sqrt((3.0 / math.pi) * self.cp_weights)
@@ -1101,7 +1116,15 @@ class DFTD4(nn.Module, FastPathModule):
             weights_neutral = self.reference_weights(z, cn_d4, torch.zeros_like(q))
             alpha_neutral = self.dynamic_polarizabilities(z, weights_neutral)
             in_triple = r <= self.cutoff_triple / self.bohr
-            if self.checkpoint_triplets and not torch.jit.is_scripting():
+            cpu_tiles = False
+            if not torch.jit.is_scripting():
+                cpu_tiles = (self.fast_active and not z.is_cuda and n_atoms <= 20000
+                             and self._fast_three_body_allowed())
+            if cpu_tiles:
+                c6_neutral = (3.0 / math.pi) * (alpha_neutral * self.cp_weights) @ alpha_neutral.t()
+                e3 = self._three_body_cpu(z, edge_index[:, in_triple], vec_au[in_triple], r[in_triple],
+                                          c6_neutral, n_atoms)
+            elif self.checkpoint_triplets and not torch.jit.is_scripting():
                 e3 = self._three_body_chunked(z, pos_au, edge_index[:, in_triple], vec_au[in_triple],
                                               r[in_triple], alpha_neutral, cell / self.bohr, batch,
                                               n_atoms)

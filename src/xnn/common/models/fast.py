@@ -26,6 +26,7 @@ says so when a fast path first runs in float32.
 """
 from __future__ import annotations
 
+import contextlib
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union
@@ -120,6 +121,9 @@ class AutoPolicy:
         A GPU in neither table has none unless the defaults set one.
     default_max_edges, default_max_edges_float64 : int, optional
         The upper bounds of a GPU in neither table (``None``: no bound).
+    cpu_min_edges, cpu_min_edges_float64 : int, optional
+        The thresholds on a CPU, for fast paths that have a CPU implementation
+        (``None``, the default: never on a CPU).
     """
 
     min_edges: Dict[str, int] = field(default_factory=dict)
@@ -130,6 +134,8 @@ class AutoPolicy:
     max_edges_float64: Dict[str, int] = field(default_factory=dict)
     default_max_edges: Optional[int] = None
     default_max_edges_float64: Optional[int] = None
+    cpu_min_edges: Optional[int] = None
+    cpu_min_edges_float64: Optional[int] = None
 
     def threshold(self, device: torch.device, dtype: torch.dtype = torch.float32) -> int:
         """The minimum edge count for ``device`` and ``dtype``."""
@@ -143,6 +149,9 @@ class AutoPolicy:
 
     def decide(self, device: torch.device, dtype: torch.dtype, num_edges: int) -> bool:
         """Whether a graph with ``num_edges`` edges takes the fast path."""
+        if device.type == "cpu":
+            t = self.cpu_min_edges_float64 if dtype == torch.float64 else self.cpu_min_edges
+            return t is not None and num_edges >= t
         if device.type != "cuda" or num_edges < self.threshold(device, dtype):
             return False
         bound = self.upper_bound(device, dtype)
@@ -224,6 +233,22 @@ def iter_fast_capable(model: nn.Module, device: torch.device,
             yield m
 
 
+def separate_shapes():
+    """A context in which :func:`torch.compile` gives every dynamic size its own symbol.
+
+    By default sizes that are equal when a graph is traced share one symbol ("duck
+    shaping"); an edge count that happens to equal a feature width then ties the
+    two, and tracing the second derivatives of such a graph can crash the process
+    (torch 2.5). The compiled functions here are called inside this context, so
+    their graphs are traced without it.
+    """
+    try:
+        import torch.fx.experimental._config as fx_config
+        return fx_config.patch(use_duck_shape=False)
+    except (ImportError, AttributeError):
+        return contextlib.nullcontext()
+
+
 def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
                                  n_constants: int = 0) -> Callable[..., Any]:
     """``fn`` compiled by :func:`torch.compile` and differentiable twice.
@@ -291,13 +316,15 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
         def forward(ctx, *args):
             ctx.save_for_backward(*args[:n_inputs], *args[m:])
             ctx.consts = args[n_inputs:m]
-            return tuple(first_c(*args))
+            with separate_shapes():
+                return tuple(first_c(*args))
 
         @staticmethod
         @torch.autograd.function.once_differentiable
         def backward(ctx, *cotangents):
             saved = ctx.saved_tensors
-            g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:], *cotangents)
+            with separate_shapes():
+                g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:], *cotangents)
             return (*g_inputs, *([None] * n_constants), *g_grads)
 
     class Stage(torch.autograd.Function):
@@ -305,7 +332,8 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
         def forward(ctx, *xs):
             ctx.save_for_backward(*xs[:n_inputs])
             ctx.consts = xs[n_inputs:]
-            return forward(*xs)
+            with separate_shapes():
+                return forward(*xs)
 
         @staticmethod
         def backward(ctx, *grads):

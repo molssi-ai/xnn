@@ -378,6 +378,17 @@ def make_activation(activation) -> nn.Module:
     return factories[key]()
 
 
+def small_gather_elements() -> int:
+    """Element count below which :func:`gather_rows` and :func:`scatter_sum` use ``index_select`` and
+    ``index_add_`` on CUDA as well.
+
+    The kernels cost the same there, and the expanded index of ``gather`` / ``scatter_add_`` adds host-side
+    view operations, which bound small systems. A function, not a module constant: TorchScript cannot read
+    module globals.
+    """
+    return 1 << 21
+
+
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum rows of ``src`` into ``dim_size`` buckets given by ``index`` (dim 0).
 
@@ -413,22 +424,24 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
         # one bucket: a reduction, not every row's atomic add into the same addresses
         return src.sum(0, keepdim=True)
     shape = [dim_size] + list(src.shape[1:])
+    # in place on the fresh buffer: the out-of-place forms copy it first (one more kernel)
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
-    if src.is_cuda:
+    if src.is_cuda and src.numel() >= small_gather_elements():
         view = [index.shape[0]] + [1] * (src.dim() - 1)
-        return out.scatter_add(0, index.reshape(view).expand(src.shape), src)
-    return out.index_add(0, index, src)
+        return out.scatter_add_(0, index.reshape(view).expand(src.shape), src)
+    return out.index_add_(0, index, src)
 
 
 def gather_rows(src: Tensor, index: Tensor) -> Tensor:
     """Rows ``src[index]`` (dim 0), with the faster kernels of the device.
 
     The node -> edge gather of message passing, the counterpart of
-    :func:`scatter_sum`. On CUDA it is a :meth:`torch.Tensor.gather` over an
-    expanded index, faster than indexing in both directions (its backward is
-    the scatter of :func:`scatter_sum`); elsewhere it uses
-    :func:`torch.index_select`, whose backward (an ``index_add``) is the faster
-    one on CPUs. The values are the same.
+    :func:`scatter_sum`. On CUDA, from :func:`small_gather_elements` output
+    elements, it is a :meth:`torch.Tensor.gather` over an expanded index, faster
+    than indexing in both directions (its backward is the scatter of
+    :func:`scatter_sum`); below that and on CPUs it uses
+    :func:`torch.index_select`, whose backward is an ``index_add``. The values
+    are the same.
 
     Parameters
     ----------
@@ -447,7 +460,7 @@ def gather_rows(src: Tensor, index: Tensor) -> Tensor:
     -----
     Compatible with :func:`torch.jit.script`.
     """
-    if src.is_cuda:
+    if src.is_cuda and index.shape[0] * (src.numel() // max(src.shape[0], 1)) >= small_gather_elements():
         view = [index.shape[0]] + [1] * (src.dim() - 1)
         shape = [index.shape[0]] + list(src.shape[1:])
         return src.gather(0, index.reshape(view).expand(shape))
@@ -572,7 +585,12 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
     order = torch.argsort(dst, stable=True)          # (E,) edge ids, centre-grouped
     counts = torch.bincount(dst, minlength=num_nodes)  # (num_nodes,) edges per centre
     n_pairs = counts * (counts - 1) // 2               # pairs per centre
-    total = int(n_pairs.sum())
+    if counts.numel() == 0:
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        return empty, empty, empty
+    # the pair count and the largest centre in one device-to-host copy
+    sizes = torch.stack([n_pairs.sum(), counts.max()]).cpu()
+    total, m = int(sizes[0]), int(sizes[1])
     if total == 0:
         empty = torch.empty(0, dtype=torch.long, device=device)
         return empty, empty, empty
@@ -585,7 +603,6 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
 
     # Local pair (a, b) with 0 <= a < b < cnt, laid out from a shared template
     # sized to the largest centre, then masked down to each centre's count.
-    m = int(counts.max())
     tri = torch.tril_indices(m, m, -1, device=device)  # (2, m*(m-1)/2): b > a
     # position of each emitted pair within its centre's pair-list
     pair_pos = torch.arange(total, device=device) - (

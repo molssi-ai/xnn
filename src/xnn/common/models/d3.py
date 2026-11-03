@@ -258,7 +258,7 @@ def _taper(r: Tensor, cutoff: float) -> Tensor:
 
 
 def _ncoord(z_i: Tensor, z_j: Tensor, r: Tensor, idx_i: Tensor, n_atoms: int,
-            cutoff: Optional[float] = None, rcov: Tensor = d3_rcov) -> Tensor:
+            cutoff: Optional[float] = None, rcov: Tensor = d3_rcov, k1: float = _K1) -> Tensor:
     """Fractional coordination number of every atom (2010 paper eq 15).
 
     Each neighbor contributes a logistic count
@@ -289,14 +289,14 @@ def _ncoord(z_i: Tensor, z_j: Tensor, r: Tensor, idx_i: Tensor, n_atoms: int,
         Coordination numbers, shape ``(N,)``.
     """
     radius_sum = (rcov[z_i] + rcov[z_j]).to(r.dtype)
-    count = 1.0 / (1.0 + torch.exp(-_K1 * (radius_sum / r - 1.0)))
+    count = 1.0 / (1.0 + torch.exp(-k1 * (radius_sum / r - 1.0)))
     if cutoff is not None:
         count = count * _taper(r, cutoff)
     return _scatter_add(count, idx_i, n_atoms)
 
 
 def _getc6(z_i: Tensor, z_j: Tensor, cn_i: Tensor, cn_j: Tensor,
-           table: Tensor) -> Tensor:
+           table: Tensor, k3: float = _K3) -> Tensor:
     """C6 coefficient of each pair, interpolated over reference systems.
 
     D3 tabulates C6 values for up to 5 x 5 reference environments per
@@ -328,15 +328,16 @@ def _getc6(z_i: Tensor, z_j: Tensor, cn_i: Tensor, cn_j: Tensor,
     c6_ref = refs[..., 0]
     dist2 = ((refs[..., 1] - cn_i[:, None, None]) ** 2
              + (refs[..., 2] - cn_j[:, None, None]) ** 2)
-    gauss = torch.exp(_K3 * dist2)
+    gauss = torch.exp(k3 * dist2)
     weight = torch.where(c6_ref > 0.0, gauss, torch.zeros_like(gauss))
     norm = weight.sum(dim=(-2, -1))
     total = (weight * c6_ref).sum(dim=(-2, -1))
     # The no-reference sentinel exceeds the float32 range; build it as a
     # float64 tensor and cast so float32 saturates to -inf instead of
     # raising on the scalar-conversion path.
-    sentinel = torch.tensor(-1.0e99, dtype=torch.float64,
-                            device=norm.device).to(norm.dtype)
+    # filled on the device (a host tensor copied over would break a captured CUDA graph)
+    # (-1e99 overflows float32: there it is -inf, as the float64 constant cast down)
+    sentinel = torch.full_like(norm, -1.0e99 if norm.dtype == torch.float64 else float("-inf"))
     return torch.where(norm > 0.0, total / norm, sentinel)
 
 
@@ -385,6 +386,15 @@ def edisp(Z: Tensor, r: Tensor, idx_i: Tensor, idx_j: Tensor,
         rcov = d3_rcov
     if r2r4 is None:
         r2r4 = d3_r2r4
+    params = [torch.as_tensor(v, dtype=r.dtype, device=r.device) for v in (s6, s8, a1, a2)]
+    return edisp_core(Z, r, idx_i, idx_j, cutoff, *params, c6ab, rcov, r2r4)
+
+
+def edisp_core(Z: Tensor, r: Tensor, idx_i: Tensor, idx_j: Tensor, cutoff: Optional[float],
+               s6: Tensor, s8: Tensor, a1: Tensor, a2: Tensor, c6ab: Tensor, rcov: Tensor,
+               r2r4: Tensor) -> Tensor:
+    """:func:`edisp` with every argument given (TorchScript-compatible): the parameters as
+    tensors and the reference tables on the device of ``r``."""
     n_atoms = Z.shape[0]
     z_i, z_j = Z[idx_i], Z[idx_j]
 
@@ -698,7 +708,11 @@ class DFTD3(nn.Module, FastPathModule):
 
     @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA."""
+        """The fast three-body term (:mod:`~xnn.common.models.dispersion_fast`) runs on CUDA
+        (Triton) and on CPUs where ``torch.compile`` produces code (compiled tiles)."""
+        if device.type == "cpu":
+            from .dispersion_fast.atm_cpu import available
+            return dtype in (torch.float32, torch.float64) and available()
         from .dispersion_fast import supported
         return supported(device, dtype)
 
@@ -710,6 +724,16 @@ class DFTD3(nn.Module, FastPathModule):
         if self.training and torch.is_grad_enabled():
             return False
         return not self.s9.requires_grad
+
+    @torch.jit.unused
+    def _three_body_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor, c6_mat: Tensor,
+                        n_atoms: int) -> Tensor:
+        """The ATM term on the compiled CPU tiles of
+        :mod:`~xnn.common.models.dispersion_fast.atm_cpu` (the reference's values)."""
+        from .dispersion_fast.atm_cpu import three_body_energy_cpu
+        return three_body_energy_cpu(z, edge_index, edge_vec, r, c6_mat, self.rs9 * self.rvdw, self.s9,
+                                     (self.alp + 2.0) / 3.0, self.cutoff_triple / self.bohr,
+                                     self.switch_width_triple / self.bohr, n_atoms)
 
     @torch.jit.unused
     def _three_body_fast(self, z: Tensor, weights: Tensor, vectors: Tensor, edge_index: Tensor,
@@ -791,15 +815,20 @@ class DFTD3(nn.Module, FastPathModule):
         fast3 = False
         if not torch.jit.is_scripting():
             fast3 = self.fast_active and bool(self.s9 != 0.0) and self._fast_three_body_allowed()
-        dense = n_atoms <= 20000 and not fast3
+        # on a GPU the fast three-body kernels need no dense C6 matrix; on a CPU the compiled
+        # tiles read it
+        dense = n_atoms <= 20000 and not (fast3 and z.is_cuda)
         c6_mat = (self.c6_matrix(z, weights, vectors) if dense
                   else torch.zeros((0, 0), dtype=r.dtype, device=r.device))
         if bool(self.s9 != 0.0):
-            if not dense and not fast3:
+            if not dense and not (fast3 and z.is_cuda):
                 raise ValueError("the D3 three-body term needs the dense C6 matrix "
                                  "(more than 20000 atoms); set s9 = 0")
             in_triple = r <= self.cutoff_triple / self.bohr
-            if fast3:
+            if fast3 and not z.is_cuda:
+                e3 = self._three_body_cpu(z, edge_index[:, in_triple], vec_au[in_triple], r[in_triple],
+                                          c6_mat, n_atoms)
+            elif fast3:
                 e3 = self._three_body_fast(z, weights, vectors, edge_index[:, in_triple],
                                            vec_au[in_triple], n_atoms)
             elif self.checkpoint_triplets and not torch.jit.is_scripting():

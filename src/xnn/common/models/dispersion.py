@@ -107,13 +107,12 @@ def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: flo
         j = torch.arange(1, n_max + 1, device=cn.device)
         gauss = torch.exp(-wf * j.to(cn.dtype)[None, None, :] * dcn2[:, :, None])
         use = j[None, None, :] <= ngw[:, :, None]
-        gw = torch.where(use, gauss, torch.zeros_like(gauss)).sum(-1)
-    gw = torch.where(valid, gw, torch.zeros_like(gw))
+        gw = torch.where(use, gauss, 0.0).sum(-1)
+    gw = torch.where(valid, gw, 0.0)
     norm = gw.sum(dim=1)
     ok = norm > eps_norm
-    weights = gw / torch.where(ok, norm, torch.ones_like(norm))[:, None]
-    neg_inf = torch.full_like(refcn, -math.inf)
-    max_cn = torch.where(valid, refcn, neg_inf).max(dim=1).values
+    weights = gw / torch.where(ok, norm, 1.0)[:, None]
+    max_cn = torch.where(valid, refcn, -math.inf).max(dim=1).values
     fallback = (valid & ((refcn - max_cn[:, None]).abs() < 1e-12)).to(cn.dtype)
     return torch.where(ok[:, None], weights, fallback)
 

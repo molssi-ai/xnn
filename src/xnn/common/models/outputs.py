@@ -72,6 +72,19 @@ class ForceStressOutput(nn.Module):
         self.compute_stress = compute_stress
         self.cutoff = getattr(model, "cutoff", None)
 
+    def _model_dtype(self):
+        """The floating dtype of the wrapped model: its first floating parameter, found once
+        (a parameter keeps its identity under ``.to()``; walking the modules every call costs
+        a fraction of a millisecond)."""
+        cached = self.__dict__.get("_dtype_source")
+        if cached is not None and cached[0] is self.model:
+            return cached[1].dtype
+        for t in self.model.parameters():
+            if t.is_floating_point():
+                self.__dict__["_dtype_source"] = (self.model, t)
+                return t.dtype
+        return _float_dtype(self.model)
+
     def forward(self, data: AtomicGraph, plan: Optional[Any] = None) -> dict[str, Tensor]:
         """Run the wrapped model and add forces and stress via autograd.
 
@@ -114,7 +127,7 @@ class ForceStressOutput(nn.Module):
         # model sees its own dtype through edge_vectors(); forces and stress
         # are derivatives with respect to the float64 leaves
         if data.compute_dtype is None:
-            dtype = _float_dtype(self.model)
+            dtype = self._model_dtype()
             if dtype is not None and dtype != data.pos.dtype:
                 data.compute_dtype = dtype
 
