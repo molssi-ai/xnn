@@ -102,21 +102,21 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
    * - ANI
      - |Y|
-     - |N|
      - |Y|
-     - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
    * - PhysNet
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |N|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
    * - HDNNP
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |N|
      - |N|
@@ -140,34 +140,34 @@ and is at least as fast, for evaluation and for a training step.
      - |O|
      - |Y|
      - |N|
-     - |N|
-     - |O|
+     - |Y|
+     - |Y|
    * - OPLS-AA / L-OPLS
      - |Y|
      - |O|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - DREIDING / X6
      - |Y|
      - |O|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - AMBER (ff94)
      - |Y|
      - |O|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - CHARMM22
      - |Y|
      - |O|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - AMOEBA
@@ -196,27 +196,27 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
    * - EquiformerV2
      - |Y|
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
    * - BAMBOO
      - |Y|
      - |N|
      - |Y|
-     - |N|
+     - |Y|
      - |N|
      - |N|
    * - SpookyNet
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |N|
      - |N|
    * - PM3 / PM6 / PM6-ORG / PM7
@@ -230,7 +230,8 @@ and is at least as fast, for evaluation and for a training step.
 - **ASE and MDI** serve every model, with or without a D3 / D4 term (see
   :ref:`deployment`).
 - **Torchscript-LAMMPS** exports the reference implementation with
-  ``xnn export``. A long-range (LES) model needs the whole system on one rank.
+  ``xnn export``. A model with long-range terms (LES, or the charges of
+  AIMNet2, PhysNet and HDNNP 3G / 4G) needs the whole system on one rank.
 - **Reference-Path** rates the reference implementation against the upstream
   code:
 
@@ -245,7 +246,52 @@ and is at least as fast, for evaluation and for a training step.
 - **Fast-Path (Training)** also gives the second derivatives of a force loss,
   so training runs through the kernels.
 - ``use_fast="auto"`` picks the fast path above a measured system size (see
-  :ref:`howto-fast-paths`).
+  :ref:`howto-fast-paths`). For Equiformer and EquiformerV2 it is the other way
+  round: their fast paths win on small systems, so ``"auto"`` takes them below a
+  measured size.
+
+Notes on individual models:
+
+- **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
+  Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
+  :ref:`howto-fast-paths`), which runs the same reference implementation and
+  is faster than the upstream at every size.
+- **ANI.** Its fast path is faster at every size in float32. In float64,
+  ``"auto"`` keeps the reference on a T4 or an L40S, whose float64 throughput
+  is low.
+- **PhysNet.** The upstream runs on TensorFlow's graph executor, which is
+  faster on small systems. A captured xnn step (``trainer.cuda_graph: true``)
+  is faster than the upstream's training step at every size. The fast path
+  wins from about a thousand atoms.
+- **BAMBOO.** Its forces are the exact gradient of the energy. The forces the
+  upstream code reports differ from that gradient by about one part in 10^10.
+- **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and
+  float64, but Triton has no float64 matrix products. In float64, ``"auto"``
+  keeps the reference for DimeNet++ (its fast path is slower there but needs
+  half the memory). For GemNet, it keeps the reference in training and for the
+  quadruplet layers, and takes the fast path for evaluation from a few hundred
+  atoms on.
+- **OPLS, AMBER, CHARMM and DREIDING.** All four match LAMMPS to round-off.
+  DREIDING / X6 has no code from its authors, so LAMMPS serves as its upstream.
+  LAMMPS also runs on CPUs, where the reference is still being compared with
+  it.
+  On a GPU, all four evaluate and train on fused kernels. An MD step with
+  :class:`~xnn.ffnn.models.ClassicalStepper` is faster than with the GPU build
+  of LAMMPS, list rebuilds included. A training step is two to two and a half
+  times faster than on the eager terms, which still handle stress losses.
+- **ReaxFF.** It matches LAMMPS to round-off. On CPUs, the reference is still
+  being compared with LAMMPS. Above 2048 atoms, it solves for
+  the charges by conjugate gradients instead of a dense solve. On a GPU,
+  ReaxFF and ReaxFF-nn evaluate energies, forces and stress on fused kernels
+  in both conventions. The neural bond orders of ReaxFF-nn stay in PyTorch.
+  Training runs on the kernels as well, 1.1 to 2.7 times faster than on the
+  eager terms. A stress loss trains on the eager terms. An MD step of a
+  classical field with :class:`~xnn.ffnn.models.ReaxFFStepper` is faster than
+  with the GPU build of LAMMPS, list rebuilds included.
+- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
+  ReaxFF deploy as inputs for LAMMPS's own styles
+  (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
+  These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
 
 Add-on terms
 ============
@@ -285,36 +331,17 @@ are the same as above.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
 
-- **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
-  Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
-  :ref:`howto-fast-paths`), which runs the same reference implementation and
-  is faster than the upstream at every size.
-- **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and
-  float64, but Triton has no float64 matrix products. In float64, ``"auto"``
-  keeps the reference for DimeNet++ (its fast path is slower there but needs
-  half the memory). For GemNet, it keeps the reference in training and for the
-  quadruplet layers, and takes the fast path for evaluation from a few hundred
-  atoms on.
-- **OPLS, AMBER, CHARMM and DREIDING.** All four match LAMMPS to round-off.
-  DREIDING / X6 has no code from its authors, so LAMMPS serves as its upstream.
-  On a GPU, all four evaluate and train on fused kernels. An MD step with
-  :class:`~xnn.ffnn.models.ClassicalStepper` is faster than with the GPU build
-  of LAMMPS, list rebuilds included. A training step is two to two and a half
-  times faster than on the eager terms, which still handle stress losses.
-- **ReaxFF.** It matches LAMMPS to round-off but is slower than LAMMPS's GPU
-  build. Above 2048 atoms, it solves for the charges by conjugate gradients
-  instead of a dense solve. Its fused kernels cover classical fields with the
-  LAMMPS conventions, in evaluation. ReaxFF-nn and the ReaxFF-nn conventions
-  evaluate their bonded terms eagerly, and training runs the eager terms.
-- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
-  ReaxFF deploy as inputs for LAMMPS's own styles
-  (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
-  These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
-- **D3, D4 and LES.** All three match their upstream codes to round-off. We
-  have not compared their speed with those codes yet. The dispersion kernels
-  are differentiable only once, so training uses the reference three-body term
-  and the dispersion fast path serves evaluation only.
+- **D3, D4 and LES.** All three match their upstream codes to round-off. LES
+  is faster than its upstream on the same GPU, for evaluation and training. The
+  D3 and D4 upstreams run only on the CPU. On the same CPU, xnn's reference
+  three-body term is slower than their compiled loops, so the Reference-Path
+  cells stay red. The dispersion kernels are differentiable only once, so
+  training uses the reference three-body term and the dispersion fast path
+  serves evaluation only. On a CPU the three-body term also runs compiled (see
+  :ref:`howto-fast-paths-cpu`). D3 then takes 0.44 to 0.73 of simple-dftd3's
+  time from about 375 atoms. D4 matches dftd4 for large molecules and stays
+  slower for cells and small systems.
