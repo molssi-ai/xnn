@@ -39,14 +39,14 @@ def _shifted_softplus(z, ln2):
 
 @triton.jit
 def _forward_kernel(h_ptr, z_ptr, env_ptr, src_ptr, order_ptr, ptr_ptr, out_ptr, ln2_ptr,
-                    F: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr, ACT: tl.constexpr):
+                    F: tl.constexpr, FP: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr, ACT: tl.constexpr):
     """``out[i] = sum_e h[src_e] * act(z_e) * env_e`` over the edges of center ``i``."""
     i = tl.program_id(0).to(tl.int64)
     b = tl.arange(0, B)[:, None]
-    f = tl.arange(0, F)[None, :]
+    f = tl.arange(0, FP)[None, :]
     start = tl.load(ptr_ptr + i)
     end = tl.load(ptr_ptr + i + 1)
-    acc = tl.zeros([B, F], dtype=out_ptr.dtype.element_ty)
+    acc = tl.zeros([B, FP], dtype=out_ptr.dtype.element_ty)
     k = start
     while k < end:
         mk = (k + b) < end
@@ -60,22 +60,22 @@ def _forward_kernel(h_ptr, z_ptr, env_ptr, src_ptr, order_ptr, ptr_ptr, out_ptr,
             w = w * tl.load(env_ptr + e, mask=mk, other=0.0)
         acc += tl.load(h_ptr + j * F + f, mask=m2, other=0.0) * w
         k += B
-    tl.store(out_ptr + i * F + tl.arange(0, F), tl.sum(acc, axis=0))
+    tl.store(out_ptr + i * F + tl.arange(0, FP), tl.sum(acc, axis=0), mask=tl.arange(0, FP) < F)
 
 
 @triton.jit
 def _backward_kernel(h_ptr, z_ptr, env_ptr, dst_ptr, order_ptr, ptr_ptr, g_ptr, gh_ptr, gz_ptr,
-                     genv_ptr, ln2_ptr, F: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr,
+                     genv_ptr, ln2_ptr, F: tl.constexpr, FP: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr,
                      ACT: tl.constexpr):
     """Over the edges of neighbor ``j``: ``gh[j] = sum_e g[dst_e] act(z_e) env_e``, and per edge
     the gradients of ``z`` and of the envelope."""
     j = tl.program_id(0).to(tl.int64)
     b = tl.arange(0, B)[:, None]
-    f = tl.arange(0, F)[None, :]
+    f = tl.arange(0, FP)[None, :]
     start = tl.load(ptr_ptr + j)
     end = tl.load(ptr_ptr + j + 1)
-    hj = tl.load(h_ptr + j * F + f)
-    acc = tl.zeros([B, F], dtype=gh_ptr.dtype.element_ty)
+    hj = tl.load(h_ptr + j * F + f, mask=f < F, other=0.0)
+    acc = tl.zeros([B, FP], dtype=gh_ptr.dtype.element_ty)
     k = start
     while k < end:
         mk = (k + b) < end
@@ -101,7 +101,7 @@ def _backward_kernel(h_ptr, z_ptr, env_ptr, dst_ptr, order_ptr, ptr_ptr, g_ptr, 
             gz = gz / (1.0 + tl.exp(-z))                     # times ssp'(z) = sigmoid(z)
         tl.store(gz_ptr + e * F + f, gz, mask=m2)
         k += B
-    tl.store(gh_ptr + j * F + tl.arange(0, F), tl.sum(acc, axis=0))
+    tl.store(gh_ptr + j * F + tl.arange(0, FP), tl.sum(acc, axis=0), mask=tl.arange(0, FP) < F)
 
 
 @triton.jit
@@ -120,7 +120,7 @@ def _derivatives(z, ln2_ptr, ACT: tl.constexpr):
 
 @triton.jit
 def _double_center(h_ptr, z_ptr, env_ptr, th_ptr, tz_ptr, tenv_ptr, src_ptr, order_ptr, ptr_ptr,
-                   dg_ptr, ln2_ptr, F: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr,
+                   dg_ptr, ln2_ptr, F: tl.constexpr, FP: tl.constexpr, B: tl.constexpr, HAS_ENV: tl.constexpr,
                    ACT: tl.constexpr, HAS_TH: tl.constexpr, HAS_TZ: tl.constexpr,
                    HAS_TENV: tl.constexpr):
     """Over the edges of center ``i``: the derivative with respect to ``g[i]`` of
@@ -128,10 +128,10 @@ def _double_center(h_ptr, z_ptr, env_ptr, th_ptr, tz_ptr, tenv_ptr, src_ptr, ord
     (``s, a1 = act(z), act'(z)``, ``c`` the envelope)."""
     i = tl.program_id(0).to(tl.int64)
     b = tl.arange(0, B)[:, None]
-    f = tl.arange(0, F)[None, :]
+    f = tl.arange(0, FP)[None, :]
     start = tl.load(ptr_ptr + i)
     end = tl.load(ptr_ptr + i + 1)
-    acc = tl.zeros([B, F], dtype=dg_ptr.dtype.element_ty)
+    acc = tl.zeros([B, FP], dtype=dg_ptr.dtype.element_ty)
     k = start
     while k < end:
         mk = (k + b) < end
@@ -153,12 +153,12 @@ def _double_center(h_ptr, z_ptr, env_ptr, th_ptr, tz_ptr, tenv_ptr, src_ptr, ord
             if HAS_TENV:
                 acc += tl.load(tenv_ptr + e, mask=mk, other=0.0) * hs * s
         k += B
-    tl.store(dg_ptr + i * F + tl.arange(0, F), tl.sum(acc, axis=0))
+    tl.store(dg_ptr + i * F + tl.arange(0, FP), tl.sum(acc, axis=0), mask=tl.arange(0, FP) < F)
 
 
 @triton.jit
 def _double_neighbor(h_ptr, z_ptr, env_ptr, g_ptr, th_ptr, tz_ptr, tenv_ptr, dst_ptr, order_ptr,
-                     ptr_ptr, dh_ptr, dz_ptr, denv_ptr, ln2_ptr, F: tl.constexpr, B: tl.constexpr,
+                     ptr_ptr, dh_ptr, dz_ptr, denv_ptr, ln2_ptr, F: tl.constexpr, FP: tl.constexpr, B: tl.constexpr,
                      HAS_ENV: tl.constexpr, ACT: tl.constexpr, HAS_TH: tl.constexpr,
                      HAS_TZ: tl.constexpr, HAS_TENV: tl.constexpr):
     """Over the edges of neighbor ``j``: the derivatives of ``<th, gh> + <tz, gz> + <tenv, genv>``
@@ -167,13 +167,13 @@ def _double_neighbor(h_ptr, z_ptr, env_ptr, g_ptr, th_ptr, tz_ptr, tenv_ptr, dst
     (``sum_f th[j] g s + tz g h[j] a1``), with ``g = g[dst_e]``."""
     j = tl.program_id(0).to(tl.int64)
     b = tl.arange(0, B)[:, None]
-    f = tl.arange(0, F)[None, :]
+    f = tl.arange(0, FP)[None, :]
     start = tl.load(ptr_ptr + j)
     end = tl.load(ptr_ptr + j + 1)
-    hj = tl.load(h_ptr + j * F + f)
+    hj = tl.load(h_ptr + j * F + f, mask=f < F, other=0.0)
     if HAS_TH:
-        thj = tl.load(th_ptr + j * F + f)
-    acc = tl.zeros([B, F], dtype=dh_ptr.dtype.element_ty)
+        thj = tl.load(th_ptr + j * F + f, mask=f < F, other=0.0)
+    acc = tl.zeros([B, FP], dtype=dh_ptr.dtype.element_ty)
     k = start
     while k < end:
         mk = (k + b) < end
@@ -205,7 +205,7 @@ def _double_neighbor(h_ptr, z_ptr, env_ptr, g_ptr, th_ptr, tz_ptr, tenv_ptr, dst
         if HAS_ENV:
             tl.store(denv_ptr + e, tl.sum(dc, axis=1)[:, None], mask=mk)
         k += B
-    tl.store(dh_ptr + j * F + tl.arange(0, F), tl.sum(acc, axis=0))
+    tl.store(dh_ptr + j * F + tl.arange(0, FP), tl.sum(acc, axis=0), mask=tl.arange(0, FP) < F)
 
 
 def _ln2(like: Tensor) -> Tensor:
@@ -219,10 +219,11 @@ def _ln2(like: Tensor) -> Tensor:
 SHAPES = {torch.float32: (1024, 2), torch.float64: (512, 1)}
 
 
-def _launch(n_features: int, dtype: torch.dtype) -> Tuple[int, int]:
-    """Edges per step and warps per program."""
+def _launch(n_features: int, dtype: torch.dtype) -> Tuple[int, int, int]:
+    """Padded feature width (a power of two: any width runs, masked), edges per step and warps per program."""
     values, warps = SHAPES[dtype]
-    return max(1, values // n_features), warps
+    fp = triton.next_power_of_2(n_features)
+    return fp, max(1, values // fp), warps
 
 
 def _contiguous(t):
@@ -240,9 +241,9 @@ class CFConvFunction(torch.autograd.Function):
         out = torch.empty_like(h)
         order_dst, ptr_dst = rows[0], rows[1]
         if n:
-            B, warps = _launch(F, h.dtype)
+            FP, B, warps = _launch(F, h.dtype)
             _forward_kernel[(n,)](h, z, env if has_env else z, src, order_dst, ptr_dst, out,
-                                  _ln2(z), F=F, B=B, HAS_ENV=has_env, ACT=activated,
+                                  _ln2(z), F=F, FP=FP, B=B, HAS_ENV=has_env, ACT=activated,
                                   num_warps=warps)
         ctx.activated = activated
         ctx.rows = rows
@@ -271,9 +272,9 @@ class CFConvGradFunction(torch.autograd.Function):
         genv = torch.empty_like(env)
         order_src, ptr_src = rows[2], rows[3]
         if n:
-            B, warps = _launch(F, h.dtype)
+            FP, B, warps = _launch(F, h.dtype)
             _backward_kernel[(n,)](h, z, env if has_env else z, dst, order_src, ptr_src, g, gh, gz,
-                                   genv if has_env else z, _ln2(z), F=F, B=B, HAS_ENV=has_env,
+                                   genv if has_env else z, _ln2(z), F=F, FP=FP, B=B, HAS_ENV=has_env,
                                    ACT=activated, num_warps=warps)
         ctx.activated = activated
         ctx.rows = rows
@@ -295,8 +296,8 @@ class CFConvGradFunction(torch.autograd.Function):
         dz = torch.empty_like(z)
         denv = torch.empty_like(env)
         if n:
-            B, warps = _launch(F, h.dtype)
-            flags = dict(F=F, B=B, HAS_ENV=has_env, ACT=ctx.activated, HAS_TH=th is not None,
+            FP, B, warps = _launch(F, h.dtype)
+            flags = dict(F=F, FP=FP, B=B, HAS_ENV=has_env, ACT=ctx.activated, HAS_TH=th is not None,
                          HAS_TZ=tz is not None, HAS_TENV=tenv is not None, num_warps=warps)
             th_, tz_, tenv_ = (h if th is None else th), (z if tz is None else tz), (z if tenv is None else tenv)
             env_ = env if has_env else z
