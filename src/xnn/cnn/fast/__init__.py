@@ -1,9 +1,9 @@
 """Fast paths of the voxel models (SteerableCNN, CNN3D).
 
 The 3D convolutions of their blocks have a second implementation,
-:func:`~xnn.cnn.fast.conv.conv3d`, which runs cuDNN's channels-last kernels with its algorithm search;
-:class:`~xnn.common.models.fast.FastPathModule` explains the contract and
-``use_fast`` the choice. :data:`AUTO_POLICY` and
+:func:`~xnn.cnn.fast.conv.conv3d`, which runs cuDNN's channels-last kernels
+with its algorithm search; :class:`~xnn.common.models.fast.FastPathModule`
+explains the contract and ``use_fast`` the choice. :data:`AUTO_POLICY` and
 :data:`AUTO_POLICY_TRAINING` hold where ``use_fast="auto"`` takes it.
 
 The correlations of the SphericalCNN have Triton kernels instead, in
