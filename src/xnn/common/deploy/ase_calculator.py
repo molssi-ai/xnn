@@ -68,6 +68,12 @@ class XNNCalculator(Calculator):
         next (:meth:`~xnn.common.models.d4.DFTD4.enable_eeq_reuse`), for
         molecular dynamics and geometry optimization; results agree with the
         fresh solve to the solver tolerance. Default ``False``.
+    cuda_graph : bool, optional
+        On a CUDA device, replay the evaluation as one CUDA graph
+        (:class:`~xnn.common.deploy.GraphedEvaluation`): faster on small
+        structures, where an evaluation is bound by kernel launches; the same
+        results. Needs a model with an index planner (DimeNet, GemNet,
+        PhysNet). Default ``False``.
 
     Raises
     ------
@@ -78,7 +84,7 @@ class XNNCalculator(Calculator):
     implemented_properties = ["energy", "forces", "stress", "charges", "dipole"]
 
     def __init__(self, model, cutoff: float, device: str = "cpu", eeq_reuse: bool = False,
-                 **kwargs):
+                 cuda_graph: bool = False, **kwargs):
         if not _HAS_ASE:
             raise ImportError("ASE is required: pip install \"xnn[ase]\"")
         super().__init__(**kwargs)
@@ -91,6 +97,10 @@ class XNNCalculator(Calculator):
             # step to the next (no effect on a model without a D4 term)
             from ..models.d4 import enable_eeq_reuse
             enable_eeq_reuse(self.model)
+        self._graphed = None
+        if cuda_graph and torch.device(device).type == "cuda":
+            from .graphed_eval import GraphedEvaluation
+            self._graphed = GraphedEvaluation(self.model)
 
     @classmethod
     def from_pretrained(cls, source, device: str = "cpu", eeq_reuse: bool = False,
@@ -210,7 +220,7 @@ class XNNCalculator(Calculator):
             struct["fragment_charges"] = np.asarray(atoms.arrays["fragment_charges"], dtype=float)
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
         graph.compute_dtype = self.dtype
-        out = self.model(graph)
+        out = self._graphed(graph) if self._graphed is not None else self.model(graph)
 
         self.results["energy"] = float(out["energy"].sum().detach())
         if "forces" in out:
