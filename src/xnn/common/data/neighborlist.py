@@ -236,11 +236,16 @@ def half_list(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
     return _vesin_neighbor_list(pos, cutoff, cell, pbc, False, full_list=False)
 
 
+GRID_CPU_ATOMS = 4096
+
+
 def cell_grid(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
               pbc: Optional[Tensor] = None) -> Optional[tuple]:
-    """The grid :func:`unique_pairs` searches on the GPU: an orthorhombic cell,
-    periodic on every axis, with room for at least three cells of ``cutoff``
-    per axis, and positions on a CUDA device with Triton.
+    """The grid :func:`unique_pairs` searches: an orthorhombic cell, periodic on
+    every axis, with room for at least three cells of ``cutoff`` per axis, and
+    positions on a CUDA device with Triton, or on the CPU with at least
+    ``GRID_CPU_ATOMS`` atoms where the CPU kernels compile
+    (:mod:`xnn.common.cpu_kernels`; vesin's search is single-threaded).
 
     Parameters
     ----------
@@ -256,11 +261,16 @@ def cell_grid(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
     Returns
     -------
     tuple or None
-        The cell's edges ``(3,)`` and the cells per axis, or ``None`` where the
-        pairs come from vesin.
+        The cell's edges ``(3,)`` and the cells per axis (and, on a CPU, no
+        capacity and the cells per cutoff), or ``None`` where the pairs come from
+        vesin.
     """
-    if not pos.is_cuda or cell is None or pbc is None or not bool(pbc.all()):
+    if cell is None or pbc is None or not bool(pbc.all()):
         return None
+    if not pos.is_cuda:
+        from xnn.common import cpu_kernels
+        if pos.device.type != "cpu" or int(pos.shape[0]) < GRID_CPU_ATOMS or not cpu_kernels.available():
+            return None
     try:
         from .grid_pairs import grid_shape
     except ImportError:
@@ -268,7 +278,12 @@ def cell_grid(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
     rows = cell.detach().reshape(3, 3).double().cpu()
     if bool((rows - torch.diag(torch.diagonal(rows))).abs().max() > 0):
         return None
-    shape = grid_shape(torch.diagonal(rows).abs().tolist(), cutoff)
+    lengths = torch.diagonal(rows).abs().tolist()
+    # on a CPU, cells of half the cutoff where the cell has room for five per axis
+    shape = None if pos.is_cuda else grid_shape(lengths, cutoff, 2)
+    if shape is not None:
+        return torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape, None, 2
+    shape = grid_shape(lengths, cutoff)
     return None if shape is None else (torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape)
 
 
