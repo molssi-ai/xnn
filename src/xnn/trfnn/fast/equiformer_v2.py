@@ -9,11 +9,12 @@ from xnn.common.models.fast import AutoPolicy
 from xnn.trfnn.fast.compiled import supported  # noqa: F401
 
 #: Edge counts below which ``use_fast="auto"`` takes the compiled blocks in evaluation mode
-#: (energy and forces): they save kernel launches, so they win on small graphs. On the A100
-#: they won on a single small molecule (0.39-0.41 of upstream's time against 0.71-0.74)
-#: and lost or tied from 4.5k edges.
+#: (energy and forces): they save kernel launches, so they win on small graphs (a single
+#: molecule) and lose or tie on larger ones.
 AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0, default_max_edges=1000,
                          default_max_edges_float64=1000)
 
-#: The same for training mode (a step with a force loss, second derivatives included).
-AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+#: The same for training mode (a step with a force loss, second derivatives included), where
+#: the compiled derivatives also keep a fraction of the reference's memory.
+AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0, default_max_edges=1000,
+                                  default_max_edges_float64=1000)

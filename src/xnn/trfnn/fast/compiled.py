@@ -14,7 +14,7 @@ import sys
 import torch
 from torch import Tensor
 
-from xnn.common.models.fast import compile_twice_differentiable
+from xnn.common.models.fast import compile_twice_differentiable, separate_shapes
 
 
 def supported(device: torch.device, dtype: torch.dtype) -> bool:
@@ -97,8 +97,14 @@ def run_compiled(block: torch.nn.Module, *args):
         fn = _SHARED[key] = (compile_twice_differentiable(raw, n_diff, n_const) if block.training
                              else torch.compile(raw, dynamic=True))
     params, buffers = _states(block)
+    # weights and buffers keep fixed sizes: as symbolic sizes they meet the same sizes as numbers
+    # in fused matrix products, which the compiler rejects
+    for t in (*params, *buffers):
+        if not hasattr(t, "_dynamo_static_indices"):
+            torch._dynamo.mark_static(t)
     # contiguous inputs: a transposed view as an input of the twice-differentiated graph trips
     # the compiler (symbolic strides)
     diff = [a.contiguous() for a in args if _kind(a) == "d"]
     const = [a for a in args if _kind(a) == "c"]
-    return fn(*params, *diff, *buffers, *const)
+    with separate_shapes():
+        return fn(*params, *diff, *buffers, *const)

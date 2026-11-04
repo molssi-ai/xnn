@@ -12,11 +12,13 @@ from xnn.common.models.fast import AutoPolicy
 from xnn.trfnn.fast.compiled import supported  # noqa: F401
 
 #: Edge counts below which ``use_fast="auto"`` takes the compiled blocks in evaluation mode
-#: (energy and forces): they save kernel launches, so they win on small graphs. On the A100
-#: they won up to 7.7k edges (0.44-0.89 of upstream's time against 0.99-1.07 for
-#: the reference) and lost from 20k (generic kernels on large tensors against cuBLAS).
+#: (energy and forces): they save kernel launches, so they win on small graphs, and lose on
+#: large ones (generic kernels on large tensors against cuBLAS).
 AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0, default_max_edges=12000,
                          default_max_edges_float64=12000)
 
-#: The same for training mode (a step with a force loss, second derivatives included).
-AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0)
+#: The same for training mode (a step with a force loss, second derivatives included), where
+#: the compiled derivatives also keep less memory. The float64 bound is lower: a dense graph
+#: of a few thousand edges already loses there.
+AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=0, default_min_edges_float64=0, default_max_edges=10000,
+                                  default_max_edges_float64=4000)

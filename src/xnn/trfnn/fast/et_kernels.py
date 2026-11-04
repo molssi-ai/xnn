@@ -292,9 +292,10 @@ def _warps(n_features: int) -> int:
 class _Pairs:
     """The pair list of a layer: neighbors, centers, atom count, head layout and the sorted orders."""
 
-    def __init__(self, src: Tensor, dst: Tensor, n: int, heads: int, head_dim: int):
+    def __init__(self, src: Tensor, dst: Tensor, n: int, heads: int, head_dim: int,
+                 key: Optional[Tensor] = None):
         self.src, self.dst, self.n = src, dst, n
-        self.order_dst, self.ptr_dst, self.order_src, self.ptr_src = orderings(src, dst, n)
+        self.order_dst, self.ptr_dst, self.order_src, self.ptr_src = orderings(src, dst, n, key=key)
         self.sizes = dict(H=heads, D=head_dim, HP=_pow2(heads), DP=_pow2(head_dim))
         self.warps = _warps(heads * head_dim)
 
@@ -405,7 +406,7 @@ class _Messages(MultilinearBlock):
 
 
 def attention_logits(q: Tensor, k: Tensor, dk: Optional[Tensor], src: Tensor, dst: Tensor,
-                     heads: int) -> Tensor:
+                     heads: int, key: Optional[Tensor] = None) -> Tensor:
     """The fused logits ``sum_(f in h) q[dst] k[src] dk`` of every pair and head, ``(P, H)``.
 
     Parameters
@@ -418,13 +419,16 @@ def attention_logits(q: Tensor, k: Tensor, dk: Optional[Tensor], src: Tensor, ds
         Neighbor and center of every pair ``(P,)``.
     heads : int
         Number of heads ``H`` (``F`` divisible by it).
+    key : Tensor, optional
+        The object that identifies the pair list for the sort cache (for example the edge
+        index ``src`` and ``dst`` are rows of); by default ``src`` and ``dst`` themselves.
 
     Returns
     -------
     Tensor
         ``(P, H)``.
     """
-    pairs = _Pairs(src, dst, q.shape[0], heads, q.shape[1] // heads)
+    pairs = _Pairs(src, dst, q.shape[0], heads, q.shape[1] // heads, key)
     ops = [q, k] + ([dk] if dk is not None else [])
     return multilinear(_Logits(pairs, dk is not None), *ops)
 
