@@ -27,8 +27,8 @@ of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
 solve of ReaxFF and ReaxFF-nn, the three-body term of D3 and D4 and the
 large-system EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA
 builds of PyTorch), and the reciprocal sum of the LES long-range term (for
-which, we use plain PyTorch). On a CPU, the three-body term of D3 and D4 and the
-symmetry functions of HDNNP run compiled (see :ref:`howto-fast-paths-cpu`).
+which, we use plain PyTorch). On a CPU, D3, D4 and the symmetry functions of
+HDNNP run on C++ kernels (see :ref:`howto-fast-paths-cpu`).
 
 Install
 =======
@@ -131,31 +131,29 @@ obtained with ``"auto"``.
 
 On a CPU
 ========
-The ATM three-body term of D3 and D4 and the symmetry functions of HDNNP also
-have a fast path on CPUs. For D3 and D4 it is the same computation compiled with
-``torch.compile`` into C++ and OpenMP loops. For HDNNP, C++ and OpenMP kernels
-loop over the atoms, their neighbors and neighbor pairs, as RuNNer does, and take
-about half of RuNNer's time. They are built on first use, which needs ``ninja``
-(``pip install "xnns[cpu-kernels]"``). Other function sets fall back to
-``torch.compile``.
-So, the code needs a C++ compiler on the machine:
+D3, D4 and the symmetry functions of HDNNP also have a fast path on CPUs: C++
+and OpenMP kernels that loop over the atoms, their neighbors and neighbor pairs,
+as the Fortran codes do. D3 runs entirely in them. D4 runs its polarizabilities
+and its two- and three-body sums in them, and its charges in PyTorch. They take
+a fraction of the time of simple-dftd3, dftd4 and RuNNer from about 80 atoms on.
+The kernels are built on first use, which needs a C++ compiler with OpenMP and
+``ninja`` (``pip install "xnns[cpu-kernels]"``):
 
 .. code-block:: python
 
-   model.set_use_fast(True)     # the compiled path on a CPU, where torch.compile works
+   model.set_use_fast(True)     # the C++ kernels on a CPU, where they build
 
-- **First call.** The first evaluation compiles, which takes 10 to 20 seconds
-  (about a minute for the HDNNP kernels, once per machine). Later calls of any
-  system size reuse the compiled code. ``"auto"`` takes the D3 / D4 path above
-  5000 edges (about 75 atoms), where that pays off, and the HDNNP kernels at
-  every size. The compiled HDNNP fallback runs only with ``use_fast=True``.
-- **Threads.** The compiled code keeps the OpenMP thread count of the process that
-  compiled it. Give runs with different thread counts their own
-  ``TORCHINDUCTOR_CACHE_DIR``.
+- **First call.** The build takes about a minute, once per machine. ``"auto"``
+  takes the kernels at every size where they build.
+- **Fallback.** Without the build, D3 and D4 compile their three-body term with
+  ``torch.compile`` (10 to 20 seconds on the first call; ``"auto"`` takes it above
+  5000 edges, about 75 atoms). HDNNP function sets the kernels do not cover use
+  ``torch.compile`` only with ``use_fast=True``. Compiled code keeps the OpenMP
+  thread count of the process that compiled it, so give runs with different
+  thread counts their own ``TORCHINDUCTOR_CACHE_DIR``. Where neither works, the
+  reference path runs.
 - **Evaluation only.** Covers the energies, forces and stress. A training step
   runs the reference path.
-- **Fallback.** Where ``torch.compile`` cannot produce CPU code, the reference
-  path runs.
 
 AMOEBA and HIPPO run their GPU kernels on a CPU as well. With
 ``use_fast=True``, the pair, mutual-field, solver and mesh kernels become C++
@@ -166,8 +164,9 @@ pair kernels and runs the mesh and the solver eagerly.
 - **First call.** The system C++ compiler builds the kernels on first use, which
   takes about a minute. They are cached in ``~/.cache/xnn/cpu_kernels``, or in
   ``XNN_CPU_KERNELS_DIR`` when it is set.
-- **Choice.** ``"auto"`` keeps the reference on a CPU. Set ``use_fast=True`` to
-  take the kernels.
+- **Choice.** ``"auto"`` takes the kernels on a CPU from about 50 000 pairs
+  (about 1500 atoms of water), in evaluation and in training. Below that, it
+  keeps the reference. ``use_fast=True`` takes the kernels at every size.
 
 What to expect from fast implementations
 ========================================
