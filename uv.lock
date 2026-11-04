@@ -4398,6 +4398,7 @@ all = [
     { name = "nbconvert" },
     { name = "nbformat" },
     { name = "nequip" },
+    { name = "ninja" },
     { name = "omegaconf" },
     { name = "pytest" },
     { name = "tensorboard" },
@@ -4409,6 +4410,9 @@ ani = [
 ]
 ase = [
     { name = "ase" },
+]
+cpu-kernels = [
+    { name = "ninja" },
 ]
 d3 = [
     { name = "dftd3" },
@@ -4500,6 +4504,8 @@ requires-dist = [
     { name = "nbformat", marker = "extra == 'examples'" },
     { name = "nequip", marker = "extra == 'all'", specifier = "==0.6.2" },
     { name = "nequip", marker = "extra == 'examples'", specifier = "==0.6.2" },
+    { name = "ninja", marker = "extra == 'all'" },
+    { name = "ninja", marker = "extra == 'cpu-kernels'" },
     { name = "numpy" },
     { name = "omegaconf", marker = "extra == 'all'", specifier = ">=2.3" },
     { name = "omegaconf", marker = "extra == 'hydra'", specifier = ">=2.3" },
@@ -4526,7 +4532,7 @@ requires-dist = [
     { name = "vesin-torch", marker = "extra == 'all'", specifier = ">=0.3" },
     { name = "vesin-torch", marker = "extra == 'vesin'", specifier = ">=0.3" },
 ]
-provides-extras = ["ase", "hub", "gnn", "mdi", "vesin", "hydra", "tensorboard", "dev", "docs", "examples", "ani", "d4", "d3", "ffnn", "opls", "all"]
+provides-extras = ["ase", "hub", "gnn", "mdi", "vesin", "cpu-kernels", "hydra", "tensorboard", "dev", "docs", "examples", "ani", "d4", "d3", "ffnn", "opls", "all"]
 
 [[package]]
 name = "zarr"
