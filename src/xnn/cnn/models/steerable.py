@@ -53,6 +53,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
 
@@ -274,7 +275,7 @@ def rotate_fields(x: Tensor, R: Tensor, fields: Sequence[int]) -> Tensor:
     return torch.cat(pieces, dim=1)
 
 
-class SteerableConv3d(nn.Module):
+class SteerableConv3d(nn.Module, FastPathModule):
     """SE(3)-equivariant 3D convolution between stacks of fields.
 
     For every pair of output order ``j`` and input order ``l`` the kernel
@@ -285,7 +286,9 @@ class SteerableConv3d(nn.Module):
     basis of a block is scaled by ``sqrt((2j + 1) / (B_{jl} sum_l m_l))`` so
     that weights drawn from ``N(0, 1)`` give outputs of unit variance (the
     initialization of the reference implementation). There is no bias: the
-    biases of scalar fields live in the gated nonlinearity.
+    biases of scalar fields live in the gated nonlinearity. Its fast path
+    (``fast_active``, set by the model's ``use_fast``) runs the convolution
+    with cuDNN's algorithm search (:func:`xnn.cnn.fast.conv3d`).
 
     Parameters
     ----------
@@ -346,6 +349,11 @@ class SteerableConv3d(nn.Module):
         if len(self.weight) == 0:
             raise ValueError("no basis kernel couples these fields at this kernel size "
                              "and bandlimit; the layer would be identically zero")
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.cnn.fast import supported
+        return supported(device, dtype)
 
     def kernel(self) -> Tensor:
         """The filter bank spanned by the current weights, ``(K_out, K_in, s, s, s)``."""
@@ -368,8 +376,15 @@ class SteerableConv3d(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """Convolve ``(B, in_channels, X, Y, Z)`` fields into ``(B, out_channels, X', Y', Z')``."""
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x)
         return F.conv3d(x, self.kernel(), stride=self.stride, padding=self.padding,
                         dilation=self.dilation)
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor) -> Tensor:
+        from xnn.cnn.fast import conv3d
+        return conv3d(x, self.kernel(), stride=self.stride, padding=self.padding, dilation=self.dilation)
 
     def extra_repr(self) -> str:
         return (f"fields_in={self.fields_in}, fields_out={self.fields_out}, n_gates={self.n_gates}, "

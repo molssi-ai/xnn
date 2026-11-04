@@ -21,11 +21,11 @@ use).
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Dict, Optional, Sequence
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
@@ -101,7 +101,9 @@ def low_pass_filter(x: Tensor, scale: float, stride: int = 1) -> Tensor:
     voxels (the width that turns the voxel-sized sampling kernel into one of
     ``scale`` voxels), truncated at 2.5 standard deviations and normalized to
     unit sum. Applied channel by channel, so it commutes with every fiber
-    transformation and preserves equivariance.
+    transformation and preserves equivariance. The Gaussian is separable,
+    so the zero-padded, strided 3D convolution is applied as one banded
+    matrix per axis.
 
     Parameters
     ----------
@@ -127,13 +129,31 @@ def low_pass_filter(x: Tensor, scale: float, stride: int = 1) -> Tensor:
     size = int(1 + 2 * 2.5 * sigma)
     if size % 2 == 0:
         size += 1
-    r = torch.arange(size, dtype=x.dtype, device=x.device) - size // 2
-    g = torch.exp(-r ** 2 / (2 * sigma ** 2))
-    kernel = g[:, None, None] * g[None, :, None] * g[None, None, :]
-    kernel = (kernel / kernel.sum()).view(1, 1, size, size, size)
-    lead = x.shape[:-3]
-    out = F.conv3d(x.reshape(-1, 1, *x.shape[-3:]), kernel, padding=size // 2, stride=stride)
-    return out.view(*lead, *out.shape[-3:])
+    lead, (nx, ny, nz) = x.shape[:-3], x.shape[-3:]
+    mx, my, mz = (_blur_matrix(sigma, size, n, stride, x.dtype, x.device) for n in (nx, ny, nz))
+    # matrix products on views, no permuted copies: the last axis, the middle one (batched), the first
+    x = x @ mz.t()
+    x = my @ x
+    x = mx @ x.reshape(*lead, nx, -1)
+    return x.view(*lead, mx.shape[0], my.shape[0], mz.shape[0])
+
+
+@lru_cache(maxsize=64)
+def _blur_matrix(sigma: float, size: int, n: int, stride: int, dtype: torch.dtype,
+                 device: torch.device) -> Tensor:
+    """``(n_out, n)`` matrix of the zero-padded, strided 1D Gaussian of ``size`` taps (unit sum)."""
+    r = torch.arange(size, dtype=torch.float64) - size // 2
+    taps = torch.exp(-r ** 2 / (2 * sigma ** 2))
+    taps = taps / taps.sum()
+    half = size // 2
+    n_out = (n - 1) // stride + 1
+    rows = torch.arange(n_out)
+    m = torch.zeros(n_out, n, dtype=torch.float64)
+    for k in range(size):
+        cols = rows * stride - half + k
+        valid = (cols >= 0) & (cols < n)
+        m[rows[valid], cols[valid]] = taps[k]
+    return m.to(device=device, dtype=dtype)
 
 
 def global_average_pool(x: Tensor) -> Tensor:
@@ -252,6 +272,8 @@ class VoxelPotential(InteratomicPotential):
     """
 
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
+    #: The module holding the ``AUTO_POLICY`` / ``AUTO_POLICY_TRAINING`` of the model's fast path.
+    fast_policy_module = "xnn.cnn.fast"
 
     def __init__(self, species: Sequence[int] = (1, 6, 8), cutoff: float = 4.0,
                  grid_size: int = 17, n_features: int = 32,
@@ -278,6 +300,50 @@ class VoxelPotential(InteratomicPotential):
         nn.init.zeros_(self.atom_ref.weight)
         if atomic_energies is not None:
             self.set_atomic_energies(atomic_energies)
+        # the searched convolutions of the blocks (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "VoxelPotential":
+        """Choose the implementation of the blocks' 3D convolutions.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the convolutions of
+            :mod:`xnn.cnn.fast`, with cuDNN's algorithm search, where they are
+            available and faster for the input (a CUDA device, a graph above
+            the size crossover measured for evaluation, ``AUTO_POLICY``, or for
+            training, ``AUTO_POLICY_TRAINING``); ``True``: wherever they are
+            available; ``False``: always the reference implementation. They are
+            twice differentiable and reach the weights, so force training takes
+            them as well; they agree with the reference to the round-off of the
+            convolution algorithms. Models without such blocks ignore the
+            setting.
+
+        Returns
+        -------
+        VoxelPotential
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int, like: Tensor) -> None:
+        """Switch the fast-path blocks on or off for one evaluation."""
+        import importlib
+
+        from xnn.common.models.fast import fast_modules, select
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        if blocks:
+            policies = importlib.import_module(type(self).fast_policy_module)
+            policy = policies.AUTO_POLICY_TRAINING if self.training else policies.AUTO_POLICY
+            select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @property
     def grid_size(self) -> int:
@@ -359,6 +425,8 @@ class VoxelPotential(InteratomicPotential):
             invariant ``"node_features"`` ``(N, n_features)``.
         """
         grid = self.featurizer(data)
+        if not torch.jit.is_scripting():
+            self._select_fast(int(data.edge_index.shape[1]), grid)
         features, node_energy = self.node_features_energy(grid, data.atomic_numbers)
         return {"node_energy": node_energy, "energy": self.aggregate_energy(node_energy, data),
                 "node_features": features}

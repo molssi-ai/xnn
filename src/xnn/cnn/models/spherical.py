@@ -48,6 +48,7 @@ import torch
 from torch import Tensor, nn
 
 from xnn.common.data import AtomicGraph
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.multilinear import MultilinearBlock, multilinear
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
@@ -421,7 +422,7 @@ def _spectral_product(equation: str, f_hat: Tensor, psi: Tensor, index: Tensor, 
     return torch.view_as_complex(multilinear(block, block._compact(f_hat), block._compact(psi.conj())))
 
 
-class S2Convolution(nn.Module):
+class S2Convolution(nn.Module, FastPathModule):
     """``S^2`` correlation layer (eq 4, computed by the Fourier theorem of Appendix D).
 
     The filter of every (input, output) channel pair is a set of values on the
@@ -430,7 +431,9 @@ class S2Convolution(nn.Module):
     product ``f^l psi^l+`` and transformed back onto the ``SO(3)`` grid of
     bandwidth ``b_out``. The filter values are drawn uniformly in ``[-1, 1]``
     and scaled by ``1 / sqrt(n_points n_in b_out^4 / b_in^2)``, the
-    initialization of the reference implementation.
+    initialization of the reference implementation. Its fast path (``fast_active``,
+    set by the model's ``use_fast``) runs the transforms and the product on compact
+    spectra with the Triton kernels of :mod:`xnn.cnn.fast.spherical`.
 
     Parameters
     ----------
@@ -458,6 +461,11 @@ class S2Convolution(nn.Module):
         self.kernel = nn.Parameter(torch.empty(n_in, n_out, points.shape[0]).uniform_(-1, 1))
         self.bias = nn.Parameter(torch.zeros(1, n_out, 1, 1, 1))
         self.scaling = 1.0 / math.sqrt(points.shape[0] * n_in * self.b_out ** 4 / self.b_in ** 2)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.cnn.fast.spherical import supported
+        return supported(device, dtype)
 
     def filter_spectrum(self) -> Tensor:
         """``psi^l_m`` of every channel pair, ``(n_in, n_out, b_out, 2 b_out - 1)``."""
@@ -466,18 +474,26 @@ class S2Convolution(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """``(B, n_in, 2 b_in, 2 b_in)`` -> ``(B, n_out, 2 b_out, 2 b_out, 2 b_out)``."""
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x)
         f_hat = self.analysis.analyze(x)                                    # (B, i, l, m)
         z = _spectral_product("bilm,ioln->bolmn", f_hat, self.filter_spectrum(), self.compact, 2)
         return self.synthesis.synthesize(z) + self.bias
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor) -> Tensor:
+        from xnn.cnn.fast.spherical import correlation
+        return correlation(self, x, so3=False)
 
     def extra_repr(self) -> str:
         return (f"n_in={self.n_in}, n_out={self.n_out}, b_in={self.b_in}, b_out={self.b_out}, "
                 f"n_points={self.points.shape[0]}")
 
 
-class SO3Convolution(nn.Module):
+class SO3Convolution(nn.Module, FastPathModule):
     """``SO(3)`` correlation layer (eq 6, computed as the matrix product
-    ``f^l psi^l+`` of Appendix D).
+    ``f^l psi^l+`` of Appendix D). Its fast path runs on the Triton kernels of
+    :mod:`xnn.cnn.fast.spherical`, as for :class:`S2Convolution`.
 
     Parameters
     ----------
@@ -503,6 +519,11 @@ class SO3Convolution(nn.Module):
         self.kernel = nn.Parameter(torch.empty(n_in, n_out, points.shape[0]).uniform_(-1, 1))
         self.bias = nn.Parameter(torch.zeros(1, n_out, 1, 1, 1))
         self.scaling = 1.0 / math.sqrt(points.shape[0] * n_in * self.b_out ** 3 / self.b_in ** 3)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.cnn.fast.spherical import supported
+        return supported(device, dtype)
 
     def filter_spectrum(self) -> Tensor:
         """``psi^l_{mn}`` of every channel pair, ``(n_in, n_out, b_out, 2 b_out - 1, 2 b_out - 1)``."""
@@ -511,9 +532,16 @@ class SO3Convolution(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """``(B, n_in, 2 b_in, 2 b_in, 2 b_in)`` -> ``(B, n_out, 2 b_out, 2 b_out, 2 b_out)``."""
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x)
         f_hat = self.analysis.analyze(x)                                    # (B, i, l, m, n)
         z = _spectral_product("bilmn,iolkn->bolmk", f_hat, self.filter_spectrum(), self.compact, 3)
         return self.synthesis.synthesize(z) + self.bias
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor) -> Tensor:
+        from xnn.cnn.fast.spherical import correlation
+        return correlation(self, x, so3=True)
 
     def extra_repr(self) -> str:
         return (f"n_in={self.n_in}, n_out={self.n_out}, b_in={self.b_in}, b_out={self.b_out}, "
@@ -679,6 +707,11 @@ class SphericalCNN(VoxelPotential):
     the energy by a second MLP (the per-atom energy is then the structure's
     energy divided by its atom count, plus the atom's reference energy).
 
+    The correlation layers have a fast path (``set_use_fast``): the transforms and
+    the spectral products on compact spectra with the Triton kernels of
+    :mod:`xnn.cnn.fast.spherical`, twice differentiable, with the ``"auto"``
+    crossovers of that module.
+
     Parameters
     ----------
     species : sequence of int, optional
@@ -725,6 +758,8 @@ class SphericalCNN(VoxelPotential):
     features, bandwidths : list of int
         Channels and bandwidths of every block.
     """
+
+    fast_policy_module = "xnn.cnn.fast.spherical"
 
     def __init__(self, species: Sequence[int] = (1, 6, 7, 8, 16), cutoff: float = 10.0,
                  radius: float = 0.48, bandwidth: int = 10, exponent: float = 1.0,
@@ -776,7 +811,10 @@ class SphericalCNN(VoxelPotential):
     def forward(self, data: AtomicGraph) -> Dict[str, Tensor]:
         if self.set_readout is None:
             return super().forward(data)
-        features = self.trunk(self.featurizer(data))
+        grid = self.featurizer(data)
+        if not torch.jit.is_scripting():
+            self._select_fast(int(data.edge_index.shape[1]), grid)
+        features = self.trunk(grid)
         latent = self.set_readout["phi"](features)
         pooled = torch.zeros(data.num_graphs, latent.shape[1], dtype=latent.dtype, device=latent.device)
         pooled = pooled.index_add(0, data.batch, latent)
