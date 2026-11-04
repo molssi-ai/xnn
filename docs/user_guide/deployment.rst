@@ -28,7 +28,10 @@ and dipole for models that can predict them:
    atoms.calc = XNNCalculator(model, cutoff=5.0)       #  A model object you hold
 
 The net charge and spin multiplicity can come from ``atoms.info`` entries in an
-ASE ``*.xyz`` file. See the :ref:`howto-ase` guide for more information.
+ASE ``*.xyz`` file. See the :ref:`howto-ase` guide for more information. On a
+GPU, ``cuda_graph=True`` replays each evaluation as one CUDA graph for
+DimeNet, GemNet and PhysNet, which is faster for small structures (see
+:ref:`howto-fast-paths`).
 
 TorchScript
 ===========
