@@ -274,6 +274,9 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
         self._has_type1, self._has_type2 = 1 in types, 2 in types
         self._has_type3, self._has_type8, self._has_type9 = 3 in types, 8 in types, 9 in types
         self._single_cutoff = len(self.cutoffs) == 1
+        # the Triton kernels of xnn.dnn.fast.acsf_kernels: types 1, 2, 3 and 9, up to two cosine / tanh cutoffs
+        self._kernel_ok = (types <= {1, 2, 3, 9} and len(self.cutoffs) <= 2
+                           and all(c["kind"] in ("cosine", "tanh") for c in self.cutoffs))
         self.fast_active = False
         self._factor_tables(rows, n_sp)
 
@@ -375,8 +378,13 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
         r = torch.linalg.norm(vec, dim=-1)
         fast = False
         if not torch.jit.is_scripting():
-            # the compiled blocks are differentiable once: a training step keeps the reference
+            if self.fast_active and vec.is_cuda and self._kernel_ok:
+                return self._raw_kernels(vec, r, sp, edge_index, n)
+            # the compiled blocks and the CPU kernels are differentiable once: a training step keeps
+            # the reference
             fast = self.fast_active and not (self.training and torch.is_grad_enabled())
+            if fast and not vec.is_cuda and self._cpu_kernels_ok():
+                return self._raw_cpu(vec, sp, edge_index, n)
         if self._rad_lookup.shape[-1] > 0:
             if fast:
                 out = out + self._radial_fast(r, sp, src, dst, n)
@@ -437,8 +445,13 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
             a_fac = self._a_pref.to(dtype) * torch.pow(base, self._a_zeta.to(dtype))  # (T, nA)
             a_fac = torch.cat([a_fac, torch.zeros_like(cos).unsqueeze(-1)], dim=-1)
             third = (r3 * r3).unsqueeze(-1) * self._r_type3.to(dtype)
-            cut = self._r_cutoff
-            f_sel = torch.where(self._r_type3, f123_all.index_select(1, cut), f12_all.index_select(1, cut))
+            if self._single_cutoff:
+                # one cutoff: a broadcast, no column selection (whose backward, an indirect store, keeps
+                # the compiled block from vectorizing)
+                f_sel = torch.where(self._r_type3, f123_all, f12_all)
+            else:
+                cut = self._r_cutoff
+                f_sel = torch.where(self._r_type3, f123_all.index_select(1, cut), f12_all.index_select(1, cut))
             r_fac = torch.exp(-self._r_eta.to(dtype) * (rsq.unsqueeze(-1) + third)) * f_sel  # (T, nR)
             val = (torch.gather(a_fac, 1, self._ang_ia.index_select(0, bucket))
                    * torch.gather(r_fac, 1, self._ang_ir.index_select(0, bucket)))
@@ -466,6 +479,66 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
         return out
 
     @torch.jit.unused
+    def _cpu_kernels_ok(self) -> bool:
+        """Whether the C++ kernels of :mod:`xnn.dnn.fast.acsf_cpu` build and cover the function set."""
+        from xnn.dnn.fast import acsf_cpu
+        return self._kernel_ok and acsf_cpu.available()
+
+    @torch.jit.unused
+    def _raw_cpu(self, vec: Tensor, sp: Tensor, edge_index: Tensor, n: int) -> Tensor:
+        """:meth:`compute_raw` on the C++ / OpenMP kernels of :mod:`xnn.dnn.fast.acsf_cpu` (evaluation)."""
+        from xnn.dnn.fast import acsf_cpu
+        from xnn.dnn.fast.acsf_tables import tables
+        key = (vec.dtype, "cpu")
+        cached = self.__dict__.get("_cpu_tables")
+        if cached is None or cached[0] != key:
+            rad, ang = tables(self.functions, self.species, self.cutoffs, self._dim, vec.dtype, "cpu")
+            self.__dict__["_cpu_tables"] = (key, acsf_cpu._Tables(
+                rad if self._rad_lookup.shape[-1] > 0 else None,
+                ang if self._ang_lookup.shape[-1] > 0 else None, len(self.species)))
+        return acsf_cpu.symmetry_functions(vec, edge_index, sp, n, self.__dict__["_cpu_tables"][1], self._dim,
+                                           self._ang_cutoff)
+
+    @torch.jit.unused
+    def _raw_kernels(self, vec: Tensor, r: Tensor, sp: Tensor, edge_index: Tensor, n: int) -> Tensor:
+        """:meth:`compute_raw` on the Triton kernels of :mod:`xnn.dnn.fast.acsf_kernels` (differentiable
+        twice: evaluation and training): the edges and triplets as in the reference, sorted into segments
+        of one center and neighbor species (species pair), the functions and their sums fused."""
+        from xnn.dnn.fast import acsf_kernels as k
+        key = (vec.dtype, vec.device)
+        cached = self.__dict__.get("_kernel_tables")
+        if cached is None or cached[0] != key:
+            self.__dict__["_kernel_tables"] = (key,) + k.tables(self.functions, self.species, self.cutoffs,
+                                                                self._dim, vec.dtype, vec.device)
+        _, rad, ang = self.__dict__["_kernel_tables"]
+        n_sp = len(self.species)
+        src, dst = edge_index[0], edge_index[1]
+        sp32 = sp.to(torch.int32)
+        out = vec.new_zeros(n, self._dim)
+        if self._rad_lookup.shape[-1] > 0:
+            s_nb = sp[src]
+            order, ptr = k.segments(dst, s_nb, n, n_sp)
+            row = (sp[dst] * n_sp + s_nb).index_select(0, order).to(torch.int32)
+            out = out + k.RadialFunction.apply(r.index_select(0, order), row, dst.index_select(0, order), ptr,
+                                               sp32, n, rad)
+        if self._ang_lookup.shape[-1] > 0:
+            eidx = (r < self._ang_cutoff).nonzero().squeeze(-1)
+            e1, e2, center = build_triplets(edge_index[:, eidx], n)
+            if center.numel() > 0:
+                e1, e2 = eidx[e1], eidx[e2]
+                pair = k.pair_index(sp[src[e1]], sp[src[e2]], n_sp)
+                order, ptr = k.segments(center, pair, n, ang.q)
+                e1, e2, center, pair = (t.index_select(0, order) for t in (e1, e2, center, pair))
+                v1, v2 = gather_rows(vec, e1), gather_rows(vec, e2)
+                r1, r2 = gather_rows(r, e1), gather_rows(r, e2)
+                r3 = torch.linalg.norm(v1 - v2, dim=-1)
+                cos = (v1 * v2).sum(-1) / (r1 * r2)
+                row = (sp[center] * ang.q + pair).to(torch.int32)
+                out = out + k.AngularFunction.apply(r1.contiguous(), r2.contiguous(), r3.contiguous(),
+                                                    cos.contiguous(), row, center, ptr, sp32, n, ang)
+        return out
+
+    @torch.jit.unused
     def _compiled(self, name: str, scalar: bool):
         """:meth:`_radial` or :meth:`_angular` compiled for CPUs (``torch.compile``, dynamic sizes)."""
         cache = self.__dict__.setdefault("_compiled_blocks", {})
@@ -477,16 +550,17 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
     @torch.jit.unused
     def _run_compiled(self, name: str, *args):
         """The block compiled with vectorized loops, else with scalar loops (a construct inductor
-        cannot vectorize), else the reference block (the choice is made once per block). The angular
-        block starts with scalar loops: the backward of its column selection is an indirect store,
-        which inductor does not vectorize, and vectorizing the rest gained nothing."""
+        cannot vectorize), else the reference block (the choice is made once per block). With several
+        cutoffs the angular block starts with scalar loops: the backward of its cutoff-column selection
+        is an indirect store, which inductor does not vectorize; with one cutoff there is no selection."""
         import contextlib
 
         from torch._inductor import config as inductor_config
         modes = self.__dict__.setdefault("_compiled_modes", {})
         known = modes.get(name)
         inputs = [a for a in args if isinstance(a, Tensor) and a.requires_grad]
-        order = ["scalar", "vector", "eager"] if name == "angular" else ["vector", "scalar", "eager"]
+        order = (["scalar", "vector", "eager"] if name == "angular" and not self._single_cutoff
+                 else ["vector", "scalar", "eager"])
         for mode in [known] if known is not None else order:
             if mode == "eager":
                 modes[name] = mode
@@ -526,15 +600,25 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
 
     @torch.jit.unused
     def fast_policies(self):
-        """The ``"auto"`` policies (evaluation, training) of :mod:`xnn.dnn.fast.acsf`."""
-        from xnn.dnn.fast.acsf import AUTO_POLICY, AUTO_POLICY_TRAINING
+        """The ``"auto"`` policies (evaluation, training) of :mod:`xnn.dnn.fast.acsf`; on a CPU, the
+        C++ kernels' where they build and cover the function set."""
+        from xnn.dnn.fast.acsf import AUTO_POLICY, AUTO_POLICY_CPU, AUTO_POLICY_TRAINING
+        if self._params.device.type == "cpu" and self._cpu_kernels_ok():
+            return AUTO_POLICY_CPU, AUTO_POLICY_TRAINING
         return AUTO_POLICY, AUTO_POLICY_TRAINING
 
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """CPUs where ``torch.compile`` produces code (the compiled blocks of
-        :mod:`xnn.dnn.fast.acsf`)."""
-        if device.type != "cpu" or dtype not in (torch.float32, torch.float64):
+        """CPUs where the C++ kernels build or ``torch.compile`` produces code, and CUDA devices with
+        Triton (:mod:`xnn.dnn.fast.acsf`)."""
+        if dtype not in (torch.float32, torch.float64):
             return False
+        if device.type == "cuda":
+            from xnn.common.models.dispersion_fast._triton import supported
+            return supported(device, dtype)
+        if device.type != "cpu":
+            return False
+        if self._cpu_kernels_ok():
+            return True
         from xnn.dnn.fast.acsf import available
         return available()
 

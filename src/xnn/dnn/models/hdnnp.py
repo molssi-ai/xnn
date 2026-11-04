@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Iterable, Optional, Sequence, Union
+from typing import Iterable, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor, nn
@@ -237,6 +237,8 @@ class HDNNP(DescriptorPotential):
     """
 
     head_modules = ("element_nets", "_self_energies_by_z")
+    # the screening settings as a dict (eager only; the typed copies serve TorchScript)
+    __jit_ignored_attributes__ = ["screening"]
 
     def __init__(self, species: Sequence[int], featurizer: AtomCenteredSymmetryFunctions,
                  generation: int = 2, hidden: Union[Sequence[int], dict] = (15, 15),
@@ -265,6 +267,22 @@ class HDNNP(DescriptorPotential):
         self.hardness = hardness
         self.constrain_charges = bool(constrain_charges)
         self.screening = None
+        # the screening as typed attributes, and placeholders of the 3G / 4G tensors (not saved),
+        # so that one TorchScript core serves every generation
+        self._has_screening = False
+        self._scr_kind, self._scr_rc, self._scr_inner, self._scr_exp = "cosine", 1.0, 0.0, 2
+        self.ewald_accuracy = float(ewald_accuracy)
+        self.coulomb_constant = float(coulomb_constant)
+        if generation < 3:
+            self.register_buffer("gaussian_widths", torch.zeros(119), persistent=False)
+        if generation < 4:
+            self.register_buffer("chi_scale", torch.tensor(1.0), persistent=False)
+            self.register_buffer("hardness_scale", torch.tensor(1.0), persistent=False)
+            self.register_buffer("charge_input_shift", torch.zeros(119), persistent=False)
+            self.register_buffer("charge_input_factor", torch.ones(119), persistent=False)
+        if not (generation == 4 and hardness == "element"):
+            self.register_buffer("_hardness_index", torch.zeros(119, dtype=torch.long), persistent=False)
+            self.hardness_act = nn.Identity()
         if generation >= 3:
             feat = charge_featurizer if charge_featurizer is not None else featurizer
             dims = getattr(feat, "n_features", None) or feat.output_dim
@@ -278,8 +296,12 @@ class HDNNP(DescriptorPotential):
                 sigma[z] = w
             self.register_buffer("gaussian_widths", sigma)
             self.screening = None if screening is None else dict(screening)
-            self.ewald_accuracy = float(ewald_accuracy)
-            self.coulomb_constant = float(coulomb_constant)
+            if self.screening is not None:
+                self._has_screening = True
+                self._scr_kind = str(self.screening.get("kind", "cosine"))
+                self._scr_rc = float(self.screening["r_cut"])
+                self._scr_inner = float(self.screening.get("r_inner", 0.0) or 0.0)
+                self._scr_exp = int(self.screening.get("exponent", 2))
             self.cutoff = max(self.cutoff, feat.cutoff,
                               float(self.screening["r_cut"]) if self.screening else 0.0)
         if generation == 4:
@@ -378,15 +400,18 @@ class HDNNP(DescriptorPotential):
             node = node - self.coulomb_constant * self._screening_energy(data, charges)
         return node
 
+    @torch.jit.ignore
     def _screening_energy(self, data: AtomicGraph, q: Tensor) -> Tensor:
         """Per-atom electrostatics removed by the screening function (no Coulomb constant)."""
-        s = self.screening
-        vec = data.edge_vectors().to(q.dtype)
+        return self._screening_terms(data.atomic_numbers, data.edge_index, data.edge_vectors(), q)
+
+    def _screening_terms(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor, q: Tensor) -> Tensor:
+        """:meth:`_screening_energy` on tensors (TorchScript-compatible)."""
+        vec = edge_vec.to(q.dtype)
         r = torch.linalg.norm(vec, dim=-1)
-        src, dst = data.edge_index[0], data.edge_index[1]
-        fc = cutoff_function(r, s.get("kind", "cosine"), float(s["r_cut"]),
-                             float(s.get("r_inner", 0.0) or 0.0), int(s.get("exponent", 2)))
-        sigma = self.gaussian_widths.to(q.dtype)[data.atomic_numbers]
+        src, dst = edge_index[0], edge_index[1]
+        fc = cutoff_function(r, self._scr_kind, self._scr_rc, self._scr_inner, self._scr_exp)
+        sigma = self.gaussian_widths.to(q.dtype)[atomic_numbers]
         gamma2 = sigma[src] ** 2 + sigma[dst] ** 2
         point = gamma2 <= 0
         safe = torch.where(point, torch.ones_like(gamma2), gamma2)
@@ -403,6 +428,75 @@ class HDNNP(DescriptorPotential):
         return ((charges - self.charge_input_shift.to(charges.dtype)[z])
                 * self.charge_input_factor.to(charges.dtype)[z])
 
+    @torch.jit.export
+    def node_features_energy_charges(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                                     pos: Tensor, cell: Tensor, pbc: Tensor, total_charge: float,
+                                     spin_multiplicity: float) -> Tuple[Tensor, Tensor, Tensor]:
+        """TorchScript core of one structure (every generation): the descriptor ``(N, D)``, the
+        atomic energies ``(N,)`` (3G / 4G: with the electrostatics) and the charges ``(N,)`` (zero
+        for 2G) for the net charge ``total_charge``. ``pos`` and ``cell`` enter the Coulomb sum
+        (``cell`` only where ``pbc`` is set, all three directions); ``spin_multiplicity`` is not used."""
+        z = atomic_numbers
+        n = z.shape[0]
+        desc = self.featurizer.compute(z, edge_index, edge_vec, n)
+        dtype = desc.dtype
+        q = desc.new_zeros(n)
+        elec = desc.new_zeros(n)
+        extra: Optional[Tensor] = None
+        if self.generation >= 3:
+            desc_q = desc
+            cf = self.charge_featurizer
+            if cf is not None:
+                desc_q = cf.compute(z, edge_index, edge_vec, n)
+            periodic = bool(pbc.any())
+            if periodic and not bool(pbc.all()):
+                raise RuntimeError("HDNNP electrostatics need full or no periodicity")
+            box: Optional[Tensor] = None
+            if periodic:
+                box = cell.to(dtype)
+            amat = self.coulomb_constant * gaussian_coulomb_matrix(
+                pos.to(dtype), self.gaussian_widths.to(dtype)[z], box, self.ewald_accuracy, True)
+            nets = self.charge_nets
+            if nets is not None:
+                if self.generation == 3:
+                    raw = nets(desc_q, z, None)
+                    q = raw - (raw.sum() - total_charge) / n if self.constrain_charges else raw
+                else:
+                    chi = self.chi_scale.to(dtype) * nets(desc_q, z, None)
+                    hard_nets = self.hardness_nets
+                    raw_h = self.hardness_raw
+                    if hard_nets is not None:
+                        hard = hard_nets(desc_q, z, None)
+                    elif raw_h is not None:
+                        hard = self.hardness_act(raw_h.to(dtype))[self._hardness_index[z]]
+                    else:
+                        hard = torch.ones_like(chi)
+                    hard = self.hardness_scale.to(dtype) * hard
+                    q = solve_charges(chi, hard, amat, desc.new_full((1,), total_charge))[0]
+                    if self.charge_neuron:
+                        extra = ((q - self.charge_input_shift.to(dtype)[z])
+                                 * self.charge_input_factor.to(dtype)[z]).unsqueeze(-1)
+            elec = 0.5 * q * (amat @ q)
+            if self._has_screening:
+                elec = elec - self.coulomb_constant * self._screening_terms(z, edge_index, edge_vec, q)
+        short = self.energy_scale.to(dtype) * self.element_nets(desc, z, extra)
+        node_energy = short + self._self_energies_by_z.to(dtype)[z] + elec
+        return desc, node_energy, q
+
+    @torch.jit.export
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """The local TorchScript core of a 2G model: the descriptor ``(N, D)`` and the atomic
+        energies ``(N,)`` from the local graph. 3G and 4G models (global charges) export through
+        :meth:`node_features_energy_charges`."""
+        if self.generation >= 3:
+            raise RuntimeError("3G and 4G HDNNP models export through node_features_energy_charges "
+                               "(export_torchscript_potential); the 2G models also through node_energy")
+        desc = self.featurizer.compute(atomic_numbers, edge_index, edge_vec, atomic_numbers.shape[0])
+        short = self.energy_scale.to(desc.dtype) * self.element_nets(desc, atomic_numbers, None)
+        return desc, short + self._self_energies_by_z.to(desc.dtype)[atomic_numbers]
+
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Energies (and for 3G/4G charges and electrostatics) of a batch.
 
@@ -421,6 +515,7 @@ class HDNNP(DescriptorPotential):
             charges times the positions), 3G ``charges_raw``, 4G
             ``electronegativities``, ``hardness`` and ``chemical_potential``.
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         desc = self.featurizer(data)
         z = data.atomic_numbers
         out: dict[str, Tensor] = {}

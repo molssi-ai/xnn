@@ -50,9 +50,9 @@ electrostatics/dispersion over *all* pairs; in xnn the pair list is the
 graph's, so set ``lr_cutoff`` (or a large ``cutoff``) to capture long-range
 terms explicitly.
 """
-from __future__ import annotations
 
 import math
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -62,7 +62,8 @@ from torch.nn import functional as F
 from xnn.common.data import AtomicGraph
 from xnn.common.finetune.lora import register_lora_target
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import scatter_sum, shifted_softplus, softplus_inverse
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import gather_rows, scatter_sum, shifted_softplus, softplus_inverse
 from xnn.common.models.registry import register_model
 
 from ...common.models import d3
@@ -115,9 +116,9 @@ class _Dense(nn.Module):
         self.activation = activation
 
     def forward(self, x: Tensor) -> Tensor:
-        y = x @ self.weight
-        if self.bias is not None:
-            y = y + self.bias
+        bias = self.bias
+        # one kernel with the bias (addmm) rather than a product and a sum
+        y = torch.addmm(bias, x, self.weight) if bias is not None else x @ self.weight
         if self.activation:
             y = shifted_softplus(y)
         return y
@@ -178,7 +179,7 @@ class _RBF(nn.Module):
         return self.cutoff_fn(r) * g
 
 
-class _InteractionLayer(nn.Module):
+class _InteractionLayer(FastPathModule, nn.Module):
     """The message computation (paper eqs 5-6, upstream ``InteractionLayer``).
 
     ``x' = u * x + W act(m)``, where the proto-message sums the transformed
@@ -197,16 +198,34 @@ class _InteractionLayer(nn.Module):
             [_Residual(n_features) for _ in range(num_residual)])
         self.dense = _Dense(n_features, n_features)
         self.u = nn.Parameter(torch.ones(n_features))
+        self.n_features = n_features
+        self.fast_active = False
 
-    def forward(self, x: Tensor, rbf: Tensor, idx_i: Tensor,
-                idx_j: Tensor) -> Tensor:
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` and a power-of-two feature width (the fused continuous-filter
+        convolution of :mod:`xnn.gnn.fast.schnet`, the same operation)."""
+        from xnn.dnn.fast.physnet import supported
+        n = self.n_features
+        return 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
+
+    def forward(self, x: Tensor, rbf: Tensor, edge_index: Tensor) -> Tensor:
         xa = shifted_softplus(x)
-        g = self.k2f(rbf)
-        m = self.dense_i(xa) + scatter_sum(
-            g * self.dense_j(xa)[idx_j], idx_i, x.shape[0])
+        if self.fast_active and not torch.jit.is_scripting():
+            m = self.dense_i(xa) + self._messages_fast(xa, rbf, edge_index)
+        else:
+            idx_j, idx_i = edge_index[0], edge_index[1]
+            g = self.k2f(rbf)
+            m = self.dense_i(xa) + scatter_sum(
+                g * gather_rows(self.dense_j(xa), idx_j), idx_i, x.shape[0])
         for residual in self.residuals:
             m = residual(m)
         return self.u * x + self.dense(shifted_softplus(m))
+
+    @torch.jit.unused
+    def _messages_fast(self, xa: Tensor, rbf: Tensor, edge_index: Tensor) -> Tensor:
+        """``sum_j G g(r_ij) * (W_J act(x_j) + b_J)`` by the fused convolution."""
+        from xnn.gnn.fast.schnet_kernels import cfconv
+        return cfconv(self.dense_j(xa), self.k2f(rbf), None, edge_index)
 
 
 class _InteractionBlock(nn.Module):
@@ -220,9 +239,8 @@ class _InteractionBlock(nn.Module):
         self.residuals = nn.ModuleList(
             [_Residual(n_features) for _ in range(num_residual_atomic)])
 
-    def forward(self, x: Tensor, rbf: Tensor, idx_i: Tensor,
-                idx_j: Tensor) -> Tensor:
-        x = self.interaction(x, rbf, idx_i, idx_j)
+    def forward(self, x: Tensor, rbf: Tensor, edge_index: Tensor) -> Tensor:
+        x = self.interaction(x, rbf, edge_index)
         for residual in self.residuals:
             x = residual(x)
         return x
@@ -318,6 +336,10 @@ class PhysNet(InteratomicPotential):
     # one readout head = the per-block output networks (energy and charge) and
     # the per-element energy and charge scale/shift (see MultiHead)
     head_modules = ("output_blocks", "Eshift", "Escale", "Qshift", "Qscale")
+    # the D3 parameter properties read their tensors by computed names (eager only)
+    __jit_unused_properties__ = ["s6", "s8", "a1", "a2"]
+    lr_cut: Optional[float]
+    sr_cut: float
 
     def __init__(
         self,
@@ -348,6 +370,11 @@ class PhysNet(InteratomicPotential):
         if num_blocks < 1:
             raise ValueError("num_blocks must be >= 1")
         self.sr_cut = cutoff
+        # the fused message sums (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
+        # the D3 unit conversions as attributes (TorchScript reads no module globals)
+        self._autoang = float(d3.d3_autoang)
+        self._autoev = float(d3.d3_autoev)
         self.lr_cut = lr_cutoff
         if species is not None:          # the elements the references are set for
             self.species = [int(z) for z in species]
@@ -452,18 +479,17 @@ class PhysNet(InteratomicPotential):
             non-hierarchicality penalty, and the final per-atom feature
             vectors ``(N, n_features)``.
         """
-        idx_j, idx_i = edge_index[0], edge_index[1]
-        Dij = edge_vec.norm(dim=-1)
+        Dij = torch.linalg.norm(edge_vec, dim=-1)
         rbf = self.rbf_layer(Dij)
         x = self.embeddings[atomic_numbers]
 
         # every module contributes an additive (energy, charge) pair per atom
         energy = x.new_zeros(x.shape[0])
         charge = x.new_zeros(x.shape[0])
-        head_sq = []
+        head_sq: List[Tensor] = []
         for interaction, head in zip(self.interaction_blocks,
                                      self.output_blocks):
-            x = interaction(x, rbf, idx_i, idx_j)
+            x = interaction(x, rbf, edge_index)
             eq = head(x)  # (N, 2): energy column 0, charge column 1
             energy = energy + eq[:, 0]
             charge = charge + eq[:, 1]
@@ -483,7 +509,8 @@ class PhysNet(InteratomicPotential):
     def scaled_charges(self, Qa: Tensor, batch: Tensor, num_graphs: int,
                        total_charge: Tensor | None = None) -> Tensor:
         """Correct the raw charges to the exact total charge (paper eq 14)."""
-        n_per = torch.bincount(batch, minlength=num_graphs).to(Qa.dtype)
+        # atoms per structure by a scatter (a CUDA bincount reads its maximum back to the host)
+        n_per = scatter_sum(torch.ones_like(Qa), batch, num_graphs)
         if total_charge is None:
             total_charge = torch.zeros(num_graphs, dtype=Qa.dtype,
                                        device=Qa.device)
@@ -509,16 +536,17 @@ class PhysNet(InteratomicPotential):
         force-shifted (value and slope zero at the cutoff) and pairs beyond
         it are dropped.
         """
-        q_pair = self.kehalf * Qa[idx_i] * Qa[idx_j]
+        q_pair = self.kehalf * gather_rows(Qa, idx_i) * gather_rows(Qa, idx_j)
         r_bound = torch.sqrt(Dij * Dij + 1.0)
         w = self._switch(Dij)
         w_bar = 1.0 - w
-        if self.lr_cut is None:
+        rc_opt = self.lr_cut
+        if rc_opt is None:
             kernel_bare = 1.0 / Dij
             kernel_bound = 1.0 / r_bound
             e_pair = q_pair * (w_bar * kernel_bound + w * kernel_bare)
         else:
-            rc = self.lr_cut
+            rc = rc_opt
             rc_sq = rc * rc
             kernel_bare = 1.0 / Dij + Dij / rc_sq - 2.0 / rc
             kernel_bound = 1.0 / r_bound + r_bound / rc_sq - 2.0 / rc
@@ -529,12 +557,98 @@ class PhysNet(InteratomicPotential):
     def dispersion_energy_per_atom(self, atomic_numbers: Tensor, Dij: Tensor,
                                    idx_i: Tensor, idx_j: Tensor) -> Tensor:
         """Grimme D3(BJ) dispersion per atom, in eV (paper eq 12)."""
-        cutoff = self.lr_cut / d3.d3_autoang if self.lr_cut is not None else None
-        return d3.d3_autoev * d3.edisp(
-            atomic_numbers, Dij / d3.d3_autoang, idx_i, idx_j, cutoff=cutoff,
-            s6=self.s6, s8=self.s8, a1=self.a1, a2=self.a2,
-            c6ab=self._d3_c6ab, rcov=self._d3_rcov, r2r4=self._d3_r2r4)
+        rc = self.lr_cut
+        cutoff: Optional[float] = None
+        if rc is not None:
+            cutoff = rc / self._autoang
+        # the parameters spelled out (TorchScript reads no computed attribute names)
+        s6 = F.softplus(self._s6) if self._s6_learnable else self._s6
+        s8 = F.softplus(self._s8) if self._s8_learnable else self._s8
+        a1 = F.softplus(self._a1) if self._a1_learnable else self._a1
+        a2 = F.softplus(self._a2) if self._a2_learnable else self._a2
+        return self._autoev * d3.edisp_core(
+            atomic_numbers, Dij / self._autoang, idx_i, idx_j, cutoff, s6, s8, a1, a2,
+            self._d3_c6ab, self._d3_rcov, self._d3_r2r4)
 
+    @torch.jit.export
+    def node_features_energy_charges(self, atomic_numbers: Tensor, edge_index: Tensor,
+                                     edge_vec: Tensor, pos: Tensor, cell: Tensor, pbc: Tensor,
+                                     total_charge: float,
+                                     spin_multiplicity: float) -> Tuple[Tensor, Tensor, Tensor]:
+        """TorchScript core of one structure: features ``(N, F)``, atomic energies ``(N,)``
+        (electrostatics and dispersion included) and the charges ``(N,)`` corrected to
+        ``total_charge``. The long-range terms run over the given edges, so the edge list
+        must reach the long-range cutoff (all pairs without one); ``pos``, ``cell``, ``pbc``
+        and ``spin_multiplicity`` are not used."""
+        idx_j, idx_i = edge_index[0], edge_index[1]
+        Ea, Qa, Dij, nh_loss, features = self.atomic_properties(atomic_numbers, edge_index, edge_vec)
+        Qa = Qa + (total_charge - Qa.sum()) / Qa.shape[0]
+        if self.use_electrostatics:
+            Ea = Ea + self.electrostatic_energy_per_atom(Dij, Qa, idx_i, idx_j)
+        if self.use_dispersion:
+            Ea = Ea + self.dispersion_energy_per_atom(atomic_numbers, Dij, idx_i, idx_j)
+        return features, Ea, Qa
+
+    @torch.jit.export
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """Features and atomic energies of one neutral structure
+        (:meth:`node_features_energy_charges`)."""
+        empty = edge_vec.new_zeros(0)
+        out = self.node_features_energy_charges(atomic_numbers, edge_index, edge_vec, empty,
+                                                empty, empty.to(torch.bool), 0.0, 1.0)
+        return out[0], out[1]
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor) -> Tensor:
+        """Atomic energies ``(N,)`` of one neutral structure (the LAMMPS entry point)."""
+        return self.node_features_energy(atomic_numbers, edge_index, edge_vec)[1]
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "PhysNet":
+        """Choose the implementation of the message sums.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused continuous-filter convolution
+            (:mod:`xnn.dnn.fast.physnet`) where it is available and faster for the
+            input (a CUDA device, Triton, a power-of-two feature width, a graph above
+            the size crossover measured for evaluation, ``AUTO_POLICY``, or for
+            training, ``AUTO_POLICY_TRAINING``); ``True``: wherever it is available;
+            ``False``: always the reference implementation. The kernels are twice
+            differentiable, so force training takes them as well.
+
+        Returns
+        -------
+        PhysNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused message sums on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.dnn.fast.physnet import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.embeddings
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
+
+    @torch.jit.ignore
+    def index_planner(self):
+        """The planner of a captured training step (``trainer.cuda_graph``): PhysNet's step
+        needs nothing beyond the edges (:class:`~xnn.common.train.graphed.NoIndexPlanner`)."""
+        from xnn.common.train.graphed import NoIndexPlanner
+        return NoIndexPlanner()
+
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict energies, corrected charges, and the dipole for a graph.
 
@@ -553,6 +667,13 @@ class PhysNet(InteratomicPotential):
             charges), ``"dipole"`` ``(B, 3)`` (paper eq 15) and ``"nh_loss"``
             (scalar regularization term).
         """
+        if getattr(data, "index_plan", None) is not None:
+            # a padded batch of a captured training step: the reference path (the fused kernels
+            # sort the edges once per edge list, which a replay would not repeat)
+            from xnn.common.models.fast import deactivate
+            deactivate(self)
+        else:
+            self._select_fast(int(data.edge_index.shape[1]))
         idx_j, idx_i = data.edge_index[0], data.edge_index[1]
         Ea, Qa, Dij, nh_loss, features = self.atomic_properties(
             data.atomic_numbers, data.edge_index, data.edge_vectors())
