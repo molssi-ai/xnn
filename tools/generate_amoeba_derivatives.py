@@ -11,7 +11,7 @@ another device function becomes a call of its tangent twin, specialized to the a
 tangents. Inexact constants of the derivative rules come from the scope of the function (the derivative of
 ``erfc`` takes ``inv_sqrt_pi``), never from float32 literals.
 
-    python tools/generate_amoeba_derivatives.py [--target amoeba|classical] [--out <module>]
+    python tools/generate_amoeba_derivatives.py [--target amoeba|classical|reaxff|atm] [--out <module>]
 """
 import argparse
 import ast
@@ -254,11 +254,11 @@ class Registry:
             self.order.append(key)
         return self.out[key].name
 
-    def reverse_kernel(self, name: str, params: tuple, cotangents: dict) -> str:
+    def reverse_kernel(self, name: str, params: tuple, cotangents: dict, suffix: str = "_r") -> str:
         """The adjoint of a kernel with respect to the parameter tables ``params``."""
         key = (name, ("reverse_kernel",) + tuple(params))
         if key not in self.out:
-            gen = Reverse(self, self.defs[name], f"{name}_r", params, cotangents).build()
+            gen = Reverse(self, self.defs[name], f"{name}{suffix}", params, cotangents).build()
             self.out[key] = gen
             self.order.append(key)
         return self.out[key].name
@@ -301,6 +301,10 @@ class Tangent:
             return _name(e.id + "_t") if e.id in self.diff else ZERO
         if isinstance(e, ast.Attribute):
             return ZERO
+        if isinstance(e, ast.Subscript):
+            # a broadcast or a slice: the same of the tangent
+            t = self.d(e.value)
+            return ZERO if t is ZERO else ast.Subscript(value=t, slice=copy.deepcopy(e.slice), ctx=ast.Load())
         if isinstance(e, ast.UnaryOp):
             if isinstance(e.op, ast.USub):
                 t = self.d(e.operand)
@@ -442,6 +446,9 @@ class Tangent:
             if ta is ZERO:
                 return ZERO
             return _mul(_bin(_mul(copy.deepcopy(e), copy.deepcopy(b)), ast.Div(), copy.deepcopy(a)), ta)
+        if short in ("floor", "ceil", "trunc", "rint"):
+            # piecewise constant: no tangent (autograd's convention)
+            return ZERO
         if self.reg.known(e):
             raise NotImplementedError(f"call of {name} inside an expression (hoist it)")
         if any(self.d(a) is not ZERO for a in e.args):
@@ -479,6 +486,14 @@ class Tangent:
         mask = tuple(2 if isinstance(a, ast.Name) and a.id in self.pointers else int(self.d(a) is not ZERO)
                      for a in call.args)
         names = [t.id for t in targets]
+        if any(mask) and 2 not in mask:
+            self.reg.tangent(short, mask)
+            gen = self.reg.out[(short, mask)]
+            if gen is not None and not any(gen.nonzero):
+                # no output carries a tangent (a mask, an index): the function itself, and no twin
+                if (short, mask) in self.reg.order:
+                    self.reg.order.remove((short, mask))
+                mask = (0,) * len(mask)
         if not any(mask):
             for n in names:
                 self.diff.discard(n)
@@ -549,7 +564,9 @@ class Tangent:
                 self.diff.discard(tgt.id)
                 out += self.zeros([tgt.id])
             else:
-                out.append(ast.Assign(targets=[ast.Name(id=tgt.id + "_t", ctx=ast.Store())], value=t, lineno=0))
+                tangent = ast.Assign(targets=[ast.Name(id=tgt.id + "_t", ctx=ast.Store())], value=t, lineno=0)
+                # ``a = f(a)``: a tangent that reads ``a`` runs before ``a`` is overwritten
+                out = [tangent, s] if tgt.id in _loads(t) else [s, tangent]
                 self.diff.add(tgt.id)
             return out
         if isinstance(s, ast.AugAssign):
@@ -590,6 +607,11 @@ class Tangent:
             self.diff = after_body | after_else
             self.assigned = assigned_body | assigned_else
             return [ast.If(test=s.test, body=body or [ast.Pass()], orelse=orelse)]
+        if isinstance(s, ast.For) and not s.orelse:
+            # a loop with a runtime bound: its body statement by statement. The tangents of the values it
+            # carries are defined before it (their variables are forced), as Triton requires of loop values
+            body = [x for b in s.body for x in self.stmt(b)]
+            return [ast.For(target=s.target, iter=s.iter, body=body or [ast.Pass()], orelse=[], lineno=0)]
         if isinstance(s, ast.Return):
             vals = s.value.elts if isinstance(s.value, ast.Tuple) else ([s.value] if s.value is not None else [])
             if not vals:
@@ -1050,9 +1072,15 @@ from triton.language.extra import libdevice
 def generate(requests, kernels=(), reverse=(), reverse_tangents=(), target="amoeba", bool_aware=False) -> str:
     """The module source for the tangent twins ``requests`` ((function name, mask) pairs) and the tangent
     kernels ``kernels`` ((kernel name, pointers with tangents) pairs) of ``target`` (``"amoeba"``: the AMOEBA
-    and HIPPO kernels; ``"classical"``: the kernels of the classical force fields)."""
+    and HIPPO kernels; ``"classical"``: the kernels of the classical force fields; ``"reaxff"`` and ``"atm"``:
+    those of ReaxFF and of the D3 and D4 three-body term)."""
     models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
-    if target == "reaxff":
+    if target == "atm":
+        # the three-body kernels of D3 and D4 and their device functions
+        atm = Path(__file__).resolve().parents[1] / "src/xnn/common/models/dispersion_fast/atm.py"
+        sources = {"": [(atm.read_text(), {"_switch", "_pair_mask", "_atm_forward", "_atm_backward"})]}
+        header, home, bounds = ATM_HEADER, ".atm", None
+    elif target == "reaxff":
         # the ReaxFF kernels, and the vector device function they share with the classical kernels
         sources = {"": [((models / "reaxff_kernels.py").read_text(), None),
                         ((models / "classical_kernels.py").read_text(), {"_vec"})]}
@@ -1070,8 +1098,8 @@ def generate(requests, kernels=(), reverse=(), reverse_tangents=(), target="amoe
         reg.tangent(name, tuple(mask))
     for name, pointers in kernels:
         reg.tangent_kernel(name, tuple(pointers))
-    for name, params, cotangents in reverse:
-        reg.reverse_kernel(name, tuple(params), cotangents)
+    for name, params, cotangents, *suffix in reverse:
+        reg.reverse_kernel(name, tuple(params), cotangents, *suffix)
     # the generated adjoints become sources themselves: their tangents give the mixed second derivatives
     for key in list(reg.order):
         fn = reg.out[key]
@@ -1200,16 +1228,71 @@ REAXFF_REVERSE = [
     ("_torsions_nn_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "fbo_ptr", "dang_ptr", "tor_ptr", "gen_ptr"),
      {"out_ptr": "g_ptr"}),
 ]
+# training: the tangents of the forward kernels along every differentiable input (into the per-atom energies)
+# and of their adjoints along the same inputs (into the gradients), the second derivatives of a force loss
+REAXFF_TRAIN = [(name, params, next(iter(cot))) for name, params, cot in REAXFF_REVERSE
+                if name != "_bond_corrections_forward"]
+REAXFF_KERNELS = [(name, tuple(p for p in params if p != "cell_ptr") + (out,)) for name, params, out in REAXFF_TRAIN]
+REAXFF_REVERSE_TANGENTS = [(name + "_r", tuple(p for p in params if p != "cell_ptr")
+                            + tuple(p + "_g" for p in params if p != "cell_ptr")) for name, params, _ in REAXFF_TRAIN]
+
+# the adjoints in the geometry and the per-atom and per-bond inputs only (an evaluation with constant parameter
+# tables and cells: no adds of every term into a few table entries)
+REAXFF_REVERSE += [
+    ("_nonbonded_forward", ("pos_ptr", "q_ptr"), {"e_ptr": "g_ptr"}, "_rx"),
+    ("_bond_corrections_forward", ("bop_ptr", "bpi_ptr", "bpp_ptr", "dp_ptr"),
+     {"bo0_ptr": "g_bo0_ptr", "bosi_ptr": "g_bosi_ptr", "bopi_ptr": "g_bopi_ptr", "bopp_ptr": "g_bopp_ptr",
+      "e_ptr": "g_ptr"}, "_rx"),
+    ("_angles_forward", ("bv_ptr", "br_ptr", "bo_ptr", "fbo_ptr", "sbo_ptr", "dang_ptr", "f9_ptr", "sig_ptr",
+                         "del_ptr"), {"out_ptr": "g_ptr"}, "_rx"),
+    ("_torsions_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "dang_ptr"), {"out_ptr": "g_ptr"}, "_rx"),
+    ("_hbonds_forward", ("bv_ptr", "br_ptr", "bo_ptr", "ev_ptr", "er_ptr"), {"out_ptr": "g_ptr"}, "_rx"),
+    ("_hbonds_nn_forward", ("bv_ptr", "br_ptr", "bo_ptr", "fhb_ptr", "ev_ptr", "er_ptr"), {"out_ptr": "g_ptr"},
+     "_rx"),
+    ("_torsions_nn_forward", ("bv_ptr", "br_ptr", "bo_ptr", "bpi_ptr", "fbo_ptr", "dang_ptr"), {"out_ptr": "g_ptr"},
+     "_rx"),
+    # a stepper's bond-order stage
+    ("_bond_orders_forward", ("br_ptr",), {"bsi_ptr": "g_bsi_ptr", "bpi_ptr": "g_bpi_ptr", "bpp_ptr": "g_bpp_ptr",
+                                           "dp_ptr": "g_dp_ptr"}, "_rx"),
+    ("_bond_atom_sums_forward", ("bo0_ptr", "bpi_ptr", "bpp_ptr", "del_ptr"),
+     {"so_ptr": "g_so_ptr", "dpil_ptr": "g_dpil_ptr", "e_ptr": "g_ptr"}, "_rx"),
+    ("_atom_terms_forward", ("del_ptr", "so_ptr", "dpil_ptr"), {"nlp_ptr": "g_nlp_ptr", "e_ptr": "g_ptr"}, "_rx"),
+]
+
+ATM_HEADER = '''"""Derivatives of the Triton kernels of the D3 and D4 three-body term
+
+Generated by ``tools/generate_amoeba_derivatives.py --target atm`` from the kernels of
+:mod:`xnn.common.models.dispersion_fast.atm` (do not edit by hand; regenerate). ``<kernel>_t`` is the
+tangent of a kernel along the edge vectors and both pair-C6 factor matrices (loads of ``vec_ptr``,
+``fa_ptr`` and ``fb_ptr`` carry the tangents ``vec_ptr_t``, ``fa_ptr_t`` and ``fb_ptr_t``; its outputs
+write their tangents to ``<output>_t``). That of the gradient kernel is a Hessian-vector product, that of
+the energy kernel the directional derivative of the per-atom energies.
+"""
+# ruff: noqa: E501, F841
+import triton
+import triton.language as tl
+
+'''
+
+# the tangent kernels of the three-body term: along the edge vectors and the factor matrices, into the outputs
+_ATM_INPUTS = ("vec_ptr", "fa_ptr", "fb_ptr")
+ATM_KERNELS = [
+    ("_atm_forward", _ATM_INPUTS + ("energy_ptr",)),
+    ("_atm_backward", _ATM_INPUTS + ("gvec_ptr", "gc6_ptr", "gfa_ptr", "gfb_ptr")),
+]
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
-    ap.add_argument("--target", choices=("amoeba", "classical", "reaxff"), default="amoeba")
+    ap.add_argument("--target", choices=("amoeba", "classical", "reaxff", "atm"), default="amoeba")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    if args.target == "reaxff":
+    if args.target == "atm":
+        out = args.out or str(models.parents[1] / "common/models/dispersion_fast/atm_tangents.py")
+        text = generate((), ATM_KERNELS, target="atm")
+    elif args.target == "reaxff":
         out = args.out or str(models / "reaxff_tangents.py")
-        text = generate((), (), REAXFF_REVERSE, (), target="reaxff")
+        text = generate((), REAXFF_KERNELS, REAXFF_REVERSE, REAXFF_REVERSE_TANGENTS, target="reaxff")
     elif args.target == "classical":
         out = args.out or str(models / "classical_tangents.py")
         text = generate((), CLASSICAL_KERNELS, CLASSICAL_REVERSE, CLASSICAL_REVERSE_TANGENTS, target="classical")
