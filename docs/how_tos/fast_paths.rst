@@ -19,15 +19,15 @@ bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
 (compiled with ``torch.compile``), the 3D convolutions of the SE(3) steerable
-CNN and the 3D CNN (with cuDNN's algorithm search), the Fourier transforms and
-spectral products of the spherical CNN, the atomic environment
-vectors of ANI, the message sums of PhysNet, the symmetry functions of HDNNP (compiled with
-``torch.compile``), the local message sums of SpookyNet, the attention
-messages of BAMBOO, every energy term of the OPLS, AMBER, CHARMM and
-DREIDING force fields, the terms and the charge solve of ReaxFF and ReaxFF-nn,
-the three-body term of D3 and D4 and the large-system EEQ solve of D4 (where we
-use the Triton kernels, shipped with CUDA builds of PyTorch), and the reciprocal
-sum of the LES long-range term (for which, we use plain PyTorch). On a CPU, the three-body term
+CNN and the 3D CNN (on cuDNN's channels-last kernels), the Fourier transforms
+and spectral products of the spherical CNN, the atomic environment vectors of
+ANI, the message sums of PhysNet, the symmetry functions of HDNNP (compiled with
+``torch.compile``), the local message sums of SpookyNet, the attention messages
+of BAMBOO, every energy term of the OPLS, AMBER, CHARMM and DREIDING force
+fields, the terms and the charge solve of ReaxFF and ReaxFF-nn, the three-body
+term of D3 and D4 and the large-system EEQ solve of D4 (where we use the Triton
+kernels, shipped with CUDA builds of PyTorch), and the reciprocal sum of the LES
+long-range term (for which, we use plain PyTorch). On a CPU, the three-body term
 of D3 and D4 and the symmetry functions of HDNNP run compiled (see
 :ref:`howto-fast-paths-cpu`).
 
@@ -100,8 +100,7 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.trfnn.fast.equiformer_v2.AUTO_POLICY_TRAINING` (maximum edge
   counts: the compiled blocks are faster on small systems only)
 - SE(3) steerable CNN and 3D CNN: :data:`xnn.cnn.fast.AUTO_POLICY`,
-  :data:`xnn.cnn.fast.AUTO_POLICY_TRAINING` (training only: in evaluation
-  cuDNN's own choice of algorithm is already the fastest)
+  :data:`xnn.cnn.fast.AUTO_POLICY_TRAINING`
 - Spherical CNN: :data:`xnn.cnn.fast.spherical.AUTO_POLICY`,
   :data:`xnn.cnn.fast.spherical.AUTO_POLICY_TRAINING`
 - ANI: :data:`xnn.dnn.fast.aev.AUTO_POLICY`,

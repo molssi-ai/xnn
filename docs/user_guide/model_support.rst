@@ -127,7 +127,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
    * - Spherical CNN
      - |Y|
      - |N|
@@ -268,13 +268,12 @@ Notes on individual models:
   compiled code is differentiable only once, so a training step runs the
   reference.
 - **SE(3) steerable CNN and 3D CNN.** Their fast path runs the 3D
-  convolutions with cuDNN's algorithm search. It pays off for the second
-  derivatives of a training step, so the Fast-Path (Training) cell is green.
-  Evaluation has no faster path yet: there cuDNN's own choice of algorithm
-  is as fast as the searched one, ``"auto"`` keeps the reference, and the
-  Fast-Path (Inference) cell stays red. cuDNN searches once for every new
-  input shape, so a training run pays a few seconds for each batch size it
-  meets.
+  convolutions on cuDNN's channels-last kernels, in batch chunks that bound
+  the kernels' workspace, with cuDNN's algorithm search. From a few molecules
+  on it is faster than the reference and needs less memory, in evaluation and
+  training; ``"auto"`` keeps the reference below that, where the kernels'
+  workspace would need more memory. cuDNN searches once for every new input
+  shape, so a training run pays a few seconds for each batch size it meets.
 - **Spherical CNN.** Its fast path computes the Fourier transforms on Triton
   kernels and the products of the spectra as one matrix product per degree.
   It is faster than the reference at every size, and faster than the
