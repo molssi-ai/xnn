@@ -111,15 +111,15 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - HDNNP
      - |Y|
      - |Y|
      - |Y|
-     - |N|
-     - |N|
+     - |Y|
+     - |Y|
      - |Y|
    * - SE(3) steerable CNN / 3D CNN
      - |Y|
@@ -139,35 +139,35 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - OPLS-AA / L-OPLS
      - |Y|
      - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - DREIDING / X6
      - |Y|
      - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - AMBER (ff94)
      - |Y|
      - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - CHARMM22
      - |Y|
      - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - AMOEBA
@@ -181,7 +181,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |N|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - ET
@@ -259,14 +259,19 @@ Notes on individual models:
 - **ANI.** Its fast path is faster at every size in float32. In float64,
   ``"auto"`` keeps the reference on a T4 or an L40S, whose float64 throughput
   is low.
-- **PhysNet.** The upstream runs on TensorFlow's graph executor, which is
-  faster on small systems. A captured xnn step (``trainer.cuda_graph: true``)
-  is faster than the upstream's training step at every size. The fast path
-  wins from about a thousand atoms.
-- **HDNNP.** Its fast path is the symmetry functions compiled with
-  ``torch.compile``, into Triton kernels on a GPU and C++ loops on a CPU. The
-  compiled code is differentiable only once, so a training step runs the
-  reference.
+- **PhysNet.** The upstream runs on TensorFlow's graph executor. Compare it
+  with captured xnn steps (``trainer.cuda_graph: true`` for training,
+  ``XNNCalculator(..., cuda_graph=True)`` for evaluations, see
+  :ref:`howto-fast-paths`). They run the same reference implementation and are
+  faster than the upstream at every size. The fast path wins from about a
+  thousand atoms.
+- **HDNNP.** On a GPU, Triton kernels evaluate the symmetry functions of
+  types 1, 2, 3 and 9 with cosine or tanh cutoffs, for evaluation and
+  training. Other function sets, and every set on a CPU, run the symmetry
+  functions compiled with ``torch.compile``. That code is differentiable only
+  once, so a training step with those runs the reference. RuNNer runs only on
+  CPUs. There, xnn's C++ kernels take about half of RuNNer's time on one and
+  eight threads, and the Reference-Path cell rates them.
 - **SE(3) steerable CNN and 3D CNN.** Their fast path runs the 3D
   convolutions on cuDNN's channels-last kernels, in batch chunks that bound
   the kernels' workspace, with cuDNN's algorithm search. From a few molecules
@@ -291,14 +296,15 @@ Notes on individual models:
   atoms on.
 - **OPLS, AMBER, CHARMM and DREIDING.** All four match LAMMPS to round-off.
   DREIDING / X6 has no code from its authors, so LAMMPS serves as its upstream.
-  LAMMPS also runs on CPUs, where the reference is still being compared with
-  it.
+  On CPUs, an MD step with :class:`~xnn.ffnn.models.ClassicalStepper` is faster
+  than LAMMPS on the same cores, list rebuilds included.
   On a GPU, all four evaluate and train on fused kernels. An MD step with
   :class:`~xnn.ffnn.models.ClassicalStepper` is faster than with the GPU build
   of LAMMPS, list rebuilds included. A training step is two to two and a half
   times faster than on the eager terms, which still handle stress losses.
-- **ReaxFF.** It matches LAMMPS to round-off. On CPUs, the reference is still
-  being compared with LAMMPS. Above 2048 atoms, it solves for
+- **ReaxFF.** It matches LAMMPS to round-off. On CPUs, an MD step with
+  :class:`~xnn.ffnn.models.ReaxFFStepper` is faster than LAMMPS on the same
+  cores, list rebuilds included. Above 2048 atoms, it solves for
   the charges by conjugate gradients instead of a dense solve. On a GPU,
   ReaxFF and ReaxFF-nn evaluate energies, forces and stress on fused kernels
   in both conventions. The neural bond orders of ReaxFF-nn stay in PyTorch.
@@ -310,6 +316,9 @@ Notes on individual models:
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
   These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
+- **AMOEBA and HIPPO.** Both match Tinker 8 to round-off. Tinker 8 also runs
+  on CPUs, where the reference is still being compared with it. On a GPU, both
+  evaluate and train on fused kernels, which are compared with Tinker9.
 
 Add-on terms
 ============
@@ -336,14 +345,14 @@ are the same as above.
      - |Y|
      - |Y|
      - |N|
-     - |N|
+     - |Y|
      - |Y|
    * - D4
      - |Y|
      - |Y|
      - |Y|
      - |N|
-     - |N|
+     - |Y|
      - |Y|
    * - LES
      - |Y|
