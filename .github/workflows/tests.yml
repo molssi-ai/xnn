@@ -40,7 +40,8 @@ jobs:
         run: pip install "triton==3.3.1"
 
       - name: Install xnn and test dependencies
-        run: pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4" pytest-cov
+        # cpu-kernels: ninja, which builds the C++ CPU kernels of the HDNNP tests
+        run: pip install -e ".[ase,gnn,ffnn,vesin,cpu-kernels,dev]" "e3nn==0.4.4" pytest-cov
 
       - name: Fetch the MOPAC parameter files of the sqmnn methods
         # xnn does not ship the published PM3/PM6/PM6-ORG/PM7 values; they are
