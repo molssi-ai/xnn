@@ -699,20 +699,42 @@ class DFTD4(nn.Module, FastPathModule):
 
     @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA; on CPUs
-        where ``torch.compile`` produces code the three-body term runs on compiled tiles."""
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA; on CPUs the
+        two- and three-body terms run on C++ kernels where they build, else the three-body term
+        on compiled tiles where ``torch.compile`` produces code."""
         if device.type == "cpu":
+            from .dispersion_fast import cpu
             from .dispersion_fast.atm_cpu import available
-            return dtype in (torch.float32, torch.float64) and available()
+            return dtype in (torch.float32, torch.float64) and (cpu.available() or available())
         from .dispersion_fast import supported
         return supported(device, dtype)
 
     @torch.jit.unused
-    def _fast_three_body_allowed(self) -> bool:
-        """Whether the ATM kernels apply: fixed damping parameters (no gradient to
-        them), and not a training step, whose second derivatives (a force loss)
-        the kernels would hand to the reference anyway."""
-        if self.training and torch.is_grad_enabled():
+    def cpu_kernels_apply(self, n_atoms: int) -> bool:
+        """Whether the C++ kernels of :mod:`~xnn.common.models.dispersion_fast.cpu` evaluate the
+        two- and three-body terms on a CPU: they build, no parameter is trained and, with a
+        three-body term, the structure fits their dense C6 arrays."""
+        from .dispersion_fast import cpu
+        if any(p is not None and p.requires_grad for p in self._parameters.values()):
+            return False
+        if n_atoms > cpu.MAX_DENSE_ATOMS and float(self.s9) != 0.0:
+            return False
+        return cpu.available()
+
+    @torch.jit.unused
+    def _terms_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, batch: Tensor, cn: Tensor,
+                   q: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The two- and three-body energies per atom (hartree) and the dynamic polarizabilities on the
+        C++ kernels."""
+        from .dispersion_fast import cpu
+        return cpu.d4_terms(self, z, edge_index, edge_vec, batch, cn, q)
+
+    @torch.jit.unused
+    def _fast_three_body_allowed(self, cuda: bool) -> bool:
+        """Whether the fast ATM term applies: fixed damping parameters (no gradient
+        to them) and, on a CPU, not a training step. The Triton kernels give the second
+        derivatives of a force loss; the compiled CPU tiles are differentiable once."""
+        if not cuda and self.training and torch.is_grad_enabled():
             return False
         return not any(t.requires_grad for t in (self.s9, self.a1, self.a2))
 
@@ -839,7 +861,7 @@ class DFTD4(nn.Module, FastPathModule):
                                              c6_edge=c6_edge, edge_shift=shifts,
                                              chunk=self.triplet_chunk, triplet_cache=cache)
 
-        if self.fast_active and pos.is_cuda and self._fast_three_body_allowed():
+        if self.fast_active and pos.is_cuda and self._fast_three_body_allowed(True):
             from .dispersion_fast.atm import ATMConstants, atm_energy
             # C6_AB = (3 / pi) sum_w cp_w alpha_A(iw) alpha_B(iw) = <f_A, f_B>
             feat = alpha_neutral * torch.sqrt((3.0 / math.pi) * self.cp_weights)
@@ -849,9 +871,7 @@ class DFTD4(nn.Module, FastPathModule):
             consts = ATMConstants(spec.to(torch.int32).contiguous(), table, float(self.s9),
                                   self.alp / 3.0, self.cutoff_triple / self.bohr,
                                   self.switch_width_triple / self.bohr)
-            return atm_energy(edge_index, edge_vec, feat, feat, consts, n_atoms,
-                              reference=lambda v, f_a, f_b: reference(
-                                  v, (f_a[edge_index[1]] * f_b[edge_index[0]]).sum(-1), 0.0))
+            return atm_energy(edge_index, edge_vec, feat, feat, consts, n_atoms)
         alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
         c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
         return reference(edge_vec, c6_edge, self.triplet_cache)
@@ -1089,14 +1109,25 @@ class DFTD4(nn.Module, FastPathModule):
                                                 cell_b, periodic))
         q = torch.cat(charges)
 
-        weights = self.reference_weights(z, cn_d4, q)
-        alpha_iw = self.dynamic_polarizabilities(z, weights)
+        # on a CPU the C++ kernels evaluate the polarizabilities and the two- and three-body terms
+        # (differentiable once: not in a training step)
+        kernels = False
+        if not torch.jit.is_scripting():
+            kernels = (self.fast_active and not z.is_cuda and not (self.training and torch.is_grad_enabled())
+                       and self.cpu_kernels_apply(n_atoms))
+        e2_cpu, e3_cpu = torch.zeros_like(cn_d4), torch.zeros_like(cn_d4)
+        if kernels:
+            e2_cpu, e3_cpu, alpha_iw = self._terms_cpu(z, edge_index, edge_vec, batch, cn_d4, q)
+        else:
+            alpha_iw = self.dynamic_polarizabilities(z, self.reference_weights(z, cn_d4, q))
 
         in_pair = r <= self.cutoff_pair / self.bohr
         edge_pair, r_pair = edge_index, r
         if not bool(in_pair.all()):
             edge_pair, r_pair = edge_index[:, in_pair], r[in_pair]
-        if self.recompute_pairs and not torch.jit.is_scripting():
+        if kernels:
+            e2 = e2_cpu
+        elif self.recompute_pairs and not torch.jit.is_scripting():
             e2 = self._two_body_chunked(z, edge_pair, r_pair, alpha_iw, n_atoms)
         else:
             e2 = self.two_body_energy(z, edge_pair, r_pair, alpha_iw, n_atoms)
@@ -1111,7 +1142,10 @@ class DFTD4(nn.Module, FastPathModule):
                         0, members, self.tail_energy(z[members], alpha_iw[members], cell_b))
             node_energy = node_energy + e_tail
         e3 = torch.zeros_like(e2)
-        if bool(self.s9 != 0.0):
+        if kernels:
+            e3 = e3_cpu
+            node_energy = node_energy + e3
+        elif bool(self.s9 != 0.0):
             # the ATM term uses C6 coefficients of the *neutral* atoms
             weights_neutral = self.reference_weights(z, cn_d4, torch.zeros_like(q))
             alpha_neutral = self.dynamic_polarizabilities(z, weights_neutral)
@@ -1119,7 +1153,7 @@ class DFTD4(nn.Module, FastPathModule):
             cpu_tiles = False
             if not torch.jit.is_scripting():
                 cpu_tiles = (self.fast_active and not z.is_cuda and n_atoms <= 20000
-                             and self._fast_three_body_allowed())
+                             and self._fast_three_body_allowed(False))
             if cpu_tiles:
                 c6_neutral = (3.0 / math.pi) * (alpha_neutral * self.cp_weights) @ alpha_neutral.t()
                 e3 = self._three_body_cpu(z, edge_index[:, in_triple], vec_au[in_triple], r[in_triple],

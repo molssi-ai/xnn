@@ -34,12 +34,33 @@ from ..data import AtomicGraph, collate
 #: The atomic number of the padding atoms.
 PADDING_Z = 1
 
-#: The spacing of the padding atoms along x (the two carrying the padding edges sit
-#: within every cutoff; no edge links them to a real atom).
+#: The spacing of the padding atoms along x (neighbors on the line, which carry the padding edges,
+#: sit within every cutoff; no edge links them to a real atom).
 PADDING_SPACING = 1.0
 
 #: Ordinary steps before the capture.
 WARMUP_STEPS = 3
+
+
+class NoIndexPlanner:
+    """The planner of a model whose step needs no index work beyond its edges (PhysNet): the
+    padded batch fixes the atom and edge counts only. Holds no state."""
+
+    #: No plan entries.
+    offsets: Dict[str, Optional[str]] = {}
+
+    def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        return {}
+
+    @staticmethod
+    def sizes(plan: Dict[str, Tensor]) -> Dict[str, int]:
+        """No sizes beyond the atoms and edges."""
+        return {}
+
+    @staticmethod
+    def pad(plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:
+        """The empty plan."""
+        return {}
 
 
 def index_planner(model: torch.nn.Module) -> Optional[Callable]:
@@ -167,17 +188,20 @@ def capacity(planner: Callable, dataset: PlannedDataset, batch_size: int) -> Cap
 
 def padding_structure(n_atoms: int, n_edges: int, like: AtomicGraph) -> AtomicGraph:
     """The inert structure that fills a batch: ``n_atoms >= 2`` atoms on a line,
-    ``n_edges`` edges between the first two (alternating in direction, so every edge has
-    its reverse: ``n_edges`` is even), no labels."""
+    ``n_edges`` edges between neighbors on the line (each with its reverse: ``n_edges`` is even),
+    spread over the pairs in turn so that no atom collects many of them (sums onto one atom
+    would serialize), no labels."""
     if n_edges % 2:
         raise ValueError(f"the padding edges come in reverse pairs, got {n_edges}")
     pos = torch.zeros((n_atoms, 3), dtype=like.pos.dtype)
     pos[:, 0] = PADDING_SPACING * torch.arange(n_atoms, dtype=like.pos.dtype)
-    src = torch.arange(n_edges) % 2
+    pair = torch.arange(n_edges // 2) % max(n_atoms - 1, 1)
+    src = torch.stack([pair, pair + 1], dim=1).reshape(-1)
+    dst = torch.stack([pair + 1, pair], dim=1).reshape(-1)
     return AtomicGraph(
         pos=pos,
         atomic_numbers=torch.full((n_atoms,), PADDING_Z, dtype=like.atomic_numbers.dtype),
-        edge_index=torch.stack([src, 1 - src]).to(like.edge_index.dtype),
+        edge_index=torch.stack([src, dst]).to(like.edge_index.dtype),
         cell_shifts=torch.zeros((n_edges, 3), dtype=like.cell_shifts.dtype),
         batch=torch.zeros(n_atoms, dtype=like.batch.dtype),
         n_atoms=torch.tensor([n_atoms], dtype=like.n_atoms.dtype),

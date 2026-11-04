@@ -389,6 +389,13 @@ def small_gather_elements() -> int:
     return 1 << 21
 
 
+def _compiling() -> bool:
+    """Whether ``torch.compile`` is tracing (``False`` under TorchScript)."""
+    if not torch.jit.is_scripting():
+        return bool(torch.compiler.is_compiling())
+    return False
+
+
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum rows of ``src`` into ``dim_size`` buckets given by ``index`` (dim 0).
 
@@ -426,6 +433,11 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     shape = [dim_size] + list(src.shape[1:])
     # in place on the fresh buffer: the out-of-place forms copy it first (one more kernel)
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
+    if src.is_cuda and _compiling():
+        # traced code takes the out-of-place scatter at every size: the compiled second derivatives of the
+        # small-size forms trip an internal assert of the compiler (torch 2.5)
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        return out.scatter_add(0, index.reshape(view).expand(src.shape), src)
     if src.is_cuda and src.numel() >= small_gather_elements():
         view = [index.shape[0]] + [1] * (src.dim() - 1)
         return out.scatter_add_(0, index.reshape(view).expand(src.shape), src)
@@ -460,7 +472,9 @@ def gather_rows(src: Tensor, index: Tensor) -> Tensor:
     -----
     Compatible with :func:`torch.jit.script`.
     """
-    if src.is_cuda and index.shape[0] * (src.numel() // max(src.shape[0], 1)) >= small_gather_elements():
+    if src.is_cuda and (_compiling() or index.shape[0] * (src.numel() // max(src.shape[0], 1))
+                        >= small_gather_elements()):
+        # traced code takes the gather at every size (see scatter_sum)
         view = [index.shape[0]] + [1] * (src.dim() - 1)
         shape = [index.shape[0]] + list(src.shape[1:])
         return src.gather(0, index.reshape(view).expand(shape))

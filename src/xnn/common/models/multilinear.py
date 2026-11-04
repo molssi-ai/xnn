@@ -22,6 +22,38 @@ import torch
 from torch import Tensor
 
 
+def _nodes(ops) -> List[Optional[object]]:
+    """The autograd node each operand's gradient flows into (``None`` without one)."""
+    nodes = []
+    for t in ops:
+        node = None
+        if t.requires_grad:
+            try:
+                node = torch.autograd.graph.get_gradient_edge(t).node
+            except (AttributeError, RuntimeError):
+                node = None
+        nodes.append(node)
+    return nodes
+
+
+def _narrowed(needs: List[bool], nodes) -> List[bool]:
+    """``needs`` without the operands whose gradient this backward pass does not compute.
+
+    ``needs_input_grad`` of an autograd function follows ``requires_grad``; a
+    call such as ``autograd.grad(energy, positions)`` needs no weight gradient,
+    and the engine knows which nodes it will run.
+    """
+    out = []
+    for need, node in zip(needs, nodes):
+        if need and node is not None:
+            try:
+                need = bool(torch._C._will_engine_execute_node(node))
+            except (AttributeError, RuntimeError):
+                pass
+        out.append(need)
+    return out
+
+
 def add_optional(a: Optional[Tensor], b: Tensor) -> Tensor:
     """``a + b``, or ``b`` when ``a`` is ``None``."""
     return b if a is None else a + b
@@ -89,14 +121,15 @@ class _Multilinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, block, *ops: Tensor) -> Tensor:
         ctx.block = block
+        ctx.nodes = _nodes(ops)
         ctx.set_materialize_grads(False)
         ctx.save_for_backward(*ops)
         return block.value(list(ops))
 
     @staticmethod
     def backward(ctx, grad_out: Optional[Tensor]):
-        needs = list(ctx.needs_input_grad[1:])
-        if grad_out is None:
+        needs = _narrowed(list(ctx.needs_input_grad[1:]), ctx.nodes)
+        if grad_out is None or not any(needs):
             return (None,) * (1 + len(needs))
         grads = iter(_MultilinearGrad.apply(ctx.block, needs, grad_out.contiguous(), *ctx.saved_tensors))
         return (None, *[next(grads) if need else None for need in needs])

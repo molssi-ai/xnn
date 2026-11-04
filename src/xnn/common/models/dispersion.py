@@ -749,9 +749,43 @@ class DispersionCorrection(InteratomicPotential):
         """Switch the term's fast paths on or off for one evaluation."""
         from .fast import FastPathModule, select
         if isinstance(self.term, FastPathModule):
-            from .dispersion_fast import AUTO_POLICY
-            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.model_dtype,
+            from .dispersion_fast import AUTO_POLICY, AUTO_POLICY_CPU_KERNELS
+            policy = AUTO_POLICY
+            kernels = getattr(self.term, "cpu_kernels_apply", None)
+            if data.pos.device.type == "cpu" and kernels is not None and kernels(int(data.atomic_numbers.shape[0])):
+                policy = AUTO_POLICY_CPU_KERNELS
+            select([self.term], self.use_fast, policy, data.pos.device, data.model_dtype,
                    int(data.edge_index.shape[1]))
+
+    @torch.jit.unused
+    def direct_forces(self, data: AtomicGraph) -> bool:
+        """Whether :meth:`forward_direct` serves this evaluation: a standalone term whose CPU kernels form
+        the forces and stress themselves (evaluation, no gradient asked of the positions)."""
+        if (self.model is not None or self.training or data.pos.requires_grad or self.use_fast is False
+                or data.pos.device.type != "cpu" or not hasattr(self.term, "evaluate_direct")):
+            return False
+        # "auto" takes the CPU kernels at every size where they apply (AUTO_POLICY_CPU_KERNELS)
+        if not self.term.cpu_kernels_apply(int(data.atomic_numbers.shape[0])):
+            return False
+        self.term.fast_active = True
+        if data.model_dtype == torch.float32:
+            from .fast import warn_float32_once
+            warn_float32_once()
+        return True
+
+    @torch.jit.unused
+    def forward_direct(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        """:meth:`forward` with ``"forces"`` and ``"virial"`` (``dE / d(strain)``) from the term's CPU
+        kernels, no autograd (see :meth:`direct_forces`)."""
+        disp = self.term.evaluate_direct(data)
+        energy = disp.pop("energy")
+        out: Dict[str, Tensor] = {
+            "node_energy": disp.pop("node_energy"), "energy": energy,
+            "node_features": disp.pop("node_features"),
+            "energy_sr": torch.zeros_like(energy), "energy_disp": energy}
+        for key, value in disp.items():
+            out[self._RENAME.get(key, key)] = value
+        return out
 
     def inner_graph(self, data: AtomicGraph) -> AtomicGraph:
         """``data`` restricted to the edges within the wrapped model's cutoff."""

@@ -239,6 +239,18 @@ d3_rcov = torch.from_numpy(_LEGACY_RCOV)  # (95,)
 d3_r2r4 = torch.from_numpy(_LEGACY_R2R4)  # (95,)
 
 
+_D3_CPU = None
+
+
+def _d3_cpu():
+    """:mod:`~xnn.common.models.dispersion_fast.cpu`, imported once."""
+    global _D3_CPU
+    if _D3_CPU is None:
+        from .dispersion_fast import cpu
+        _D3_CPU = cpu
+    return _D3_CPU
+
+
 def _scatter_add(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum edge values into ``dim_size`` per-atom bins."""
     return src.new_zeros(dim_size).index_add(0, index, src)
@@ -708,20 +720,63 @@ class DFTD3(nn.Module, FastPathModule):
 
     @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """The fast three-body term (:mod:`~xnn.common.models.dispersion_fast`) runs on CUDA
-        (Triton) and on CPUs where ``torch.compile`` produces code (compiled tiles)."""
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA (Triton) and on
+        CPUs where the C++ kernels build or ``torch.compile`` produces code (compiled tiles)."""
         if device.type == "cpu":
             from .dispersion_fast.atm_cpu import available
-            return dtype in (torch.float32, torch.float64) and available()
+            return dtype in (torch.float32, torch.float64) and (_d3_cpu().available() or available())
         from .dispersion_fast import supported
         return supported(device, dtype)
 
     @torch.jit.unused
-    def _fast_three_body_allowed(self) -> bool:
-        """Whether the ATM kernels apply: a fixed ``s9`` (no gradient to it), and
-        not a training step, whose second derivatives (a force loss) the kernels
-        would hand to the reference anyway."""
-        if self.training and torch.is_grad_enabled():
+    def cpu_kernels_apply(self, n_atoms: int) -> bool:
+        """Whether the C++ kernels of :mod:`~xnn.common.models.dispersion_fast.cpu` evaluate
+        this term on a CPU: they build, no parameter is trained and, with a three-body term, the
+        structure fits their dense C6 arrays."""
+        cpu = _d3_cpu()
+        if any(p is not None and p.requires_grad for p in self._parameters.values()):
+            return False
+        if n_atoms > cpu.MAX_DENSE_ATOMS and float(self.s9) != 0.0:
+            return False
+        return cpu.available()
+
+    @torch.jit.unused
+    def _evaluate_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, batch: Tensor,
+                      num_graphs: int) -> Dict[str, Tensor]:
+        """:meth:`evaluate` on the C++ kernels (evaluation; no dense ``"c6_matrix"``)."""
+        node, e2, e3, features = _d3_cpu().evaluate_d3(self, z, edge_index, edge_vec, batch)
+        return {
+            "node_energy": node,
+            "energy_2body": structure_sum(e2, batch, num_graphs),
+            "energy_3body": structure_sum(e3, batch, num_graphs),
+            "coordination_numbers": features[:, 0],
+            "c6_matrix": torch.zeros((0, 0), dtype=edge_vec.dtype, device=edge_vec.device),
+            "node_features": features,
+        }
+
+    @torch.jit.unused
+    def evaluate_direct(self, data) -> Dict[str, Tensor]:
+        """:meth:`forward` on the C++ kernels with the forces ``"forces"`` and the strain derivative
+        ``"virial"`` (``dE / d(strain)``, ``(B, 3, 3)``) formed by the kernels, no autograd (evaluation)."""
+        node, energies, features, forces, virial = _d3_cpu().d3_direct(self, data)
+        return {
+            "node_energy": node,
+            "energy": energies[:, 0],
+            "energy_2body": energies[:, 1],
+            "energy_3body": energies[:, 2],
+            "coordination_numbers": features[:, 0],
+            "c6_matrix": torch.zeros((0, 0), dtype=node.dtype, device=node.device),
+            "node_features": features,
+            "forces": forces,
+            "virial": virial,
+        }
+
+    @torch.jit.unused
+    def _fast_three_body_allowed(self, cuda: bool) -> bool:
+        """Whether the fast ATM term applies: a fixed ``s9`` (no gradient to it)
+        and, on a CPU, not a training step. The Triton kernels give the second
+        derivatives of a force loss; the compiled CPU tiles are differentiable once."""
+        if not cuda and self.training and torch.is_grad_enabled():
             return False
         return not self.s9.requires_grad
 
@@ -755,14 +810,7 @@ class DFTD3(nn.Module, FastPathModule):
         cutoff, width = self.cutoff_triple / self.bohr, self.switch_width_triple / self.bohr
         consts = ATMConstants(spec.to(torch.int32).contiguous(), table, float(self.s9), alp3,
                               cutoff, width)
-
-        def reference(vec: Tensor, f_a: Tensor, f_b: Tensor) -> Tensor:
-            return three_body_energy_chunked(z, edge_index, vec, torch.linalg.norm(vec, dim=-1),
-                                             self.rs9 * self.rvdw, self.s9, alp3, cutoff, width,
-                                             n_atoms, alpha_a=f_a, alpha_b=f_b,
-                                             chunk=self.triplet_chunk)
-
-        return atm_energy(edge_index, edge_vec, f, g, consts, n_atoms, reference=reference)
+        return atm_energy(edge_index, edge_vec, f, g, consts, n_atoms)
 
     @torch.jit.export
     def evaluate(self, atomic_numbers: Tensor, pos: Tensor, edge_index: Tensor,
@@ -791,6 +839,11 @@ class DFTD3(nn.Module, FastPathModule):
         """
         z = atomic_numbers
         n_atoms = z.shape[0]
+        if not torch.jit.is_scripting():
+            # on a CPU the C++ kernels evaluate everything (differentiable once: not in a training step)
+            if (self.fast_active and not z.is_cuda and not (self.training and torch.is_grad_enabled())
+                    and self.cpu_kernels_apply(n_atoms)):
+                return self._evaluate_cpu(z, edge_index, edge_vec, batch, num_graphs)
         if bool((z > self.max_z).any()) or bool((z < 1).any()):
             raise ValueError("D3 reference data cover atomic numbers 1..103")
         if bool((self.nref[z] == 0).any()):
@@ -814,7 +867,7 @@ class DFTD3(nn.Module, FastPathModule):
         # no dense matrix, and no limit on the atom count
         fast3 = False
         if not torch.jit.is_scripting():
-            fast3 = self.fast_active and bool(self.s9 != 0.0) and self._fast_three_body_allowed()
+            fast3 = self.fast_active and bool(self.s9 != 0.0) and self._fast_three_body_allowed(z.is_cuda)
         # on a GPU the fast three-body kernels need no dense C6 matrix; on a CPU the compiled
         # tiles read it
         dense = n_atoms <= 20000 and not (fast3 and z.is_cuda)
