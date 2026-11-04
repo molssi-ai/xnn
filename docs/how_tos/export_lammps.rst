@@ -80,3 +80,22 @@ the script states their sum as an energy offset. A ReaxFF model with
 ``conventions="lammps"`` also writes its field as ``<name>.ffield`` and needs
 the atomic numbers (``atomic_numbers=z``). LAMMPS solves its charges with
 ``fix qeq/reaxff`` for a neutral system.
+
+AMOEBA and HIPPO
+================
+AMOEBA and HIPPO models export to LAMMPS's AMOEBA package with the same
+function:
+
+.. code-block:: python
+
+   script = write_lammps_input(model, pos, cell, "lammps_run", name="box")
+
+It writes the parameters (``box.prm``), the coordinates (``box.xyz``), the
+settings (``box.key``) and the input script (``in.box``). Make the data file
+first with LAMMPS's ``tools/tinker/tinker2lmp.py``. The header of ``in.box``
+gives the command.
+
+LAMMPS then reproduces the model's energy, with two limits:
+
+- LAMMPS has no charge flux. The export leaves it out and warns.
+- In a cell, the forces of LAMMPS 29Aug2024 do not match its energy.

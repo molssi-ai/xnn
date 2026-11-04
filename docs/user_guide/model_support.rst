@@ -172,14 +172,14 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
    * - AMOEBA
      - |Y|
-     - |N|
+     - |O|
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
    * - HIPPO
      - |Y|
-     - |N|
+     - |O|
      - |Y|
      - |Y|
      - |Y|
@@ -317,10 +317,9 @@ Notes on individual models:
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
   These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
 - **AMOEBA and HIPPO.** Both match Tinker 8 to round-off. On CPUs, their
-  kernels run as C++ loops (``use_fast``, see :ref:`howto-fast-paths-cpu`).
-  HIPPO is then faster than Tinker 8 on the same cores, in single points and in
-  MD steps on a step plan. AMOEBA is still being compared with it. On a GPU,
-  both evaluate and train on fused kernels, which are compared with Tinker9.
+  kernels run as C++ loops (see :ref:`howto-fast-paths-cpu`) and are faster
+  than Tinker 8. On GPUs, both run on fused kernels. Both deploy as inputs for
+  LAMMPS's AMOEBA package (see :ref:`howto-lammps`), which has no charge flux.
 
 Add-on terms
 ============

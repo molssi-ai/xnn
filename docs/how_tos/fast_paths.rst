@@ -155,18 +155,15 @@ The kernels are built on first use, which needs a C++ compiler with OpenMP and
 - **Evaluation only.** Covers the energies, forces and stress. A training step
   runs the reference path.
 
-AMOEBA and HIPPO run their GPU kernels on a CPU as well. With
-``use_fast=True``, the pair, mutual-field, solver and mesh kernels become C++
-loops on OpenMP threads (:mod:`xnn.common.cpu_kernels`). They give the
-reference's energies, forces and stress. As on a GPU, a training step takes the
-pair kernels and runs the mesh and the solver eagerly.
+AMOEBA and HIPPO also run their GPU kernels on a CPU, as C++ loops. The
+results match the reference.
 
-- **First call.** The system C++ compiler builds the kernels on first use, which
-  takes about a minute. They are cached in ``~/.cache/xnn/cpu_kernels``, or in
-  ``XNN_CPU_KERNELS_DIR`` when it is set.
-- **Choice.** ``"auto"`` takes the kernels on a CPU from about 50 000 pairs
-  (about 1500 atoms of water), in evaluation and in training. Below that, it
-  keeps the reference. ``use_fast=True`` takes the kernels at every size.
+- **First call.** The kernels compile on first use, in about a minute. They are
+  cached in ``~/.cache/xnn/cpu_kernels`` (or ``XNN_CPU_KERNELS_DIR``).
+- **Choice.** ``"auto"`` uses them from about 50 000 atom pairs (about 1500
+  water atoms). ``use_fast=True`` uses them at every size.
+- **Training.** A training step uses the pair kernels. The mesh and the dipole
+  solver run eagerly.
 
 What to expect from fast implementations
 ========================================
