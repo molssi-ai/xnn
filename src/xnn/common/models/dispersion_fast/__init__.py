@@ -12,12 +12,18 @@ The fast paths replace exactly those:
   operator with factorized reciprocal phases (no trigonometry per product), a
   sparse real-space matrix, a fused molecular kernel and lockstep solves;
 * :func:`~xnn.common.models.dispersion_fast.atm.atm_energy`: the ATM energy and
-  its gradient as fused Triton kernels, with the pair C6 from per-atom factors
-  (no ``(N, N)`` matrix, so D3's three-body term has no atom limit).
+  its first and second derivatives as fused Triton kernels, with the pair C6
+  from per-atom factors (no ``(N, N)`` matrix, so D3's three-body term has no
+  atom limit);
+* :mod:`~xnn.common.models.dispersion_fast.cpu`: on CPUs, C++ / OpenMP kernels
+  for the whole of D3 and for D4's polarizabilities and two- and three-body
+  terms, the loops of the Fortran codes; where they do not build, the
+  three-body term on compiled tiles
+  (:mod:`~xnn.common.models.dispersion_fast.atm_cpu`).
 
 They follow the ``use_fast`` convention of :mod:`xnn.common.models.fast`; the
 parameters, buffers and outputs of the modules are unchanged, except that the
-fast D3 path does not form the dense ``"c6_matrix"`` output (it is returned
+fast D3 paths do not form the dense ``"c6_matrix"`` output (it is returned
 empty, as above 20000 atoms; :meth:`~xnn.common.models.d3.DFTD3.c6_matrix`
 computes it on request).
 """
@@ -34,4 +40,9 @@ AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0,
                          # 10-20 s, which only pays from a few thousand edges (about 75 atoms) on
                          cpu_min_edges=5000, cpu_min_edges_float64=5000)
 
-__all__ = ["AUTO_POLICY", "available", "supported"]
+#: ``AUTO_POLICY`` for a term whose C++ CPU kernels apply (D3 and D4,
+#: :mod:`~xnn.common.models.dispersion_fast.cpu`): on a CPU every size takes them
+AUTO_POLICY_CPU_KERNELS = AutoPolicy(default_min_edges=0, default_min_edges_float64=0,
+                                     cpu_min_edges=0, cpu_min_edges_float64=0)
+
+__all__ = ["AUTO_POLICY", "AUTO_POLICY_CPU_KERNELS", "available", "supported"]
