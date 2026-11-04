@@ -52,6 +52,7 @@ from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, ExpNormalSmearing
 from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.electrostatics import all_pairs
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 from xnn.trfnn.attention import EdgeMultiheadAttention
@@ -123,7 +124,7 @@ def _energy_mlp(n_layers: int, dim: int, act: str) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
-class GETLayer(nn.Module):
+class GETLayer(FastPathModule, nn.Module):
     """One Graph Equivariant Transformer layer (BAMBOO Supplementary A.1).
 
     A GET layer updates the scalar node feature ``x_i`` and, except in the
@@ -166,6 +167,7 @@ class GETLayer(nn.Module):
         self.dim_per_head = dim // num_heads
         self.is_first = is_first
         self.is_last = is_last
+        self.fast_active = False
         self.attn = EdgeMultiheadAttention(dim, num_heads, _make_act(attn_act))
         if is_first:
             self.output_proj = nn.Linear(dim, dim)
@@ -210,18 +212,22 @@ class GETLayer(nn.Module):
             this is the last layer, the vector update/output of shape
             ``(N, 3, dim)`` (``None`` for the last layer).
         """
-        values, gate = self.attn(node_feat, center, neighbor, envelope)
-
-        # scalar channel: values carry the radial edge feature and the
-        # attention gate onto the centre atom, heads then merge back to dim
-        weighted = values * edge_feat * gate.unsqueeze(-1)
-        scal_msg = scatter_sum(weighted, center, n_atoms).flatten(-2)
+        if self.fast_active:
+            scal_msg, vec_msg = self._messages_fast(node_feat, edge_feat, edge_vec, envelope)
+        else:
+            values, gate = self.attn(node_feat, center, neighbor, envelope)
+            # scalar channel: values carry the radial edge feature and the
+            # attention gate onto the centre atom, heads then merge back to dim
+            weighted = values * edge_feat * gate.unsqueeze(-1)
+            scal_msg = scatter_sum(weighted, center, n_atoms).flatten(-2)
+            vec_msg = None
+            if not self.is_last:
+                lifted = values.unsqueeze(-3) * edge_vec
+                vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
 
         if self.is_first:
             # nothing equivariant exists yet, so the vector output is just
             # the aggregated edge-vector message
-            lifted = values.unsqueeze(-3) * edge_vec
-            vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
             return self.output_proj(scal_msg), vec_msg
 
         assert self.vec_proj is not None and node_vec is not None
@@ -241,12 +247,38 @@ class GETLayer(nn.Module):
         invariant = (left * right).sum(dim=-2)
         vec_gate, scale, shift = torch.split(proj, self.dim, dim=-1)
 
-        lifted = values.unsqueeze(-3) * edge_vec
-        vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
-
         delta_x = invariant * scale + shift
         delta_v = carry * vec_gate.unsqueeze(-2) + vec_msg
         return delta_x, delta_v
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` (see :mod:`xnn.hybnn.fast.bamboo`)."""
+        from xnn.hybnn.fast.bamboo import supported
+        return supported(device, dtype)
+
+    def _messages_fast(self, node_feat: Tensor, edge_feat: Tensor, edge_vec: Optional[Tensor],
+                       envelope: Tensor) -> tuple[Tensor, Optional[Tensor]]:
+        """The scalar and vector messages by the fused kernels: the attention logits of ET, then one
+        continuous-filter convolution over the scalar block and the three vector blocks (the values
+        repeated, the filter ``[d o a | e]``). The edges are the ones :meth:`BAMBOO._share_fast_edges`
+        stored (row 0 the neighbors, row 1 the centers)."""
+        from xnn.gnn.fast.schnet_kernels import cfconv
+        from xnn.trfnn.fast.et_kernels import attention_logits
+        edges = self.__dict__["_fast_edges"]
+        attn = self.attn
+        n, f = node_feat.shape
+        q, k, v = attn.qkv_proj(attn.layer_norm(node_feat)).unflatten(
+            -1, (self.num_heads, 3, self.dim_per_head)).unbind(dim=-2)
+        score = attention_logits(q.reshape(n, f), k.reshape(n, f), None, edges[0], edges[1], self.num_heads,
+                                 key=edges)
+        gate = attn.attn_act(score) * envelope.unsqueeze(-1)
+        z = (edge_feat * gate.unsqueeze(-1)).reshape(-1, f)
+        if self.is_last:
+            return cfconv(v.reshape(n, f), z, None, edges), None
+        z = torch.cat([z, edge_vec.reshape(-1, 3 * f)], dim=-1)
+        h = v.reshape(n, 1, f).expand(n, 4, f).reshape(n, 4 * f)
+        out = cfconv(h, z, None, edges)
+        return out[:, :f], out[:, f:].reshape(n, 3, f)
 
 
 @register_model("bamboo")
@@ -385,6 +417,8 @@ class BAMBOO(InteratomicPotential):
         self.node_feature_dim = dim
 
         self.atom_emb = nn.Embedding(n_elements, dim)
+        # the fused attention messages (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
         self.dis_rbf = ExpNormalSmearing(num_rbf, cutoff, trainable=True)
         self.cutoff_fn = CosineCutoff(cutoff)
         self.rbf_proj = nn.Sequential(
@@ -441,6 +475,47 @@ class BAMBOO(InteratomicPotential):
         damp = self.coul_softplus((dist - r0) / r0)
         return bare * dist / r0 / (1.0 + damp)
 
+    def set_use_fast(self, use_fast) -> "BAMBOO":
+        """Choose the implementation of the attention messages.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused kernels (:mod:`xnn.hybnn.fast.bamboo`)
+            where they are available and faster for the input (a CUDA device, Triton, a
+            graph above the size crossover measured for evaluation, ``AUTO_POLICY``, or
+            for training, ``AUTO_POLICY_TRAINING``); ``True``: wherever they are
+            available; ``False``: always the reference implementation. The kernels are
+            twice differentiable, so force training takes them as well.
+
+        Returns
+        -------
+        BAMBOO
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused messages on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.hybnn.fast.bamboo import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.atom_emb.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
+
+    def _share_fast_edges(self, edge_index: Tensor) -> None:
+        """Give the fused messages one edge list for the whole evaluation (one edge sort)."""
+        for b in self.__dict__.get("_fast_blocks") or []:
+            if b.fast_active:
+                b.__dict__["_fast_edges"] = edge_index
+
+
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict energies, partial charges and the dipole for a graph.
 
@@ -465,9 +540,17 @@ class BAMBOO(InteratomicPotential):
         N = data.num_nodes
         B = data.num_graphs
 
+        if getattr(data, "index_plan", None) is not None:
+            # a padded batch of a captured training step: the reference path (the fused kernels
+            # sort the edges once per edge list, which a replay would not repeat)
+            from xnn.common.models.fast import deactivate
+            deactivate(self)
+        else:
+            self._select_fast(int(data.edge_index.shape[1]))
         edge_vec = data.edge_vectors()               # (E,3) = pos[dst]-pos[src]
         center = data.edge_index[1]                  # receiver (upstream "row")
         neighbor = data.edge_index[0]                # sender   (upstream "col")
+        self._share_fast_edges(data.edge_index)
         r = edge_vec.norm(dim=-1)
         unit = edge_vec / r.unsqueeze(-1)
         radial_emb = self.dis_rbf(r)
@@ -500,7 +583,8 @@ class BAMBOO(InteratomicPotential):
         total_charge = getattr(data, "total_charge", None)
         if total_charge is None:
             total_charge = torch.zeros(B, dtype=charge.dtype, device=charge.device)
-        n_per = torch.bincount(batch, minlength=B).to(charge.dtype)
+        # atoms per structure by a scatter (a CUDA bincount reads its maximum back to the host)
+        n_per = scatter_sum(torch.ones_like(charge), batch, B)
         q_sum = scatter_sum(charge, batch, B)
         charges = charge + ((total_charge - q_sum) / n_per)[batch]
 

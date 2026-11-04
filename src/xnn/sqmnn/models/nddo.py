@@ -65,7 +65,7 @@ from ..common.constants import BOHR, COULOMB, EV_TO_KCAL
 from ..common.parameters import ELEMENT_PARAMETERS, GAUSSIAN_PARAMETERS, PAIR_PARAMETERS, ParameterSet, read_parameters
 from .angular import L_OF, MOLECULAR, dipole_factors, pair_type
 from .derived import element_quantities
-from .scf import PAD_ENERGY, Layout, SCFDensity, electronic_energy, fock_matrices, lowest, run_scf
+from .scf import PAD_ENERGY, Layout, SCFDensity, electronic_energy, fock_matrices, frontier_gap, lowest, run_scf
 from .twocenter import pair_integrals
 
 _ELEMENT_NAMES = ELEMENT_PARAMETERS + GAUSSIAN_PARAMETERS
@@ -140,6 +140,10 @@ class NDDO(InteratomicPotential):
         is kept. The default (plain aufbau and two annealing schedules)
         finds the ground state of open shells and small-gap systems where a
         single run can settle in an excited aufbau state.
+    restart_gap : float, optional
+        The runs after the first of ``scf_starts`` take place when the batch
+        is unrestricted or a structure's first solution has a HOMO-LUMO gap
+        below this (eV); default 3.0. ``float("inf")`` runs them always.
     """
 
     #: Name of the published parameter set of the method.
@@ -160,7 +164,7 @@ class NDDO(InteratomicPotential):
                  response: str = "auto", max_iter: int = 300, tol_density: float = 1e-9,
                  tol_energy: float = 1e-10, corrections: bool = True,
                  reuse_density: bool = True,
-                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25))):
+                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 3.0):
         super().__init__()
         pset = (parameters if isinstance(parameters, ParameterSet)
                 else read_parameters(parameters or self.default_parameters))
@@ -177,6 +181,7 @@ class NDDO(InteratomicPotential):
         self.last_scf = None
         self.reuse_density = bool(reuse_density)
         self.scf_starts = tuple((float(kt), int(n)) for kt, n in scf_starts)
+        self.restart_gap = float(restart_gap)
         self._scf_key = None
         self._scf_pos = None
         self._q_cache = {}
@@ -308,14 +313,15 @@ class NDDO(InteratomicPotential):
         Options in ``cfg.extra``: ``parameters`` (set name or file),
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
-        ``reuse_density``, ``scf_starts``.
+        ``reuse_density``, ``scf_starts``, ``restart_gap``.
         """
 
         from xnn.common.config.options import model_options
 
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
-                "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts")
+                "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
+                "restart_gap")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
     # the calculation
@@ -434,9 +440,14 @@ class NDDO(InteratomicPotential):
                              self.tol_density, self.tol_energy, smear_steps=0,
                              spin_guess=self.last_scf.densities if uhf else None)
         else:
-            result = lowest([run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter,
-                                     self.tol_density, self.tol_energy, smearing=kt, smear_steps=steps)
-                             for kt, steps in self.scf_starts])
+            def start(kt, steps):
+                return run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter, self.tol_density,
+                               self.tol_energy, smearing=kt, smear_steps=steps)
+            results = [start(*self.scf_starts[0])]
+            # the other runs where the first may have settled in an excited aufbau state
+            if len(self.scf_starts) > 1 and (uhf or bool((frontier_gap(results[0]) < self.restart_gap).any())):
+                results += [start(kt, steps) for kt, steps in self.scf_starts[1:]]
+            result = lowest(results)
         self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
         if self._use_response():
             pos_fixed = pos.detach()

@@ -117,8 +117,9 @@ from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.d4 import DFTD4, _erf_count, _load_reference
 from xnn.common.models.dispersion import BOHR, HARTREE, gaussian_reference_weights
 from xnn.common.models.electrostatics import COULOMB_CONSTANT, all_pairs, coulomb_ewald, ewald_parameters
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import exact_softplus as _exact_softplus
-from xnn.common.models.ops import glorot_orthogonal_, scatter_sum, softplus_inverse, structure_sum
+from xnn.common.models.ops import gather_rows, glorot_orthogonal_, scatter_sum, softplus_inverse
 from xnn.common.models.registry import register_model
 from xnn.hybnn.featurizers import ExponentialBernsteinRBF
 
@@ -188,15 +189,13 @@ def smooth_switch(r: Tensor, r_on: float, r_off: float) -> Tensor:
     (r_off - r_on)`` and ``sigma(x) = exp(-1 / x)`` for ``x > 0`` (0 else).
     """
     x = (r - r_on) / (r_off - r_on)
-    ones = torch.ones_like(x)
-    zeros = torch.zeros_like(x)
     # the dummy arguments keep the unused branch of torch.where finite, so
-    # the gradient stays finite as well
-    sigma_x = torch.where(x > 0, torch.exp(-1.0 / torch.where(x > 0, x, ones)), zeros)
+    # the gradient stays finite as well (scalars: no filled tensors)
+    sigma_x = torch.where(x > 0, torch.exp(-1.0 / torch.where(x > 0, x, 1.0)), 0.0)
     y = 1.0 - x
-    sigma_y = torch.where(y > 0, torch.exp(-1.0 / torch.where(y > 0, y, ones)), zeros)
-    middle = sigma_y / torch.where((x > 0) & (x < 1), sigma_x + sigma_y, ones)
-    return torch.where(x <= 0, ones, torch.where(x >= 1, zeros, middle))
+    sigma_y = torch.where(y > 0, torch.exp(-1.0 / torch.where(y > 0, y, 1.0)), 0.0)
+    # sigma_x + sigma_y > 0 everywhere: one of the two is positive
+    return torch.where(x <= 0, 1.0, torch.where(x >= 1, 0.0, sigma_y / (sigma_x + sigma_y)))
 
 
 def orthogonal_random_features(n_features: int, dim: int,
@@ -270,6 +269,21 @@ def _restore_tables(module: nn.Module, tables: Dict[str, Tensor]) -> bool:
     return changed
 
 
+def _pad(x: Tensor, flat: Tensor, num_graphs: int, n_max: int, fill: float) -> Tensor:
+    """Rows of ``x`` ``(N, F)`` at their flat (structure, slot) rows of a ``(B, n_max, F)`` block, ``fill`` elsewhere.
+
+    ``index_copy_`` into a fresh block: its backward is one row gather (advanced-index
+    assignment sorts the indices on CUDA).
+    """
+    out = x.new_full((num_graphs * n_max, x.shape[-1]), fill)
+    return out.index_copy_(0, flat, x).view(num_graphs, n_max, x.shape[-1])
+
+
+def _unpad(y: Tensor, flat: Tensor) -> Tensor:
+    """Rows ``(N, F)`` of a ``(B, n_max, F)`` block at the flat (structure, slot) rows."""
+    return gather_rows(y.reshape(y.shape[0] * y.shape[1], y.shape[2]), flat)
+
+
 def _structure_slots(batch: Tensor, num_graphs: int) -> Tuple[Tensor, int]:
     """Position of every atom within its structure and the largest structure size."""
     counts = torch.bincount(batch, minlength=num_graphs)
@@ -341,6 +355,48 @@ class _ResidualMLP(nn.Module):
         return self.linear(self.activation(x))
 
 
+def _groupable(mlps: List[nn.Module]) -> bool:
+    """Whether residual MLPs share one structure and plain layers (no adapters), so they can run batched."""
+    first = mlps[0]
+    for m in mlps:
+        if type(m) is not _ResidualMLP or len(m.residual) != len(first.residual):
+            return False
+        layers = [m.linear] + [b.linear1 for b in m.residual] + [b.linear2 for b in m.residual]
+        acts = [m.activation] + [b.activation1 for b in m.residual] + [b.activation2 for b in m.residual]
+        if any(type(lin) is not nn.Linear or (lin.bias is None) != (first.linear.bias is None) for lin in layers):
+            return False
+        if any(type(a) is not Swish for a in acts):
+            return False
+    return True
+
+
+def _grouped_residual_mlps(x: Tensor, mlps: List[nn.Module]) -> List[Tensor]:
+    """``[m(x) for m in mlps]`` as one batched evaluation (stacked weights, one ``baddbmm`` per layer).
+
+    The same arithmetic with a third of the operations for three or four MLPs, which bound small systems on
+    a GPU. Eager only; the parameters stay in their modules.
+    """
+    def swish(h: Tensor, acts: List[nn.Module]) -> Tensor:
+        alpha = torch.stack([a.alpha for a in acts]).unsqueeze(1)
+        beta = torch.stack([a.beta for a in acts]).unsqueeze(1)
+        return alpha * h * torch.sigmoid(beta * h)
+
+    def linear(h: Tensor, lins: List[nn.Module]) -> Tensor:
+        w = torch.stack([lin.weight for lin in lins]).transpose(1, 2)
+        if lins[0].bias is None:
+            return torch.bmm(h, w)
+        return torch.baddbmm(torch.stack([lin.bias for lin in lins]).unsqueeze(1), h, w)
+
+    h = x.unsqueeze(0).expand(len(mlps), x.shape[0], x.shape[1])
+    for i in range(len(mlps[0].residual)):
+        blocks = [m.residual[i] for m in mlps]
+        y = linear(swish(h, [b.activation1 for b in blocks]), [b.linear1 for b in blocks])
+        y = linear(swish(y, [b.activation2 for b in blocks]), [b.linear2 for b in blocks])
+        h = h + y
+    out = linear(swish(h, [m.activation for m in mlps]), [m.linear for m in mlps])
+    return list(out.unbind(0))
+
+
 class _NuclearEmbedding(nn.Module):
     """``e_Z = M d_Z + e~_Z`` (eq 9); both terms start at zero."""
 
@@ -394,20 +450,21 @@ class _ElectronicEmbedding(nn.Module):
             e = F.relu(torch.stack([psi, -psi], dim=-1))
         else:
             e = psi.abs().unsqueeze(-1)
-        k = self.linear_k(e / torch.clamp(e, min=1.0))[batch]
-        v = self.linear_v(e)[batch]
+        k = gather_rows(self.linear_k(e / torch.clamp(e, min=1.0)), batch)
+        v = gather_rows(self.linear_v(e), batch)
         q = self.linear_q(e_z)
         a = _exact_softplus((k * q).sum(-1) / math.sqrt(q.shape[-1]))
-        norm = scatter_sum(a, batch, num_graphs)[batch]
+        norm = gather_rows(scatter_sum(a, batch, num_graphs), batch)
         return self.resmlp((a / (norm + 1e-8)).unsqueeze(-1) * v)
 
 
-class _LocalInteraction(nn.Module):
+class _LocalInteraction(FastPathModule, nn.Module):
     """s-, p- and d-orbital-like message passing within the cutoff (eq 12)."""
 
     def __init__(self, n_features: int, n_rbf: int, n_residual: int):
         super().__init__()
         self.n_features = n_features
+        self.fast_active = False
         self.radial_s = nn.Linear(n_rbf, n_features, bias=False)
         self.radial_p = nn.Linear(n_rbf, n_features, bias=False)
         self.radial_d = nn.Linear(n_rbf, n_features, bias=False)
@@ -431,19 +488,73 @@ class _LocalInteraction(nn.Module):
         ``j -> i`` (``src`` = ``j``, ``dst`` = ``i``).
         """
         n = x.shape[0]
-        total = self.resmlp_c(x) + scatter_sum(
-            self.radial_s(rho) * self.resmlp_s(x)[src], dst, n)
+        if torch.jit.is_scripting():
+            m_c, m_s = self.resmlp_c(x), self.resmlp_s(x)
+            m_p = self.resmlp_p(x) if use_p else x
+            m_d = self.resmlp_d(x) if use_d else x
+        else:
+            m_c, m_s, m_p, m_d = self._feature_mlps(x, use_p, use_d)
+        if self.fast_active and not torch.jit.is_scripting():
+            s_sum, p, d = self._sums_fast(m_s, m_p, m_d, rho, y1, y2, use_p, use_d)
+        else:
+            s_sum = scatter_sum(self.radial_s(rho) * gather_rows(m_s, src), dst, n)
+            p, d = x, x
+            if use_p:
+                g = (self.radial_p(rho) * gather_rows(m_p, src)).unsqueeze(1) * y1.unsqueeze(-1)
+                p = scatter_sum(g, dst, n)                                   # (N, 3, F)
+            if use_d:
+                g = (self.radial_d(rho) * gather_rows(m_d, src)).unsqueeze(1) * y2.unsqueeze(-1)
+                d = scatter_sum(g, dst, n)                                   # (N, 5, F)
+        total = m_c + s_sum
         if use_p:
-            g = (self.radial_p(rho) * self.resmlp_p(x)[src]).unsqueeze(1) * y1.unsqueeze(-1)
-            p = scatter_sum(g, dst, n)                                       # (N, 3, F)
             parts = torch.split(self.projection_p(p), self.n_features, dim=-1)
             total = total + (parts[0] * parts[1]).sum(1)
         if use_d:
-            g = (self.radial_d(rho) * self.resmlp_d(x)[src]).unsqueeze(1) * y2.unsqueeze(-1)
-            d = scatter_sum(g, dst, n)                                       # (N, 5, F)
             parts = torch.split(self.projection_d(d), self.n_features, dim=-1)
             total = total + (parts[0] * parts[1]).sum(1)
         return self.resmlp_l(total)
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device`` (the fused continuous-filter convolution of
+        :mod:`xnn.gnn.fast.schnet`, see :mod:`xnn.hybnn.fast.spookynet`)."""
+        from xnn.hybnn.fast.spookynet import supported
+        return supported(device, dtype)
+
+    @torch.jit.unused
+    def _sums_fast(self, m_s: Tensor, m_p: Tensor, m_d: Tensor, rho: Tensor, y1: Tensor, y2: Tensor,
+                   use_p: bool, use_d: bool) -> Tuple[Tensor, Tensor, Tensor]:
+        """The s, p and d sums by the fused convolution, over the feature blocks ``[s | p (3)]`` and
+        ``[d (5)]``: the features repeated per block, the filter times the angular function (``m_p`` /
+        ``m_d`` for an unused one). Two calls rather than one: ``4F`` columns are a power of two for the
+        usual widths, and one call over ``9F`` pads to ``16F`` and runs one edge per step. The edges are
+        the ones :meth:`SpookyNet._share_fast_edges` stored."""
+        from xnn.gnn.fast.schnet_kernels import cfconv
+        edges = self.__dict__["_fast_edges"]
+        n, f = m_s.shape
+        zs = self.radial_s(rho)
+        if use_p:
+            h = torch.cat([m_s.unsqueeze(1), m_p.unsqueeze(1).expand(n, 3, f)], dim=1).reshape(n, 4 * f)
+            z = torch.cat([zs.unsqueeze(1), self.radial_p(rho).unsqueeze(1) * y1.unsqueeze(-1)], dim=1)
+            sp = cfconv(h, z.reshape(-1, 4 * f), None, edges).view(n, 4, f)
+            s_sum, p = sp[:, 0], sp[:, 1:]
+        else:
+            s_sum, p = cfconv(m_s, zs, None, edges), m_p
+        d = m_d
+        if use_d:
+            z = (self.radial_d(rho).unsqueeze(1) * y2.unsqueeze(-1)).reshape(-1, 5 * f)
+            d = cfconv(m_d.unsqueeze(1).expand(n, 5, f).reshape(n, 5 * f), z, None, edges).view(n, 5, f)
+        return s_sum, p, d
+
+    @torch.jit.unused
+    def _feature_mlps(self, x: Tensor, use_p: bool, use_d: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """``resmlp_c``, ``_s``, ``_p``, ``_d`` of ``x``, batched when they allow it (``x`` for an unused one)."""
+        mlps = [self.resmlp_c, self.resmlp_s] + ([self.resmlp_p] if use_p else []) \
+            + ([self.resmlp_d] if use_d else [])
+        out = _grouped_residual_mlps(x, mlps) if _groupable(mlps) else [m(x) for m in mlps]
+        m_c, m_s = out[0], out[1]
+        m_p = out[2] if use_p else x
+        m_d = out[-1] if use_d else x
+        return m_c, m_s, m_p, m_d
 
 
 class _NonlocalInteraction(nn.Module):
@@ -486,9 +597,10 @@ class _NonlocalInteraction(nn.Module):
     def forward(self, x: Tensor, batch: Tensor, num_graphs: int, slot: Tensor,
                 n_max: int) -> Tensor:
         """Nonlocal features ``n`` ``(N, F)``."""
-        q = self.resmlp_q(x)
-        k = self.resmlp_k(x)
-        v = self.resmlp_v(x)
+        if torch.jit.is_scripting():
+            q, k, v = self.resmlp_q(x), self.resmlp_k(x), self.resmlp_v(x)
+        else:
+            q, k, v = self._qkv(x)
         if self.exact:
             return self._exact(q, k, v, batch, num_graphs, slot, n_max)
         scale = x.shape[-1] ** 0.25
@@ -502,40 +614,41 @@ class _NonlocalInteraction(nn.Module):
             numerator = torch.matmul(phi_q, torch.matmul(phi_k.t(), v))
             denominator = torch.matmul(phi_q, phi_k.sum(0))
             return numerator / (denominator + 1e-8).unsqueeze(-1)
-        m = u_k.shape[-1]
-        padded = u_k.new_full((num_graphs, n_max, m), -math.inf)
-        padded[batch, slot] = u_k
-        k_shift = padded.flatten(1).max(dim=1).values[batch].unsqueeze(-1)
+        flat = batch * n_max + slot
+        padded = _pad(u_k, flat, num_graphs, n_max, -math.inf)
+        k_shift = gather_rows(padded.flatten(1).max(dim=1).values, batch).unsqueeze(-1)
         phi_k = self._features(k, u_k, k_shift)
-        pk = phi_k.new_zeros((num_graphs, n_max, m))
-        pk[batch, slot] = phi_k
-        pv = v.new_zeros((num_graphs, n_max, v.shape[-1]))
-        pv[batch, slot] = v
-        pq = phi_q.new_zeros((num_graphs, n_max, m))
-        pq[batch, slot] = phi_q
-        numerator = torch.bmm(pq, torch.bmm(pk.transpose(1, 2), pv))[batch, slot]
-        denominator = (pq * pk.sum(1, keepdim=True)).sum(-1)[batch, slot]
+        pk = _pad(phi_k, flat, num_graphs, n_max, 0.0)
+        pv = _pad(v, flat, num_graphs, n_max, 0.0)
+        pq = _pad(phi_q, flat, num_graphs, n_max, 0.0)
+        numerator = _unpad(torch.bmm(pq, torch.bmm(pk.transpose(1, 2), pv)), flat)
+        denominator = _unpad((pq * pk.sum(1, keepdim=True)).sum(-1, keepdim=True), flat).squeeze(-1)
         return numerator / (denominator + 1e-8).unsqueeze(-1)
+
+    @torch.jit.unused
+    def _qkv(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """``resmlp_q``, ``_k``, ``_v`` of ``x``, batched when they allow it."""
+        mlps = [self.resmlp_q, self.resmlp_k, self.resmlp_v]
+        out = _grouped_residual_mlps(x, mlps) if _groupable(mlps) else [m(x) for m in mlps]
+        return out[0], out[1], out[2]
 
     def _exact(self, q: Tensor, k: Tensor, v: Tensor, batch: Tensor, num_graphs: int,
                slot: Tensor, n_max: int) -> Tensor:
         """Exact softmax attention within every structure (eq 19)."""
         d = q.shape[-1]
-        pq = q.new_zeros((num_graphs, n_max, d))
-        pq[batch, slot] = q
-        pk = k.new_zeros((num_graphs, n_max, d))
-        pk[batch, slot] = k
-        pv = v.new_zeros((num_graphs, n_max, v.shape[-1]))
-        pv[batch, slot] = v
-        valid = torch.zeros((num_graphs, n_max), dtype=torch.bool, device=q.device)
-        valid[batch, slot] = True
+        flat = batch * n_max + slot
+        pq = _pad(q, flat, num_graphs, n_max, 0.0)
+        pk = _pad(k, flat, num_graphs, n_max, 0.0)
+        pv = _pad(v, flat, num_graphs, n_max, 0.0)
+        valid = torch.zeros(num_graphs * n_max, dtype=torch.bool, device=q.device)
+        valid = valid.index_fill_(0, flat, True).view(num_graphs, n_max)
         dot = torch.bmm(pq, pk.transpose(1, 2))
         mask = valid.unsqueeze(1) & valid.unsqueeze(2)
         shift = torch.where(mask, dot, torch.full_like(dot, -math.inf)).flatten(1).max(dim=1).values
         a = torch.exp((dot - shift[:, None, None]) / math.sqrt(d))
         a = torch.where(mask, a, torch.zeros_like(a))
         a = a / (a.sum(-1, keepdim=True) + 1e-8)
-        return torch.bmm(a, pv)[batch, slot]
+        return _unpad(torch.bmm(a, pv), flat)
 
 
 class _InteractionModule(nn.Module):
@@ -641,13 +754,14 @@ class _Electrostatics(nn.Module):
 
     def forward(self, q: Tensor, src: Tensor, dst: Tensor, r: Tensor) -> Tensor:
         """Per-atom energies ``(N,)`` in eV over ordered pairs (both directions present)."""
-        pair = 0.5 * self.k_e * q[src] * q[dst] * self.kernel(r)
+        pair = 0.5 * self.k_e * gather_rows(q, src) * gather_rows(q, dst) * self.kernel(r)
         return scatter_sum(pair, dst, q.shape[0])
 
     def damping(self, q: Tensor, src: Tensor, dst: Tensor, r: Tensor) -> Tensor:
         """Per-atom short-range part ``k_e f (1 / sqrt(r^2 + 1) - 1 / r)`` (for the Ewald path)."""
         f = smooth_switch(r, self.r_on, self.r_off)
-        pair = 0.5 * self.k_e * q[src] * q[dst] * f * (1.0 / torch.sqrt(r * r + 1.0) - 1.0 / r)
+        qq = gather_rows(q, src) * gather_rows(q, dst)
+        pair = 0.5 * self.k_e * qq * f * (1.0 / torch.sqrt(r * r + 1.0) - 1.0 / r)
         return scatter_sum(pair, dst, q.shape[0])
 
 
@@ -708,19 +822,19 @@ class _ChargeD4(nn.Module):
     def _zeta(self, hardness: Tensor, qref: Tensor, qmod: Tensor) -> Tensor:
         """Charge scaling ``exp(ga (1 - exp(gamma (1 - qref / qmod))))``, ``exp(ga)`` for ``qmod <= 0``."""
         positive = qmod > 1e-8
-        safe = torch.where(positive, qmod, torch.ones_like(qmod))
+        safe = torch.where(positive, qmod, 1.0)
         scaled = torch.exp(self.ga * (1.0 - torch.exp(hardness * self.gc * (1.0 - qref / safe))))
-        return torch.where(positive, scaled, torch.full_like(qmod, math.exp(self.ga)))
+        return torch.where(positive, scaled, math.exp(self.ga))
 
     def reference_polarizabilities(self, scale_q: Tensor) -> Tensor:
         """Atom-in-molecule reference ``alpha(i omega)`` ``(23, 7, 119)`` with the hydrogen charges scaled."""
         present = self.refsys > 0
-        secondary = torch.where(present, self.refsys, torch.zeros_like(self.refsys))
+        secondary = torch.where(present, self.refsys, 0)
         zeff_x = self.zeff[secondary]
         scale = self._zeta(self.hardness[secondary], zeff_x, self.refh * scale_q + zeff_x)
         alpha_x = self.sscale[secondary] * self.secaiw[:, secondary] * scale
         alpha = self.ascale * (self.alphaiw - self.hcount * alpha_x)
-        return torch.where(present, torch.clamp(alpha, min=0.0), torch.zeros_like(alpha))
+        return torch.where(present, torch.clamp(alpha, min=0.0), 0.0)
 
     def forward(self, z: Tensor, q: Tensor, src: Tensor, dst: Tensor, r_angstrom: Tensor) -> Tensor:
         """Per-atom dispersion energies ``(N,)`` in eV over ordered pairs."""
@@ -744,7 +858,15 @@ class _ChargeD4(nn.Module):
                           zeff + q[:, None])
         alpha_ref = self.reference_polarizabilities(scale_q)[:, :, z]          # (23, 7, N)
         alpha_iw = torch.einsum("nr,krn->nk", [weights * zeta, alpha_ref])     # (N, 23)
-        c6 = (3.0 / math.pi) * (alpha_iw[dst] * alpha_iw[src] * self.cp_weights).sum(-1)
+        n_pairs = dst.shape[0]
+        if 4 * n_pairs >= n * n and n * n <= 1 << 25:
+            # a dense pair list (all pairs): C6 of every pair as one (N, 23) x (23, N) product, then the
+            # pairs, instead of three (P, 23) tensors
+            c6_all = (3.0 / math.pi) * torch.mm(alpha_iw * self.cp_weights, alpha_iw.t())
+            c6 = gather_rows(c6_all.reshape(n * n), dst * n + src)
+        else:
+            c6 = (3.0 / math.pi) * (gather_rows(alpha_iw, dst) * gather_rows(alpha_iw, src)
+                                    * self.cp_weights).sum(-1)
         rr = 3.0 * self.r4r2[zi] * self.r4r2[zj]
         r0 = F.softplus(self._a1) * torch.sqrt(rr) + F.softplus(self._a2)
         r0_6 = r0 ** 6
@@ -897,10 +1019,59 @@ class SpookyNet(InteratomicPotential):
         self.electrostatics = (_Electrostatics(self.local_cutoff, self.lr_cutoff)
                                if electrostatics else None)
         self.dispersion = _ChargeD4(lr_cutoff=self.lr_cutoff) if d4_dispersion else None
+        # the fused local message sums (see set_use_fast); "auto" takes them where measured faster
+        self.use_fast = "auto"
         if atomic_energies is not None:
             if species is None:
                 raise ValueError("species is required to map atomic_energies")
             self.set_atomic_energies(species, atomic_energies)
+
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "SpookyNet":
+        """Choose the implementation of the local message sums.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused continuous-filter convolution
+            (:mod:`xnn.hybnn.fast.spookynet`) where it is available and faster for the
+            input (a CUDA device, Triton, a graph above the size crossover measured for
+            evaluation, ``AUTO_POLICY``, or for training, ``AUTO_POLICY_TRAINING``);
+            ``True``: wherever it is available; ``False``: always the reference
+            implementation. The kernels are twice differentiable, so force training
+            takes them as well.
+
+        Returns
+        -------
+        SpookyNet
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused local sums on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        from xnn.hybnn.fast.spookynet import AUTO_POLICY, AUTO_POLICY_TRAINING
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        like = self.output.weight
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
+
+    @torch.jit.unused
+    def _share_fast_edges(self, src: Tensor, dst: Tensor) -> None:
+        """Give the fused local sums one edge list for the whole evaluation (one edge sort)."""
+        blocks = self.__dict__.get("_fast_blocks") or []
+        if any(b.fast_active for b in blocks):
+            edges = torch.stack([src, dst])
+            for b in blocks:
+                b.__dict__["_fast_edges"] = edges
+
 
     def _apply(self, fn, recurse=True):
         # constant tables built in float32 are rebuilt exactly once float64
@@ -932,13 +1103,15 @@ class SpookyNet(InteratomicPotential):
         """Ordered pairs ``(src, dst)`` and distances of the electrostatics and dispersion."""
         lr = self.lr_cutoff
         if lr is not None:
-            keep = r_all < lr
-            return edge_index[0][keep], edge_index[1][keep], r_all[keep]
+            # one index list instead of three masks (each mask is a host synchronization)
+            keep = (r_all < lr).nonzero().squeeze(1)
+            return (edge_index[0].index_select(0, keep), edge_index[1].index_select(0, keep),
+                    r_all.index_select(0, keep))
         if periodic:
             raise ValueError("SpookyNet sums the long-range terms over all pairs of a "
                              "molecule; periodic structures need lr_cutoff")
         dst, src = all_pairs(batch)
-        r = torch.linalg.norm(pos[dst] - pos[src], dim=-1)
+        r = torch.linalg.norm(gather_rows(pos, dst) - gather_rows(pos, src), dim=-1)
         return src, dst, r
 
     def _evaluate(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, pos: Tensor,
@@ -948,11 +1121,12 @@ class SpookyNet(InteratomicPotential):
         dtype = self.output.weight.dtype
         n = z.shape[0]
         r_all = torch.linalg.norm(edge_vec, dim=-1)
-        local = r_all < self.local_cutoff
-        src, dst = edge_index[0][local], edge_index[1][local]
-        r = r_all[local]
+        # one index list instead of four masks (each mask is a host synchronization)
+        local = (r_all < self.local_cutoff).nonzero().squeeze(1)
+        src, dst = edge_index[0].index_select(0, local), edge_index[1].index_select(0, local)
+        r = r_all.index_select(0, local)
         # the paper's r_ij = r_j - r_i is the negative of the xnn edge vector
-        u = -edge_vec[local] / r.unsqueeze(-1)
+        u = -gather_rows(edge_vec, local) / r.unsqueeze(-1)
         ux, uy, uz = u[:, 0], u[:, 1], u[:, 2]
         y1 = torch.stack([uy, uz, ux], dim=-1)
         sqrt3 = math.sqrt(3.0)
@@ -974,6 +1148,8 @@ class SpookyNet(InteratomicPotential):
         n_max = n
         if num_graphs > 1:
             slot, n_max = _structure_slots(batch, num_graphs)
+        if not torch.jit.is_scripting():
+            self._share_fast_edges(src, dst)
         f = torch.zeros_like(x)
         for module in self.interactions:
             x, y = module(x, rho, y1, y2, src, dst, batch, num_graphs, slot, n_max,
@@ -983,8 +1159,9 @@ class SpookyNet(InteratomicPotential):
         out = self.output(f)
         e_nn = out[:, 0] + self.atom_ref(z).squeeze(-1)
         q = out[:, 1] + self.charge_ref(z).squeeze(-1)
-        counts = torch.bincount(batch, minlength=num_graphs).to(dtype)
-        q = q + ((total_charge - scatter_sum(q, batch, num_graphs)) / counts)[batch]
+        # atoms per structure by a scatter (a CUDA bincount reads its maximum back to the host)
+        counts = scatter_sum(torch.ones_like(e_nn), batch, num_graphs)
+        q = q + gather_rows((total_charge - scatter_sum(q, batch, num_graphs)) / counts, batch)
 
         zero = torch.zeros_like(e_nn)
         e_rep, e_ele, e_vdw = zero, zero, zero
@@ -995,13 +1172,14 @@ class SpookyNet(InteratomicPotential):
         dispersion = self.dispersion
         if electrostatics is not None or dispersion is not None:
             periodic_atoms = torch.zeros(n, dtype=torch.bool, device=z.device)
+            any_periodic = False
             if cell is not None and pbc is not None:
                 periodic_atoms = pbc.any(dim=1)[batch]
-            lr_src, lr_dst, lr_r = self._long_range_pairs(edge_index, r_all, pos, batch,
-                                                          bool(periodic_atoms.any()))
+                any_periodic = bool(periodic_atoms.any())      # molecules: no read-back
+            lr_src, lr_dst, lr_r = self._long_range_pairs(edge_index, r_all, pos, batch, any_periodic)
             if electrostatics is not None:
                 if self.ewald and cell is not None and pbc is not None \
-                        and bool(periodic_atoms.any()):
+                        and any_periodic:
                     e_ele = self._ewald(q, pos, cell, pbc, batch, num_graphs,
                                         lr_src, lr_dst, lr_r, periodic_atoms)
                 else:
@@ -1108,6 +1286,13 @@ class SpookyNet(InteratomicPotential):
             e Angstrom) and the per-structure terms ``"energy_repulsion"``,
             ``"energy_electrostatics"`` and ``"energy_dispersion"``.
         """
+        if getattr(data, "index_plan", None) is not None:
+            # a padded batch of a captured training step: the reference path (the fused kernels
+            # sort the edges once per edge list, which a replay would not repeat)
+            from xnn.common.models.fast import deactivate
+            deactivate(self)
+        else:
+            self._select_fast(int(data.edge_index.shape[1]))
         dtype = self.output.weight.dtype
         b = data.num_graphs
         device = data.atomic_numbers.device
@@ -1120,15 +1305,18 @@ class SpookyNet(InteratomicPotential):
                              data.pos.to(dtype), data.cell, data.pbc, data.batch, b, q_tot,
                              n_unpaired)
         charges = out["charges"]
+        # the three per-structure terms in one float64 reduction
+        terms = scatter_sum(torch.stack([out["node_repulsion"], out["node_electrostatics"],
+                                         out["node_dispersion"]], dim=-1).to(torch.float64), data.batch, b)
         return {
             "node_energy": out["node_energy"],
             "energy": self.aggregate_energy(out["node_energy"], data),
             "node_features": out["node_features"],
             "charges": charges,
             "dipole": scatter_sum(charges.unsqueeze(-1) * data.pos.to(dtype), data.batch, b),
-            "energy_repulsion": structure_sum(out["node_repulsion"], data.batch, b),
-            "energy_electrostatics": structure_sum(out["node_electrostatics"], data.batch, b),
-            "energy_dispersion": structure_sum(out["node_dispersion"], data.batch, b),
+            "energy_repulsion": terms[:, 0],
+            "energy_electrostatics": terms[:, 1],
+            "energy_dispersion": terms[:, 2],
         }
 
     @classmethod

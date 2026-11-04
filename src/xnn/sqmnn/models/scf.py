@@ -298,6 +298,16 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, n_alpha: Tensor, 
                      converged=converged, electronic=e_el)
 
 
+def frontier_gap(result: SCFResult) -> Tensor:
+    """The HOMO-LUMO gap ``(B,)`` (eV) of each structure, the smaller of the two spins of an unrestricted
+    result (a structure without a virtual orbital gets the padding's distance)."""
+    occupied = result.occupations > 0.0
+    eps = result.energies
+    homo = torch.where(occupied, eps, torch.full_like(eps, -PAD_ENERGY)).amax(-1)
+    lumo = torch.where(occupied | (eps > 0.5 * PAD_ENERGY), torch.full_like(eps, PAD_ENERGY), eps).amin(-1)
+    return (lumo - homo).amin(0)
+
+
 def lowest(results: List[SCFResult]) -> SCFResult:
     """Per structure, the converged result of lowest electronic energy (any if none converged)."""
     best = results[0]
