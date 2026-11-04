@@ -2,6 +2,7 @@ from .amber import Amber, AmberForceField
 from .amberlib import AmberLibrary, match_improper, place_impropers, read_amber
 from .amberlib import builtin_library as builtin_amber
 from .amoeba import Amoeba, AmoebaForceField, DipolePredictor, Hippo, StepPlan
+from .amoeba_lammps import write_lammps_amoeba_input
 from .amoebalib import AmoebaLibrary, read_amoeba, read_tinker_prm, read_tinker_xyz, write_tinker_prm, write_tinker_xyz
 from .amoebalib import builtin_library as builtin_amoeba
 from .charmm import Charmm, CharmmForceField
@@ -16,10 +17,11 @@ from .lammps_input import lammps_input, write_lammps_input
 from .opls import OPLS, OPLSForceField
 from .oplslib import OPLSLibrary, builtin_library, fourier_to_rb, rb_to_fourier, read_opls
 from .reaxff import ReaxFF
+from .reaxff_step import ReaxFFStepper
 from .topology import MolecularTopology, guess_bonds, read_topology
 
 __all__ = ["ClassicalStepper", "lammps_input", "write_lammps_input", "FFieldLibrary", "read_ffield",
-           "template_library", "ReaxFF",
+           "template_library", "ReaxFF", "ReaxFFStepper",
            "OPLSLibrary", "read_opls", "builtin_library", "fourier_to_rb",
            "rb_to_fourier", "MolecularTopology", "read_topology",
            "guess_bonds", "OPLS", "OPLSForceField", "DreidingLibrary",
@@ -29,5 +31,6 @@ __all__ = ["ClassicalStepper", "lammps_input", "write_lammps_input", "FFieldLibr
            "AmberForceField", "CharmmLibrary", "read_charmm", "builtin_charmm",
            "place_charmm_impropers", "Charmm", "CharmmForceField", "AmoebaLibrary",
            "read_amoeba", "builtin_amoeba", "read_tinker_prm", "write_tinker_prm",
-           "read_tinker_xyz", "write_tinker_xyz", "Amoeba", "Hippo", "AmoebaForceField", "DipolePredictor",
+           "read_tinker_xyz", "write_tinker_xyz", "write_lammps_amoeba_input", "Amoeba", "Hippo",
+           "AmoebaForceField", "DipolePredictor",
            "StepPlan"]

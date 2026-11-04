@@ -75,13 +75,36 @@ def _image_shifts(vec: Tensor, lattice: Tensor, inv: Tensor, pbc: Optional[Tenso
     """Integer image shifts ``(M, 3)`` that minimize ``|vec + shift @ lattice|``.
 
     ``vec`` ``(M, 3)``; ``lattice`` ``(M, 3, 3)`` the periodic lattice vectors
-    per displacement (:func:`_periodic_lattice`) and ``inv`` its
-    pseudo-inverse, which maps a vector to the fractional coordinates of its
-    projection onto the periodic sublattice; ``pbc`` ``(M, 3)`` bool or
-    ``None``. The rounded image is returned for orthogonal lattices; otherwise
-    the best of its 27 neighbours. Nothing here carries gradients.
+    per displacement (:func:`_periodic_lattice`), or ``(3, 3)`` one lattice for
+    all, and ``inv`` its pseudo-inverse, which maps a vector to the fractional
+    coordinates of its projection onto the periodic sublattice; ``pbc``
+    ``(M, 3)`` (or ``(3,)``) bool or ``None``. The rounded image is returned for
+    orthogonal lattices; otherwise the best of its 27 neighbours. Nothing here
+    carries gradients.
     """
     with torch.no_grad():
+        if lattice.dim() == 2:
+            # one lattice: its 3 x 3 algebra once, not per displacement
+            shift = -torch.round(vec @ inv)
+            if pbc is not None:
+                shift = shift * pbc.to(vec.dtype)
+            gram = lattice @ lattice.T
+            diag = torch.diagonal(gram)
+            off = gram - torch.diag(diag)
+            half = 0.5 * torch.minimum(diag[:, None], diag[None, :]) * (1.0 + 1.0e-8)
+            skewed, unreduced = torch.stack([(off.abs() > ORTHOGONAL_TOL * gram.abs().amax()).any(),
+                                             (off.abs() > half).any()]).tolist()
+            if unreduced:
+                warnings.warn(UNREDUCED_CELL_MESSAGE, stacklevel=3)
+            if skewed:
+                one = torch.arange(-1, 2, device=vec.device)
+                offsets = torch.cartesian_prod(one, one, one).to(vec.dtype)          # (27, 3)
+                if pbc is not None:
+                    offsets = offsets * pbc.to(vec.dtype)
+                cand = vec[:, None, :] + (shift[:, None, :] + offsets[None]) @ lattice
+                k = (cand * cand).sum(-1).argmin(1)
+                shift = shift + offsets[k]
+            return shift
         shift = -torch.round(torch.einsum("mi,mij->mj", vec, inv))
         mask = None if pbc is None else pbc.to(vec.dtype)
         if mask is not None:
@@ -128,12 +151,10 @@ def minimum_image_vectors(vec: Tensor, cell: Tensor, pbc: Optional[Tensor] = Non
     """
     if vec.shape[0] == 0 or (pbc is not None and not bool(pbc.any())):
         return vec
-    m = vec.shape[0]
     flags = None if pbc is None else pbc.to(device=vec.device, dtype=torch.bool)
     lattice = _periodic_lattice(cell.to(vec.dtype), flags)
     inv = _lattice_inverse(lattice.detach(), flags)
-    shift = _image_shifts(vec.detach(), lattice.detach()[None].expand(m, 3, 3), inv[None].expand(m, 3, 3),
-                          None if flags is None else flags[None].expand(m, 3))
+    shift = _image_shifts(vec.detach(), lattice.detach(), inv, flags)
     return vec + shift @ cell.to(vec.dtype)
 
 
@@ -156,9 +177,11 @@ def pair_image_shifts(data: AtomicGraph, a: Tensor, b: Tensor) -> Optional[Tenso
     if data.cell is None or a.shape[0] == 0:
         return None
     vec = data.pos[b] - data.pos[a]
-    idx = data.batch[a]
     lattice = _periodic_lattice(data.cell.to(vec.dtype).detach(), data.pbc)
     inv = _lattice_inverse(lattice, data.pbc)
+    if lattice.shape[0] == 1:
+        return _image_shifts(vec.detach(), lattice[0], inv[0], None if data.pbc is None else data.pbc[0])
+    idx = data.batch[a]
     pbc = None if data.pbc is None else data.pbc[idx]
     return _image_shifts(vec.detach(), lattice[idx], inv[idx], pbc)
 

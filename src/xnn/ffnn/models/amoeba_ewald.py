@@ -202,6 +202,24 @@ def fft_mesh_size(n: int, minimum: int = 16) -> int:
     return n
 
 
+def mesh_rfftn(grid: Tensor) -> Tensor:
+    """``rfftn`` of the mesh groups ``(G, K1, K2, K3)`` over their three axes. On a CPU the groups go one at a
+    time: a batched transform runs MKL's threaded transforms inside a parallel loop over the groups, which starts
+    a second OpenMP team beside the first on every call."""
+    if grid.device.type == "cpu" and grid.shape[0] > 1:
+        return torch.stack([torch.fft.rfftn(g, dim=(0, 1, 2)) for g in grid])
+    return torch.fft.rfftn(grid, dim=(1, 2, 3))
+
+
+def mesh_irfftn(spectrum: Tensor, mesh: Sequence[int]) -> Tensor:
+    """The inverse of :func:`mesh_rfftn` onto the mesh ``mesh`` with ``norm="forward"`` (the influence function
+    carries the scaling), the groups one at a time on a CPU."""
+    s = tuple(int(k) for k in mesh)
+    if spectrum.device.type == "cpu" and spectrum.shape[0] > 1:
+        return torch.stack([torch.fft.irfftn(x, s=s, dim=(0, 1, 2), norm="forward") for x in spectrum])
+    return torch.fft.irfftn(spectrum, s=s, dim=(1, 2, 3), norm="forward")
+
+
 def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int = 16) -> List[int]:
     """Mesh dimensions from the cell lengths: at least ``density`` points per
     Angstrom along each axis, rounded up to an even size whose prime factors
@@ -603,8 +621,8 @@ class MeshPlan:
         k1, k2, k3 = self.mesh
         grid = torch.zeros(self.groups * k1 * k2 * k3, dtype=coeff.dtype, device=coeff.device)
         grid = grid.index_add(0, self.flat.reshape(-1), coeff.reshape(-1))
-        spectrum = torch.fft.rfftn(grid.view(self.groups, k1, k2, k3), dim=(1, 2, 3))
-        potential = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward").reshape(-1)
+        spectrum = mesh_rfftn(grid.view(self.groups, k1, k2, k3))
+        potential = mesh_irfftn(spectrum * influence, (k1, k2, k3)).reshape(-1)
         return potential.index_select(0, self.flat.reshape(-1)).view(self.flat.shape)
 
     @region("mesh.potential")
@@ -662,8 +680,7 @@ class MeshPlan:
         k1, k2, k3 = self.mesh
         grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh, self.groups, 1,
                                    guard)
-        pot = torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * self.influence(alpha, "coulomb"),
-                               s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+        pot = mesh_irfftn(mesh_rfftn(grid) * self.influence(alpha, "coulomb"), (k1, k2, k3))
         return km.gather_field(pot, self.jac_g, w, start, self.batch, self.mesh, acc, d, coef, guard)
 
     def paired_field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float,
@@ -682,8 +699,7 @@ class MeshPlan:
         _, w, start, batch, jac, influence, zero = self._paired
         k1, k2, k3 = self.mesh
         grid = km.spread_cartesian(zero, d, None, jac, w, start, batch, self.mesh, 2 * self.groups, 1, guard)
-        pot = torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * influence, s=(k1, k2, k3), dim=(1, 2, 3),
-                               norm="forward")
+        pot = mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
         return km.gather_field(pot, jac, w, start, batch, self.mesh, acc, d, coef, guard)
 
     def dipole_adjoint(self, mu: Tensor, lam: Tensor, alpha: float, scale: Optional[float] = None) -> Tensor:
@@ -700,8 +716,7 @@ class MeshPlan:
         def potential(d):
             grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh,
                                        self.groups, 1)
-            return torch.fft.irfftn(torch.fft.rfftn(grid, dim=(1, 2, 3)) * influence, s=(k1, k2, k3),
-                                    dim=(1, 2, 3), norm="forward")
+            return mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
 
         pot = potential(mu)
         # the field is minus the potential's gradient: the probes are -lam

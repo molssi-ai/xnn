@@ -80,6 +80,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import Parameter, ParameterDict
 
+from xnn.common import cpu_kernels
 from xnn.common.data import AtomicGraph
 from xnn.common.data.neighborlist import unique_pairs
 from xnn.common.models import InteratomicPotential, register_model
@@ -967,8 +968,11 @@ def _kernels():
 
 
 def _kernels_supported(device: torch.device, dtype: torch.dtype) -> bool:
-    """Whether the fused pair kernels run on ``device`` in ``dtype``."""
-    if device.type != "cuda" or dtype not in (torch.float32, torch.float64):
+    """Whether the fused pair kernels run on ``device`` in ``dtype``: Triton on a GPU, their C++ loops
+    (:mod:`xnn.common.cpu_kernels`) on a CPU with a C++ compiler."""
+    if device.type not in ("cuda", "cpu") or dtype not in (torch.float32, torch.float64):
+        return False
+    if device.type == "cpu" and not cpu_kernels.available():
         return False
     try:
         import triton  # noqa: F401
@@ -1182,7 +1186,7 @@ class _Images:
     with a complete plan they are replayed in the same order."""
 
     def __init__(self, data: AtomicGraph, plan: Optional[StepPlan], shifts: Optional[list] = None,
-                 pairs: Optional[list] = None):
+                 pairs: Optional[list] = None, plain: Optional[dict] = None):
         # the recorded shifts may be given on their own (a compiled block takes the list, not the
         # plan: an object whose attributes change would be guarded by identity and recompiled)
         self.data, self.plan, self.calls = data, plan, 0
@@ -1191,8 +1195,14 @@ class _Images:
         # served call by call: one scatter per side in the backward pass instead of one per call
         self.pairs = pairs
         self._parts: Optional[tuple] = None
+        # a plain evaluation in a cell (no plan): the model's record of the atom pairs of these calls
+        # (``plain["pairs"]``, taken on its first such evaluation), whose vectors are then formed in
+        # one search and gather
+        self.plain = plain if plan is None and shifts is None and data.cell is not None else None
 
     def __call__(self, a: Tensor, b: Tensor) -> Tensor:
+        if self.plain is not None:
+            return self._plain_call(a, b)
         if self.shifts is None or self.data.cell is None:
             return pair_vectors(self.data, a, b)
         if self.plan is not None and self.plan.recording:
@@ -1211,6 +1221,24 @@ class _Images:
             shift = self.shifts[self.calls]
         self.calls += 1
         return pair_vectors(self.data, a, b, shift=shift)
+
+    def _plain_call(self, a: Tensor, b: Tensor) -> Tensor:
+        pairs = self.plain.get("pairs")
+        k = self.calls
+        self.calls += 1
+        if pairs is None:
+            self.plain.setdefault("new", []).append((a.detach(), b.detach()))
+            return pair_vectors(self.data, a, b)
+        if k < len(pairs) and pairs[k][0].shape == a.shape and torch.equal(pairs[k][0], a) and \
+                torch.equal(pairs[k][1], b):
+            if self._parts is None:
+                vec = pair_vectors(self.data, torch.cat([pa for pa, _ in pairs]), torch.cat([pb for _, pb in pairs]))
+                self._parts = vec.split([int(pa.shape[0]) for pa, _ in pairs])
+            return self._parts[k]
+        # the calls no longer follow the record: searched one by one, recorded again next time
+        self.plain["pairs"] = None
+        self.plain.pop("new", None)
+        return pair_vectors(self.data, a, b)
 
 
 def dipole_field(m: Tensor, r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
@@ -1849,9 +1877,11 @@ class Amoeba(InteratomicPotential):
         forces follow, AMOEBA's fast implementation solves the dipoles of
         the direct and the polar field together, one set of iterations for
         both (Tinker's scheme), so its dipoles and forces agree with the
-        reference's to the solver tolerance. ``"auto"`` (default) takes the
-        fast implementation on a GPU above the measured crossover of the mode
-        (evaluation or training) and the reference otherwise.
+        reference's to the solver tolerance. On a CPU with a C++ compiler the
+        same kernels run as C++ loops (:mod:`.amoeba_cpu`). ``"auto"``
+        (default) takes the fast implementation above the measured crossover
+        of the device and the mode (evaluation or training) and the reference
+        otherwise.
     mixed_precision : bool, optional
         How the fast implementation of HIPPO evaluates the radial ladders of
         the pair terms in a float32 model: ``False`` (default) in float64,
@@ -2574,6 +2604,15 @@ class Amoeba(InteratomicPotential):
         cell are cut by their switches or the Ewald ``keep`` in addition)."""
         if plan is None:
             src, dst = data.edge_index[0], data.edge_index[1]
+            if not data.pos.is_cuda:
+                sel = (src < dst).nonzero()[:, 0]
+                if self._kernels_active(torch.empty(int(sel.shape[0]), dtype=data.model_dtype)):
+                    # on the CPU kernels: the vectors of the unique pairs alone, from the pair-difference
+                    # kernel (its backward a kernel scatter, not a gather's index_add over every edge)
+                    i, k = src[sel], dst[sel]
+                    shift = None if data.cell is None else _take(data.cell_shifts, sel).to(data.pos.dtype)
+                    r = _plan_vectors(data, i, k, shift, kernels=True)
+                    return i, k, r, self._pair_scales(data, i, k, r), torch.sqrt((r * r).sum(1) + TINY)
             i, k, r, scales = self._select_pairs(data, src, dst, data.edge_vectors())
             return i, k, r, scales, torch.sqrt((r * r).sum(1) + TINY)
         if plan.recording:
@@ -2784,7 +2823,10 @@ class Amoeba(InteratomicPotential):
             same = ((r[sel].detach() - closest) ** 2).sum(-1) < 1e-10
             hit = hit.clone()
             hit[sel] = same
-        return torch.where(hit[:, None], self.special_scales[pos], torch.ones_like(self.special_scales[pos]))
+        # ones, with the rows of the (few) bonded pairs copied in
+        out = torch.ones(i.shape[0], 8, dtype=self.special_scales.dtype, device=i.device)
+        sel = hit.nonzero()[:, 0]
+        return out.index_copy(0, sel, self.special_scales.index_select(0, pos.index_select(0, sel)))
 
     # forward
     def forward(self, data: AtomicGraph, plan: Optional[StepPlan] = None) -> dict[str, Tensor]:
@@ -2843,9 +2885,15 @@ class Amoeba(InteratomicPotential):
         # the valence terms and the frames compiled as one block (not while a plan records its
         # image shifts: that evaluation runs once)
         recording = plan is not None and plan.recording
+        # a plain evaluation on a CPU reuses its record of the valence terms' atom pairs (one image search)
+        plain = (self.__dict__.setdefault("_plain_images", {}).setdefault((B, N), {})
+                 if plan is None and data.cell is not None and data.pos.device.type == "cpu" else None)
         with fused(active and not recording):
             val = self._valence(data, plan if recording else None, None if plan is None or recording else plan.shifts,
-                                B, N, None if plan is None or recording else plan.image_pairs[:plan.valence_calls])
+                                B, N, None if plan is None or recording else plan.image_pairs[:plan.valence_calls],
+                                plain)
+        if plain is not None and "new" in plain:
+            plain["pairs"] = plain.pop("new")
         # the image calls of the terms that follow continue the recorded sequence
         img = _Images(data, plan)
         img.calls = val["img_calls"]
@@ -2886,13 +2934,13 @@ class Amoeba(InteratomicPotential):
     @fusable
     @region("amoeba.valence")
     def _valence(self, data: AtomicGraph, plan: Optional[StepPlan], shifts: Optional[list], B: int, N: int,
-                 pairs: Optional[list] = None) -> dict:
+                 pairs: Optional[list] = None, plain: Optional[dict] = None) -> dict:
         """The valence terms per atom, the global-frame multipoles with the charge flux, and
         the bond and angle quantities the intermediates report; one compiled block on the
         fused path. ``plan`` is given while it records its image shifts, ``shifts`` (its list)
         when they are replayed, with ``pairs`` (the plan's atom pairs of these calls) in one gather;
         the count of image calls is returned for the terms that follow."""
-        img = _Images(data, plan, shifts, pairs)
+        img = _Images(data, plan, shifts, pairs, plain)
         n = int(self.top_type.shape[0])
         device = data.pos.device
         P = self.ff.params
@@ -3099,18 +3147,18 @@ class Amoeba(InteratomicPotential):
         """Ideal length of the bond between atoms ``a`` and ``b`` (gathered
         from the bond table through the topology's bond list)."""
         n = int(self.top_type.shape[0])
-        key_lookup = getattr(self, "_bond_key_lookup", None)
-        if key_lookup is None:
-            keys = torch.full((n * n,), -1, dtype=torch.long, device=a.device)
-            bonds = self.bond_index
-            idx = bonds[0] * n + bonds[1]
-            keys[idx] = torch.arange(bonds.shape[1], device=a.device)
-            keys[bonds[1] * n + bonds[0]] = torch.arange(bonds.shape[1], device=a.device)
-            self._bond_key_lookup = keys
-            key_lookup = keys
-        la = a % n
-        lb = b % n
-        m = key_lookup[la * n + lb]
+        lookup = getattr(self, "_bond_key_lookup", None)
+        if lookup is None or lookup[0].device != a.device:
+            # the bonds' pair keys in both orders, sorted, with their bond rows: a search per query (a dense
+            # table over every atom pair would hold n^2 entries)
+            bonds = self.bond_index.to(a.device)
+            rows = torch.arange(bonds.shape[1], device=a.device)
+            keys = torch.cat([bonds[0] * n + bonds[1], bonds[1] * n + bonds[0]])
+            order = torch.argsort(keys)
+            lookup = (keys[order], rows.repeat(2)[order])
+            self._bond_key_lookup = lookup
+        keys, rows = lookup
+        m = rows[torch.searchsorted(keys, (a % n) * n + (b % n))]
         return self.ff.params["bond_r0"][self.bond_type[m]]
 
     def _has_cflux(self) -> bool:
@@ -3239,8 +3287,16 @@ class Amoeba(InteratomicPotential):
 
     def _kernels_active(self, R: Tensor) -> bool:
         """Whether this evaluation runs the fused pair kernels: the fast path on a CUDA device
-        where Triton is available (the compiled arithmetic serves it otherwise)."""
-        return self._fused_active(R) and _kernels_supported(R.device, R.dtype)
+        where Triton is available (the compiled arithmetic serves it otherwise), or on a CPU as C++
+        loops, where the compiled blocks of the GPU path stay eager."""
+        if R.is_cuda:
+            return self._fused_active(R) and _kernels_supported(R.device, R.dtype)
+        if not self.use_fast or not _kernels_supported(R.device, R.dtype):
+            return False
+        if isinstance(self.use_fast, str):
+            policy = TRAINING_POLICY if self.training else FAST_POLICY
+            return policy.decide(R.device, R.dtype, int(R.shape[0]))
+        return True
 
     def _pair_kernels_active(self, R: Tensor) -> bool:
         """Whether the nonbonded pairs run on the fused pair kernels: the kernels are active and the
@@ -4278,10 +4334,12 @@ def _extrapolate(weights: tuple, sets: tuple) -> Tensor:
 
 
 #: ``use_fast="auto"``: the minimum number of pairs per GPU model and precision from which the fast
-#: implementation runs in evaluation; it is faster at every size measured, so it runs on every GPU
-FAST_POLICY = AutoPolicy()
+#: implementation runs in evaluation; it is faster at every size measured, so it runs on every GPU. On a
+#: CPU its C++ loops win from water boxes of about 1500 atoms (about 75 000 pairs) in both precisions;
+#: below, the first call's compilation and mixed timings keep the reference
+FAST_POLICY = AutoPolicy(cpu_min_edges=50_000, cpu_min_edges_float64=50_000)
 #: The same for training (an energy and force loss through the kernels)
-TRAINING_POLICY = AutoPolicy()
+TRAINING_POLICY = AutoPolicy(cpu_min_edges=50_000, cpu_min_edges_float64=50_000)
 
 # pairs from which the solver's real-space product runs compiled under use_fast (measured on an
 # A30: a loss of 5-9 % at about 5e4 pairs, a gain of 3-22 % from about 4e5)
@@ -4438,6 +4496,7 @@ class _MutualField:
         # the pairs in compressed rows per atom for the field kernel (a plan's, or built at first use)
         self.rows: Optional[tuple] = None
         self._du: Optional[tuple] = None
+        self._packed: Optional[tuple] = None
         self.polar_field: Optional[Tensor] = None
         # the paired solve: the right-hand side of the polar field's dipoles, their guess, and the
         # dipoles themselves once solved
@@ -4496,7 +4555,15 @@ class _MutualField:
                     du = torch.stack([D1, D2], 1)
                 self._du = (pair, du)
             if self.rows is None:
-                self.rows = _kernels().pair_rows(self.i, self.k, self.N)
+                # pairs sorted by their first atom need only their second atoms sorted (checked on a CPU)
+                ordered = not self.i.is_cuda and bool((self.i[1:] >= self.i[:-1]).all())
+                self.rows = _kernels().pair_rows(self.i, self.k, self.N, sorted_i=ordered)
+            if not r.is_cuda:
+                # on a CPU the rows stream their pairs' data, ordered once per set of ladders
+                from . import amoeba_cpu
+                if self._packed is None or self._packed[0] is not pair:
+                    self._packed = (pair, amoeba_cpu.pack_rows(r, self._du[1], self.rows, self.count))
+                return amoeba_cpu.mutual_field(mu, self._packed[1], self.rows, self.N, guard)
             return _kernels().mutual_field(mu, r, self._du[1], self.i, self.k, self.N, self.count, guard, self.rows)
         with fused(self.fused):
             return mutual_field_real(mu, r, D1, D2, self.ik, self.ki, self.N)

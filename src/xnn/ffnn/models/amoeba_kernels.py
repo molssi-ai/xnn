@@ -26,9 +26,11 @@ from torch import Tensor
 from torch.autograd.function import once_differentiable
 from triton.language.extra import libdevice
 
+from xnn.common import cpu_kernels
 from xnn.common.models.csr import compressed, narrow_keys
 
 from . import amoeba_ladders as lad
+from .amoeba_ewald import mesh_irfftn, mesh_rfftn
 from .geometry import TINY
 
 # the per-atom parameter table: one row per atom, these columns
@@ -98,6 +100,22 @@ def _scalar(value: float, device) -> Tensor:
     if key not in _SCALARS:
         _SCALARS[key] = torch.tensor([value], dtype=torch.float64, device=device)
     return _SCALARS[key]
+
+
+def _split(dtypes: tuple, dtype: torch.dtype, device) -> bool:
+    """Whether the pair kernels run as one launch per term group: in ``dtypes`` on a GPU. A CPU lane keeps
+    its working set in the cache, where the groups would only repeat the gathers and the ladders."""
+    return dtype in dtypes and torch.device(device).type == "cuda"
+
+
+def _go(kernel, grid, *args, **meta):
+    """``kernel[grid](*args, **meta)``. On CPU tensors, with a C++ compiler at hand, the kernel runs as the
+    C++ loops of :mod:`xnn.common.cpu_kernels` (:mod:`.amoeba_cpu`)."""
+    if args[0].device.type == "cpu" and cpu_kernels.available():
+        from .amoeba_cpu import launch
+        launch(kernel, grid, *args, **meta)
+    else:
+        kernel[grid](*args, **meta)
 
 
 @triton.jit
@@ -612,17 +630,17 @@ def pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: T
         extra = (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(),
                  *[dummy if out[k + "_t"] is None else out[k + "_t"] for k in ("e_node", "e_pair", "field_d",
                                                                                "field_p", "du", "expol")])
-    for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
-        kernel[(triton.cdiv(M, TILE),)](
+    for group in ((1, 2) if _split(SPLIT_DTYPES, dtype, device) else (0,)):
+        _go(kernel, (triton.cdiv(M, TILE),),
             i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
             dummy if keep_d is None else keep_d.contiguous(), per.contiguous(), q.contiguous(), d.contiguous(),
             Q.reshape(N, 9).contiguous(), params.contiguous(), constants(device), scalars, out["e_node"],
             out["e_pair"] if write_pairs else dummy, out["field_d"], out["field_p"], out["du"],
             out["expol"] if out["expol"] is not None else dummy, _count(count, M, device),
             dummy if select is None else select, *extra, SELECT=select is not None, KEEP_R=keep is None,
-            POLAR=bool(polar), EXPOL=bool(polar and expol), WRITE_PAIRS=bool(write_pairs),
-            SW_REP=int(switch_modes[0]), SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]),
-            NP=NP, GROUP=group, MIXED=bool(mixed), BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+            POLAR=bool(polar), EXPOL=bool(polar and expol), WRITE_PAIRS=bool(write_pairs), SW_REP=int(switch_modes[0]),
+            SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed), BLOCK=TILE,
+            num_warps=WARPS, maxnreg=MAXNREG)
     return finish(out)
 
 
@@ -1410,13 +1428,12 @@ def pairs_backward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep: 
         kernel = tg._pairs_backward_t
         r_t, q_t, d_t, Q_t = (t.contiguous() for t in tangents)
         args = args + (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), *[out[k + "_t"] for k in keys])
-    groups = ((1, 2, 3) if polar else (1, 3)) if dtype in SPLIT_BACKWARD else (0,)
+    groups = ((1, 2, 3) if polar else (1, 3)) if _split(SPLIT_BACKWARD, dtype, device) else (0,)
     for group in groups:
-        kernel[(triton.cdiv(M, TILE),)](
+        _go(kernel, (triton.cdiv(M, TILE),),
             *args, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar), EXPOL=bool(polar and expol),
-            SW_REP=int(switch_modes[0]),
-            SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed),
-            BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+            SW_REP=int(switch_modes[0]), SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group,
+            MIXED=bool(mixed), BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
     return finish(out)
 
 
@@ -1444,17 +1461,17 @@ def pairs_param_grad(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, keep
         if tangents is not None:
             r_t, q_t, d_t, Q_t = (x.contiguous() for x in tangents)
             kernel, extra = tg._pairs_forward_r_t, (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), grad_t)
-        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
-            kernel[(triton.cdiv(M, TILE),)](
+        for group in ((1, 2) if _split(SPLIT_DTYPES, dtype, device) else (0,)):
+            _go(kernel, (triton.cdiv(M, TILE),),
                 i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
                 dummy if keep_d is None else keep_d.contiguous(), per.contiguous(), q.contiguous(), d.contiguous(),
                 Q.reshape(N, 9).contiguous(), params.contiguous(), constants(device), scalars, dummy, dummy, dummy,
                 dummy, dummy, dummy, _count(count, M, device), dummy if select is None else select,
                 given(g_node, (N, 4)), given(g_field_d, (N, 3)), given(g_field_p, (N, 3)), given(g_du, (M, 2)),
                 given(g_expol, (N, 9)), grad, *extra, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar),
-                EXPOL=bool(polar and expol), WRITE_PAIRS=False, SW_REP=int(switch_modes[0]),
-                SW_CT=int(switch_modes[1]), SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed),
-                BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+                EXPOL=bool(polar and expol), WRITE_PAIRS=False, SW_REP=int(switch_modes[0]), SW_CT=int(switch_modes[1]),
+                SW_DISP=int(switch_modes[2]), NP=NP, GROUP=group, MIXED=bool(mixed), BLOCK=TILE, num_warps=WARPS,
+                maxnreg=MAXNREG)
     return grad.to(dtype) if tangents is None else (grad.to(dtype), grad_t.to(dtype))
 
 
@@ -1478,16 +1495,15 @@ def amoeba_param_grad(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, kee
         if tangents is not None:
             r_t, q_t, d_t, Q_t, off_t = (x.contiguous() for x in tangents)
             kernel, extra = tg._amoeba_forward_r_t, (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t, grad_t)
-        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
-            kernel[(triton.cdiv(M, TILE),)](
+        for group in ((1, 2) if _split(SPLIT_DTYPES, dtype, device) else (0,)):
+            _go(kernel, (triton.cdiv(M, TILE),),
                 i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
                 per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
                 offsets.contiguous(), scalars, dummy, dummy, dummy, dummy, dummy, _count(count, M, device),
                 dummy if select is None else select, given(g_node, (N, 2)), given(g_field_d, (N, 3)),
                 given(g_field_p, (N, 3)), given(g_du, (M, 2)), grad, *extra, SELECT=select is not None,
-                KEEP_R=keep is None, POLAR=bool(polar), WRITE_PAIRS=False, SW_VDW=int(modes[0]),
-                RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=TILE,
-                num_warps=WARPS, maxnreg=MAXNREG)
+                KEEP_R=keep is None, POLAR=bool(polar), WRITE_PAIRS=False, SW_VDW=int(modes[0]), RADIUS=int(modes[1]),
+                EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
     return grad.to(dtype) if tangents is None else (grad.to(dtype), grad_t.to(dtype))
 
 
@@ -1627,8 +1643,8 @@ class PairDifference(torch.autograd.Function):
     ``(M, 3)`` with the one cell ``(3, 3)`` when given, computed in the precision of ``pos`` and
     stored in ``dtype`` (the model's) by one kernel, with the gradient scattered back to the atoms
     by one kernel (``index_add`` serializes the adds of a list sorted by atom), over the compressed
-    ``rows`` of the pairs (:func:`pair_rows`) when given. Differentiable once, in the positions only;
-    ``count`` as in :func:`pairs_forward`."""
+    ``rows`` of the pairs (:func:`pair_rows`) when given. Differentiable in the positions only, any
+    number of times (its gradient is :class:`PairScatter`); ``count`` as in :func:`pairs_forward`."""
 
     @staticmethod
     def forward(ctx, pos, i_, k_, count=None, shift=None, cell=None, dtype=None, rows=None):
@@ -1638,27 +1654,49 @@ class PairDifference(torch.autograd.Function):
         out = torch.empty(M, 3, dtype=dtype or pos.dtype, device=pos.device)
         if M:
             pos = pos.contiguous()
-            _pair_vectors[(triton.cdiv(M, TILE),)](pos, i_, k_, pos if shift is None else shift.contiguous(),
-                                                   pos if cell is None else cell.contiguous(), out, M,
-                                                   SHIFT=shift is not None, BLOCK=TILE, num_warps=WARPS)
+            _go(_pair_vectors, (triton.cdiv(M, TILE),),
+                pos, i_, k_, pos if shift is None else shift.contiguous(), pos if cell is None else cell.contiguous(),
+                out, M, SHIFT=shift is not None, BLOCK=TILE, num_warps=WARPS)
         return out
 
     @staticmethod
-    @once_differentiable
     def backward(ctx, g):
         i_, k_ = ctx.saved_tensors
-        M = int(i_.shape[0])
-        if ctx.rows is not None and M:
-            ptr, pair, other = ctx.rows
-            out = torch.empty(ctx.n, 3, dtype=ctx.dtype, device=g.device)
-            _rows_scatter[(ctx.n,)](ptr, pair, other, i_, g.contiguous(), out, _count(ctx.count, M, g.device),
-                                    CHUNK=ROWS_CHUNK, num_warps=ROWS_WARPS)
-            return out, None, None, None, None, None, None, None
-        out = torch.zeros(ctx.n, 3, dtype=ctx.dtype, device=g.device)
-        if M:
-            _pair_scatter[(triton.cdiv(M, TILE),)](g.contiguous(), i_, k_, out, _count(ctx.count, M, g.device),
-                                                   BLOCK=TILE, num_warps=WARPS)
+        out = PairScatter.apply(g.contiguous(), i_, k_, ctx.count, ctx.n, ctx.dtype, ctx.rows)
         return out, None, None, None, None, None, None, None
+
+
+class PairScatter(torch.autograd.Function):
+    """The gradient of :class:`PairDifference` with respect to the positions: ``g`` ``(M, 3)`` of the pairs
+    added to their second atoms and subtracted from their first, ``(N, 3)`` in ``dtype``, by one kernel (over
+    the compressed ``rows`` when given; the pairs at or beyond ``count`` skipped). Linear in ``g``: its own
+    gradient is :class:`PairDifference` of the incoming one, so force losses differentiate through both."""
+
+    @staticmethod
+    def forward(ctx, g, i_, k_, count, n, dtype, rows):
+        ctx.save_for_backward(i_, k_)
+        ctx.count = count
+        M = int(i_.shape[0])
+        if rows is not None and M:
+            ptr, pair, other = rows
+            out = torch.empty(n, 3, dtype=dtype, device=g.device)
+            _go(_rows_scatter, (n,),
+                ptr, pair, other, i_, g, out, _count(count, M, g.device), CHUNK=ROWS_CHUNK, num_warps=ROWS_WARPS)
+            return out
+        out = torch.zeros(n, 3, dtype=dtype, device=g.device)
+        if M:
+            _go(_pair_scatter, (triton.cdiv(M, TILE),),
+                g, i_, k_, out, _count(count, M, g.device), BLOCK=TILE, num_warps=WARPS)
+        return out
+
+    @staticmethod
+    def backward(ctx, gg):
+        i_, k_ = ctx.saved_tensors
+        grad = PairDifference.apply(gg, i_, k_, ctx.count)
+        if ctx.count is not None:
+            # the skipped pairs receive nothing
+            grad = grad * (torch.arange(grad.shape[0], device=grad.device) < ctx.count).to(grad.dtype)[:, None]
+        return grad, None, None, None, None, None, None
 
 
 @triton.jit
@@ -1793,9 +1831,10 @@ def mutual_field(mu: Tensor, r_vec: Tensor, du: Tensor, i_: Tensor, k_: Tensor, 
     f = torch.empty(mu.shape[0], 3, dtype=mu.dtype, device=mu.device)
     if N:
         M = int(r_vec.shape[0])
-        _mutual_rows[(N,)](ptr, pair, other, r_vec.contiguous(), du.contiguous(), mu.contiguous(), f,
-                           _count(count, M, mu.device), f if guard is None else guard, N, GUARD=guard is not None,
-                           PAIRED=paired, CHUNK=ROWS_CHUNK, num_warps=ROWS_WARPS)
+        _go(_mutual_rows, (N,),
+            ptr, pair, other, r_vec.contiguous(), du.contiguous(), mu.contiguous(), f, _count(count, M, mu.device),
+            f if guard is None else guard, N, GUARD=guard is not None, PAIRED=paired, CHUNK=ROWS_CHUNK,
+            num_warps=ROWS_WARPS)
     return f
 
 
@@ -1808,10 +1847,10 @@ def mutual_backward(mu: Tensor, lam: Tensor, r_vec: Tensor, du: Tensor, i_: Tens
     gr = torch.zeros(M, 3, dtype=mu.dtype, device=mu.device)
     gdu = torch.zeros(M, 2, dtype=mu.dtype, device=mu.device)
     if M:
-        _mutual_backward[(triton.cdiv(M, TILE),)](i_, k_, r_vec.contiguous(), du.contiguous(), mu.contiguous(),
-                                                  lam.contiguous(), gr, gdu, _count(count, M, mu.device),
-                                                  gr if select is None else select, SELECT=select is not None,
-                                                  BLOCK=TILE, num_warps=WARPS)
+        _go(_mutual_backward, (triton.cdiv(M, TILE),),
+            i_, k_, r_vec.contiguous(), du.contiguous(), mu.contiguous(), lam.contiguous(), gr, gdu,
+            _count(count, M, mu.device), gr if select is None else select, SELECT=select is not None, BLOCK=TILE,
+            num_warps=WARPS)
     return gr, gdu
 
 
@@ -1870,10 +1909,12 @@ def select_pairs_within(r: Tensor, cutoff_sq: Tensor, valid: Optional[Tensor] = 
     if M:
         grid = (triton.cdiv(M, 256),)
         r = r.detach().contiguous()
-        _pair_inside[grid](r, r if valid is None else valid.contiguous(), cutoff_sq, R, flag, M, TINY,
-                           VALID=valid is not None, BLOCK=256, num_warps=4)
+        _go(_pair_inside, grid,
+            r, r if valid is None else valid.contiguous(), cutoff_sq, R, flag, M, TINY, VALID=valid is not None,
+            BLOCK=256, num_warps=4)
         rank = torch.cumsum(flag, 0, dtype=torch.int32)
-        _pair_compact[grid](flag, rank, sel, count, M, BLOCK=256, num_warps=4)
+        _go(_pair_compact, grid,
+            flag, rank, sel, count, M, BLOCK=256, num_warps=4)
     return R, sel, count
 
 
@@ -1931,10 +1972,9 @@ def plan_checks(pos: Tensor, reference: Tensor, last: Tensor, converged: Tensor,
     def bits(x: float) -> int:
         return struct.unpack("<q", struct.pack("<d", float(x)))[0]
 
-    _plan_checks[(triton.cdiv(max(n, 1), 256),)](pos.detach().contiguous(), reference.contiguous(), last,
-                                                  converged.reshape(-1), needed.reshape(-1).contiguous(), out, n,
-                                                  int(needed.numel()), bits(0.5 * skin), bits((0.5 * skin) ** 2),
-                                                  steps + 1, BLOCK=256, num_warps=4)
+    _go(_plan_checks, (triton.cdiv(max(n, 1), 256),),
+        pos.detach().contiguous(), reference.contiguous(), last, converged.reshape(-1), needed.reshape(-1).contiguous(),
+        out, n, int(needed.numel()), bits(0.5 * skin), bits((0.5 * skin) ** 2), steps + 1, BLOCK=256, num_warps=4)
     return out
 
 
@@ -2623,15 +2663,15 @@ def amoeba_pairs_forward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, 
             r_t, q_t, d_t, Q_t, off_t = (t.contiguous() for t in tangents)
             extra = (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t,
                      *[dummy if out[k + "_t"] is None else out[k + "_t"] for k in keys])
-        for group in ((1, 2) if dtype in SPLIT_DTYPES else (0,)):
-            kernel[(triton.cdiv(M, TILE),)](
+        for group in ((1, 2) if _split(SPLIT_DTYPES, dtype, device) else (0,)):
+            _go(kernel, (triton.cdiv(M, TILE),),
                 i_, k_, r_vec.contiguous(), scales.contiguous(), dummy if keep is None else keep.contiguous(),
                 per.contiguous(), q.contiguous(), d.contiguous(), Q.reshape(N, 9).contiguous(), params.contiguous(),
-                offsets.contiguous(), scalars, out["e_node"], out["e_pair"] if write_pairs else dummy,
-                out["field_d"], out["field_p"], out["du"], _count(count, M, device),
-                dummy if select is None else select, *extra, SELECT=select is not None, KEEP_R=keep is None,
-                POLAR=bool(polar), WRITE_PAIRS=bool(write_pairs), SW_VDW=int(modes[0]), RADIUS=int(modes[1]),
-                EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
+                offsets.contiguous(), scalars, out["e_node"], out["e_pair"] if write_pairs else dummy, out["field_d"],
+                out["field_p"], out["du"], _count(count, M, device), dummy if select is None else select, *extra,
+                SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar), WRITE_PAIRS=bool(write_pairs),
+                SW_VDW=int(modes[0]), RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group,
+                BLOCK=TILE, num_warps=WARPS, maxnreg=MAXNREG)
     out.update(_cast_segments(flat, N, widths, dtype))
     for key in ("e_node_t", "field_d_t", "field_p_t"):
         if out.get(key) is not None:
@@ -2671,13 +2711,13 @@ def amoeba_pairs_backward(i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor,
             kernel = tg._amoeba_backward_t
             r_t, q_t, d_t, Q_t, off_t = (t.contiguous() for t in tangents)
             args = args + (r_t, q_t, d_t, Q_t.reshape(N, 9).contiguous(), off_t, *[out[k + "_t"] for k in keys])
-        groups = ((1, 2, 3) if polar else (1, 3)) if dtype in SPLIT_BACKWARD else (0,)
+        groups = ((1, 2, 3) if polar else (1, 3)) if _split(SPLIT_BACKWARD, dtype, device) else (0,)
         tile, warps = AMOEBA_BACKWARD_LAUNCH.get(dtype, (TILE, WARPS))
         for group in groups:
-            kernel[(triton.cdiv(M, tile),)](
+            _go(kernel, (triton.cdiv(M, tile),),
                 *args, SELECT=select is not None, KEEP_R=keep is None, POLAR=bool(polar), SW_VDW=int(modes[0]),
-                RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=tile,
-                num_warps=warps, maxnreg=MAXNREG)
+                RADIUS=int(modes[1]), EPSILON=int(modes[2]), NP=AMOEBA_NP, GROUP=group, BLOCK=tile, num_warps=warps,
+                maxnreg=MAXNREG)
     out.update(_cast_segments(flat, N, widths, dtype))
     for key in ("grad_q_t", "grad_d_t", "grad_Q_t", "grad_off_t"):
         if key in out:
@@ -3132,8 +3172,9 @@ def spline_tables(u: Tensor, mesh: list, order: int) -> tuple:
     w = torch.empty(N, 3, _SLOTS, P, dtype=u.dtype, device=u.device)
     start = torch.empty(N, 3, dtype=torch.int32, device=u.device)
     if N:
-        _splines[(triton.cdiv(N, MESH_BLOCK),)](u.contiguous(), w, start, N, K1=int(mesh[0]), K2=int(mesh[1]),
-                                                K3=int(mesh[2]), P=P, BLOCK=MESH_BLOCK, num_warps=2)
+        _go(_splines, (triton.cdiv(N, MESH_BLOCK),),
+            u.contiguous(), w, start, N, K1=int(mesh[0]), K2=int(mesh[1]), K3=int(mesh[2]), P=P, BLOCK=MESH_BLOCK,
+            num_warps=2)
     return w, start
 
 
@@ -3155,9 +3196,9 @@ def spread(c0: Tensor, c1: Tensor, c2: Tensor, w: Tensor, start: Tensor, batch: 
     K1, K2, K3 = (int(k) for k in mesh)
     grid = torch.zeros(groups * K1 * K2 * K3, dtype=w.dtype, device=w.device)
     if N:
-        _spread[(triton.cdiv(N, MESH_BLOCK),)](c0.contiguous(), c1.contiguous(), c2.contiguous(), w, start,
-                                               batch.contiguous(), grid, N, K1=K1, K2=K2, K3=K3, P=P,
-                                               ORD=int(order), BLOCK=MESH_BLOCK, num_warps=2)
+        _go(_spread, (triton.cdiv(N, MESH_BLOCK),),
+            c0.contiguous(), c1.contiguous(), c2.contiguous(), w, start, batch.contiguous(), grid, N, K1=K1, K2=K2,
+            K3=K3, P=P, ORD=int(order), BLOCK=MESH_BLOCK, num_warps=2)
     return grid.view(groups, K1, K2, K3)
 
 
@@ -3167,8 +3208,9 @@ def gather(grid: Tensor, w: Tensor, start: Tensor, batch: Tensor, mesh: list, de
     K1, K2, K3 = (int(k) for k in mesh)
     out = torch.zeros(N, 10, dtype=w.dtype, device=w.device)
     if N:
-        _gather[(triton.cdiv(N, MESH_BLOCK),)](grid.contiguous(), w, start, batch.contiguous(), out, N, K1=K1, K2=K2,
-                                               K3=K3, P=P, DERIV=int(deriv), BLOCK=MESH_BLOCK, num_warps=2)
+        _go(_gather, (triton.cdiv(N, MESH_BLOCK),),
+            grid.contiguous(), w, start, batch.contiguous(), out, N, K1=K1, K2=K2, K3=K3, P=P, DERIV=int(deriv),
+            BLOCK=MESH_BLOCK, num_warps=2)
     return out
 
 
@@ -3180,11 +3222,10 @@ def adjoint(grid_a: Tensor, coef_a: Tensor, order_a: int, grid_b: Tensor, coef_b
     K1, K2, K3 = (int(k) for k in mesh)
     gu = torch.empty(N, 3, dtype=w.dtype, device=w.device)
     if N:
-        _adjoint[(triton.cdiv(N, MESH_BLOCK),)](grid_a.contiguous(), grid_b.contiguous(), coef_a.contiguous(),
-                                                coef_b.contiguous(), w, start, batch.contiguous(), gu, N,
-                                                K1=K1, K2=K2, K3=K3, P=P, ORDA=int(order_a), ORDB=int(order_b),
-                                                THIRD=bool(max(order_a, order_b) >= 2), BLOCK=MESH_BLOCK,
-                                                num_warps=2)
+        _go(_adjoint, (triton.cdiv(N, MESH_BLOCK),),
+            grid_a.contiguous(), grid_b.contiguous(), coef_a.contiguous(), coef_b.contiguous(), w, start,
+            batch.contiguous(), gu, N, K1=K1, K2=K2, K3=K3, P=P, ORDA=int(order_a), ORDB=int(order_b),
+            THIRD=bool(max(order_a, order_b) >= 2), BLOCK=MESH_BLOCK, num_warps=2)
     return gu
 
 
@@ -3202,8 +3243,8 @@ class MeshConvolution(torch.autograd.Function):
     def forward(ctx, u, c0, c1, c2, influence, w, start, batch, mesh, groups, order, deriv):
         k1, k2, k3 = (int(k) for k in mesh)
         grid = spread(c0, c1, c2, w, start, batch, mesh, groups, order)
-        spectrum = torch.fft.rfftn(grid, dim=(1, 2, 3))
-        pot = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+        spectrum = mesh_rfftn(grid)
+        pot = mesh_irfftn(spectrum * influence, (k1, k2, k3))
         out = gather(pot, w, start, batch, mesh, deriv)
         ctx.save_for_backward(c0, c1, c2, influence, w, start, batch, spectrum, pot)
         ctx.mesh, ctx.groups, ctx.order, ctx.deriv = list(mesh), int(groups), int(order), int(deriv)
@@ -3218,8 +3259,8 @@ class MeshConvolution(torch.autograd.Function):
         g_out = g_out.contiguous()
         g_grid = spread(g_out[:, 0].contiguous(), g_out[:, 1:4].contiguous(), g_out[:, 4:10].contiguous(), w, start,
                         batch, mesh, ctx.groups, deriv)
-        g_spectrum = torch.fft.rfftn(g_grid, dim=(1, 2, 3))
-        psi = torch.fft.irfftn(g_spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+        g_spectrum = mesh_rfftn(g_grid)
+        psi = mesh_irfftn(g_spectrum * influence, (k1, k2, k3))
         gs = gather(psi, w, start, batch, mesh, order)
         gu = adjoint(pot, g_out, deriv, psi, _components(c0, c1, c2), order, w, start, batch, mesh)
         g_influence = None
@@ -3228,7 +3269,7 @@ class MeshConvolution(torch.autograd.Function):
             # inverse transform, with the spread gradient as the potential's cotangent
             with torch.enable_grad():
                 inf = influence.detach().requires_grad_(True)
-                pot_ = torch.fft.irfftn(spectrum * inf, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+                pot_ = mesh_irfftn(spectrum * inf, (k1, k2, k3))
                 g_influence = torch.autograd.grad(pot_, inf, g_grid)[0]
         gc1 = gs[:, 1:4] if order >= 1 else None
         gc2 = gs[:, 4:10] if order >= 2 else None
@@ -3546,15 +3587,18 @@ def spread_cartesian(q: Tensor, d, Q, jac: Tensor, w: Tensor, start: Tensor, bat
     """:func:`spread` of Cartesian multipoles with the structures' Jacobians ``jac`` ``(G, 3, 3)``; with
     the scalars ``guard`` of a conjugate-gradient iteration the grid stays zero once the solve has
     converged."""
+    if w.device.type == "cpu" and cpu_kernels.available():
+        from .amoeba_cpu import spread_cartesian as spread_on_cpu
+        return spread_on_cpu(q, d, Q, jac, w, start, batch, mesh, groups, order, guard)
     N, P = int(w.shape[0]), int(w.shape[-1])
     K1, K2, K3 = (int(k) for k in mesh)
     grid = torch.zeros(groups * K1 * K2 * K3, dtype=w.dtype, device=w.device)
     if N:
         q_, d_, Q_ = _multipole_args(q, d, Q, order)
-        _spread_c[(triton.cdiv(N, SPREAD_BLOCK),)](q_, d_, Q_, jac.contiguous(), w, start, batch.contiguous(), grid,
-                                                   N, grid if guard is None else guard, K1=K1, K2=K2, K3=K3, P=P,
-                                                   ORD=int(order), BLOCK=SPREAD_BLOCK, SP=_lanes(P),
-                                                   GUARD=guard is not None, num_warps=SPREAD_WARPS)
+        _go(_spread_c, (triton.cdiv(N, SPREAD_BLOCK),),
+            q_, d_, Q_, jac.contiguous(), w, start, batch.contiguous(), grid, N, grid if guard is None else guard,
+            K1=K1, K2=K2, K3=K3, P=P, ORD=int(order), BLOCK=SPREAD_BLOCK, SP=_lanes(P), GUARD=guard is not None,
+            num_warps=SPREAD_WARPS)
     return grid.view(groups, K1, K2, K3)
 
 
@@ -3567,11 +3611,14 @@ def gather_cartesian(grid: Tensor, jac: Tensor, w: Tensor, start: Tensor, batch:
     phi = torch.empty(N, dtype=w.dtype, device=w.device)
     grad = (torch.empty if deriv >= 1 else torch.zeros)(N, 3, dtype=w.dtype, device=w.device)
     hess = (torch.empty if deriv >= 2 else torch.zeros)(N, 9, dtype=w.dtype, device=w.device)
-    if N:
-        _gather_c[(triton.cdiv(N, SPREAD_BLOCK),)](grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(),
-                                                 phi, grad, hess, phi, phi, N, phi, K1=K1, K2=K2, K3=K3, P=P,
-                                                 DERIV=int(deriv), FIELD=False, BLOCK=SPREAD_BLOCK, SP=_lanes(P),
-                                                 GUARD=False, num_warps=SPREAD_WARPS)
+    if N and w.device.type == "cpu" and cpu_kernels.available():
+        from .amoeba_cpu import gather
+        gather(grid, jac, w, start, batch, mesh, (phi, grad, hess), phi, phi, None, deriv, False)
+    elif N:
+        _go(_gather_c, (triton.cdiv(N, SPREAD_BLOCK),),
+            grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(), phi, grad, hess, phi, phi, N, phi, K1=K1,
+            K2=K2, K3=K3, P=P, DERIV=int(deriv), FIELD=False, BLOCK=SPREAD_BLOCK, SP=_lanes(P), GUARD=False,
+            num_warps=SPREAD_WARPS)
     return phi, grad, hess.view(N, 3, 3)
 
 
@@ -3583,12 +3630,15 @@ def gather_field(grid: Tensor, jac: Tensor, w: Tensor, start: Tensor, batch: Ten
     converged."""
     N, P = int(w.shape[0]), int(w.shape[-1])
     K1, K2, K3 = (int(k) for k in mesh)
-    if N:
-        _gather_c[(triton.cdiv(N, SPREAD_BLOCK),)](grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(),
-                                                 acc, acc, acc, d.contiguous(), _scalar(float(coef), acc.device), N,
-                                                 acc if guard is None else guard, K1=K1, K2=K2, K3=K3, P=P, DERIV=1,
-                                                 FIELD=True, BLOCK=SPREAD_BLOCK, SP=_lanes(P), GUARD=guard is not None,
-                                                 num_warps=SPREAD_WARPS)
+    if N and w.device.type == "cpu" and cpu_kernels.available():
+        from .amoeba_cpu import gather
+        gather(grid, jac, w, start, batch, mesh, (acc, acc, acc), d.contiguous(), _scalar(float(coef), acc.device),
+               guard, 1, True)
+    elif N:
+        _go(_gather_c, (triton.cdiv(N, SPREAD_BLOCK),),
+            grid.contiguous(), jac.contiguous(), w, start, batch.contiguous(), acc, acc, acc, d.contiguous(),
+            _scalar(float(coef), acc.device), N, acc if guard is None else guard, K1=K1, K2=K2, K3=K3, P=P, DERIV=1,
+            FIELD=True, BLOCK=SPREAD_BLOCK, SP=_lanes(P), GUARD=guard is not None, num_warps=SPREAD_WARPS)
     return acc
 
 
@@ -3627,8 +3677,8 @@ def blocks_inverse(alpha: Tensor, expol: Tensor, mask: Tensor) -> Tensor:
     N = int(alpha.shape[0])
     out = torch.empty(N, 9, dtype=alpha.dtype, device=alpha.device)
     if N:
-        _blocks_inverse[(triton.cdiv(N, PCG_BLOCK),)](alpha.contiguous(), expol.reshape(N, 9).contiguous(),
-                                                      mask.contiguous(), out, N, BLOCK=PCG_BLOCK)
+        _go(_blocks_inverse, (triton.cdiv(N, PCG_BLOCK),),
+            alpha.contiguous(), expol.reshape(N, 9).contiguous(), mask.contiguous(), out, N, BLOCK=PCG_BLOCK)
     return out.view(N, 3, 3)
 
 
@@ -3641,11 +3691,10 @@ def adjoint_cartesian(grid_a: Tensor, set_a: tuple, order_a: int, grid_b: Tensor
     if N:
         aq, ad, aQ = _multipole_args(set_a[0], set_a[1], set_a[2], order_a)
         bq, bd, bQ = _multipole_args(set_b[0], set_b[1], set_b[2], order_b)
-        _adjoint_c[(triton.cdiv(N, SPREAD_BLOCK),)](grid_a.contiguous(), grid_b.contiguous(), aq, ad, aQ, bq, bd, bQ,
-                                                  jac.contiguous(), w, start, batch.contiguous(), gu, N,
-                                                  K1=K1, K2=K2, K3=K3, P=P, ORDA=int(order_a), ORDB=int(order_b),
-                                                  THIRD=bool(max(order_a, order_b) >= 2), BLOCK=SPREAD_BLOCK,
-                                                  SP=_lanes(P), num_warps=SPREAD_WARPS)
+        _go(_adjoint_c, (triton.cdiv(N, SPREAD_BLOCK),),
+            grid_a.contiguous(), grid_b.contiguous(), aq, ad, aQ, bq, bd, bQ, jac.contiguous(), w, start,
+            batch.contiguous(), gu, N, K1=K1, K2=K2, K3=K3, P=P, ORDA=int(order_a), ORDB=int(order_b),
+            THIRD=bool(max(order_a, order_b) >= 2), BLOCK=SPREAD_BLOCK, SP=_lanes(P), num_warps=SPREAD_WARPS)
     return gu
 
 
@@ -3658,8 +3707,8 @@ class MeshConvolutionCartesian(torch.autograd.Function):
     def forward(ctx, u, q, d, Q, jac, batch, influence, w, start, mesh, groups, order, deriv):
         k1, k2, k3 = (int(k) for k in mesh)
         grid = spread_cartesian(q, d, Q, jac, w, start, batch, mesh, groups, order)
-        spectrum = torch.fft.rfftn(grid, dim=(1, 2, 3))
-        pot = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+        spectrum = mesh_rfftn(grid)
+        pot = mesh_irfftn(spectrum * influence, (k1, k2, k3))
         phi, grad, hess = gather_cartesian(pot, jac, w, start, batch, mesh, deriv)
         ctx.save_for_backward(q, d if d is not None else q, Q if Q is not None else q, jac, batch, influence, w, start,
                               spectrum, pot)
@@ -3677,8 +3726,8 @@ class MeshConvolutionCartesian(torch.autograd.Function):
         # the spread kernel symmetrizes its quadrupole sources: the Hessian gradient goes in as it is
         g_set = (g_phi.contiguous(), g_grad if deriv >= 1 else None, g_hess if deriv >= 2 else None)
         g_grid = spread_cartesian(g_set[0], g_set[1], g_set[2], jac, w, start, batch, mesh, ctx.groups, deriv)
-        g_spectrum = torch.fft.rfftn(g_grid, dim=(1, 2, 3))
-        psi = torch.fft.irfftn(g_spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+        g_spectrum = mesh_rfftn(g_grid)
+        psi = mesh_irfftn(g_spectrum * influence, (k1, k2, k3))
         gq, gd, gQ = gather_cartesian(psi, jac, w, start, batch, mesh, order)
         gu = adjoint_cartesian(pot, g_set, deriv, psi, (q, d if has_d else None, Q if has_Q else None), order,
                                jac, w, start, batch, mesh)
@@ -3686,7 +3735,7 @@ class MeshConvolutionCartesian(torch.autograd.Function):
         if ctx.needs_input_grad[6]:
             with torch.enable_grad():
                 inf = influence.detach().requires_grad_(True)
-                pot_ = torch.fft.irfftn(spectrum * inf, s=(k1, k2, k3), dim=(1, 2, 3), norm="forward")
+                pot_ = mesh_irfftn(spectrum * inf, (k1, k2, k3))
                 g_influence = torch.autograd.grad(pot_, inf, g_grid)[0]
         return (gu, gq, gd if (has_d and order >= 1) else None, gQ if (has_Q and order >= 2) else None, None, None,
                 g_influence, None, None, None, None, None, None)
@@ -3855,9 +3904,9 @@ def pcg_apply(p: Tensor, field: Tensor, inv_alpha: Tensor, expol, mask: Tensor, 
     N = int(p.shape[0])
     ap = torch.empty_like(p)
     if N:
-        _pcg_apply[(triton.cdiv(N, PCG_BLOCK),)](p, field.contiguous(), ap, inv_alpha, ap if expol is None
-                                                 else expol.reshape(N, 9).contiguous(), mask, scal, N,
-                                                 EXPOL=expol is not None, BLOCK=PCG_BLOCK, num_warps=4)
+        _go(_pcg_apply, (triton.cdiv(N, PCG_BLOCK),),
+            p, field.contiguous(), ap, inv_alpha, ap if expol is None else expol.reshape(N, 9).contiguous(), mask, scal,
+            N, EXPOL=expol is not None, BLOCK=PCG_BLOCK, num_warps=4)
     return ap
 
 
@@ -3865,17 +3914,17 @@ def pcg_step(x: Tensor, r: Tensor, z: Tensor, p: Tensor, ap: Tensor, diag, block
     """The update of ``x``, ``r`` and ``z`` in place (see :func:`_pcg_step`)."""
     N = int(x.shape[0])
     if N:
-        _pcg_step[(triton.cdiv(N, PCG_BLOCK),)](x, r, z, p, ap, x if diag is None else diag,
-                                                x if blocks is None else blocks.reshape(N, 9).contiguous(), scal, N,
-                                                BLOCKS=blocks is not None, BLOCK=PCG_BLOCK, num_warps=4)
+        _go(_pcg_step, (triton.cdiv(N, PCG_BLOCK),),
+            x, r, z, p, ap, x if diag is None else diag, x if blocks is None else blocks.reshape(N, 9).contiguous(),
+            scal, N, BLOCKS=blocks is not None, BLOCK=PCG_BLOCK, num_warps=4)
 
 
 def pcg_direction(p: Tensor, z: Tensor, scal_in: Tensor, scal_out: Tensor, bound: float) -> None:
     """The new direction in place and the next iteration's scalars (see :func:`_pcg_direction`)."""
     N = int(p.shape[0])
     if N:
-        _pcg_direction[(triton.cdiv(N, PCG_BLOCK),)](p, z, scal_in, scal_out, N, float(bound), BLOCK=PCG_BLOCK,
-                                                     num_warps=4)
+        _go(_pcg_direction, (triton.cdiv(N, PCG_BLOCK),),
+            p, z, scal_in, scal_out, N, float(bound), BLOCK=PCG_BLOCK, num_warps=4)
 
 
 def scalar_table(coulomb: float, alpha_e: float, alpha_p: float, alpha_d: float, windows: dict, cutoff: float,
@@ -3889,7 +3938,8 @@ def scalar_table(coulomb: float, alpha_e: float, alpha_p: float, alpha_d: float,
     return torch.tensor(values, dtype=torch.float64, device=device)
 
 
-__all__ = ["PARAMS", "NP", "SCALARS", "HippoPairs", "PairDifference", "pairs_forward", "pairs_backward", "mutual_field",
+__all__ = ["PARAMS", "NP", "SCALARS", "HippoPairs", "PairDifference", "PairScatter", "pairs_forward", "pairs_backward",
+           "mutual_field",
            "mutual_backward", "MeshConvolution", "MeshConvolutionCartesian", "spline_tables", "spread", "gather",
            "adjoint", "spread_cartesian", "gather_cartesian", "gather_field", "blocks_inverse",
            "adjoint_cartesian", "pcg_scalars",

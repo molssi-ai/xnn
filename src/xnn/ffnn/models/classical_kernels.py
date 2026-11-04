@@ -53,11 +53,12 @@ def _pair_energy(r2, t_ptr, tab_ptr, qi, qk, ke, tiny, m, FORM: tl.constexpr):
         A = tl.load(tab_ptr + t_ptr * 3, mask=m, other=0.0)
         Bc = tl.load(tab_ptr + t_ptr * 3 + 1, mask=m, other=0.0)
         R2 = tl.load(tab_ptr + t_ptr * 3 + 2, mask=m, other=0.0)
-        y = R2 / (r2 + tiny)
+        inv = 1.0 / (r2 + tiny)
+        y = R2 * inv
         x = y * y * y
         e_v = A * (x * x - Bc * x)
         # dx/dr2 = -3 x / (r2 + tiny)
-        de_v = A * (2.0 * x - Bc) * (-3.0 * x / (r2 + tiny))
+        de_v = A * (2.0 * x - Bc) * (-3.0 * x * inv)
     else:
         a = tl.load(tab_ptr + t_ptr * 3, mask=m, other=0.0)
         b = tl.load(tab_ptr + t_ptr * 3 + 1, mask=m, other=0.0)
@@ -67,9 +68,10 @@ def _pair_energy(r2, t_ptr, tab_ptr, qi, qk, ke, tiny, m, FORM: tl.constexpr):
         r6 = r2 * r2 * r2
         e_v = ex - b / (r6 + tiny)
         de_v = -c * ex * 0.5 / r + b * 3.0 * r2 * r2 / ((r6 + tiny) * (r6 + tiny))
-    r = tl.sqrt(r2 + tiny)
-    e_c = ke * qi * qk / r
-    de_c = -0.5 * e_c / (r2 + tiny)
+    # one division and one square root for both energies of the 12-6 form
+    inv_c = 1.0 / (r2 + tiny)
+    e_c = ke * qi * qk * tl.sqrt(inv_c)
+    de_c = -0.5 * e_c * inv_c
     return e_v, de_v, e_c, de_c
 
 
@@ -120,7 +122,9 @@ def _pair(src_ptr, dst_ptr, sh_ptr, pos_ptr, cell_ptr, bat_ptr, xp_ptr, xk_ptr, 
     cut2 = tl.load(sc_ptr + 2).to(DT)
     start = tl.load(sc_ptr + 3).to(DT)
     inv_width = tl.load(sc_ptr + 4).to(DT)
-    w = tl.where(m & (r2 < cut2), tl.where(own, 0.5, 1.0), 0.0).to(DT)
+    # the pairs of a list with a skin beyond the cutoff are inactive (no load, no add)
+    m = m & (r2 < cut2)
+    w = tl.where(m, tl.where(own, 0.5, 1.0), 0.0).to(DT)
     if EXCL:
         # the excluded partners of the first atom (its row of the exclusions of one structure)
         hit = _excluded_row(xp_ptr, xk_ptr, i % n_local, (k % n_local).to(tl.int32), m, MAXE)
@@ -131,8 +135,11 @@ def _pair(src_ptr, dst_ptr, sh_ptr, pos_ptr, cell_ptr, bat_ptr, xp_ptr, xk_ptr, 
     e_v, de_v, e_c, de_c = _pair_energy(r2, tp, tab_ptr, qi, qk, ke, tiny, m, FORM)
     r = tl.sqrt(r2 + tiny)
     s, ds = _switch(r, start, inv_width, SWITCH)
-    # d(s e)/dr2 = s de/dr2 + e ds/dr dr/dr2, dr/dr2 = 1 / (2 r)
-    dsr = ds * 0.5 / r
+    # d(s e)/dr2 = s de/dr2 + e ds/dr dr/dr2, dr/dr2 = 1 / (2 r) (without a switch ds is 0)
+    if SWITCH:
+        dsr = ds * 0.5 / r
+    else:
+        dsr = ds
     return i, k, m, x, y, z, w * s * e_v, w * (s * de_v + e_v * dsr), w * s * e_c, w * (s * de_c + e_c * dsr)
 
 
@@ -174,6 +181,161 @@ def _pairs_backward(src_ptr, dst_ptr, sh_ptr, pos_ptr, cell_ptr, bat_ptr, xp_ptr
                      HAS_CELL, CELL_GRAD)
 
 
+@triton.jit
+def _pairs_energy_forces(src_ptr, dst_ptr, sh_ptr, pos_ptr, cell_ptr, bat_ptr, xp_ptr, xk_ptr, t_ptr, q_ptr, tab_ptr,
+                         sc_ptr, e_ptr, gpos_ptr, gcell_ptr, n_edges, n_local, n_types, DT: tl.constexpr,
+                         HAS_CELL: tl.constexpr, CELL_GRAD: tl.constexpr, EXCL: tl.constexpr, MAXE: tl.constexpr,
+                         FORM: tl.constexpr, SWITCH: tl.constexpr, BLOCK: tl.constexpr):
+    """A step's pairs in one pass: the total van der Waals and Coulomb energies added into ``e`` ``(2,)`` and
+    their position (and cell) gradients into ``gpos`` (``gcell``)."""
+    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+    i, k, m, x, y, z, ev, dv, ec, dc = _pair(src_ptr, dst_ptr, sh_ptr, pos_ptr, cell_ptr, bat_ptr, xp_ptr, xk_ptr,
+                                             t_ptr, q_ptr, tab_ptr, sc_ptr, e, e < n_edges, n_local, n_types, DT,
+                                             HAS_CELL, EXCL, MAXE, FORM, SWITCH)
+    tl.atomic_add(e_ptr, tl.sum(tl.where(m, ev.to(tl.float64), 0.0), 0), sem="relaxed")
+    tl.atomic_add(e_ptr + 1, tl.sum(tl.where(m, ec.to(tl.float64), 0.0), 0), sem="relaxed")
+    d = 2.0 * (dv + dc)
+    i0, i1, same, tail, rest = _segments(src_ptr, i, m, n_edges, BLOCK)
+    _vec_grad_sorted(gpos_ptr, gcell_ptr, bat_ptr, sh_ptr, i, k, e, m, d * x, d * y, d * z, i0, i1, same, tail, rest,
+                     HAS_CELL, CELL_GRAD)
+
+
+@triton.jit
+def _pairs_rows_energy_forces(beg_ptr, end_ptr, nbr_ptr, sh_ptr, pos_ptr, cell_ptr, t_ptr, q_ptr, tab_ptr, sc_ptr,
+                              e_ptr, gpos_ptr, n_types, DT: tl.constexpr, HAS_CELL: tl.constexpr,
+                              FORM: tl.constexpr, SWITCH: tl.constexpr, BLOCK: tl.constexpr,
+                              ENERGY: tl.constexpr = True):
+    """:func:`_pairs_energy_forces` by rows, for a CPU: one program per first atom ``i``, its partners ``k > i``
+    (``nbr[beg[i]:end[i]]``, no excluded pair, one structure, ``HAS_CELL`` its one cell) in chunks of
+    ``BLOCK`` lanes, ``i``'s position, charge and type read once and its force summed over the row. ``HAS_CELL``
+    2: ``sh`` one byte per pair, the index of its image among 27 Cartesian offsets ``cell (27, 3)`` (shifts of
+    -1, 0 or 1 per axis); otherwise ``sh`` the integer shifts ``(E, 3)`` and ``cell`` the cell. ``ENERGY`` off:
+    the forces alone."""
+    i = tl.program_id(0).to(tl.int64)
+    lo = tl.load(beg_ptr + i).to(tl.int64)
+    hi = tl.load(end_ptr + i).to(tl.int64)
+    xi = tl.load(pos_ptr + i * 3)
+    yi = tl.load(pos_ptr + i * 3 + 1)
+    zi = tl.load(pos_ptr + i * 3 + 2)
+    qi = tl.load(q_ptr + i)
+    ti = tl.load(t_ptr + i) * n_types
+    ke = tl.load(sc_ptr).to(DT)
+    tiny = tl.load(sc_ptr + 1).to(DT)
+    cut2 = tl.load(sc_ptr + 2).to(DT)
+    start = tl.load(sc_ptr + 3).to(DT)
+    inv_width = tl.load(sc_ptr + 4).to(DT)
+    # no value carried between the chunks: on a CPU a partner beyond the cutoff skips the rest of its chunk
+    for e0 in range(lo, hi, BLOCK):
+        e = e0 + tl.arange(0, BLOCK)
+        m = e < hi
+        k = tl.load(nbr_ptr + e, mask=m, other=0).to(tl.int64)
+        x = tl.load(pos_ptr + k * 3, mask=m, other=0.0) - xi
+        y = tl.load(pos_ptr + k * 3 + 1, mask=m, other=0.0) - yi
+        z = tl.load(pos_ptr + k * 3 + 2, mask=m, other=0.0) - zi
+        if HAS_CELL == 2:
+            c = tl.load(sh_ptr + e, mask=m, other=13).to(tl.int64) * 3
+            x += tl.load(cell_ptr + c, mask=m, other=0.0)
+            y += tl.load(cell_ptr + c + 1, mask=m, other=0.0)
+            z += tl.load(cell_ptr + c + 2, mask=m, other=0.0)
+        elif HAS_CELL:
+            s0 = tl.load(sh_ptr + e * 3, mask=m, other=0)
+            s1 = tl.load(sh_ptr + e * 3 + 1, mask=m, other=0)
+            s2 = tl.load(sh_ptr + e * 3 + 2, mask=m, other=0)
+            x += s0 * tl.load(cell_ptr) + s1 * tl.load(cell_ptr + 3) + s2 * tl.load(cell_ptr + 6)
+            y += s0 * tl.load(cell_ptr + 1) + s1 * tl.load(cell_ptr + 4) + s2 * tl.load(cell_ptr + 7)
+            z += s0 * tl.load(cell_ptr + 2) + s1 * tl.load(cell_ptr + 5) + s2 * tl.load(cell_ptr + 8)
+        x, y, z = x.to(DT), y.to(DT), z.to(DT)
+        r2 = x * x + y * y + z * z
+        m = m & (r2 < cut2)
+        tp = ti + tl.load(t_ptr + k, mask=m, other=0)
+        qk = tl.load(q_ptr + k, mask=m, other=0.0)
+        e_v, de_v, e_c, de_c = _pair_energy(r2, tp, tab_ptr, qi, qk, ke, tiny, m, FORM)
+        if SWITCH:
+            r = tl.sqrt(r2 + tiny)
+            s, ds = _switch(r, start, inv_width, SWITCH)
+            dsr = ds * 0.5 / r
+            d = 2.0 * ((s * de_v + e_v * dsr) + (s * de_c + e_c * dsr))
+            e_v = s * e_v
+            e_c = s * e_c
+        else:
+            # no switch: neither a distance nor a factor of one (the same numbers)
+            d = 2.0 * (de_v + de_c)
+        if ENERGY:
+            tl.atomic_add(e_ptr, tl.sum(tl.where(m, e_v.to(tl.float64), 0.0), 0), sem="relaxed")
+            tl.atomic_add(e_ptr + 1, tl.sum(tl.where(m, e_c.to(tl.float64), 0.0), 0), sem="relaxed")
+        gx = (d * x).to(tl.float64)
+        gy = (d * y).to(tl.float64)
+        gz = (d * z).to(tl.float64)
+        tl.atomic_add(gpos_ptr + k * 3, gx, mask=m, sem="relaxed")
+        tl.atomic_add(gpos_ptr + k * 3 + 1, gy, mask=m, sem="relaxed")
+        tl.atomic_add(gpos_ptr + k * 3 + 2, gz, mask=m, sem="relaxed")
+        tl.atomic_add(gpos_ptr + i * 3, tl.sum(tl.where(m, -gx, 0.0), 0), sem="relaxed")
+        tl.atomic_add(gpos_ptr + i * 3 + 1, tl.sum(tl.where(m, -gy, 0.0), 0), sem="relaxed")
+        tl.atomic_add(gpos_ptr + i * 3 + 2, tl.sum(tl.where(m, -gz, 0.0), 0), sem="relaxed")
+
+
+@triton.jit
+def _bonded_energy_forces(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr, p1_ptr, p2_ptr, p3_ptr, p4_ptr, p5_ptr,
+                          sc_ptr, e_ptr, gpos_ptr, gcell_ptr, n_terms, KIND: tl.constexpr, DT: tl.constexpr,
+                          HAS_CELL: tl.constexpr, CELL_GRAD: tl.constexpr, FORM: tl.constexpr, S: tl.constexpr,
+                          NMAX: tl.constexpr, BLOCK: tl.constexpr, ENERGY: tl.constexpr = True):
+    """A step's terms of one class in one pass: their total energy added into ``e`` ``(1,)`` and its position (and
+    cell) gradient into ``gpos`` (``gcell``). ``KIND`` 0 to 5: bonds, Morse bonds, angles, torsions, inversions,
+    hydrogen bonds, with the parameter arrays of :data:`_FORWARD`'s kernel in order (the rest unused); ``ENERGY``
+    off: the gradient alone."""
+    e = (tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)).to(tl.int64)
+    m = e < n_terms
+    tiny = tl.load(sc_ptr).to(DT)
+    if KIND == 0:
+        a, b, en, gx, gy, gz = _bond(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr, p1_ptr, e, m, n_terms, tiny,
+                                     DT, HAS_CELL)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, a, b, e, m, gx, gy, gz, HAS_CELL, CELL_GRAD)
+    elif KIND == 1:
+        a, b, en, gx, gy, gz = _morse(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr, p1_ptr, p2_ptr, e, m,
+                                      n_terms, tiny, DT, HAS_CELL)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, a, b, e, m, gx, gy, gz, HAS_CELL, CELL_GRAD)
+    elif KIND == 2:
+        bound = tl.load(sc_ptr + 1).to(DT)
+        a, c, b, en, gux, guy, guz, gvx, gvy, gvz = _angle(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr, p1_ptr,
+                                                           p2_ptr, e, m, n_terms, tiny, bound, DT, HAS_CELL)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, c, a, e, m, gux, guy, guz, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 3, c, b, e, m, gvx, gvy, gvz, HAS_CELL, CELL_GRAD)
+    elif KIND == 3:
+        i0, i1, i2, i3, en, ax, ay, az, bx, by, bz, cx, cy, cz = _torsion(
+            pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p1_ptr, p2_ptr, p3_ptr, p4_ptr, p5_ptr, e, m, n_terms, tiny, DT,
+            HAS_CELL, FORM, S, NMAX)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, i0, i1, e, m, ax, ay, az, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 3, i1, i2, e, m, bx, by, bz, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 6, i2, i3, e, m, cx, cy, cz, HAS_CELL, CELL_GRAD)
+    elif KIND == 4:
+        c, a, b, d, en, gix, giy, giz, gjx, gjy, gjz, glx, gly, glz = _inversion(
+            pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr, p1_ptr, p2_ptr, e, m, n_terms, tiny, DT, HAS_CELL)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, c, a, e, m, gix, giy, giz, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 3, c, b, e, m, gjx, gjy, gjz, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 6, c, d, e, m, glx, gly, glz, HAS_CELL, CELL_GRAD)
+    else:
+        cut2 = tl.load(sc_ptr + 2).to(DT)
+        cos_max = tl.load(sc_ptr + 3).to(DT)
+        dd, hh, aa, en, gax, gay, gaz, ghx, ghy, ghz = _hbond(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, p0_ptr,
+                                                              p1_ptr, e, m, n_terms, tiny, cut2, cos_max, DT, HAS_CELL)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr, dd, aa, e, m, gax, gay, gaz, HAS_CELL, CELL_GRAD)
+        _vec_grad(gpos_ptr, gcell_ptr, bat_ptr, s_ptr + n_terms * 3, hh, dd, e, m, ghx, ghy, ghz, HAS_CELL, CELL_GRAD)
+    if ENERGY:
+        tl.atomic_add(e_ptr, tl.sum(tl.where(m, en.to(tl.float64), 0.0), 0), sem="relaxed")
+
+
+_KINDS = {"bond": 0, "morse": 1, "angle": 2, "torsion": 3, "inversion": 4, "hbond": 5}
+
+
+def _go(kernel, grid, *args, **meta):
+    """``kernel[grid](*args, **meta)``, on CPU tensors as C++ loops (:mod:`.classical_cpu`)."""
+    if args[0].device.type == "cpu":
+        from .classical_cpu import launch
+        launch(kernel, grid, *args, **meta)
+    else:
+        kernel[grid](*args, **meta)
+
+
 _SCALARS: dict = {}
 
 
@@ -190,21 +352,27 @@ def _scalars(values: tuple, device: torch.device) -> Tensor:
 
 @triton.jit
 def _vec(pos_ptr, cell_ptr, bat_ptr, s_ptr, a, b, e, m, HAS_CELL: tl.constexpr):
-    """``pos[b] - pos[a] + shift @ cell`` in the precision of the positions (:func:`pair_vectors`)."""
+    """``pos[b] - pos[a] + shift @ cell`` in the precision of the positions (:func:`pair_vectors`); ``HAS_CELL`` 2:
+    one cell for all atoms (its entries read once, not per lane)."""
     x = tl.load(pos_ptr + b * 3, mask=m, other=0.0) - tl.load(pos_ptr + a * 3, mask=m, other=0.0)
     y = tl.load(pos_ptr + b * 3 + 1, mask=m, other=0.0) - tl.load(pos_ptr + a * 3 + 1, mask=m, other=0.0)
     z = tl.load(pos_ptr + b * 3 + 2, mask=m, other=0.0) - tl.load(pos_ptr + a * 3 + 2, mask=m, other=0.0)
     if HAS_CELL:
-        c = tl.load(bat_ptr + a, mask=m, other=0).to(tl.int64) * 9
         s0 = tl.load(s_ptr + e * 3, mask=m, other=0.0)
         s1 = tl.load(s_ptr + e * 3 + 1, mask=m, other=0.0)
         s2 = tl.load(s_ptr + e * 3 + 2, mask=m, other=0.0)
-        x += s0 * tl.load(cell_ptr + c, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 3, mask=m, other=0.0) \
-            + s2 * tl.load(cell_ptr + c + 6, mask=m, other=0.0)
-        y += s0 * tl.load(cell_ptr + c + 1, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 4, mask=m, other=0.0) \
-            + s2 * tl.load(cell_ptr + c + 7, mask=m, other=0.0)
-        z += s0 * tl.load(cell_ptr + c + 2, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 5, mask=m, other=0.0) \
-            + s2 * tl.load(cell_ptr + c + 8, mask=m, other=0.0)
+        if HAS_CELL == 2:
+            x += s0 * tl.load(cell_ptr) + s1 * tl.load(cell_ptr + 3) + s2 * tl.load(cell_ptr + 6)
+            y += s0 * tl.load(cell_ptr + 1) + s1 * tl.load(cell_ptr + 4) + s2 * tl.load(cell_ptr + 7)
+            z += s0 * tl.load(cell_ptr + 2) + s1 * tl.load(cell_ptr + 5) + s2 * tl.load(cell_ptr + 8)
+        else:
+            c = tl.load(bat_ptr + a, mask=m, other=0).to(tl.int64) * 9
+            x += s0 * tl.load(cell_ptr + c, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 3, mask=m, other=0.0) \
+                + s2 * tl.load(cell_ptr + c + 6, mask=m, other=0.0)
+            y += s0 * tl.load(cell_ptr + c + 1, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 4, mask=m, other=0.0) \
+                + s2 * tl.load(cell_ptr + c + 7, mask=m, other=0.0)
+            z += s0 * tl.load(cell_ptr + c + 2, mask=m, other=0.0) + s1 * tl.load(cell_ptr + c + 5, mask=m, other=0.0) \
+                + s2 * tl.load(cell_ptr + c + 8, mask=m, other=0.0)
     return x, y, z
 
 
@@ -428,7 +596,9 @@ def _torsion(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, k_ptr, n_ptr, cg_ptr, s
     """A torsion term over four atoms and the gradients of its three bond vectors. FORM 0: ``const + sum_s K_s
     (1 + cg_s T_n(cos phi))`` (Chebyshev polynomials of the cosine); 1: ``sum_s K_s (1 + cg_s cos(n phi) +
     sg_s sin(n phi))`` of the signed angle; 2: ``K (phi - phi0)^2`` with ``(cos, sin)`` of ``phi0`` in
-    ``(cg, sg)``."""
+    ``(cg, sg)``. FORM 3 and 4: forms 0 and 1 with the terms summed by multiplicity, ``k`` a row of
+    ``1 + NMAX`` (3: ``sum K``, then ``a_n``) or ``1 + 2 NMAX`` (4: then ``b_n``) coefficients per torsion
+    (:func:`~xnn.ffnn.models.classical_cpu.torsion_coefficients`), one recurrence for all its terms."""
     i0 = tl.load(idx_ptr + e, mask=m, other=0).to(tl.int64)
     i1 = tl.load(idx_ptr + n_terms + e, mask=m, other=0).to(tl.int64)
     i2 = tl.load(idx_ptr + 2 * n_terms + e, mask=m, other=0).to(tl.int64)
@@ -457,7 +627,29 @@ def _torsion(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, k_ptr, n_ptr, cg_ptr, s
     en = tl.load(c0_ptr + e, mask=m, other=0.0)
     ec = c * 0.0
     es = c * 0.0
-    if FORM == 0:
+    if FORM == 3:
+        row = e * (NMAX + 1)
+        a1 = tl.load(k_ptr + row + 1, mask=m, other=0.0)
+        en += tl.load(k_ptr + row, mask=m, other=0.0) + a1 * c
+        ec += a1
+        tp = c * 0.0 + 1.0
+        tc = c
+        dp = c * 0.0
+        dcur = c * 0.0 + 1.0
+        for q in tl.static_range(2, NMAX + 1):
+            tnew = 2.0 * c * tc - tp
+            dnew = 2.0 * tc + 2.0 * c * dcur - dp
+            tp = tc
+            tc = tnew
+            dp = dcur
+            dcur = dnew
+            aq = tl.load(k_ptr + row + q, mask=m, other=0.0)
+            en += aq * tc
+            ec += aq * dcur
+        s = c * 0.0
+        Lb = c * 0.0 + 1.0
+        Q = c * 0.0
+    elif FORM == 0:
         for j in tl.static_range(S):
             K = tl.load(k_ptr + e * S + j, mask=m, other=0.0)
             nn = tl.load(n_ptr + e * S + j, mask=m, other=1)
@@ -488,7 +680,38 @@ def _torsion(pos_ptr, cell_ptr, bat_ptr, s_ptr, idx_ptr, k_ptr, n_ptr, cg_ptr, s
         qx, qy, qz = _cross(n1x, n1y, n1z, n2x, n2y, n2z)
         Q = qx * bx + qy * by + qz * bz
         s = -Q / (D * Lb)
-        if FORM == 1:
+        if FORM == 4:
+            row = e * (2 * NMAX + 1)
+            a1 = tl.load(k_ptr + row + 1, mask=m, other=0.0)
+            b1 = tl.load(k_ptr + row + 1 + NMAX, mask=m, other=0.0)
+            en += tl.load(k_ptr + row, mask=m, other=0.0) + a1 * c + b1 * s
+            ec += a1
+            es += b1
+            C = c
+            Sn = s
+            Cc = c * 0.0 + 1.0
+            Cs = c * 0.0
+            Sc = c * 0.0
+            Ss = c * 0.0 + 1.0
+            for q in tl.static_range(2, NMAX + 1):
+                Cn = C * c - Sn * s
+                Snn = Sn * c + C * s
+                Ccn = Cc * c + C - Sc * s
+                Csn = Cs * c - Ss * s - Sn
+                Scn = Sc * c + Sn + Cc * s
+                Ssn = Ss * c + Cs * s + C
+                C = Cn
+                Sn = Snn
+                Cc = Ccn
+                Cs = Csn
+                Sc = Scn
+                Ss = Ssn
+                aq = tl.load(k_ptr + row + q, mask=m, other=0.0)
+                bq = tl.load(k_ptr + row + q + NMAX, mask=m, other=0.0)
+                en += aq * C + bq * Sn
+                ec += aq * Cc + bq * Sc
+                es += aq * Cs + bq * Ss
+        elif FORM == 1:
             for j in tl.static_range(S):
                 K = tl.load(k_ptr + e * S + j, mask=m, other=0.0)
                 nn = tl.load(n_ptr + e * S + j, mask=m, other=1)
@@ -796,6 +1019,12 @@ def _cell_args(pos: Tensor, cell: Optional[Tensor], batch: Tensor, shifts: Optio
     return cell.reshape(-1, 9).to(pos.dtype).contiguous(), batch.contiguous(), shifts.to(pos.dtype).contiguous(), True
 
 
+_FORWARD = {"bond": _bonds_forward, "morse": _morses_forward, "angle": _angles_forward, "torsion": _torsions_forward,
+            "inversion": _inversions_forward, "hbond": _hbonds_forward}
+_BACKWARD = {"bond": _bonds_backward, "morse": _morses_backward, "angle": _angles_backward,
+             "torsion": _torsions_backward, "inversion": _inversions_backward, "hbond": _hbonds_backward}
+
+
 class BondedTerms(torch.autograd.Function):
     """The per-atom energies ``(N,)`` (float64) of one class of bonded terms (``kind`` ``"bond"``, ``"morse"``,
     ``"angle"``, ``"torsion"``, ``"inversion"`` or ``"hbond"``) from the positions ``(N, 3)``, the cells
@@ -815,24 +1044,8 @@ class BondedTerms(torch.autograd.Function):
         dt = tl.float64 if dtype == torch.float64 else tl.float32
         grid = (triton.cdiv(max(M, 1), BLOCK),)
         if M:
-            if kind == "bond":
-                _bonds_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt, HAS_CELL=has,
-                                     BLOCK=BLOCK, num_warps=WARPS)
-            elif kind == "morse":
-                _morses_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt, HAS_CELL=has,
-                                      BLOCK=BLOCK, num_warps=WARPS)
-            elif kind == "angle":
-                _angles_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt, HAS_CELL=has,
-                                      BLOCK=BLOCK, num_warps=WARPS)
-            elif kind == "inversion":
-                _inversions_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt,
-                                          HAS_CELL=has, BLOCK=BLOCK, num_warps=WARPS)
-            elif kind == "hbond":
-                _hbonds_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt, HAS_CELL=has,
-                                      BLOCK=BLOCK, num_warps=WARPS)
-            else:
-                _torsions_forward[grid](pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt,
-                                        HAS_CELL=has, BLOCK=BLOCK, num_warps=WARPS, **options)
+            _go(_FORWARD[kind], grid, pos_c, cell_t, bat_t, s_t, idx, *params, scalars, out, M, DT=dt, HAS_CELL=has,
+                BLOCK=BLOCK, num_warps=WARPS, **(options if kind == "torsion" else {}))
         # the inputs themselves too: a further derivative of the backward's outputs must reach them
         ctx.save_for_backward(pos_c, cell_t, bat_t, s_t, idx, scalars, *params, pos,
                               cell if cell is not None else pos)
@@ -852,24 +1065,8 @@ class BondedTerms(torch.autograd.Function):
         grid = (triton.cdiv(max(ctx.M, 1), BLOCK),)
         if ctx.M:
             args = (pos_c, cell_t, bat_t, s_t, idx, *params, scalars, g, gpos, gcell, ctx.M)
-            if ctx.kind == "bond":
-                _bonds_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                      num_warps=WARPS)
-            elif ctx.kind == "morse":
-                _morses_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                       num_warps=WARPS)
-            elif ctx.kind == "angle":
-                _angles_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                       num_warps=WARPS)
-            elif ctx.kind == "inversion":
-                _inversions_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                           num_warps=WARPS)
-            elif ctx.kind == "hbond":
-                _hbonds_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                       num_warps=WARPS)
-            else:
-                _torsions_backward[grid](*args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
-                                         num_warps=WARPS, **ctx.options)
+            _go(_BACKWARD[ctx.kind], grid, *args, DT=ctx.dt, HAS_CELL=ctx.has, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
+                num_warps=WARPS, **(ctx.options if ctx.kind == "torsion" else {}))
         g_cell = None
         if ctx.cell_shape is not None and ctx.cell_grad:
             g_cell = gcell.reshape(ctx.cell_shape).to(ctx.cell_dtype)
@@ -908,7 +1105,7 @@ class PairTerms(torch.autograd.Function):
         args = (src.contiguous(), dst.contiguous(), s_t, pos_c, cell_t, bat_t, xp, xk, t.contiguous(),
                 q.contiguous().to(dtype), table.contiguous().to(dtype), scalars)
         if E:
-            _pairs_forward[(triton.cdiv(E, BLOCK),)](*args, out, E, int(n_local), int(table.shape[0]), **flags,
+            _go(_pairs_forward, (triton.cdiv(E, BLOCK),), *args, out, E, int(n_local), int(table.shape[0]), **flags,
                                                      BLOCK=BLOCK, num_warps=WARPS)
         ctx.save_for_backward(*[a for a in args if isinstance(a, Tensor)], pos, cell if cell is not None else pos)
         ctx.flags, ctx.E, ctx.n_local, ctx.T, ctx.has = flags, E, int(n_local), int(table.shape[0]), has
@@ -924,7 +1121,7 @@ class PairTerms(torch.autograd.Function):
         gpos = torch.zeros(pos_c.shape[0], 3, dtype=torch.float64, device=pos_c.device)
         gcell = torch.zeros(cell_t.shape[0], 9, dtype=torch.float64, device=pos_c.device) if ctx.has else gpos
         if ctx.E:
-            _pairs_backward[(triton.cdiv(ctx.E, BLOCK),)](*args, g.contiguous(), gpos, gcell, ctx.E, ctx.n_local,
+            _go(_pairs_backward, (triton.cdiv(ctx.E, BLOCK),), *args, g.contiguous(), gpos, gcell, ctx.E, ctx.n_local,
                                                           ctx.T, **ctx.flags, CELL_GRAD=ctx.cell_grad, BLOCK=BLOCK,
                                                           num_warps=WARPS)
         g_cell = gcell.reshape(ctx.cell_shape).to(ctx.cell_dtype) if ctx.cell_shape is not None and ctx.cell_grad \
@@ -966,8 +1163,8 @@ def excluded(src: Tensor, dst: Tensor, exclusions: tuple, n_local: int) -> Tenso
     out = torch.empty(n, dtype=torch.int8, device=src.device)
     if n > 0:
         BLOCK = 512
-        _excluded_kernel[(triton.cdiv(n, BLOCK),)](src.contiguous(), dst.contiguous(), ptr, cols, out, n, n_local,
-                                                  MAXE=int(width), BLOCK=BLOCK)
+        _go(_excluded_kernel, (triton.cdiv(n, BLOCK),), src.contiguous(), dst.contiguous(), ptr, cols, out, n,
+            n_local, MAXE=int(width), BLOCK=BLOCK)
     return out.bool()
 
 

@@ -37,8 +37,8 @@ class _PairsGrad(torch.autograd.Function):
         args = c["args"](pos, q, table)
         gpos = torch.zeros(pos.shape[0], 3, dtype=torch.float64, device=pos.device)
         if c["E"]:
-            kk._pairs_backward[_grid(c["E"])](*args, g.contiguous(), gpos, gpos, c["E"], c["n_local"], c["T"],
-                                              **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+            kk._go(kk._pairs_backward, _grid(c["E"]), *args, g.contiguous(), gpos, gpos, c["E"], c["n_local"], c["T"],
+                   **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK, num_warps=kk.WARPS)
         ctx.save_for_backward(pos, q, table, g)
         ctx.c = c
         return gpos.to(pos.dtype)
@@ -56,21 +56,21 @@ class _PairsGrad(torch.autograd.Function):
         if c["E"]:
             grid, common = _grid(c["E"]), (c["E"], c["n_local"], c["T"])
             scratch = torch.zeros(N, 3, dtype=torch.float64, device=pos.device)
-            kt._pairs_backward_t[grid](*args, g.contiguous(), scratch, scratch, *common, pos_ptr_t=u, gpos_ptr_t=hvp,
-                                       **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+            kk._go(kt._pairs_backward_t, grid, *args, g.contiguous(), scratch, scratch, *common, pos_ptr_t=u,
+                   gpos_ptr_t=hvp, **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK, num_warps=kk.WARPS)
             if ctx.needs_input_grad[3]:
                 out = torch.zeros(N, 2, dtype=torch.float64, device=pos.device)
                 g_g = torch.zeros_like(out)
-                kt._pairs_forward_t[grid](*args, out, *common, pos_ptr_t=u, e_ptr_t=g_g, **c["flags"],
-                                          BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+                kk._go(kt._pairs_forward_t, grid, *args, out, *common, pos_ptr_t=u, e_ptr_t=g_g, **c["flags"],
+                       BLOCK=kk.BLOCK, num_warps=kk.WARPS)
                 g_g = g_g.to(g.dtype)
             if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
                 qa, ta = args[9], args[10]
                 out = torch.zeros(N, 2, dtype=torch.float64, device=pos.device)
                 g_q, g_t = torch.zeros_like(qa), torch.zeros_like(ta)
-                kt._pairs_forward_r_t[grid](*args, out, *common, g_ptr=g.contiguous(), q_ptr_g=torch.zeros_like(qa),
-                                            tab_ptr_g=torch.zeros_like(ta), pos_ptr_t=u, q_ptr_g_t=g_q,
-                                            tab_ptr_g_t=g_t, **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+                kk._go(kt._pairs_forward_r_t, grid, *args, out, *common, g_ptr=g.contiguous(),
+                       q_ptr_g=torch.zeros_like(qa), tab_ptr_g=torch.zeros_like(ta), pos_ptr_t=u, q_ptr_g_t=g_q,
+                       tab_ptr_g_t=g_t, **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
                 g_q, g_t = g_q.to(q.dtype), g_t.reshape(table.shape).to(table.dtype)
         return hvp.to(pos.dtype), g_q, g_t, g_g, None
 
@@ -83,8 +83,8 @@ class PairTermsTwice(torch.autograd.Function):
     def forward(ctx, pos, q, table, c):
         out = torch.zeros(pos.shape[0], 2, dtype=torch.float64, device=pos.device)
         if c["E"]:
-            kk._pairs_forward[_grid(c["E"])](*c["args"](pos, q, table), out, c["E"], c["n_local"], c["T"],
-                                             **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+            kk._go(kk._pairs_forward, _grid(c["E"]), *c["args"](pos, q, table), out, c["E"], c["n_local"], c["T"],
+                   **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
         ctx.save_for_backward(pos, q, table)
         ctx.c = c
         return out
@@ -102,9 +102,8 @@ class PairTermsTwice(torch.autograd.Function):
                 qa, ta = args[9], args[10]
                 g_q, g_t = torch.zeros_like(qa), torch.zeros_like(ta)
                 out = torch.zeros(pos.shape[0], 2, dtype=torch.float64, device=pos.device)
-                kt._pairs_forward_r[_grid(c["E"])](*args, out, c["E"], c["n_local"], c["T"], g_ptr=g.detach(),
-                                                   q_ptr_g=g_q, tab_ptr_g=g_t, **c["flags"], BLOCK=kk.BLOCK,
-                                                   num_warps=kk.WARPS)
+                kk._go(kt._pairs_forward_r, _grid(c["E"]), *args, out, c["E"], c["n_local"], c["T"], g_ptr=g.detach(),
+                       q_ptr_g=g_q, tab_ptr_g=g_t, **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
             g_q, g_t = g_q.to(q.dtype), g_t.reshape(table.shape).to(table.dtype)
         return gpos, g_q, g_t, None
 
@@ -140,9 +139,8 @@ class _BondedGrad(torch.autograd.Function):
         args = c["args"](pos, params)
         gpos = torch.zeros(pos.shape[0], 3, dtype=torch.float64, device=pos.device)
         if c["M"]:
-            getattr(kk, c["stem"] + "_backward")[_grid(c["M"])](*args, g.contiguous(), gpos, gpos, c["M"],
-                                                                **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK,
-                                                                num_warps=kk.WARPS)
+            kk._go(getattr(kk, c["stem"] + "_backward"), _grid(c["M"]), *args, g.contiguous(), gpos, gpos, c["M"],
+                   **c["flags"], CELL_GRAD=False, BLOCK=kk.BLOCK, num_warps=kk.WARPS)
         ctx.save_for_backward(pos, g, *params)
         ctx.c = c
         return gpos.to(pos.dtype)
@@ -161,12 +159,12 @@ class _BondedGrad(torch.autograd.Function):
         if c["M"]:
             grid, stem, opts = _grid(c["M"]), c["stem"], dict(**c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
             scratch = torch.zeros(N, 3, dtype=torch.float64, device=pos.device)
-            getattr(kt, stem + "_backward_t")[grid](*args, g.contiguous(), scratch, scratch, c["M"], pos_ptr_t=u,
-                                                    gpos_ptr_t=hvp, CELL_GRAD=False, **opts)
+            kk._go(getattr(kt, stem + "_backward_t"), grid, *args, g.contiguous(), scratch, scratch, c["M"],
+                   pos_ptr_t=u, gpos_ptr_t=hvp, CELL_GRAD=False, **opts)
             if ctx.needs_input_grad[1]:
                 out = torch.zeros(N, dtype=torch.float64, device=pos.device)
                 g_g = torch.zeros_like(out)
-                getattr(kt, stem + "_forward_t")[grid](*args, out, c["M"], pos_ptr_t=u, out_ptr_t=g_g, **opts)
+                kk._go(getattr(kt, stem + "_forward_t"), grid, *args, out, c["M"], pos_ptr_t=u, out_ptr_t=g_g, **opts)
                 g_g = g_g.to(g.dtype)
             wanted = [j for j in c["floats"] if ctx.needs_input_grad[3 + j]]
             if wanted:
@@ -176,8 +174,8 @@ class _BondedGrad(torch.autograd.Function):
                     name = c["names"][j]
                     kw[name + "_g"] = torch.zeros_like(args[5 + j])
                     kw[name + "_g_t"] = torch.zeros_like(args[5 + j])
-                getattr(kt, stem + "_forward_r_t")[grid](*args, out, c["M"], g_ptr=g.contiguous(), pos_ptr_t=u, **kw,
-                                                         **opts)
+                kk._go(getattr(kt, stem + "_forward_r_t"), grid, *args, out, c["M"], g_ptr=g.contiguous(), pos_ptr_t=u,
+                       **kw, **opts)
                 for j in wanted:
                     g_par[j] = kw[c["names"][j] + "_g_t"].reshape(params[j].shape).to(params[j].dtype)
         return (hvp.to(pos.dtype), g_g, None, *g_par)
@@ -191,8 +189,8 @@ class BondedTermsTwice(torch.autograd.Function):
     def forward(ctx, pos, c, *params):
         out = torch.zeros(pos.shape[0], dtype=torch.float64, device=pos.device)
         if c["M"]:
-            getattr(kk, c["stem"] + "_forward")[_grid(c["M"])](*c["args"](pos, params), out, c["M"], **c["flags"],
-                                                               BLOCK=kk.BLOCK, num_warps=kk.WARPS)
+            kk._go(getattr(kk, c["stem"] + "_forward"), _grid(c["M"]), *c["args"](pos, params), out, c["M"],
+                   **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
         ctx.save_for_backward(pos, *params)
         ctx.c = c
         return out
@@ -210,9 +208,8 @@ class BondedTermsTwice(torch.autograd.Function):
                 args = c["args"](pos, params)
                 out = torch.zeros(pos.shape[0], dtype=torch.float64, device=pos.device)
                 kw = {c["names"][j] + "_g": torch.zeros_like(args[5 + j]) for j in c["floats"]}
-                getattr(kt, c["stem"] + "_forward_r")[_grid(c["M"])](*args, out, c["M"], g_ptr=g.detach(), **kw,
-                                                                     **c["flags"], BLOCK=kk.BLOCK,
-                                                                     num_warps=kk.WARPS)
+                kk._go(getattr(kt, c["stem"] + "_forward_r"), _grid(c["M"]), *args, out, c["M"], g_ptr=g.detach(), **kw,
+                       **c["flags"], BLOCK=kk.BLOCK, num_warps=kk.WARPS)
             for j in wanted:
                 g_par[j] = kw[c["names"][j] + "_g"].reshape(params[j].shape).to(params[j].dtype)
         return (gpos, None, *g_par)
