@@ -118,7 +118,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
-     - |Y|
+     - |N|
      - |Y|
      - |Y|
    * - SE(3) steerable CNN / 3D CNN
@@ -207,7 +207,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
    * - BAMBOO
      - |Y|
-     - |N|
+     - |Y|
      - |Y|
      - |Y|
      - |Y|
@@ -218,7 +218,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |N|
-     - |N|
+     - |O|
    * - PM3 / PM6 / PM6-ORG / PM7
      - |Y|
      - |N|
@@ -231,7 +231,8 @@ and is at least as fast, for evaluation and for a training step.
   :ref:`deployment`).
 - **Torchscript-LAMMPS** exports the reference implementation with
   ``xnn export``. A model with long-range terms (LES, or the charges of
-  AIMNet2, PhysNet and HDNNP 3G / 4G) needs the whole system on one rank.
+  AIMNet2, BAMBOO, PhysNet and HDNNP 3G / 4G) needs the whole system on one
+  rank.
 - **Reference-Path** rates the reference implementation against the upstream
   code:
 
@@ -256,10 +257,12 @@ Notes on individual models:
   Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
   :ref:`howto-fast-paths`), which runs the same reference implementation and
   is faster than the upstream at every size.
-- **ANI.** Its fast path is faster at every size in float32. In float64,
+- **ANI.** The upstream is torchani 2.2.4. Its fast path is faster at every
+  size in float32. In float64,
   ``"auto"`` keeps the reference on a T4 or an L40S, whose float64 throughput
   is low.
-- **PhysNet.** The upstream runs on TensorFlow's graph executor. Compare it
+- **PhysNet.** The upstream is MMunibas/PhysNet at commit ``e243e2c``. It
+  runs on TensorFlow's graph executor. Compare it
   with captured xnn steps (``trainer.cuda_graph: true`` for training,
   ``XNNCalculator(..., cuda_graph=True)`` for evaluations, see
   :ref:`howto-fast-paths`). They run the same reference implementation and are
@@ -270,8 +273,9 @@ Notes on individual models:
   training. Other function sets, and every set on a CPU, run the symmetry
   functions compiled with ``torch.compile``. That code is differentiable only
   once, so a training step with those runs the reference. RuNNer runs only on
-  CPUs. There, xnn's C++ kernels take about half of RuNNer's time on one and
-  eight threads, and the Reference-Path cell rates them.
+  CPUs. There, its Fortran loops are faster than the PyTorch reference and its
+  compiled form (RuNNer 2.0.5), so the Reference-Path cell stays red. The optional C++ kernels
+  (see :ref:`howto-fast-paths-cpu`) take about half of RuNNer's time.
 - **SE(3) steerable CNN and 3D CNN.** Their fast path runs the 3D
   convolutions on cuDNN's channels-last kernels, in batch chunks that bound
   the kernels' workspace, with cuDNN's algorithm search. From a few molecules
@@ -286,8 +290,17 @@ Notes on individual models:
   differentiated twice, so the upstream cannot train on forces. On a single
   molecule in float32 evaluation, it pads the spectra to take all degrees in
   one product, which needs about a third more memory than the upstream.
-- **BAMBOO.** Its forces are the exact gradient of the energy. The forces the
+- **BAMBOO.** The upstream is release 202404 (commit ``386ac0f``). Its forces
+  are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.
+- **SpookyNet.** The upstream is OUnke/SpookyNet 1.0 (commit ``d57b1fc``). Its
+  time goes to launching many small kernels. Its fast path
+  compiles the interaction modules with ``torch.compile`` and needs about a
+  third less memory, but it is faster only for float64 evaluation of large
+  systems. ``"auto"`` takes it there and keeps the reference elsewhere.
+  Captured steps remove the launch cost instead: they make training and
+  evaluation 3 to 5 times faster on small and medium systems (see
+  :ref:`howto-fast-paths`).
 - **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and
   float64, but Triton has no float64 matrix products. In float64, ``"auto"``
   keeps the reference for DimeNet++ (its fast path is slower there but needs
@@ -316,6 +329,14 @@ Notes on individual models:
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
   These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
+- **PM3, PM6, PM6-ORG and PM7.** All four match MOPAC to its printed
+  precision. MOPAC runs only on CPUs. On the same cores and at the same SCF
+  convergence (MOPAC's ``PRECISE``), PM3 and PM6 are faster than MOPAC at
+  every size, and all four methods from about 50 atoms on. Below that,
+  PM6-ORG and PM7 are as fast as MOPAC, except PM7 on a 12-atom water cluster
+  (about 10 % slower), so the Reference-Path cell stays red. Like MOPAC, the
+  SCF of large systems rotates the previous orbitals near convergence instead
+  of diagonalizing the Fock matrix.
 - **AMOEBA and HIPPO.** Both match Tinker 8 to round-off. On CPUs, their
   kernels run as C++ loops (see :ref:`howto-fast-paths-cpu`) and are faster
   than Tinker 8. On GPUs, both run on fused kernels. Both deploy as inputs for
@@ -363,14 +384,15 @@ are the same as above.
      - |Y|
      - |Y|
 
-- **D3, D4 and LES.** All three match their upstream codes to round-off. LES
-  is faster than its upstream on the same GPU, for evaluation and training. The
-  D3 and D4 upstreams run only on the CPU. There, xnn's C++ kernels (see
-  :ref:`howto-fast-paths-cpu`) take 0.04 to 0.51 of simple-dftd3's time and
-  0.11 to 0.61 of dftd4's from 81 atoms on, on one and eight threads. On a
-  21-atom molecule they take two to six times as long: the whole upstream call
-  is shorter than the Python overhead of an xnn evaluation, so the
-  Reference-Path cells stay red. On a GPU the three-body kernels are twice
-  differentiable, so a training step with a force loss also runs them. They do
-  not differentiate ``s9``, ``a1`` or ``a2``. When those are trained, the
-  reference three-body term runs.
+- **D3, D4 and LES.** All three match their upstream codes to round-off. LES is
+  faster than its upstream on the same GPU, for evaluation and training. The D3
+  and D4 upstreams (simple-dftd3 1.6.0 and dftd4 4.2.0) run only on the CPU. There, xnn's PyTorch path with
+  written-out forces and a compiled three-body term beats them from about 375
+  atoms on (D3 on eight threads from 81). Small molecules stay slower: a 21-atom
+  call costs a few milliseconds of PyTorch overhead against a fraction of a
+  millisecond upstream, so the Reference-Path cells stay red. The optional C++
+  kernels (see :ref:`howto-fast-paths-cpu`) are faster than both upstream codes
+  at every size. On a GPU the three-body kernels are twice differentiable, so a
+  training step with a force loss also runs them. They do not differentiate
+  ``s9``, ``a1`` or ``a2``. When those are trained, the reference three-body
+  term runs.

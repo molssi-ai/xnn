@@ -42,7 +42,7 @@ xnn gives you the ability to install only what you need:
    pip install "xnns[gnn]"          # e3nn: NequIP, MACE, Allegro
    pip install "xnns[ase]"          # ASE calculator, reading structure files
    pip install "xnns[vesin]"        # cell-list neighbor lists for large systems
-   pip install "xnns[cpu-kernels]"  # ninja, to build the D3, D4 and HDNNP CPU kernels
+   pip install "xnns[cpu-kernels]"  # ninja, for the optional C++ CPU kernels (D3, D4, HDNNP)
    pip install "xnns[hub]"          # h5py, for the ANI datasets of the data hub
    pip install "xnns[ffnn]"         # RDKit, for typing molecules with OPLS / DREIDING / AMBER
    pip install "xnns[mdi]"          # pymdi, for the MDI engine (xnn mdi)

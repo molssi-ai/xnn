@@ -18,17 +18,17 @@ TensorNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
-(compiled with ``torch.compile``), the 3D convolutions of the SE(3) steerable
-CNN and the 3D CNN (on cuDNN's channels-last kernels), the Fourier transforms
-and spectral products of the spherical CNN, the atomic environment vectors of
-ANI, the message sums of PhysNet, the symmetry functions of HDNNP, the local
-message sums of SpookyNet, the attention messages of BAMBOO, every energy term
-of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
+and the interaction modules of SpookyNet (compiled with ``torch.compile``), the
+3D convolutions of the SE(3) steerable CNN and the 3D CNN (on cuDNN's
+channels-last kernels), the Fourier transforms and spectral products of the
+spherical CNN, the atomic environment vectors of ANI, the message sums of
+PhysNet, the symmetry functions of HDNNP, the attention messages of BAMBOO,
+every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
 solve of ReaxFF and ReaxFF-nn, the three-body term of D3 and D4 and the
 large-system EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA
 builds of PyTorch), and the reciprocal sum of the LES long-range term (for
-which, we use plain PyTorch). On a CPU, D3, D4 and the symmetry functions of
-HDNNP run on C++ kernels (see :ref:`howto-fast-paths-cpu`).
+which, we use plain PyTorch). On a CPU, the three-body term of D3 and D4 and the
+symmetry functions of HDNNP run compiled (see :ref:`howto-fast-paths-cpu`).
 
 Install
 =======
@@ -122,38 +122,50 @@ at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
 float64 throughput is low. The PhysNet kernels win on large systems, from about
 20k to 300k edges depending on the GPU, and the BAMBOO kernels from about 5k to
-60k. The HDNNP kernels are faster at every size, for evaluation and training. ``"auto"`` keeps the
-reference for SpookyNet, whose fused local sums are not faster. The thresholds may change in
-any release as we rerun our benchmarks, so report the xnn version with results
+60k. The HDNNP kernels are faster at every size, for evaluation and training,
+except in float64 on an L40S. ``"auto"`` takes the
+compiled blocks of SpookyNet for float64 evaluation of large systems, from about
+50k edges on an A100. The thresholds may change in any release as we rerun our benchmarks, so report the xnn version with results
 obtained with ``"auto"``.
 
 .. _howto-fast-paths-cpu:
 
 On a CPU
 ========
-D3, D4 and the symmetry functions of HDNNP also have a fast path on CPUs: C++
-and OpenMP kernels that loop over the atoms, their neighbors and neighbor pairs,
-as the Fortran codes do. D3 runs entirely in them. D4 runs its polarizabilities
-and its two- and three-body sums in them, and its charges in PyTorch. They take
-a fraction of the time of simple-dftd3, dftd4 and RuNNer from about 80 atoms on.
-The kernels are built on first use, which needs a C++ compiler with OpenMP and
-``ninja`` (``pip install "xnns[cpu-kernels]"``):
+D3, D4 and the symmetry functions of HDNNP also have a fast path on CPUs. It is
+the same PyTorch computation compiled with ``torch.compile`` into C++ and OpenMP
+loops. So, the code needs a C++ compiler on the machine:
 
 .. code-block:: python
 
-   model.set_use_fast(True)     # the C++ kernels on a CPU, where they build
+   model.set_use_fast(True)     # the compiled path on a CPU, where torch.compile works
 
-- **First call.** The build takes about a minute, once per machine. ``"auto"``
-  takes the kernels at every size where they build.
-- **Fallback.** Without the build, D3 and D4 compile their three-body term with
-  ``torch.compile`` (10 to 20 seconds on the first call; ``"auto"`` takes it above
-  5000 edges, about 75 atoms). HDNNP function sets the kernels do not cover use
-  ``torch.compile`` only with ``use_fast=True``. Compiled code keeps the OpenMP
-  thread count of the process that compiled it, so give runs with different
-  thread counts their own ``TORCHINDUCTOR_CACHE_DIR``. Where neither works, the
-  reference path runs.
+- **First call.** The first evaluation compiles, which takes 10 to 20 seconds.
+  Later calls of any system size reuse the compiled code. ``"auto"`` takes the
+  D3 / D4 path above 5000 edges (about 75 atoms), where that pays off. HDNNP runs
+  it only with ``use_fast=True``.
+- **Threads.** The compiled code keeps the OpenMP thread count of the process that
+  compiled it. Give runs with different thread counts their own
+  ``TORCHINDUCTOR_CACHE_DIR``.
 - **Evaluation only.** Covers the energies, forces and stress. A training step
-  runs the reference path.
+  runs the reference path. A standalone D3 or D4 term (no wrapped model) forms
+  its forces and stress from written-out derivatives instead of an autograd
+  pass (D4 for molecules); its outputs then carry no autograd graph.
+- **Fallback.** Where ``torch.compile`` cannot produce CPU code, the reference
+  path runs.
+
+**Optional C++ kernels.** For D3, D4 and HDNNP, xnn also ships hand-written C++
+and OpenMP kernels with the loops of the Fortran codes. They are off by default.
+Turn them on with ``XNN_CPP_KERNELS=1`` in the environment or in Python:
+
+.. code-block:: python
+
+   from xnn.common.models import cpu_extension
+   cpu_extension.enable()
+
+They need ``ninja`` (``pip install "xnns[cpu-kernels]"``) and build in about a
+minute on first use. ``"auto"`` then takes them at every size. They take a
+fraction of the time of simple-dftd3, dftd4 and RuNNer.
 
 AMOEBA and HIPPO also run their GPU kernels on a CPU, as C++ loops. The
 results match the reference.
@@ -212,8 +224,9 @@ What to expect from fast implementations
 Captured training steps
 =======================
 A training step on small molecules is bound by kernel launches, not by the
-GPU's arithmetic. For DimeNet, DimeNet++, GemNet and PhysNet, the trainer can
-record the whole step once as a CUDA graph and replay it for every batch:
+GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, the
+trainer can record the whole step once as a CUDA graph and replay it for every
+batch:
 
 .. code-block:: yaml
 
@@ -221,8 +234,11 @@ record the whole step once as a CUDA graph and replay it for every batch:
      cuda_graph: true
 
 The data loader pads every batch to fixed counts with one inert structure
-and builds the model's triplets (and GemNet's quadruplets) on the CPU. The
-step runs the reference implementation. The results equal those of ordinary
+and builds the model's index work on the CPU: the triplets of DimeNet, the
+quadruplets of GemNet, and the local edges and long-range pairs of SpookyNet.
+The step runs the reference implementation. SpookyNet steps are 3 to 5 times
+faster this way on small and medium systems. They do not support the Ewald
+sum. The results equal those of ordinary
 steps up to round-off. Where ``use_fast`` takes the fused kernels for the
 padded batch size, the first steps time ordinary steps on the kernels against
 captured ones, and training goes on with the faster. It needs one GPU and a
@@ -232,8 +248,8 @@ ordinary steps.
 Captured evaluations
 ====================
 An evaluation of a small structure is bound by kernel launches in the same
-way. For DimeNet, DimeNet++, GemNet and PhysNet, the ASE calculator can record
-the evaluation once as a CUDA graph and replay it at every step:
+way. For DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, the ASE calculator
+can record the evaluation once as a CUDA graph and replay it at every step:
 
 .. code-block:: python
 
@@ -244,7 +260,8 @@ the evaluation once as a CUDA graph and replay it at every step:
 Each structure is padded to fixed atom and edge counts with one inert
 structure, with 5 % headroom. A structure that outgrows the counts is recorded
 again. The replay runs the reference implementation, so the results equal
-those of ordinary evaluations up to round-off.
+those of ordinary evaluations up to round-off. SpookyNet's replay also uses
+its compiled blocks where ``"auto"`` takes them.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any
 evaluation of a graph.
 
