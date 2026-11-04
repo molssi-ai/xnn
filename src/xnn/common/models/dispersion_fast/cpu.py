@@ -239,8 +239,8 @@ struct Acc {
 };
 
 // the three-body (ATM) energies (hartree) into the per-thread rows e3_t and, with GRAD, the gradient into gb
-// and the coordination-number derivatives into the per-thread rows dcn_t; s6m[i, j] = sqrt(C6_ij), dc6m[i, j] = d C6_ij /
-// d CN_i, dc6n[i, j] = d C6_ij / d CN_j, the pair radii scale * r0tab[Z_i, Z_j]
+// and the coordination-number derivatives into the per-thread rows dcn_t; s6m[i, j] = sqrt(C6_ij),
+// dc6m[i, j] = d C6_ij / d CN_i, dc6n[i, j] = d C6_ij / d CN_j, the pair radii scale * r0tab[Z_i, Z_j]
 template <bool GRAD>
 static void atm(const Edges& E, const int64_t* z, int64_t nz, const T* s6m, const T* dc6m, const T* dc6n,
                 const T* r0tab, T scale, T s9, T alp3, T cut, T width, const T* w3, T* e3_t, T* dcn_t, T* gb) {
@@ -590,6 +590,18 @@ static Prm params_of(const std::vector<double>& prm) {
   return p;
 }
 
+static void check_d3(const torch::Tensor& z, const std::vector<torch::Tensor>& tabs, const std::vector<double>& prm) {
+  const int64_t n = z.size(0), max_z = static_cast<int64_t>(prm[21]);
+  const int64_t* zp = z.data_ptr<int64_t>();
+  const int64_t* nr = tabs[4].data_ptr<int64_t>();
+  for (int64_t i = 0; i < n; ++i)
+    if (zp[i] < 1 || zp[i] > max_z) throw std::invalid_argument("D3 reference data cover atomic numbers 1..103");
+  for (int64_t i = 0; i < n; ++i)
+    if (nr[zp[i]] == 0)
+      throw std::invalid_argument("no D3 reference systems for an element of the input (Z > 94 with "
+                                  "references='2010'?)");
+}
+
 static void evaluate_d3(const torch::Tensor& vec, const torch::Tensor& src, const torch::Tensor& dst,
                         const torch::Tensor& z, const torch::Tensor& batch, const std::vector<torch::Tensor>& tabs,
                         const Prm& p, bool grad, const T* w2, const T* w3, const T* seed, torch::Tensor& e2,
@@ -674,18 +686,6 @@ torch::Tensor d3_backward(torch::Tensor vec, torch::Tensor src, torch::Tensor ds
   if (n > 0) evaluate_d3(vec, src, dst, z, batch, tabs, p, true, w2.data(), w3.data(), any_seed ? seed.data() : nullptr,
                          e2, e3, cn, c6self, ds, g);
   return g;
-}
-
-static void check_d3(const torch::Tensor& z, const std::vector<torch::Tensor>& tabs, const std::vector<double>& prm) {
-  const int64_t n = z.size(0), max_z = static_cast<int64_t>(prm[21]);
-  const int64_t* zp = z.data_ptr<int64_t>();
-  const int64_t* nr = tabs[4].data_ptr<int64_t>();
-  for (int64_t i = 0; i < n; ++i)
-    if (zp[i] < 1 || zp[i] > max_z) throw std::invalid_argument("D3 reference data cover atomic numbers 1..103");
-  for (int64_t i = 0; i < n; ++i)
-    if (nr[zp[i]] == 0)
-      throw std::invalid_argument("no D3 reference systems for an element of the input (Z > 94 with "
-                                  "references='2010'?)");
 }
 
 // D3 with the forces and the strain derivative, no autograd: the edge vectors from the positions, the cells (B, 3, 3;
