@@ -573,3 +573,199 @@ def test_runner_fidelity(case):
     fidelity = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fidelity)
     assert fidelity.run_case(case) < 1e-9
+
+
+@pytest.mark.parametrize("periodic", [False, True])
+def test_2g_scriptable_and_lammps_export(periodic, tmp_path):
+    """The 2G TorchScript core equals the eager model (every cutoff kind, function type and a
+    scaling mode); the LAMMPS export gives its energy and forces; 3G takes the charge-aware core instead."""
+    from xnn.common.deploy import export_to_lammps
+    torch.manual_seed(0)
+    s = _cell() if periodic else _molecule()
+    species = (11, 17) if periodic else (1, 6, 8)
+    acsf = _acsf(species, mode="center_scale")
+    acsf.fit_scaling([structure_to_graph(s, acsf.cutoff)])
+    model = HDNNP(list(species), acsf, generation=2, hidden=(8, 6),
+                  activation=["tanh", "softplus", "linear"]).double().eval()
+    g = _graph(s, model)
+    scripted = torch.jit.script(model)
+    vec = g.edge_vectors()
+    d = (scripted.node_energy(g.atomic_numbers, g.edge_index, vec)
+         - model(g)["node_energy"]).abs().max()
+    assert d < 1e-12
+    path = str(tmp_path / "hdnnp_lammps.pt")
+    export_to_lammps(model, model.cutoff, path)
+    cell = g.cell[0] if periodic else torch.eye(3, dtype=g.pos.dtype) * 30.0
+    out = torch.jit.load(path)(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, cell)
+    ref = ForceStressOutput(model)(g)
+    assert abs(float(out["total_energy"]) - float(ref["energy"])) < 1e-10
+    assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-10
+    with pytest.raises(Exception, match="node_features_energy_charges"):
+        torch.jit.script(_model(3).eval()).node_energy(g.atomic_numbers, g.edge_index, vec)
+
+
+# fast path: the symmetry-function blocks compiled (C++ on a CPU, Triton on a GPU)    #
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="needs a CUDA device"))])
+@pytest.mark.parametrize("generation", [2, 4])
+@pytest.mark.parametrize("periodic", [False, True])
+def test_compiled_symmetry_functions_match_the_reference(device, generation, periodic):
+    """The compiled blocks (every function type and cutoff kind, a scaling mode) give the
+    reference's energies, forces and stress; a training step keeps the reference."""
+    from xnn.dnn.fast.acsf import available
+    if device == "cpu" and not available():
+        pytest.skip("torch.compile produces no CPU code here")
+    if device == "cuda":
+        pytest.importorskip("triton")
+    torch.manual_seed(0)
+    s = _cell() if periodic else _molecule()
+    species = (11, 17) if periodic else (1, 6, 8)
+    acsf = _acsf(species, mode="center_scale")
+    acsf.fit_scaling([structure_to_graph(s, acsf.cutoff)])
+    model = HDNNP(list(species), acsf, generation=generation, hidden=(8, 6),
+                  activation=["tanh", "softplus", "linear"]).double().eval().to(device)
+    g = _graph(s, model).to(device)
+    wrapped = ForceStressOutput(model, compute_stress=periodic).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        out[use_fast] = wrapped(g)
+        assert model.featurizer.fast_active == use_fast
+    for key in ("energy", "forces") + (("stress",) if periodic else ()):
+        ref = out[False][key].detach()
+        assert (out[True][key].detach() - ref).abs().max() <= 1e-12 * ref.abs().max(), key
+    # training mode: the reference blocks (the compiled ones are differentiable once)
+    model.set_use_fast(True).train()
+    train_out = ForceStressOutput(model, compute_stress=periodic).train()(g)
+    (gf,) = torch.autograd.grad(train_out["forces"].pow(2).sum(), model.element_nets.nets[str(species[0])][0].weight)
+    assert torch.isfinite(gf).all()
+
+
+@pytest.mark.parametrize("generation,extra", [
+    (2, {}), (3, {}), (3, {"screening": {"kind": "cosine", "r_cut": 2.5}}),
+    (4, {}), (4, {"hardness": "network"})])
+@pytest.mark.parametrize("periodic", [False, True])
+def test_scripted_potential_matches_eager_every_generation(generation, extra, periodic, tmp_path):
+    """The charge-aware TorchScript core (and the exported artifact) give the eager energies,
+    forces and charges for 2G, 3G (also screened) and 4G (element or network hardness) models,
+    molecules and cells, at a net charge."""
+    from xnn.common.deploy import TorchScriptPotential, export_torchscript_potential
+    model = _model(generation, species=(11, 17) if periodic else (1, 6, 8), **extra).eval()
+    total = 0.0 if (periodic or generation == 2) else -1.0
+    s = _cell() if periodic else _molecule(charge=total)
+    s = dict(s, total_charge=total)
+    eager = ForceStressOutput(model, compute_stress=periodic)(_graph(s, model))
+    wrapper = TorchScriptPotential(model, model.cutoff, total_charge=total).eval()
+    scripted = torch.jit.script(wrapper)
+    pos = torch.tensor(np.asarray(s["pos"]))
+    z = torch.tensor(np.asarray(s["atomic_numbers"]))
+    cell = torch.tensor(np.asarray(s["cell"])) if periodic else None
+    pbc = torch.tensor([periodic] * 3)
+    out = scripted(pos, z, cell, pbc)
+    scale = float(eager["energy"].abs().max()) or 1.0
+    assert abs(float(out["energy"]) - float(eager["energy"])) < 1e-10 * max(scale, 1.0)
+    assert torch.allclose(out["forces"], eager["forces"].detach(), rtol=0, atol=1e-9)
+    if generation >= 3:
+        assert torch.allclose(out["charges"], eager["charges"].detach(), rtol=0, atol=1e-10)
+    if periodic:
+        assert torch.allclose(out["stress"], eager["stress"][0].detach(), rtol=0, atol=1e-9)
+    path = str(tmp_path / "hdnnp.pt")
+    export_torchscript_potential(model, model.cutoff, path, total_charge=total)
+    again = torch.jit.load(path)(pos, z, cell, pbc)
+    assert abs(float(again["energy"]) - float(out["energy"])) < 1e-12 * max(scale, 1.0)
+# fast path: the Triton kernels (types 1, 2, 3 and 9, cosine and tanh cutoffs)          #
+
+def _kernel_acsf():
+    cutoffs = [{"kind": "cosine", "r_cut": 4.0}, {"kind": "tanh", "r_cut": 3.5, "r_inner": 0.5}]
+    fns = []
+    for a in (1, 6, 8):
+        for b in (1, 6, 8):
+            fns += [{"element": a, "type": 2, "neighbors": [b], "eta": eta, "rs": rs, "cutoff": ci}
+                    for eta, rs, ci in ((0.5, 0.0, 0), (1.2, 1.1, 1), (0.1, 2.0, 0))]
+            fns += [{"element": a, "type": 1, "neighbors": [b], "cutoff": 1}]
+        for b, c in ((1, 1), (1, 6), (6, 8), (8, 8), (1, 8)):
+            fns += [{"element": a, "type": t, "neighbors": [b, c], "eta": eta, "lambda": lam, "zeta": z,
+                     "cutoff": ci}
+                    for t, eta, lam, z, ci in ((3, 0.05, 1.0, 1.0, 0), (3, 0.2, -1.0, 4.0, 1),
+                                               (9, 0.1, 1.0, 2.5, 0), (9, 0.03, -1.0, 1.0, 1))]
+    return AtomCenteredSymmetryFunctions([1, 6, 8], cutoffs, fns)
+
+
+def test_kernels_match_the_reference_to_second_order():
+    """The Triton symmetry functions give the reference's values, their gradient with respect to the
+    edge vectors, and the derivatives of that gradient (with respect to the vectors and to the incoming
+    gradient: what a force loss needs) for every supported type and cutoff (Triton's interpreter on a
+    CPU, the kernels on a GPU)."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    acsf = _kernel_acsf().to(device)
+    assert acsf._kernel_ok
+    rng = np.random.default_rng(1)
+    s = {"pos": rng.uniform(0, 4.0, (9, 3)), "atomic_numbers": [1, 6, 8, 1, 1, 6, 8, 1, 8]}
+    g = structure_to_graph(s, acsf.cutoff).to(device)
+    vec = g.edge_vectors().detach().clone().requires_grad_(True)
+    n = g.num_nodes
+    ref = acsf.compute_raw(g.atomic_numbers, g.edge_index, vec, n)
+    fast = acsf._raw_kernels(vec, torch.linalg.norm(vec, dim=-1), acsf._z2i[g.atomic_numbers], g.edge_index, n)
+    assert (fast - ref).abs().max() <= 1e-14 * ref.abs().max()
+    w = torch.randn_like(ref, requires_grad=True)
+    gr = torch.autograd.grad((ref * w).sum(), vec, create_graph=True)[0]
+    gf = torch.autograd.grad((fast * w).sum(), vec, create_graph=True)[0]
+    assert (gf - gr).abs().max() <= 1e-14 * gr.abs().max()
+    u = torch.randn_like(gr)
+    hr = torch.autograd.grad((gr * u).sum(), (vec, w))
+    hf = torch.autograd.grad((gf * u).sum(), (vec, w))
+    for a, b in zip(hf, hr):
+        assert (a - b).abs().max() <= 1e-13 * b.abs().max()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_kernel_fast_path_parity_and_training(dtype):
+    """On the GPU: a model on the kernels gives the reference energies, forces and the weight gradients
+    of a force loss (the kernels serve training)."""
+    pytest.importorskip("triton")
+    acsf = _kernel_acsf()
+    model = HDNNP([1, 6, 8], acsf, hidden=(8, 6)).to("cuda", dtype)
+    rng = np.random.default_rng(2)
+    s = {"pos": rng.uniform(0, 5.0, (14, 3)), "atomic_numbers": [1, 6, 8, 1, 1, 6, 8] * 2}
+    g = collate([structure_to_graph(s, model.cutoff)]).to("cuda")
+    g.pos = g.pos.to(dtype)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(g)
+        assert model.featurizer.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = (out["energy"].detach().double(), out["forces"].detach().double(),
+                         {k: p.grad.double().clone() for k, p in model.named_parameters() if p.grad is not None})
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    for k, gr in res[False][2].items():
+        assert (res[True][2][k] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), k
+
+
+def test_cpu_kernels_match_the_reference():
+    """The C++ / OpenMP symmetry functions (xnn.dnn.fast.acsf_cpu) give the reference's values and their
+    gradient with respect to the edge vectors, for a molecule and a cell (where a C++ compiler is available)."""
+    from xnn.dnn.fast import acsf_cpu
+    if not acsf_cpu.available():
+        pytest.skip("the C++ kernels do not build here")
+    acsf = _kernel_acsf().double()
+    rng = np.random.default_rng(1)
+    for s in ({"pos": rng.uniform(0, 4.0, (9, 3)), "atomic_numbers": [1, 6, 8, 1, 1, 6, 8, 1, 8]},
+              {"pos": rng.uniform(0, 6.0, (12, 3)), "atomic_numbers": [8, 1, 1] * 4, "cell": np.eye(3) * 6.0,
+               "pbc": [True] * 3}):
+        g = structure_to_graph(s, acsf.cutoff)
+        vec = g.edge_vectors().detach().double().clone().requires_grad_(True)
+        n = g.num_nodes
+        ref = acsf.compute_raw(g.atomic_numbers, g.edge_index, vec, n)
+        fast = acsf._raw_cpu(vec, acsf._z2i[g.atomic_numbers], g.edge_index, n)
+        assert (fast - ref).abs().max() <= 1e-14 * ref.abs().max()
+        w = torch.randn_like(ref)
+        gr = torch.autograd.grad((ref * w).sum(), vec)[0]
+        gf = torch.autograd.grad((fast * w).sum(), vec)[0]
+        assert (gf - gr).abs().max() <= 1e-14 * gr.abs().max()

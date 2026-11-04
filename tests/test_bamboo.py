@@ -321,3 +321,59 @@ def test_d3_reference_set_switch():
                        default.dispersion._c6ab[:87, :87])
     g = _graph()
     assert torch.allclose(default(g)["energy"], newer(g)["energy"])   # no actinides
+
+
+# fast path (the attention logits of ET and the fused continuous-filter convolution of SchNet)
+
+def _force_loss_results(model, g):
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model).train()(g)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+    return (out["energy"].detach().double(), out["forces"].detach().double(),
+            {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
+
+
+def test_fast_messages_match_the_reference():
+    """The fused attention logits and messages give the reference energies, forces and the weight
+    gradients of a force loss, in the first, middle and last layers (Triton's interpreter on a
+    CPU, the kernels on a GPU)."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = _build(n_interactions=3, n_features=24, num_heads=6).double().to(device)
+    g = _graph(n=8, total_charge=1.0).to(device)
+    blocks = list(model.layers)
+    res = {}
+    for on in (False, True):
+        # the model selects per evaluation, and no CPU qualifies: pin the selection
+        def pinned(num_edges, on=on):
+            model.__dict__["_fast_blocks"] = blocks
+            for b in blocks:
+                b.fast_active = on
+        model._select_fast = pinned
+        res[on] = _force_loss_results(model, g)
+    del model._select_fast
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= 1e-11 * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_parity_and_training(dtype):
+    """On the GPU: the fused kernels give the reference energies, forces and weight gradients of a
+    force loss."""
+    pytest.importorskip("triton")
+    model = _build(n_interactions=3, n_features=32, num_heads=8).to("cuda", dtype)
+    g = _graph(n=12, periodic=True).to("cuda")
+    g.pos, g.cell = g.pos.to(dtype), g.cell.to(dtype)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res[use_fast] = _force_loss_results(model, g)
+        assert model.layers[0].fast_active == use_fast
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name

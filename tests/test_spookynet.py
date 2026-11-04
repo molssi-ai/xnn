@@ -759,3 +759,63 @@ def test_fidelity_published_checkpoint():
     res = subprocess.run([sys.executable, script, "float64", path], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert float(res.stdout.strip().splitlines()[-1]) < 1e-12
+
+
+# fast path (the fused continuous-filter convolution of SchNet)
+
+def _fast_case(device="cpu", dtype=torch.float64):
+    model = _small(seed=4, n_features=12).to(device, dtype)
+    g = collate([_graph(_structure(7, seed=4), total_charge=1, spin_multiplicity=2),
+                 _graph(_structure(5, seed=5))]).to(device)
+    g.pos = g.pos.to(dtype)
+    return model, g
+
+
+def _force_loss_results(model, g):
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model).train()(g)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+    return (out["energy"].detach().double(), out["forces"].detach().double(),
+            {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
+
+
+def test_fast_sums_match_the_reference():
+    """The fused local sums (s, and p and d over 3 and 5 feature blocks: widths that are not powers
+    of two) give the reference energies, forces and the weight gradients of a force loss (Triton's
+    interpreter on a CPU, the kernels on a GPU)."""
+    pytest.importorskip("triton")
+    model, g = _fast_case("cuda" if torch.cuda.is_available() else "cpu")
+    blocks = [m.local_interaction for m in model.interactions]
+    res = {}
+    for on in (False, True):
+        # the model selects per evaluation, and no CPU qualifies: pin the selection
+        def pinned(num_edges, on=on):
+            model.__dict__["_fast_blocks"] = blocks
+            for b in blocks:
+                b.fast_active = on
+        model._select_fast = pinned
+        res[on] = _force_loss_results(model, g)
+    del model._select_fast
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= 1e-11 * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_parity_and_training(dtype):
+    """On the GPU: the fused local sums give the reference energies, forces and weight gradients
+    of a force loss."""
+    pytest.importorskip("triton")
+    model, g = _fast_case("cuda", dtype)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res[use_fast] = _force_loss_results(model, g)
+        assert model.interactions[0].local_interaction.fast_active == use_fast
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name

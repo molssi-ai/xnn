@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from xnn.common import cpu_kernels
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine
 from xnn.common.deploy.step_graph import StepGraph
@@ -573,19 +574,37 @@ def test_second_derivatives_through_the_iterative_solve(cls):
         assert float(row[other, ax2]) == pytest.approx((fp - fm) / (2 * h), rel=1e-4, abs=1e-3)
 
 
-def test_use_fast_validates_and_keeps_the_reference_on_the_cpu():
-    """use_fast is validated, defaults to "auto", is reached by set_use_fast, and is inactive on the CPU."""
+def test_use_fast_validates_and_takes_the_cpu_kernels_only_when_asked():
+    """use_fast is validated, defaults to "auto", and is reached by set_use_fast. On the CPU "auto" keeps the
+    reference and ``True`` takes the kernels as C++ loops (the compiled blocks of the GPU path stay off)."""
     from xnn.common.models.fast import set_use_fast
     with pytest.raises(ValueError):
         _box(Amoeba, use_fast="always")
-    assert _box(Amoeba).use_fast == "auto"
+    auto = _box(Amoeba).eval()
+    assert auto.use_fast == "auto"
+    one = torch.ones(3, dtype=torch.float64)
+    assert not auto._fused_active(one) and not auto._kernels_active(one)
     ref, fast = _box(Amoeba, use_fast=False), _box(Amoeba)
     set_use_fast(ForceStressOutput(fast), True)
     assert fast.use_fast is True and ref.use_fast is False
     fast.eval()
-    assert not fast._fused_active(torch.ones(3, dtype=torch.float64))
+    assert not fast._fused_active(one)
+    assert fast._kernels_active(one) == cpu_kernels.available()
     e_ref = float(ref.eval()(_graph(BOX))["energy"])
-    assert float(fast(_graph(BOX))["energy"]) == e_ref
+    assert float(auto(_graph(BOX))["energy"]) == e_ref
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_cpu_kernels_match_the_reference(cls):
+    """On a CPU, ``use_fast=True`` runs the pair, mutual-field, solver and mesh kernels as C++ loops: energies,
+    forces and stress agree with the reference."""
+    g = _graph(BOX)
+    ref = ForceStressOutput(_box(cls, use_fast=False), compute_stress=True).eval()
+    fast = ForceStressOutput(_box(cls, use_fast=True), compute_stress=True).eval()
+    want, got = ref(g), fast(g)
+    for key in ("energy", "forces", "stress"):
+        assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
@@ -602,18 +621,24 @@ def test_fused_pair_arithmetic_matches_the_reference_on_the_gpu(cls):
             assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+_KERNEL_DEVICES = [
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")),
+    pytest.param("cpu", marks=pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ "
+                                                                                     "compiler"))]
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
-def test_second_derivatives_through_the_kernels_match_the_reference(cls):
+def test_second_derivatives_through_the_kernels_match_the_reference(cls, device):
     """A force loss differentiated through the pair kernels (their generated tangent kernels) gives the
     reference's gradient with respect to the positions: the kernels are differentiable twice."""
     pos = BOX[:24] - BOX[:24].mean(0)
-    weights = torch.tensor(np.random.default_rng(8).normal(size=(24, 3)), device="cuda")
+    weights = torch.tensor(np.random.default_rng(8).normal(size=(24, 3)), device=device)
     results = []
     for use_fast in (False, True):
         lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
-        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12).to("cuda").eval()
-        g = _graph(pos, cell=None, cutoff=30.0).to("cuda")
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12).to(device).eval()
+        g = _graph(pos, cell=None, cutoff=30.0).to(device)
         g.pos.requires_grad_(True)
         energy = model(g)["energy"].sum()
         forces = -torch.autograd.grad(energy, g.pos, create_graph=True)[0]
@@ -950,6 +975,13 @@ def test_steps_on_a_plan_follow_the_plain_steps(cls):
 def test_steps_on_a_plan_follow_the_plain_steps_with_exchange_polarization():
     """Steps on a plan follow the plain steps with exchange polarization."""
     _walk(Hippo, "cpu", 4, library=_exchpol_library())
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_on_a_plan_follow_the_plain_steps_on_the_cpu_kernels(cls):
+    """On the CPU kernels, steps on a plan follow the plain steps of the reference."""
+    _walk(cls, "cpu", 6, use_fast=True)
 
 
 def test_steps_on_a_plan_shorten_their_solves():

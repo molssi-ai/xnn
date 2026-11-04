@@ -10,6 +10,7 @@ from xnn.common.models import ForceStressOutput
 from xnn.common.train import Trainer
 from xnn.common.train.graphed import PaddedCollate, PlannedDataset, capacity, strip_padding
 from xnn.common.train.losses import weighted_loss
+from xnn.dnn.models.physnet import PhysNet
 from xnn.gnn.models.dimenet import DimeNet, DimeNetPP
 from xnn.gnn.models.gemnet import GemNet
 
@@ -39,11 +40,22 @@ GEMNET = dict(n_features=12, n_edge_features=10, n_interactions=2, n_rbf=3, n_sp
               n_rbf_features=4, n_cbf_features=4, n_sbf_features=5, n_bilinear_triplet=7,
               n_bilinear_quadruplet=6, n_atom_residual=1)
 
-MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q"]
+MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q", "physnet"]
+
+#: PhysNet sizes (small)
+PHYSNET = dict(cutoff=5.0, n_features=16, n_rbf=8, num_blocks=2)
 
 
 def _small(name="dimenet"):
     torch.manual_seed(0)
+    if name == "physnet":
+        model = PhysNet(**PHYSNET)
+        with torch.no_grad():          # the zero-initialized heads randomized (all blocks contribute)
+            for ob in model.output_blocks:
+                ob.dense.weight.normal_(0, 0.1)
+            for ib in model.interaction_blocks:
+                ib.interaction.k2f.weight.normal_(0, 0.1)
+        return model
     if name.startswith("gemnet"):
         return GemNet(quadruplets=name == "gemnet-q", **GEMNET)
     common = dict(n_features=16, n_interactions=2, n_rbf=4, n_spherical=3, cutoff=5.0, n_output_layers=2)
@@ -63,8 +75,9 @@ def test_padded_batch_is_inert(name):
     # the batch plan concatenated from the structures' own plans
     padded = PaddedCollate(planner, cap)([planned[i] for i in range(3)])
     assert padded.num_nodes == cap.atoms and padded.edge_index.shape[1] == cap.edges
-    triplets = padded.index_plan["t_out" if name.startswith("gemnet") else "kj"]
-    assert triplets.shape[0] == cap.plan["triplets"]
+    if name != "physnet":
+        triplets = padded.index_plan["t_out" if name.startswith("gemnet") else "kj"]
+        assert triplets.shape[0] == cap.plan["triplets"]
     plain = collate(graphs[:3])
     wrapped = ForceStressOutput(model).train()
     out_pad, out = wrapped(padded), wrapped(plain)
@@ -95,7 +108,10 @@ def test_sync_free_loss_of_an_unlabelled_term_is_zero():
 
 
 def _cfg(tmp_path, cuda_graph, model="dimenet"):
-    if model.startswith("gemnet"):
+    if model == "physnet":
+        spec = {"name": "physnet", "cutoff": PHYSNET["cutoff"], "n_features": PHYSNET["n_features"],
+                "n_interactions": PHYSNET["num_blocks"], "n_rbf": PHYSNET["n_rbf"]}
+    elif model.startswith("gemnet"):
         extra = {k: v for k, v in GEMNET.items()
                  if k not in ("n_features", "n_interactions", "n_rbf", "cutoff")}
         extra["quadruplets"] = model == "gemnet-q"

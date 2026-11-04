@@ -4,7 +4,12 @@
 ``setup()`` makes the reference importable on a current Python / numpy / torch
 (``collections.Iterable`` for its ``lie_learn`` dependency, ``np.float`` in its
 grids) and, for the float64 run, routes its float32 constant tables through
-the default dtype. ``compare_all(dtype)`` returns the worst relative error of
+the default dtype. ``build_reference_trunk(model)`` composes the ResNet blocks
+of a :class:`~xnn.cnn.models.SphericalCNN` (Table 3 of the paper; the
+reference ships the layers, not this network) from the reference layers
+with the model's weights; between the xnn featurizer and energy head
+(``se3cnn_fidelity.ReferencePipeline``) it gives energies and forces of the
+reference trunk. ``compare_all(dtype)`` returns the worst relative error of
 every compared quantity.
 
     python tests/s2cnn_fidelity.py            # prints both precisions
@@ -84,13 +89,81 @@ def setup() -> None:
             out.append(torch.tensor(U, dtype=torch.get_default_dtype(), device=torch.device(device_type, device_index)))
         return out
 
-    s2_fft._setup_wigner = wigner_s2
-    so3_fft._setup_wigner = wigner_so3
-    s2_ft._setup_s2_ft = setup_s2_ft
-    so3_ft._setup_so3_ft = setup_so3_ft
-    so3_integrate._setup_so3_integrate = setup_integrate
-    so3_rotation._setup_so3_rotation = setup_rotation
+    # the reference keeps every table in an lru_cache; so do these, per working precision
+    def cached(fn):
+        tables = {}
+
+        def lookup(*args, **kwargs):
+            key = (torch.get_default_dtype(), args, tuple(sorted(kwargs.items())))
+            if key not in tables:
+                tables[key] = fn(*args, **kwargs)
+            return tables[key]
+        return lookup
+
+    s2_fft._setup_wigner = cached(wigner_s2)
+    so3_fft._setup_wigner = cached(wigner_so3)
+    s2_ft._setup_s2_ft = cached(setup_s2_ft)
+    so3_ft._setup_so3_ft = cached(setup_so3_ft)
+    so3_integrate._setup_so3_integrate = cached(setup_integrate)
+    so3_rotation._setup_so3_rotation = cached(setup_rotation)
     _PATCHED = True
+
+
+class _ReferenceResBlock(torch.nn.Module):
+    """A ResNet block of Table 3 of reference layers: correlation, batch norm,
+    activation, SO(3) correlation, batch norm, plus the shortcut."""
+
+    def __init__(self, conv1, norm1, act, conv2, norm2, shortcut):
+        super().__init__()
+        self.conv1, self.norm1, self.act = conv1, norm1, act
+        self.conv2, self.norm2, self.shortcut = conv2, norm2, shortcut
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv1(x)
+        if self.norm1 is not None:
+            y = self.norm1(y)
+        y = self.conv2(self.act(y))
+        if self.norm2 is not None:
+            y = self.norm2(y)
+        return y + (x if self.shortcut is None else self.shortcut(x))
+
+
+class _Integrate(torch.nn.Module):
+    """The reference integral over SO(3)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import importlib
+        return importlib.import_module("s2cnn.soft.so3_integrate").so3_integrate(x)
+
+
+def reference_conv(conv):
+    """The reference correlation of an xnn ``S2Convolution`` / ``SO3Convolution``, filter and bias copied."""
+    setup()
+    from s2cnn import S2Convolution as RefS2Conv
+    from s2cnn import SO3Convolution as RefSO3Conv
+
+    from xnn.cnn.models import S2Convolution
+
+    grid = tuple(tuple(float(v) for v in p) for p in conv.points.double().tolist())
+    cls = RefS2Conv if isinstance(conv, S2Convolution) else RefSO3Conv
+    with contextlib.redirect_stdout(io.StringIO()):
+        ref = cls(conv.n_in, conv.n_out, conv.b_in, conv.b_out, grid)
+    assert abs(ref.scaling - conv.scaling) < 1e-15
+    with torch.no_grad():
+        ref.kernel.copy_(conv.kernel)
+        ref.bias.copy_(conv.bias)
+    return ref
+
+
+def build_reference_trunk(model):
+    """The ResNet blocks and SO(3) integral of a :class:`~xnn.cnn.models.SphericalCNN` of reference layers."""
+    import copy
+
+    blocks = [_ReferenceResBlock(reference_conv(b.conv1), copy.deepcopy(b.norm1), b.act,
+                                 reference_conv(b.conv2), copy.deepcopy(b.norm2),
+                                 None if b.shortcut is None else reference_conv(b.shortcut))
+              for b in model.blocks]
+    return torch.nn.Sequential(*blocks, _Integrate())
 
 
 def _relative(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -150,11 +223,13 @@ def compare_all(dtype: torch.dtype = torch.float64, seed: int = 0) -> dict[str, 
     from s2cnn.soft.so3_fft import so3_rifft as ref_so3_rifft
     ref_rotation = importlib.import_module("s2cnn.soft.so3_rotation").so3_rotation
     ref_integrate = importlib.import_module("s2cnn.soft.so3_integrate").so3_integrate
+    from se3cnn_fidelity import ReferencePipeline, energy_forces, random_batch
     from xnn.cnn.models import (
         S2Convolution,
         S2Transform,
         SO3Convolution,
         SO3Transform,
+        SphericalCNN,
         s2_near_identity_grid,
         so3_integrate,
         so3_near_identity_grid,
@@ -215,6 +290,30 @@ def compare_all(dtype: torch.dtype = torch.float64, seed: int = 0) -> dict[str, 
             errors["s2_conv"] = _relative(z, z_ref)
             with quiet:
                 errors["so3_conv"] = _relative(so3(z), ref_so3(z_ref))
+        # the whole network (Table 3 scaled down, one identity shortcut) with transplanted weights:
+        # trunk features with batch statistics, then energies and forces with running statistics
+        n_atoms, cutoff = 5, 4.0
+        model = SphericalCNN([1, 6, 7, 8], cutoff, radius=0.5, bandwidth=5, features=[4, 6, 6],
+                             bandwidths=[4, 3, 3])
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if name.endswith("bias") or name.endswith("norm1.weight") or name.endswith("norm2.weight"):
+                    p.add_(0.3 * torch.randn(p.shape, generator=g, dtype=dtype))
+            for name, buf in model.named_buffers():
+                if name.endswith("running_mean"):
+                    buf.normal_(0.0, 0.3, generator=g)
+                elif name.endswith("running_var"):
+                    buf.uniform_(0.5, 1.5, generator=g)
+            model.readout[-1].weight.normal_(generator=g)
+            model.readout[-1].bias.normal_(generator=g)
+        with quiet:
+            trunk = build_reference_trunk(model)
+            grids = model.featurizer(random_batch(n_atoms, cutoff, dtype))
+            errors["network"] = _relative(model.train().trunk(grids), trunk.train()(grids))
+            e, f = energy_forces(model, n_atoms, cutoff, dtype)
+            e_ref, f_ref = energy_forces(ReferencePipeline(model, trunk), n_atoms, cutoff, dtype)
+        errors["energy"] = _relative(e, e_ref)
+        errors["forces"] = _relative(f, f_ref)
     finally:
         torch.set_default_dtype(old)
     return errors

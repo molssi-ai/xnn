@@ -5,7 +5,7 @@ reference code with another summation order, so energies, forces, stress and
 charges must agree to rounding (float64) and to the solver tolerance (the
 iterative EEQ solve). Systems: a small water cell (narrower than twice the
 three-body cutoff, so it has self-image triangles), a larger cell (none) and a
-water cluster. GPU tests skip without CUDA; the operator tests also run on the CPU.
+water cluster. GPU tests skip without CUDA; the operator tests and the C++ kernels run on the CPU.
 """
 import copy
 import warnings
@@ -64,8 +64,8 @@ SYSTEMS = {"small_cell": (3, True), "cell": (4, True), "cluster": (3, False)}
 def _model(method, dtype=torch.float64, device="cuda", **extra):
     cls = D4Dispersion if method == "d4" else D3Dispersion
     opts = {**OPTIONS, **(D4_ONLY if method == "d4" else {}), **extra}
-    # evaluation mode: create_graph=False, so the kernels' own backward runs
-    # (training mode asks for second derivatives, which use the reference)
+    # evaluation mode: create_graph=False, the kernels' first-order backward
+    # (training mode asks for second derivatives: test_dispersion_fast_training.py)
     model = ForceStressOutput(cls(**opts), compute_stress=True).to(device=device, dtype=dtype)
     return model.eval()
 
@@ -85,6 +85,11 @@ def _pair(model, graph):
         warnings.simplefilter("ignore", fast.FastPathPrecisionWarning)
         out = model(copy.copy(graph))
     return ref, out
+
+
+def _cpu_compiles():
+    from xnn.common.models.dispersion_fast.atm_cpu import available
+    return available()
 
 
 def _rel(a, b):
@@ -128,7 +133,7 @@ def test_atm_self_image_triangles_are_covered():
 
 @needs_gpu
 @pytest.mark.parametrize("method", ["d4", "d3"])
-def test_second_derivatives_use_the_reference(method):
+def test_second_derivatives_through_the_kernels(method):
     """A Hessian-vector product through the fast ATM term (a create_graph backward)."""
     disp = _model(method).model                       # evaluation mode: the kernels run
     hv = {}
@@ -147,18 +152,19 @@ def test_second_derivatives_use_the_reference(method):
 
 
 @needs_gpu
-def test_training_mode_uses_the_reference_three_body():
+def test_training_mode_uses_the_fast_three_body():
+    """A training step differentiates the kernels' gradient (the tangent kernels)."""
     model = _model("d4").train()
     fast.set_use_fast(model, True)
     calls = []
     import xnn.common.models.dispersion_fast.atm as atm
-    original = atm._ATMEnergy.apply
-    atm._ATMEnergy.apply = lambda *a: calls.append(1) or original(*a)
+    original = atm._ATMGrad.apply
+    atm._ATMGrad.apply = lambda *a: calls.append(1) or original(*a)
     try:
         model(_graph(model, "cell"))
     finally:
-        atm._ATMEnergy.apply = original
-    assert model.model.term.fast_active and not calls
+        atm._ATMGrad.apply = original
+    assert model.model.term.fast_active and calls
 
 
 @needs_gpu
@@ -238,14 +244,144 @@ def test_fast_eeq_charges_match_the_reference(system, solver):
 
 
 # selection, CPU behaviour, export
-def test_cpu_fast_request_runs_the_reference():
+def test_cpu_fast_request_runs_the_reference_elsewhere():
+    """On a CPU a fast request takes the C++ kernels where they build, else the compiled three-body
+    tiles where torch.compile produces code, else the reference; the results are the reference's."""
+    from xnn.common.models.dispersion_fast import cpu
     model = _model("d4", device="cpu")
     g = _graph(model, "small_cell", device="cpu")
     ref, out = _pair(model, g)
-    assert not model.model.term.fast_active
-    # the same code path; only a threaded scatter's summation order can differ
+    assert model.model.term.fast_active == (cpu.available() or _cpu_compiles())
     for key in ("energy", "forces", "stress"):
-        assert torch.allclose(out[key], ref[key], rtol=0, atol=1e-12)
+        assert _rel(out[key], ref[key]) < 1e-12, key
+
+
+@pytest.mark.parametrize("method", ["d3", "d4"])
+@pytest.mark.parametrize("system", ["small_cell", "cluster"])
+@pytest.mark.parametrize("width", [0.0, 1.0])
+def test_cpu_three_body_matches_the_reference(method, system, width):
+    """The compiled CPU three-body tiles give the reference's energies, atomic energies,
+    forces and stress (repeated-atom triangles of the periodic cell included)."""
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    model = _model(method, device="cpu", switch_width_triple=width)
+    g = _graph(model, system, device="cpu")
+    fast.set_use_fast(model, False)
+    ref = model(copy.copy(g))
+    fast.set_use_fast(model, True)
+    out = model(copy.copy(g))
+    assert model.model.term.fast_active
+    keys = ("energy", "node_energy", "forces") + (("stress",) if system != "cluster" else ())
+    for key in keys:
+        assert _rel(out[key], ref[key]) < 1e-12, key
+
+
+def _d3_kernels():
+    from xnn.common.models.dispersion_fast import cpu
+    if not cpu.available():
+        pytest.skip("the C++ kernels do not build here")
+
+
+_DAMPINGS = {"bj": {}, "zero": {}, "mzero": {"bet": 0.1}, "op": {"bet": 6.0}}
+
+
+@pytest.mark.parametrize("damping", list(_DAMPINGS))
+@pytest.mark.parametrize("system", ["small_cell", "cluster"])
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+def test_d3_cpu_kernels_match_the_reference(damping, system, s9):
+    """D3 on the C++ kernels gives the reference's energies (total, per atom, two- and three-body), forces,
+    stress, coordination numbers and features for every damping, with and without the three-body term."""
+    _d3_kernels()
+    model = _model("d3", device="cpu", damping=damping, s9=s9, **_DAMPINGS[damping])
+    g = _graph(model, system, device="cpu")
+    ref, out = _pair(model, g)
+    assert model.model.term.fast_active and out["c6_matrix"].numel() == 0
+    keys = ["energy", "node_energy", "energy_2body", "forces", "coordination_numbers", "node_features"]
+    keys += ["energy_3body"] * (s9 != 0.0) + ["stress"] * (system != "cluster")
+    for key in keys:
+        assert _rel(out[key], ref[key]) < 1e-12, key
+
+
+@pytest.mark.parametrize("system", ["small_cell", "cluster"])
+def test_d3_cpu_kernels_weighted_gradients(system):
+    """Gradients other than those of summed energies (the three-body energy alone, weighted atomic energies,
+    the coordination numbers, the homoatomic C6) evaluate again with their weights: the reference's."""
+    _d3_kernels()
+    model = _model("d3", device="cpu")
+    g = _graph(model, system, device="cpu")
+    grads = {}
+    for mode in (False, True):
+        fast.set_use_fast(model, mode)
+        gg = copy.copy(g)
+        vec = gg.edge_vectors().detach().requires_grad_(True)
+        gg.edge_vectors = lambda v=vec: v
+        out = model.model(gg)
+        assert model.model.term.fast_active == mode
+        w = torch.linspace(0.3, 1.7, out["node_energy"].shape[0])
+        losses = [out["energy_3body"].sum(), (out["node_energy"] * w).sum() + 0.5 * out["energy_2body"].sum(),
+                  (out["coordination_numbers"] * w).sum(), (out["node_features"][:, 1] * w).sum()]
+        grads[mode] = [torch.autograd.grad(loss, vec, retain_graph=True)[0] for loss in losses]
+    for a, b in zip(grads[True], grads[False]):
+        assert _rel(a, b) < 1e-12
+
+
+def test_d3_cpu_kernels_float32_is_at_least_as_accurate():
+    """float32 inputs run in float64 inside the kernels: closer to the float64 result than the float32
+    reference (whose periodic three-body sums cancel to a few digits)."""
+    _d3_kernels()
+    model = _model("d3", device="cpu")
+    exact = model(copy.copy(_graph(model, "small_cell", device="cpu")))
+    model32 = _model("d3", dtype=torch.float32, device="cpu")
+    ref, out = _pair(model32, _graph(model32, "small_cell", dtype=torch.float32, device="cpu"))
+    for key in ("energy_3body", "energy", "forces"):
+        err_out = _rel(out[key].double(), exact[key])
+        assert err_out < 1e-5 and err_out <= max(_rel(ref[key].double(), exact[key]), 1e-7), key
+
+
+def test_d3_cpu_kernels_step_aside():
+    """Trained parameters and training steps keep the reference (the kernels' gradient is differentiable
+    once); elements without reference data raise as the reference does."""
+    _d3_kernels()
+    model = _model("d3", device="cpu", trainable=True)
+    fast.set_use_fast(model, True)
+    assert not model.model.term.cpu_kernels_apply(10)
+    model = _model("d3", device="cpu").train()
+    fast.set_use_fast(model, True)
+    out = model(_graph(model, "cluster", device="cpu"))
+    assert out["c6_matrix"].numel() > 0
+    model.eval()
+    g = _graph(model, "cluster", device="cpu")
+    g.atomic_numbers = g.atomic_numbers.clone()
+    g.atomic_numbers[0] = 104
+    with pytest.raises(ValueError, match="atomic numbers"):
+        model(g)
+
+
+@pytest.mark.parametrize("system", ["small_cell", "cell", "cluster"])
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+def test_d4_cpu_kernels_match_the_reference(system, s9):
+    """D4's two- and three-body terms on the C++ kernels give the reference's energies, forces and stress,
+    and the gradients of other weightings (the three-body energy alone, weighted atomic energies)."""
+    _d3_kernels()
+    model = _model("d4", device="cpu", s9=s9)
+    g = _graph(model, system, device="cpu")
+    ref, out = _pair(model, g)
+    assert model.model.term.fast_active
+    keys = ["energy", "node_energy", "energy_2body", "energy_3body", "forces"] + ["stress"] * (system != "cluster")
+    for key in keys:
+        assert _rel(out[key], ref[key]) < 1e-12, key
+    grads = {}
+    for mode in (False, True):
+        fast.set_use_fast(model, mode)
+        gg = copy.copy(g)
+        vec = gg.edge_vectors().detach().requires_grad_(True)
+        gg.edge_vectors = lambda v=vec: v
+        o = model.model(gg)
+        w = torch.linspace(0.3, 1.7, o["node_energy"].shape[0])
+        losses = [o["energy_3body"].sum() + o["energy_2body"].sum() * 0.25, (o["node_energy"] * w).sum()]
+        grads[mode] = [torch.autograd.grad(loss, vec, retain_graph=True)[0] for loss in losses]
+    for a, b in zip(grads[True], grads[False]):
+        assert _rel(a, b) < 1e-12
 
 
 def test_set_use_fast_reaches_the_dispersion_wrapper():

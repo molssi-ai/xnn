@@ -2,7 +2,8 @@
 energies of every term, forces, charges, stress-free first derivatives in the trained parameters, on periodic
 boxes of methanol / water copies and on clusters, for the CHO template in the ReaxFF-nn conventions (classical
 and neural bond orders) and two published fields in the LAMMPS conventions (the 2008 combustion field, the Fedkin
-electrolyte field with its inner wall), float64 and float32. GPU only.
+electrolyte field with its inner wall), float64 and float32; on a GPU and, as C++ loops (xnn.common.cpu_kernels), on
+the CPU.
 """
 import numpy as np
 import pytest
@@ -11,7 +12,19 @@ import torch
 from xnn.common.data import structure_to_graph
 from xnn.ffnn.models import ReaxFF, template_library
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+from xnn.common import cpu_kernels
+
+DEVICES = [pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no GPU")),
+           pytest.param("cpu", marks=pytest.mark.skipif(not cpu_kernels.available(), reason="no C++ compiler"))]
+
+
+@pytest.fixture(params=DEVICES)
+def device(request, monkeypatch):
+    """The device of a test; on the CPU the model takes the kernels (its default there is the eager terms)."""
+    if request.param == "cpu":
+        import xnn.ffnn.models.classical_fast as cf
+        monkeypatch.setattr(cf, "fast_supported", lambda d, dtype: dtype in (torch.float32, torch.float64))
+    return request.param
 
 METHANOL = (np.array([[0.0, 0.0, 0.0], [1.42, 0.0, 0.0], [-0.60, 0.90, 0.0], [-0.60, -0.50, 0.80],
                       [-0.60, -0.50, -0.80], [1.80, 0.85, 0.0]]), [6, 8, 1, 1, 1, 1])
@@ -41,7 +54,7 @@ CASES = [("template-nn-conventions", lambda: ReaxFF(template_library(["C", "H", 
 
 @pytest.mark.parametrize("periodic", [True, False])
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
-def test_the_nonbonded_kernel_matches_the_eager_terms(case, periodic):
+def test_the_nonbonded_kernel_matches_the_eager_terms(case, periodic, device):
     name, build, mol = case
     pos, z, L = _box(mol, 3, 6.5)
     s = {"pos": torch.tensor(pos if not periodic else pos % L), "atomic_numbers": torch.tensor(z)}
@@ -52,11 +65,11 @@ def test_the_nonbonded_kernel_matches_the_eager_terms(case, periodic):
         p.requires_grad_(p.is_floating_point() and p.dim() > 0)
     model.params["vdw1"].requires_grad_(False)
     for dtype, rtol in ((torch.float64, 1e-10), (torch.float32, 3e-5)):
-        m = model.to(device="cuda", dtype=dtype).eval()
+        m = model.to(device=device, dtype=dtype).eval()
         results = []
         for fast in (False, True):
             m.use_fast = fast
-            g = structure_to_graph(s, m.cutoff, device="cuda")
+            g = structure_to_graph(s, m.cutoff, device=device)
             g.compute_dtype = dtype
             p = g.pos.detach().clone().requires_grad_(True)
             g.pos = p
@@ -83,7 +96,7 @@ def test_the_nonbonded_kernel_matches_the_eager_terms(case, periodic):
                                                                float((a - b).abs().max()), scale)
 
 
-def test_the_conjugate_gradient_charges_on_the_kernel_match(monkeypatch):
+def test_the_conjugate_gradient_charges_on_the_kernel_match(monkeypatch, device):
     """Large structures solve the EEM charges by conjugate gradients; the fast path's products on one kernel give
     the eager solve's charges, energies and forces."""
     import xnn.ffnn.models.reaxff as rx
@@ -91,11 +104,11 @@ def test_the_conjugate_gradient_charges_on_the_kernel_match(monkeypatch):
     pos, z, L = _box(METHANOL, 3, 6.5)
     s = {"pos": torch.tensor(pos % L), "atomic_numbers": torch.tensor(z),
          "cell": torch.eye(3, dtype=torch.float64) * L, "pbc": torch.ones(3, dtype=torch.bool)}
-    m = ReaxFF("CHO_cho_2008", conventions="lammps").to(device="cuda", dtype=torch.float64).eval()
+    m = ReaxFF("CHO_cho_2008", conventions="lammps").to(device=device, dtype=torch.float64).eval()
     res = []
     for fast in (False, True):
         m.use_fast = fast
-        g = structure_to_graph(s, m.cutoff, device="cuda")
+        g = structure_to_graph(s, m.cutoff, device=device)
         p = g.pos.detach().clone().requires_grad_(True)
         g.pos = p
         out = m(g)
@@ -106,7 +119,7 @@ def test_the_conjugate_gradient_charges_on_the_kernel_match(monkeypatch):
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
-def test_the_kernels_give_the_eager_stress(case):
+def test_the_kernels_give_the_eager_stress(case, device):
     """The stress of a periodic box (the cell adjoint of the pair kernel, the cell through the bond vectors of
     the others) is the eager terms'."""
     from xnn.common.models import ForceStressOutput
@@ -118,8 +131,8 @@ def test_the_kernels_give_the_eager_stress(case):
          "pbc": torch.ones(3, dtype=torch.bool)}
     model = build()
     for dtype, rtol in ((torch.float64, 1e-10), (torch.float32, 3e-5)):
-        m = model.to(device="cuda", dtype=dtype).eval()
-        g = structure_to_graph(s, m.cutoff, device="cuda")
+        m = model.to(device=device, dtype=dtype).eval()
+        g = structure_to_graph(s, m.cutoff, device=device)
         g.compute_dtype = dtype
         w = ForceStressOutput(m, compute_stress=True).eval()
         res = []
@@ -131,3 +144,49 @@ def test_the_kernels_give_the_eager_stress(case):
             a, b = res[0][key], res[1][key]
             scale = float(a.abs().max()) or 1.0
             assert float((a - b).abs().max()) <= rtol * scale, (name, str(dtype), key, float((a - b).abs().max()))
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+def test_a_force_loss_trains_through_the_kernels(case, device):
+    """In training the kernels are differentiable twice: the gradients of an energy and force loss in the
+    positions and every trained parameter (network weights included) are the eager terms' in float64; in
+    float32 both are as far from the float64 gradients (these second derivatives cancel)."""
+    name, build, mol = case
+    pos, z, L = _box(mol, 2, 6.5)
+    s = {"pos": torch.tensor(pos % L), "atomic_numbers": torch.tensor(z), "cell": torch.eye(3, dtype=torch.float64) * L,
+         "pbc": torch.ones(3, dtype=torch.bool)}
+    model = build()
+    for p in model.params.values():
+        p.requires_grad_(p.is_floating_point() and p.dim() > 0)
+    model.params["vdw1"].requires_grad_(False)
+
+    def gradients(dtype, fast):
+        m = model.to(device=device, dtype=dtype).train()
+        m.use_fast = fast
+        g = structure_to_graph(s, m.cutoff, device=device)
+        g.compute_dtype = dtype
+        p = g.pos.detach().clone().requires_grad_(True)
+        g.pos = p
+        e = m(g)["energy"].sum()
+        (f,) = torch.autograd.grad(-e, p, create_graph=True)
+        loss = 1e-3 * e * e + (f * f).sum()
+        params = [v for v in m.parameters() if v.requires_grad]
+        out = torch.autograd.grad(loss, [p] + params, allow_unused=True)
+        return [None if x is None else x.detach().double() for x in out]
+
+    ref = gradients(torch.float64, False)
+    fast64 = gradients(torch.float64, True)
+    eager32, fast32 = gradients(torch.float32, False), gradients(torch.float32, True)
+    for j, (r, a, b, c) in enumerate(zip(ref, fast64, eager32, fast32)):
+        if r is None and a is None:
+            continue
+        r = torch.zeros_like(a) if r is None else r
+        a, b, c = (torch.zeros_like(r) if x is None else x for x in (a, b, c))
+        scale = float(r.abs().max()) or 1.0
+        assert float((a - r).abs().max()) <= 1e-9 * scale, (name, "float64", j, float((a - r).abs().max()), scale)
+        err32 = float((b - r).abs().max())
+        # float32 round-off of a second derivative through the dihedral's cancelling law of cosines (the
+        # kernels contract to fused multiply-adds) reaches 1e-5 relative, and the atomic sums' order varies
+        # from run to run
+        assert float((c - r).abs().max()) <= max(5.0 * err32, 1e-4 * scale), (name, "float32", j, err32,
+                                                                               float((c - r).abs().max()), scale)

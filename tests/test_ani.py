@@ -395,3 +395,151 @@ def test_torchani_ani2x_energy_force_fidelity():
     # tolerance is looser in absolute terms but still ~1e-10 relative.
     assert abs(out["energy"].item() - e.item()) < 1e-5
     assert torch.allclose(out["forces"].detach(), f, atol=1e-5)
+
+
+@pytest.mark.parametrize("preset", ["ani1x", "ani2x"])
+def test_scriptable_and_lammps_export(tmp_path, preset):
+    """The TorchScript core equals the eager model, and the LAMMPS export gives its energy and forces."""
+    from xnn.common.deploy import export_to_lammps
+    species = SPECIES if preset == "ani1x" else [1, 6, 7, 8, 9, 16, 17]
+    model = getattr(ANI, preset)(species).eval()
+    g = _graph(n=9, cutoff=model.cutoff)
+    scripted = torch.jit.script(model)
+    d = (scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+         - model.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors()))
+    assert d.abs().max() < 1e-12
+    path = str(tmp_path / "ani_lammps.pt")
+    export_to_lammps(model, model.cutoff, path)
+    loaded = torch.jit.load(path)
+    cell = torch.eye(3, dtype=g.pos.dtype) * 30.0
+    out = loaded(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, cell)
+    ref = ForceStressOutput(model)(g)
+    assert abs(float(out["total_energy"]) - float(ref["energy"])) < 1e-10
+    assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-10
+
+
+# AEV fast path (fused Triton kernels)                                         #
+
+def _set_fast_terms(model, on):
+    for term in (model.featurizer.radial, model.featurizer.angular):
+        term.fast_active = on
+
+
+def test_fast_aev_derivatives():
+    """The fused AEV (both terms) against finite differences: first derivatives with respect
+    to the edge vectors and second derivatives (the gradient's own derivatives with respect
+    to the edge vectors and the incoming gradient, force training)."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"     # the interpreter on a CPU
+    model = ANI.ani1x(SPECIES).double().to(device)
+    g = _graph(n=6, cutoff=model.cutoff, seed=3).to(device)
+    vec0 = g.edge_vectors().detach()
+    _set_fast_terms(model, True)
+    try:
+        def f(vec):
+            return model.featurizer.compute(g.atomic_numbers, g.edge_index, vec, g.num_nodes)
+        vec = vec0.clone().requires_grad_(True)
+        # the gathers before the kernels scatter their gradients with atomic adds on a GPU
+        assert torch.autograd.gradcheck(f, (vec,), fast_mode=True, nondet_tol=1e-12)
+        assert torch.autograd.gradgradcheck(f, (vec,), fast_mode=True, nondet_tol=1e-12)
+    finally:
+        _set_fast_terms(model, False)
+
+
+def test_fast_aev_matches_the_reference():
+    """The fused AEV, its gradient and the derivatives of that gradient equal the reference."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"     # the interpreter on a CPU
+    model = ANI.ani1x(SPECIES).double().to(device)
+    g = _graph(n=9, cutoff=model.cutoff, seed=4).to(device)
+    vec0 = g.edge_vectors().detach()
+    gen = torch.Generator().manual_seed(0)
+    w = torch.randn(g.num_nodes, model.featurizer.output_dim, dtype=torch.float64, generator=gen).to(device)
+    out = {}
+    for on in (False, True):
+        _set_fast_terms(model, on)
+        vec = vec0.clone().requires_grad_(True)
+        ww = w.clone().requires_grad_(True)
+        aev = model.featurizer.compute(g.atomic_numbers, g.edge_index, vec, g.num_nodes)
+        (gv,) = torch.autograd.grad((aev * ww).sum(), vec, create_graph=True)
+        gw, gvv = torch.autograd.grad(gv.pow(2).sum(), (ww, vec))
+        out[on] = (aev.detach(), gv.detach(), gw, gvv)
+    _set_fast_terms(model, False)
+    for ref, fast in zip(out[False], out[True]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+
+
+def _fast_batch(model, dtype):
+    from xnn.common.data import collate
+    graphs = [_graph(n=14, cutoff=model.cutoff, seed=1), _graph(n=9, cutoff=model.cutoff, seed=2)]
+    batch = collate(graphs).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("preset", ["ani1x", "ani2x"])
+def test_fast_path_parity(dtype, preset):
+    """The fused AEV gives the reference energies and forces."""
+    pytest.importorskip("triton")
+    species = SPECIES if preset == "ani1x" else [1, 6, 7, 8, 9, 16, 17]
+    model = getattr(ANI, preset)(species).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(model, dtype))
+        assert model.featurizer.angular.fast_active == use_fast
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max()
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_training(dtype):
+    """Force training through the fused AEV gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = ANI.ani1x(SPECIES).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(model, dtype))
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {n: p.grad.detach().double().clone() for n, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+def test_fast_angular_general_grid_matches_the_reference():
+    """A grid with several zeta values takes the flat-lane kernels (the presets the factored
+    ones): values, gradient and both second derivatives equal the reference."""
+    pytest.importorskip("triton")
+    from xnn.dnn.featurizers.symmetry_functions import AngularSymmetryFunctions
+    device = "cuda" if torch.cuda.is_available() else "cpu"     # the interpreter on a CPU
+    term = AngularSymmetryFunctions(SPECIES, cutoff=3.5, etas=(4.0, 8.0), zetas=(8.0, 32.0), rs=(0.9, 1.6),
+                                    theta_s=(0.2, 1.2, 2.2), cos_factor=0.95).double().to(device)
+    g = _graph(n=8, cutoff=3.5, seed=5).to(device)
+    vec0 = g.edge_vectors().detach()
+    gen = torch.Generator().manual_seed(1)
+    w = torch.randn(g.num_nodes, term.output_dim, dtype=torch.float64, generator=gen).to(device)
+    out = {}
+    for on in (False, True):
+        term.fast_active = on
+        vec = vec0.clone().requires_grad_(True)
+        ww = w.clone().requires_grad_(True)
+        aev = term.compute(g.atomic_numbers, g.edge_index, vec, g.num_nodes)
+        (gv,) = torch.autograd.grad((aev * ww).sum(), vec, create_graph=True)
+        gw, gvv = torch.autograd.grad(gv.pow(2).sum(), (ww, vec))
+        out[on] = (aev.detach(), gv.detach(), gw, gvv)
+    term.fast_active = False
+    for ref, fast in zip(out[False], out[True]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
