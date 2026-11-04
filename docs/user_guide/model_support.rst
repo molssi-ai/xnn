@@ -365,12 +365,12 @@ are the same as above.
 
 - **D3, D4 and LES.** All three match their upstream codes to round-off. LES
   is faster than its upstream on the same GPU, for evaluation and training. The
-  D3 and D4 upstreams run only on the CPU. On the same CPU, xnn's reference
-  three-body term is slower than their compiled loops, so the Reference-Path
-  cells stay red. On a GPU the three-body kernels are twice differentiable,
-  so a training step with a force loss also runs them. They do not
-  differentiate ``s9``, ``a1`` or ``a2``. When those are trained, the
-  reference three-body term runs. On a CPU the three-body term also runs
-  compiled (see :ref:`howto-fast-paths-cpu`). D3 then takes 0.44 to 0.73 of simple-dftd3's
-  time from about 375 atoms. D4 matches dftd4 for large molecules and stays
-  slower for cells and small systems.
+  D3 and D4 upstreams run only on the CPU. There, xnn's C++ kernels (see
+  :ref:`howto-fast-paths-cpu`) take 0.04 to 0.51 of simple-dftd3's time and
+  0.11 to 0.61 of dftd4's from 81 atoms on, on one and eight threads. On a
+  21-atom molecule they take two to six times as long: the whole upstream call
+  is shorter than the Python overhead of an xnn evaluation, so the
+  Reference-Path cells stay red. On a GPU the three-body kernels are twice
+  differentiable, so a training step with a force loss also runs them. They do
+  not differentiate ``s9``, ``a1`` or ``a2``. When those are trained, the
+  reference three-body term runs.
