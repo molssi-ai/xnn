@@ -42,6 +42,7 @@ from .d3_direct import dense_applies as _dense_applies
 
 #: Most atoms of a molecule for the dense path (every pair and triangle of atoms in one compiled call).
 DENSE_ATOMS = 2048
+_TORCH = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
 
 
 
@@ -521,8 +522,10 @@ def _dense_entry(name: str, *args):
 @functools.lru_cache(maxsize=None)
 def _dense_compiled(serial: bool) -> Callable:
     # as the D3 dense path, with the wrapper in Python (the C++ wrapper reaches the LU factorization and solves
-    # through a slow fallback)
-    options = {**DENSE_OPTIONS, "cpp_wrapper": False, **({"cpp.threads": 1} if serial else {"cpp.min_chunk_size": 1})}
+    # through a slow fallback); torch < 2.7 compiles the single-thread variant of this graph into wrong forces, so
+    # there the serial variant keeps the default thread count
+    one_thread = {"cpp.threads": 1} if _TORCH >= (2, 7) else {}
+    options = {**DENSE_OPTIONS, "cpp_wrapper": False, **(one_thread if serial else {"cpp.min_chunk_size": 1})}
     return torch.compile(_dense_entry, options=options)
 
 

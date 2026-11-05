@@ -436,7 +436,8 @@ def write_lammps_input(model, pos, cell=None, directory: Union[str, Path] = ".",
     for LAMMPS into ``directory`` (see :func:`lammps_input`) and return the path of the input script. An
     AMOEBA or HIPPO model gets the inputs of LAMMPS's AMOEBA package instead
     (:func:`~xnn.ffnn.models.amoeba_lammps.write_lammps_amoeba_input`)."""
-    if hasattr(getattr(model, "model", model), "export_library"):
+    from .amoeba import Amoeba
+    if isinstance(getattr(model, "model", model), Amoeba):
         from .amoeba_lammps import write_lammps_amoeba_input
         return write_lammps_amoeba_input(model, pos, cell, directory, name)
     data, cmds, offset, files = lammps_input(model, pos, cell, atomic_numbers)

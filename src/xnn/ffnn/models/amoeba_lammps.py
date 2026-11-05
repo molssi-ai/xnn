@@ -117,8 +117,9 @@ def write_lammps_amoeba_input(model, pos, cell=None, directory: Union[str, Path]
     Path
         The path of the input script.
     """
+    from .amoeba import Amoeba
     core = getattr(model, "model", model)
-    if not hasattr(core, "export_library"):
+    if not isinstance(core, Amoeba):
         raise TypeError(f"no LAMMPS AMOEBA inputs for {type(core).__name__}")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)

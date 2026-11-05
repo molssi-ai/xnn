@@ -47,12 +47,14 @@ def _graph():
 
 def _spy(monkeypatch):
     calls = []
-    original = RadialNet._forward_recomputed
+    original = RadialNet._recomputes
 
     def spy(self, x):
-        calls.append(x.shape[0])
-        return original(self, x)
-    monkeypatch.setattr(RadialNet, "_forward_recomputed", spy)
+        recomputes = original(self, x)
+        if recomputes:
+            calls.append(x.shape[0])
+        return recomputes
+    monkeypatch.setattr(RadialNet, "_recomputes", spy)
     return calls
 
 
@@ -61,6 +63,7 @@ def test_recomputed_forces_and_stress_are_identical(name, monkeypatch):
     model = _model(name).eval()
     assert any(isinstance(m, RadialNet) for m in model.modules())
     g = _graph()
+    model(copy.copy(g))                           # the first call differs in the last bits (one-time setup)
     ref = model(copy.copy(g))
     calls = _spy(monkeypatch)
     out = set_recompute_radial(model, True)(copy.copy(g))
@@ -113,7 +116,8 @@ def test_state_dict_and_torchscript_are_unchanged(tmp_path):
     radial = RadialNet([8, 16, 16, 24], torch.nn.functional.silu)
     assert plain.state_dict().keys() == radial.state_dict().keys()
     x = torch.randn(5, 8)
-    assert torch.equal(plain(x), radial(x))
+    # the folded layers carry the normalization in the matrix products: equal to round-off
+    torch.testing.assert_close(radial(x), plain(x), rtol=1e-6, atol=1e-6)
     core = set_recompute_radial(_model("mace").model, True)
     path = export_torchscript_potential(core, 4.0, str(tmp_path / "model.pt"))
     assert torch.jit.load(path) is not None

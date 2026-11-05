@@ -221,8 +221,8 @@ RECOMPUTE_MIN_EDGES = 1_000_000
 class RadialNet(e3nn_nn.FullyConnectedNet):
     """Per-edge radial network that can recompute its hidden layers in the backward.
 
-    An :class:`e3nn.nn.FullyConnectedNet` (same parameters, ``state_dict`` keys
-    and outputs). When a gradient flows through it (forces, stress), the hidden
+    An :class:`e3nn.nn.FullyConnectedNet` (same parameters and ``state_dict``
+    keys, outputs equal to round-off). When a gradient flows through it (forces, stress), the hidden
     layers' activations, ``E x hidden`` per layer whatever the tensor product's
     size, are kept for the backward pass; with recomputation only the last hidden
     output is kept and the hidden layers run again in the backward, giving the
