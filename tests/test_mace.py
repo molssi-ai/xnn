@@ -298,6 +298,23 @@ def test_density_blocks_equivariance_and_script(first, rest):
     assert torch.allclose(e_s, e_e, atol=1e-14)
 
 
+def test_non_residual_first_block_is_the_density_block_without_density():
+    """The non-residual block divides by avg_num_neighbors (1 here); the density block with a
+    vanishing density network divides by 1 + 0: the same energies and forces."""
+    torch.manual_seed(0)
+    dense = _build(T=2, max_ell=2, interaction_first="RealAgnosticDensityInteractionBlock")
+    with torch.no_grad():
+        for name, p in dense.named_parameters():
+            if "density_fn" in name:
+                p.zero_()
+    plain = _build(T=2, max_ell=2, interaction_first="RealAgnosticInteractionBlock")
+    assert type(plain.interactions[0]).__name__ == "RealAgnosticInteractionBlock"
+    plain.load_state_dict({k: v for k, v in dense.state_dict().items() if "density_fn" not in k})
+    o0, o1 = ForceStressOutput(plain)(_graph()), ForceStressOutput(dense)(_graph())
+    assert abs(float(o0["energy"]) - float(o1["energy"])) < 1e-12 * max(1.0, abs(float(o1["energy"])))
+    assert torch.allclose(o0["forces"], o1["forces"], rtol=0, atol=1e-12)
+
+
 def test_from_config_scale_shift_transform_keys():
     pytest.importorskip("ase")
     cfg = from_dict({"model": {

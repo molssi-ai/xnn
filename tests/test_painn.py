@@ -858,6 +858,29 @@ def test_filters_recompute(monkeypatch, shared):
     assert not calls
 
 
+def test_filters_recompute_needs_a_gradient(monkeypatch):
+    """"on" recomputes only when a gradient flows: a frozen model's energies (positions without a
+    gradient) keep the filters and equal those without recomputation."""
+    import torch.utils.checkpoint
+
+    from xnn.gnn.models.blocks import set_recompute_radial
+    real, calls = torch.utils.checkpoint.checkpoint, []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", counting)
+    model = _small().eval().requires_grad_(False)
+    g = _graph(n=7, seed=3)
+    kept = model(g)["energy"]
+    set_recompute_radial(model, True)
+    with torch.enable_grad():
+        out = model(g)["energy"]
+    assert not calls
+    assert torch.equal(out, kept)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_fast_path_recompute(dtype):

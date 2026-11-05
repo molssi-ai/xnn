@@ -519,6 +519,28 @@ def test_fast_path_training(dtype):
         assert err < tol, (name, float(err))
 
 
+def test_symmetry_functions_without_triplets_and_fast_support(monkeypatch):
+    """A graph without neighbour triplets (two atoms) gives an all-zero angular descriptor on the
+    reference and the fused path; ``forward`` on a graph equals ``compute``; the fused path is
+    offered where Triton supports the device."""
+    from xnn.dnn.fast import aev as fast_aev
+    from xnn.dnn.featurizers.symmetry_functions import AngularSymmetryFunctions, RadialSymmetryFunctions
+    angular = AngularSymmetryFunctions(SPECIES, cutoff=3.5).double()
+    radial = RadialSymmetryFunctions(SPECIES, cutoff=3.5).double()
+    pair = structure_to_graph({"pos": np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.1]]), "atomic_numbers": [6, 1]}, 3.5)
+    for on in (False, True):
+        angular.fast_active = on
+        out = angular(pair)
+        assert out.shape == (2, angular.output_dim) and not out.any()
+    angular.fast_active = False
+    g = _graph(n=6, cutoff=3.5)
+    assert torch.equal(angular(g), angular.compute(g.atomic_numbers, g.edge_index, g.edge_vectors(), g.num_nodes))
+    monkeypatch.setattr(fast_aev, "supported", lambda device, dtype: dtype == torch.float64)
+    for term in (angular, radial):
+        assert term.fast_supported(torch.device("cuda"), torch.float64)
+        assert not term.fast_supported(torch.device("cuda"), torch.float16)
+
+
 def test_fast_angular_general_grid_matches_the_reference():
     """A grid with several zeta values takes the flat-lane kernels (the presets the factored
     ones): values, gradient and both second derivatives equal the reference."""

@@ -66,3 +66,48 @@ class _nothing:
     def __exit__(self, *exc):
         return False
 
+
+
+def _load(name):
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(f"_{name}", Path(__file__).with_name(f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_hippo_cluster_and_amoeba_triclinic_box_inputs(tmp_path):
+    """A HIPPO cluster: the repulsion, dispersion and charge-transfer cutoffs at the cluster cutoff. An AMOEBA
+    box with direct polarization and a taper in a triclinic cell: the van der Waals cutoff and taper, the
+    direct polarization in the key, the converter's note on the cell. A HIPPO box with a taper keeps it."""
+    write_lammps_input(Hippo("hippo-water-2021", _topology(2)), WATER, directory=tmp_path / "c", name="c")
+    key = (tmp_path / "c" / "c.key").read_text().split("\n")
+    assert {f"repulsion-cutoff {CLUSTER_CUTOFF}", f"dispersion-cutoff {CLUSTER_CUTOFF}",
+            f"ctrn-cutoff {CLUSTER_CUTOFF}"} <= set(key)
+    cell = np.array([[12.0, 0.0, 0.0], [1.0, 12.0, 0.0], [0.0, 0.0, 12.0]])
+    model = Amoeba("amoeba-water-2003", _topology(2), cutoff=6.3, vdw_cutoff=6.0, taper=5.4, polarization="direct",
+                   pme_grid=[24, 24, 24])
+    write_lammps_input(model, WATER, cell=cell, directory=tmp_path / "a", name="a")
+    key = (tmp_path / "a" / "a.key").read_text().split("\n")
+    assert {"vdw-cutoff 6.0", "vdw-taper 5.4", "polarization direct"} <= set(key)
+    assert "not orthorhombic" in (tmp_path / "a" / "in.a").read_text()
+    model = Hippo("hippo-water-2021", _topology(2), cutoff=6.3, taper=5.4, pme_grid=[24, 24, 24],
+                  dpme_grid=[16, 16, 16])
+    with pytest.warns(UserWarning, match="charge flux"):
+        write_lammps_input(model, WATER, cell=np.diag([12.0, 12.0, 12.0]), directory=tmp_path / "h", name="h")
+    assert "taper 5.4" in (tmp_path / "h" / "h.key").read_text().split("\n")
+
+
+def test_protein_inputs_carry_the_torsion_fixes_and_other_models_are_refused(tmp_path):
+    """The AMOEBA protein library: the pi-torsion and torsion-torsion fixes in the script and the converter's
+    bitorsion option; a model of another kind gets no AMOEBA package inputs."""
+    from xnn.ffnn.models import Dreiding
+    from xnn.ffnn.models.amoeba_lammps import write_lammps_amoeba_input
+    model, pos, z, _ = _load("test_amoeba")._protein(tmp_path, _load("test_amoeba").GLY_XYZ)
+    text = write_lammps_input(model, pos, directory=tmp_path, name="gly").read_text()
+    assert "fix pit all amoeba/pitorsion" in text and "fix bit all amoeba/bitorsion gly.bitorsion" in text
+    assert "-bitorsion gly.bitorsion" in text and "fix pit pitorsions PiTorsions" in text
+    other = Dreiding("dreiding", MolecularTopology.from_bonds(["C_3", "C_3"], [(0, 1)]), cutoff=6.0)
+    with pytest.raises(TypeError, match="no LAMMPS AMOEBA inputs"):
+        write_lammps_amoeba_input(other, np.zeros((2, 3)), directory=tmp_path)

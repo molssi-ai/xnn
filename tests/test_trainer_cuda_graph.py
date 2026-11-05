@@ -200,3 +200,107 @@ def test_trial_against_fast_kernels(tmp_path, monkeypatch):
     for name, p in weights[False].items():
         err = (weights[True][name] - p).abs().max() / p.abs().max().clamp_min(1e-30)
         assert err < 1e-9, (name, float(err))
+
+
+def _cpu_trainer(tmp_path, ds, **optim):
+    cfg = _cfg(tmp_path, False)
+    cfg.device = "cpu"
+    for k, v in optim.items():
+        setattr(cfg.optim, k, v)
+    torch.manual_seed(1)
+    return Trainer(cfg, ds)
+
+
+def test_the_checks_of_a_captured_run(tmp_path, monkeypatch):
+    """The checks before a captured run (one process, an index plan, one full batch) and its counts, which
+    fit every batch of the training set."""
+    from xnn.gnn.models.schnet import SchNet
+    ds = AtomicDataset(_structures(), 5.0)
+    trainer = _cpu_trainer(tmp_path, ds)
+    monkeypatch.setattr(trainer, "device", torch.device("cuda"))
+    monkeypatch.setattr(trainer, "distributed", True)
+    with pytest.raises(ValueError, match="single-process"):
+        trainer._check_cuda_graph(ds, None, None)
+    monkeypatch.setattr(trainer, "distributed", False)
+    model = trainer.model
+    monkeypatch.setattr(trainer, "model", ForceStressOutput(SchNet()))
+    with pytest.raises(ValueError, match="index plan"):
+        trainer._check_cuda_graph(ds, None, None)
+    monkeypatch.setattr(trainer, "model", model)
+    with pytest.raises(ValueError, match="one full batch"):
+        trainer._check_cuda_graph(AtomicDataset(_structures(1), 5.0), None, None)
+    cap = trainer._check_cuda_graph(ds, None, None)
+    assert trainer._trial is None and len(trainer._planned) == len(ds)
+    graphs = [ds[i] for i in range(len(ds))]
+    for a in range(0, len(ds), 2):
+        batch = collate(graphs[a:a + 2])
+        assert batch.num_nodes + 2 <= cap.atoms and batch.edge_index.shape[1] + 2 <= cap.edges
+
+
+def test_the_captured_step_body_is_an_ordinary_step(tmp_path):
+    """The step a CUDA graph records, on a padded batch, moves the weights and the weight average as an
+    ordinary step on the real structures does (with a prior, clipping and the average)."""
+    ds = AtomicDataset(_structures(), 5.0)
+    graphed, ordinary = (_cpu_trainer(tmp_path / name, ds, prior_weight=2.0) for name in ("g", "o"))
+    for p, q in zip(graphed.module.parameters(), ordinary.module.parameters()):
+        assert torch.equal(p, q)
+    from xnn.common.train.graphed import index_planner
+    graphs = [ds[i] for i in range(2)]
+    planner = index_planner(graphed.model)
+    planned = PlannedDataset(graphs, planner)
+    padded = PaddedCollate(planner, capacity(planner, planned, 2))([planned[0], planned[1]])
+    pred, logs, counts = graphed._graphed_body(padded)
+    want, _ = ordinary._step(collate(graphs), True)
+    assert float(logs["loss"]) == pytest.approx(want["loss"], rel=1e-12)
+    assert float(logs["prior"]) == want["prior"] == 0.0
+    assert pred["energy"].shape[0] == 3 and pred["forces"].shape[0] == padded.num_nodes
+    for module in ("module", "ema"):
+        a = graphed.module if module == "module" else graphed.ema.module
+        b = ordinary.module if module == "module" else ordinary.ema.module
+        for (name, p), q in zip(a.named_parameters(), b.parameters()):
+            err = (p - q).abs().max() / q.abs().max().clamp_min(1e-30)
+            assert err < 1e-10, (module, name, float(err))
+
+
+def test_padding_and_batches_that_do_not_fit():
+    """Padding edges come in reverse pairs; a batch beyond the counts is refused; with padding off the
+    collate is the plain one, and a plain batch has nothing to strip."""
+    from xnn.common.train.graphed import index_planner, padding_structure
+    model = _small()
+    graphs = [structure_to_graph(s, model.cutoff) for s in _structures()]
+    plain = collate(graphs[:2])
+    with pytest.raises(ValueError, match="reverse pairs"):
+        padding_structure(4, 3, plain)
+    planner = index_planner(ForceStressOutput(model))
+    planned = PlannedDataset(graphs, planner)
+    collate_fn = PaddedCollate(planner, capacity(planner, PlannedDataset(graphs[:2], planner), 1))
+    with pytest.raises(RuntimeError, match="does not fit"):
+        collate_fn([planned[i] for i in range(4)])
+    collate_fn.padded = False
+    out = collate_fn(graphs[:2])
+    assert out.num_nodes == plain.num_nodes and torch.equal(out.edge_index, plain.edge_index)
+    assert strip_padding(plain) is plain
+
+
+def test_a_captured_step_loads_batches_in_place():
+    """The static batch of a captured step is allocated from the first batch and later batches are copied
+    into it (the tensors the graph reads stay the same); a batch with other labels is refused."""
+    from xnn.common.train.graphed import GraphedStep, index_planner
+    model = _small()
+    graphs = [structure_to_graph(s, model.cutoff) for s in _structures()]
+    planner = index_planner(model)
+    planned = PlannedDataset(graphs, planner)
+    collate_fn = PaddedCollate(planner, capacity(planner, planned, 2))
+    step = GraphedStep(lambda batch: None, torch.device("cpu"))
+    assert step.graph is None and step.steps == 0
+    first, second = collate_fn([planned[0], planned[1]]), collate_fn([planned[2], planned[3]])
+    step._load(first)
+    pos, plan = step.static.pos, dict(step.static.index_plan)
+    step._load(second)
+    assert step.static.pos is pos and torch.equal(pos, second.pos)
+    for k, t in plan.items():
+        assert step.static.index_plan[k] is t and torch.equal(t, second.index_plan[k])
+    third = collate_fn([planned[4], planned[5]])
+    third.forces = None
+    with pytest.raises(RuntimeError, match="same labels"):
+        step._load(third)

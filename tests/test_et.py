@@ -606,6 +606,36 @@ def test_fast_path_parity_interpreted(monkeypatch, train):
     _check_fast_parity("cpu", torch.float64, {}, train, 1e-11)
 
 
+def test_fast_path_parity_without_vector_cutoff_interpreted(monkeypatch):
+    """With the cutoff on the attention weights (vector_cutoff=False) the fused layers give the
+    reference outputs."""
+    _needs_interpreter()
+    import xnn.trfnn.fast.et as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small(vector_cutoff=False, n_interactions=1)
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).eval()
+        res = ForceStressOutput(model).eval()(collate([_graph(n=5, seed=1)]))
+        assert all(layer.fast_active == use_fast for layer in model.layers)
+        out[use_fast] = {k: res[k].detach() for k in ("energy", "forces")}
+    for key, ref in out[False].items():
+        assert (out[True][key] - ref).abs().max() <= 1e-12 * ref.abs().max(), key
+
+
+def test_selection_needs_a_fast_path_module(monkeypatch):
+    """A model that names no fast-path module keeps its layers on the reference whatever use_fast."""
+    import xnn.trfnn.fast.et as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small().set_use_fast(True)
+    model.fast_path = ""
+    model._select_fast(10)
+    assert not any(layer.fast_active for layer in model.layers)
+    del model.fast_path                                        # the class's own module again
+    model._select_fast(10)
+    assert all(layer.fast_active for layer in model.layers)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_fast_kernels_gradients():
     """Values and every first and second derivative of the fused functions (finite differences)."""

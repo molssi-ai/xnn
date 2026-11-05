@@ -189,3 +189,80 @@ def test_a_force_loss_trains_through_the_kernels(case, device):
         # from run to run
         assert float((c - r).abs().max()) <= max(5.0 * err32, 1e-4 * scale), (name, "float32", j, err32,
                                                                                float((c - r).abs().max()), scale)
+
+
+@pytest.mark.parametrize("shielded", [False, True])
+def test_the_inner_wall_forms_on_the_kernels(shielded, device):
+    """A library with an inner wall (LAMMPS's van der Waals form 3, or form 2 without the shielding): the
+    kernels' van der Waals energies and forces are the eager terms'."""
+    import copy
+
+    from xnn.ffnn.models import read_ffield
+    lib = copy.deepcopy(read_ffield("CHO_cho_2008"))
+    for sp in lib.spec:
+        lib.p.update({f"rcore2_{sp}": 1.6, f"acore2_{sp}": 12.0, f"ecore2_{sp}": 0.2})
+        if not shielded:
+            lib.p[f"gammaw_{sp}"] = 0.4
+    m = ReaxFF(lib, conventions="lammps").to(device=device, dtype=torch.float64).eval()
+    assert m.vdw_type == (3 if shielded else 2)
+    pos, z, L = _box(METHANOL, 2, 6.5)
+    s = {"pos": torch.tensor(pos % L), "atomic_numbers": torch.tensor(z), "cell": torch.eye(3, dtype=torch.float64) * L,
+         "pbc": torch.ones(3, dtype=torch.bool)}
+    res = []
+    for fast in (False, True):
+        m.use_fast = fast
+        g = structure_to_graph(s, m.cutoff, device=device)
+        p = g.pos.detach().clone().requires_grad_(True)
+        g.pos = p
+        out = m(g)
+        (f,) = torch.autograd.grad(-out["energy"].sum(), p)
+        res.append((out["e_vdw"].detach(), out["energy"].detach(), f))
+    for a, b in zip(*res):
+        assert torch.allclose(a, b, rtol=1e-10, atol=1e-10), float((a - b).abs().max())
+
+
+
+def test_the_incoming_gradients_are_differentiated_through_the_kernels(device):
+    """A force loss of an energy scaled by a trained factor: its gradient in the factor (through the incoming
+    gradients of every term kernel's energies, the nonbonded one included) is the force loss at factor one,
+    as in the eager terms."""
+    pos, z, _ = _box(METHANOL, 2, 6.5)
+    s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(z)}
+    model = ReaxFF("CHO_cho_2008", conventions="lammps").to(device=device, dtype=torch.float64).train()
+    w = torch.tensor(np.random.default_rng(5).normal(size=pos.shape), device=device)
+    results = []
+    for fast in (False, True):
+        model.use_fast = fast
+        g = structure_to_graph(s, model.cutoff, device=device)
+        g.pos = g.pos.detach().clone().requires_grad_(True)
+        factor = torch.ones((), dtype=torch.float64, device=device, requires_grad=True)
+        energy = factor * model(g)["energy"].sum()
+        (forces,) = torch.autograd.grad(-energy, g.pos, create_graph=True)
+        loss = (forces * w).sum()
+        (grad,) = torch.autograd.grad(loss, factor)
+        assert torch.allclose(grad, loss.detach(), rtol=1e-10, atol=1e-10)
+        results.append(grad)
+    assert torch.allclose(results[0], results[1], rtol=1e-9, atol=1e-9)
+
+
+def test_the_compressed_row_products_match_a_dense_matrix(device):
+    """The charge matrix's product by rows (the stepper's), its values per entry or per pair through an index,
+    is the dense matrix's product with two right-hand sides."""
+    from xnn.ffnn.models.reaxff_kernels import eem_rows
+    rng = np.random.default_rng(4)
+    N, P = 9, 20
+    i, k = rng.integers(0, N, P), rng.integers(0, N, P)
+    keep = i != k
+    i, k = i[keep], k[keep]
+    g_pair = torch.tensor(rng.normal(size=len(i)), device=device)
+    dense = torch.zeros(N, N, dtype=torch.float64, device=device)
+    dense.index_put_((torch.tensor(i, device=device), torch.tensor(k, device=device)), g_pair, accumulate=True)
+    dense = dense + dense.T
+    rows, cols = np.concatenate([i, k]), np.concatenate([k, i])
+    order = np.argsort(rows, kind="stable")
+    ptr = torch.tensor(np.searchsorted(rows[order], np.arange(N + 1)), dtype=torch.int32, device=device)
+    col = torch.tensor(cols[order], dtype=torch.int32, device=device)
+    pair = torch.tensor(order % len(i), dtype=torch.int32, device=device)
+    x = torch.tensor(rng.normal(size=(N, 2)), device=device)
+    for product in (eem_rows(ptr, col, g_pair[pair.long()]), eem_rows(ptr, col, g_pair, pair)):
+        assert torch.allclose(product(x), dense @ x, rtol=1e-12, atol=1e-12)

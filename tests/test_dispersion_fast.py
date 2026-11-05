@@ -259,12 +259,14 @@ def test_cpu_fast_request_runs_the_reference_elsewhere():
 @pytest.mark.parametrize("method", ["d3", "d4"])
 @pytest.mark.parametrize("system", ["small_cell", "cluster"])
 @pytest.mark.parametrize("width", [0.0, 1.0])
-def test_cpu_three_body_matches_the_reference(method, system, width):
+def test_cpu_three_body_matches_the_reference(method, system, width, monkeypatch):
     """The compiled CPU three-body tiles give the reference's energies, atomic energies,
-    forces and stress (repeated-atom triangles of the periodic cell included)."""
+    forces and stress (repeated-atom triangles of the periodic cell included), with the
+    forces from autograd (the written-out forces of the direct paths turned off)."""
     if not _cpu_compiles():
         pytest.skip("torch.compile produces no CPU code here")
     model = _model(method, device="cpu", switch_width_triple=width)
+    monkeypatch.setattr(type(model.model.term), "direct_applies", lambda self, data, use_fast: False)
     g = _graph(model, system, device="cpu")
     fast.set_use_fast(model, False)
     ref = model(copy.copy(g))
@@ -287,6 +289,69 @@ def cpu_kernels(monkeypatch):
 
 
 _DAMPINGS = {"bj": {}, "zero": {}, "mzero": {"bet": 0.1}, "op": {"bet": 6.0}}
+
+
+@pytest.mark.parametrize("method", ["d3", "d4"])
+@pytest.mark.parametrize("direct", [False, True])
+def test_cpu_three_body_small_inputs(method, direct, monkeypatch):
+    """The compiled CPU tiles on the smallest inputs give the reference's energies and forces: a dimer
+    (no triangle), a linear trimer (one tile job, padded to two) and a one-water cell (every atom's own
+    images), unswitched cutoffs, through autograd and through the written-out forces of the dense and the
+    tile paths."""
+    from xnn.common.models.dispersion_fast import d3_direct, d4_direct
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    model = _model(method, device="cpu", switch_width_pair=0.0, switch_width_triple=0.0)
+    if not direct:
+        monkeypatch.setattr(type(model.model.term), "direct_applies", lambda self, data, use_fast: False)
+    one = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(1, True).items()}
+    structures = [{"pos": torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), "atomic_numbers": [8, 1]},
+                  {"pos": torch.tensor([[0.0, 0.0, 0.0], [3.5, 0.0, 0.0], [7.0, 0.0, 0.0]]),
+                   "atomic_numbers": [8, 8, 8]}, one]
+    for limit in ((2048, 0) if direct else (2048,)):
+        monkeypatch.setattr(d3_direct, "DENSE_ATOMS", limit)
+        monkeypatch.setattr(d4_direct, "DENSE_ATOMS", limit)
+        for s in structures:
+            g = structure_to_graph(s, model.model.cutoff)
+            ref, out = _pair(model, g)
+            for key in ("energy", "forces"):
+                assert _rel(out[key], ref[key]) < 1e-11, key
+
+
+def test_direct_paths_step_aside(monkeypatch):
+    """The written-out forces decline where they do not apply: trained parameters, a structure beyond the
+    tile path's dense C6 arrays; the optional C++ kernels decline for trained parameters, too many atoms with
+    a three-body term, the large EEQ regime, a cell outside the dense regime and a cell with the tail
+    correction (decisions only: nothing is built)."""
+    from xnn.common.models import cpu_extension
+    from xnn.common.models.dispersion_fast import cpu, d3_direct, d4_direct
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    monkeypatch.setattr(d3_direct, "DENSE_ATOMS", 0)
+    monkeypatch.setattr(d4_direct, "DENSE_ATOMS", 0)
+    for method in ("d3", "d4"):
+        term = _model(method, device="cpu").model.term
+        trained = _model(method, device="cpu", trainable=True).model.term
+        g = _graph(_model(method, device="cpu"), "small_cell", device="cpu")
+        assert term.direct_applies(g, True) and not trained.direct_applies(g, True)
+        with monkeypatch.context() as m:
+            m.setattr(cpu, "MAX_DENSE_ATOMS", 4)
+            assert not term.direct_applies(g, True)
+        with monkeypatch.context() as m:
+            m.setattr(cpu_extension, "enabled", lambda: True)
+            m.setattr(cpu, "available", lambda: True)
+            assert term.cpu_kernels_apply(g.num_nodes) and not trained.cpu_kernels_apply(g.num_nodes)
+            m.setattr(cpu, "MAX_DENSE_ATOMS", 4)
+            assert not term.cpu_kernels_apply(g.num_nodes)
+            m.setattr(cpu, "MAX_DENSE_ATOMS", 20000)
+            if method == "d4":
+                assert term._cpp_direct(g)
+                term.regime = "large"
+                assert not term._cpp_direct(g)
+                term.regime, term.auto_large_periodic = "auto", 1
+                assert not term._cpp_direct(g)
+                term.auto_large_periodic, term.tail_correction = 100000, True
+                assert term._periodic(g) and not term._cpp_direct(g)
 
 
 @pytest.mark.parametrize("damping", list(_DAMPINGS))
@@ -427,7 +492,8 @@ def test_d3_pytorch_direct_path_matches_the_reference(damping, s9, monkeypatch):
     """With the C++ kernels off, a standalone D3 term forms its forces and stress in PyTorch without an
     autograd pass (dispersion_fast.d3_direct; with a three-body term on the compiled tiles of atm_cpu with
     their analytic gradient): the reference's energies, forces, stress and features for every damping, on
-    molecules, a small cell with repeated-atom triangles and a molecule-plus-cell batch."""
+    molecules, a small cell with repeated-atom triangles, a one-water cell (every atom's own images inside the
+    three-body cutoff) and a molecule-plus-cell batch."""
     from xnn.common.data import collate
     from xnn.common.models.dispersion_fast import d3_direct
     if s9 != 0.0 and not _cpu_compiles():
@@ -437,6 +503,8 @@ def test_d3_pytorch_direct_path_matches_the_reference(damping, s9, monkeypatch):
     monkeypatch.setattr(d3_direct, "d3_direct", lambda *a: calls.append(1) or original(*a))
     model = _model("d3", device="cpu", damping=damping, s9=s9, **_DAMPINGS[damping])
     graphs = [_graph(model, "cluster", device="cpu"), _graph(model, "small_cell", device="cpu")]
+    one = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(1, True).items()}
+    graphs.append(structure_to_graph(one, model.model.cutoff))
     small = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(2, True).items()}
     molecule = {k: (torch.tensor(v) if k == "pos" else v) for k, v in _water(2, False, seed=5).items()}
     graphs.append(collate([structure_to_graph(molecule, model.model.cutoff),
@@ -456,8 +524,9 @@ def test_d4_pytorch_direct_path_matches_the_reference(s9, tail, monkeypatch):
     """With the C++ kernels off, a standalone D4 term forms its forces and stress in PyTorch without an
     autograd pass through the evaluation (dispersion_fast.d4_direct: the EEQ adjoint, polarizability slopes,
     compiled three-body tiles with their gradient; for cells the Ewald matrix's derivative): the reference's
-    energies, forces, stress, charges and polarizabilities, for a cluster, a small cell and a batch of a
-    charged molecule with a cell, with and without the tail correction."""
+    energies, forces, stress, charges and polarizabilities, for a cluster, a small cell, a one-water cell
+    (every atom's own images inside the three-body cutoff) and a batch of a charged molecule with a cell, with
+    and without the tail correction."""
     from xnn.common.data import collate
     from xnn.common.models.dispersion_fast import d4_direct
     if s9 != 0.0 and not _cpu_compiles():
@@ -470,7 +539,9 @@ def test_d4_pytorch_direct_path_matches_the_reference(s9, tail, monkeypatch):
     cell = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(2, True).items()}
     batch = collate([structure_to_graph(molecule, model.model.cutoff), structure_to_graph(cell, model.model.cutoff)])
     batch.total_charge = torch.tensor([1.0, 0.0])
-    graphs = [_graph(model, "cluster", device="cpu"), _graph(model, "small_cell", device="cpu"), batch]
+    one = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(1, True).items()}
+    graphs = [_graph(model, "cluster", device="cpu"), _graph(model, "small_cell", device="cpu"),
+              structure_to_graph(one, model.model.cutoff), batch]
     for g in graphs:
         ref, out = _pair(model, g)
         keys = ["energy", "node_energy", "energy_2body", "energy_3body", "energy_tail", "forces", "eeq_charges",

@@ -67,3 +67,41 @@ def test_replays_equal_ordinary_evaluations(name, dtype):
             assert out[key].shape == r.shape, key
             assert (out[key] - r).abs().max() <= tol * max(float(r.abs().max()), 1.0), key
     assert captured > 0
+
+
+def test_padded_inputs_give_the_ordinary_results_and_keep_their_counts():
+    """On the CPU (no capture): a padded input evaluates to the ordinary energies and forces of its real
+    atoms; the counts grow for a larger input or another number of structures and hold for a smaller one;
+    later inputs are copied into the static one; positions with autograd history are detached."""
+    model = _physnet().double().eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped, slack=8)
+    graphs = [structure_to_graph(s, model.cutoff) for s in (_molecule(8, 0), _molecule(8, 0, 1), _molecule(6, 2),
+                                                             _molecule(20, 4))]
+    for g in graphs:
+        g.pos = g.pos.double()
+    caps = []
+    for g in graphs:
+        g.pos.requires_grad_(True)
+        padded = graphed._pad(g)
+        assert not padded.pos.requires_grad and padded.num_graphs == 2
+        caps.append(graphed.cap)
+        ref, out = wrapped(g), wrapped(padded)
+        n = g.num_nodes
+        assert torch.allclose(out["energy"][:1], ref["energy"], rtol=0, atol=1e-12)
+        assert torch.allclose(out["forces"][:n], ref["forces"], rtol=0, atol=1e-12)
+    assert caps[0] is caps[1] is caps[2] and caps[3] is not caps[2]
+    assert caps[3].atoms >= 20 + 2 and caps[3].edges % 2 == 0
+    two = graphed._pad(collate(graphs[:2]))
+    assert graphed.n_graphs == 2 and two.num_graphs == 3
+    first = graphed._pad(graphs[0])
+    graphed._reset()
+    graphed._load(first)
+    pos = graphed.static.pos
+    second = graphed._pad(graphs[1])
+    graphed._load(second)
+    assert graphed.static.pos is pos and torch.equal(pos, second.pos)
+    third = graphed._pad(graphs[2])
+    third.cell = torch.eye(3, dtype=torch.float64)[None] * 20.0
+    with pytest.raises(RuntimeError, match="same fields"):
+        graphed._load(third)

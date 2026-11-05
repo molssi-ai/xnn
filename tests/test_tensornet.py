@@ -716,6 +716,63 @@ def test_fast_kernels_gradients_interpreted():
     _check_fused_gradients(tensornet_kernels, "cpu", fast_mode=True)
 
 
+def test_fast_messages_strided_filters_interpreted():
+    """A filter output with strided rows (a transposed view) gives the reference messages."""
+    _needs_interpreter()
+    from xnn.gnn.fast import tensornet_kernels
+    t = _fused_inputs("cpu", seed=1)
+    src, dst = t["src"], t["dst"]
+    rows, cut = t["rows"].detach(), t["cut"].detach()
+    F = rows.shape[2]
+    a = t["a"].detach().t().contiguous().t()                 # (P, 3F) with stride (1, P)
+    assert a.stride(1) != 1
+    part = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+    scaled = (a * cut[:, None]).reshape(-1, 3, F)
+    expect = torch.zeros_like(rows).index_add_(0, dst, scaled[:, part] * rows[src])
+    got = tensornet_kernels.messages(rows, a, cut, src, dst)
+    assert torch.allclose(got, expect, rtol=0, atol=1e-13)
+
+
+@pytest.mark.parametrize("group", ["O(3)", "SO(3)"])
+def test_fast_interaction_product_stage(group):
+    """The fast path's product stage against the reference's tensor algebra: the parts of
+    ``(1 + q/10)(YM + MY)`` (O(3)) or ``2YM`` (SO(3)), divided by ``|C|^2 + 1``."""
+    from xnn.gnn.fast.tensornet import stage
+    from xnn.gnn.models.tensornet import (
+        axial_vector,
+        compose,
+        decompose,
+        frobenius,
+        skew_tensor,
+        tensor_matmul,
+    )
+    gen = torch.Generator().manual_seed(2)
+    n, F = 4, 3
+
+    def rand(*shape):
+        return torch.randn(*shape, dtype=torch.float64, generator=gen)
+
+    def symmetric(entries):
+        """``(N, 6, F)`` entries xx, xy, xz, yy, yz, zz as ``(N, 3, 3, F)`` tensors."""
+        return entries[:, torch.tensor([0, 1, 2, 1, 3, 4, 2, 4, 5])].reshape(n, 3, 3, F)
+
+    I, v, S, m, q = rand(n, F), rand(n, 3, F), rand(n, 6, F), rand(n, 10, F), rand(n)
+    Y = compose(I, skew_tensor(v), symmetric(S))
+    M = compose(m[:, 0], skew_tensor(m[:, 1:4]), symmetric(m[:, 4:]))
+    if group == "O(3)":
+        C = (1.0 + 0.1 * q)[:, None, None, None] * (tensor_matmul(Y, M) + tensor_matmul(M, Y))
+    else:
+        C = 2.0 * tensor_matmul(Y, M)
+    scalar, skew, sym = decompose(C)
+    norm = frobenius(C) + 1.0
+    entries = sym.reshape(n, 9, F)[:, torch.tensor([0, 1, 2, 4, 5, 8])]
+    expect = (scalar / norm, axial_vector(skew) / norm[:, None], entries / norm[:, None])
+    name = "interaction_product_o3" if group == "O(3)" else "interaction_product_so3"
+    got = stage(name, I)(I, v, S, m, q)
+    for x, y in zip(got, expect):
+        assert torch.allclose(x, y, rtol=0, atol=1e-14)
+
+
 def test_fast_path_parity_interpreted(monkeypatch):
     """The fused layers under Triton's interpreter give the reference energies and forces."""
     _needs_interpreter()

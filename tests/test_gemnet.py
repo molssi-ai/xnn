@@ -956,3 +956,46 @@ def test_fast_path_training(dtype, quadruplets):
     for name, g in grads[False].items():
         err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
         assert err < tol, (name, float(err))
+
+
+def test_fast_neighbor_sums_without_items_interpreted():
+    """Under Triton's interpreter, neighbor sums over no items are zero, with zero gradients."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.gemnet_kernels import neighbor_sums
+    x = torch.randn(4, 3, dtype=torch.float64).requires_grad_(True)
+    s = torch.zeros(0, 2, dtype=torch.float64).requires_grad_(True)
+    idx = torch.zeros(0, dtype=torch.long)
+    out = neighbor_sums(x, s, idx, idx, 3)
+    assert torch.equal(out, torch.zeros(3, 2, 3, dtype=torch.float64))
+    (gx,) = torch.autograd.grad(out.sum(), (x,))
+    assert torch.equal(gx, torch.zeros_like(x))
+
+
+@pytest.mark.parametrize("quadruplets", [False, True])
+def test_fast_path_training_interpreted(monkeypatch, quadruplets):
+    """Under Triton's interpreter, force training through the fused bilinear layers gives the
+    reference's energies, forces and weight gradients (GemNet-T and -Q)."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.gemnet as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small(seed=6, quadruplets=quadruplets, n_interactions=1)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_graph(_structure(n=4, seed=3), model.cutoff))
+        assert model.interactions[0].trip.fast_active == use_fast
+        if quadruplets:
+            assert model.interactions[0].quad.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = {"energy": out["energy"].detach(), "forces": out["forces"].detach()}
+        res[use_fast].update({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                              if p.grad is not None})
+    assert res[False].keys() == res[True].keys()
+    for name, ref in res[False].items():
+        err = (res[True][name] - ref).abs().max() / ref.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))

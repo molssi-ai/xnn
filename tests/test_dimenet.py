@@ -778,3 +778,29 @@ def test_fast_path_pp_ji_gate_keeps_reference():
     """DimeNet++ with the gate of the edge j -> i has no edge sums: never the kernels."""
     model = _small(pp=True, radial_gate="ji")
     assert not any(b.fast_supported(torch.device("cuda"), torch.float64) for b in model.interactions)
+
+
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_training_interpreted(monkeypatch, pp, radial_gate):
+    """Under Triton's interpreter, force training through the triplet-sum kernels gives the
+    reference's energies, forces and weight gradients."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.dimenet as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small(pp=pp, seed=1, radial_gate=radial_gate, n_features=8, n_interactions=1)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_graph(n=5, seed=3))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = {"energy": out["energy"].detach(), "forces": out["forces"].detach()}
+        res[use_fast].update({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                              if p.grad is not None})
+    assert res[False].keys() == res[True].keys()
+    for name, ref in res[False].items():
+        err = (res[True][name] - ref).abs().max() / ref.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))

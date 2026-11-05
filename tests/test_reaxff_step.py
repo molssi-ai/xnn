@@ -75,3 +75,53 @@ def test_the_stepper_follows_the_model(case, dtype, device):
     assert stepper.rebuilds > 1
     if device == "cuda":
         assert stepper.replays > 0 and stepper.refills >= 1
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="no C++ compiler")
+def test_the_cpu_stepper_with_the_one_pass_search_follows_the_model():
+    """A cell over twice cutoff plus skin wide: the CPU searches every pair in one pass, its bond and
+    hydrogen-bond candidates from the rows of that list; energies, forces and charges of the model through a
+    rebuild."""
+    pos0, z, L = _box(WATER, 3, 6.5)
+    pos0 = pos0 % L
+    rng = np.random.default_rng(2)
+    step = rng.normal(size=pos0.shape)
+    step *= 0.05 / np.linalg.norm(step, axis=1, keepdims=True)
+    model = ReaxFF("CHOLiNaKCsFClI_Fedkin_2019", species=["H", "O"], conventions="lammps", vdw_cutoff=8.0)
+    model = model.double().eval()
+    model.use_fast = False
+    stepper = ReaxFFStepper(model)
+    for t in range(5):
+        s = {"pos": torch.tensor(pos0 + t * step), "atomic_numbers": torch.tensor(z),
+             "cell": torch.eye(3, dtype=torch.float64) * L, "pbc": torch.ones(3, dtype=torch.bool)}
+        got = stepper(s)
+        g = structure_to_graph(s, model.cutoff)
+        p = g.pos.detach().clone().requires_grad_(True)
+        g.pos = p
+        out = model(g)
+        forces = -torch.autograd.grad(out["energy"].sum(), p)[0]
+        ref = {"energy": out["energy"].detach(), "forces": forces, "charges": out["charges"].detach()}
+        for key in ("energy", "forces", "charges"):
+            a, b = ref[key].double().reshape(-1), got[key].double().reshape(-1)
+            scale = float(a.abs().max()) or 1.0
+            assert float((a - b).abs().max()) <= 1e-9 * scale, (t, key, float((a - b).abs().max()), scale)
+    assert stepper.rebuilds > 1 and stepper.refills >= 1
+    assert int(stepper.lists["hbonds"]["n"]) > 0
+
+
+def test_the_stepper_refuses_other_fields_trained_parameters_and_small_cells():
+    """The ReaxFF-nn conventions, a parameter requiring a gradient and a cell no wider than cutoff plus skin
+    are refused."""
+    from xnn.ffnn.models import template_library
+    with pytest.raises(ValueError, match="LAMMPS conventions"):
+        ReaxFFStepper(ReaxFF(template_library(["C", "H", "O"], nn=False), nn=False, conventions="reaxff-nn"))
+    model = ReaxFF("CHO_cho_2008", conventions="lammps")
+    model.params["val"].requires_grad_(True)
+    with pytest.raises(ValueError, match="fixed parameters"):
+        ReaxFFStepper(model)
+    model.params["val"].requires_grad_(False)
+    pos, z, L = _box(WATER, 1, 6.5)
+    s = {"pos": torch.tensor(pos % L), "atomic_numbers": torch.tensor(z),
+         "cell": torch.eye(3, dtype=torch.float64) * L, "pbc": torch.ones(3, dtype=torch.bool)}
+    with pytest.raises(ValueError, match="width"):
+        ReaxFFStepper(model)(s)

@@ -488,6 +488,20 @@ def test_fast_path_falls_back_off_gpu():
         assert fast_modules(model) and not any(m.fast_active for m in fast_modules(model))
 
 
+def test_compiled_block_wiring_matches_the_reference(monkeypatch):
+    """The evaluation fast path (each block as one functional graph) gives the reference energies,
+    forces and stress; the compiler itself is replaced by the identity so the blocks run on a CPU."""
+    import xnn.common.models.compiled as compiled
+    monkeypatch.setattr(compiled, "supported", lambda device, dtype: True)
+    monkeypatch.setattr(compiled, "_SHARED", {})
+    monkeypatch.setattr(torch, "compile", lambda fn, **kw: fn)
+    model = _small()
+    ref = _fast_v1_run(model, _graph(n=5, seed=2, periodic=True), False, False)
+    fast = _fast_v1_run(model, _graph(n=5, seed=2, periodic=True), True, False)
+    for key, value in ref.items():
+        assert (fast[key] - value).abs().max() <= 1e-12 * value.abs().max().clamp_min(1.0), key
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("options", [{}, {"attention": "dot_product", "nonlinear_message": False},

@@ -280,6 +280,17 @@ def test_scripted_potential_and_lammps_export(extra, tmp_path):
     assert abs(float(pair["total_energy"]) - float(neutral["energy"])) < 1e-10
     assert torch.allclose(pair["forces"], neutral["forces"].detach(), atol=1e-10)
 
+    # the exported entry points in Python give what the scripted model gives on the same edges
+    scripted = torch.jit.script(model)
+    vec, empty = g.edge_vectors().detach(), torch.zeros(0, dtype=torch.float64)
+    args = (g.atomic_numbers, g.edge_index, vec, empty, empty, empty.to(torch.bool), -1.0, 1.0)
+    with torch.no_grad():
+        for a, b in zip(model.node_features_energy_charges(*args), scripted.node_features_energy_charges(*args)):
+            assert torch.allclose(a, b, rtol=0, atol=1e-12)
+        local = model.node_features_energy(g.atomic_numbers, g.edge_index, vec)
+        assert torch.allclose(model.node_energy(g.atomic_numbers, g.edge_index, vec), local[1], rtol=0, atol=0)
+        assert torch.allclose(local[1], scripted.node_energy(g.atomic_numbers, g.edge_index, vec), rtol=0, atol=1e-12)
+
 
 # fast path (the fused continuous-filter convolution of SchNet)                 #
 
@@ -293,6 +304,21 @@ def _build_width(n_features):
         for ib in model.interaction_blocks:
             ib.interaction.k2f.weight.normal_(0, 0.1)
     return model
+
+
+def test_fast_path_support_and_choice(monkeypatch):
+    """The fused messages need a power-of-two feature width from 16 to 512 on a device Triton
+    supports; ``set_use_fast`` records the choice and returns the model."""
+    import xnn.dnn.fast.physnet as fast_physnet
+    monkeypatch.setattr(fast_physnet, "supported", lambda device, dtype: True)
+    widths = {16: True, 24: False, 512: True, 1024: False, 8: False}
+    for n, expected in widths.items():
+        block = _build_width(n).interaction_blocks[0].interaction
+        assert block.fast_supported(torch.device("cuda"), torch.float32) == expected, n
+    model = _build_width(16)
+    for choice, stored in ((True, True), (False, False), ("auto", "auto")):
+        assert model.set_use_fast(choice) is model
+        assert model.use_fast == stored
 
 
 def test_fast_messages_match_the_reference():

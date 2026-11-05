@@ -400,3 +400,51 @@ def test_torchscript_export_matches_eager(tmp_path, dispersion, charge):
         assert torch.allclose(energy.sum(), ref["energy"].sum(), atol=1e-12, rtol=0)
         assert torch.allclose(out["forces"], ref["forces"], atol=1e-12, rtol=0)
         assert torch.allclose(out["charges"], ref["charges"], atol=1e-12, rtol=0)
+
+
+def test_fast_selection_and_captured_batches(monkeypatch):
+    """``use_fast`` is validated; ``True`` turns the fused messages on where they are supported and they
+    give the reference energies and forces (Triton's interpreter on a CPU), while a padded batch with an
+    index plan (a captured step) always takes the reference path."""
+    from xnn.hybnn.fast.bamboo import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+    model = _build(n_interactions=2, n_features=16, num_heads=4).double()
+    with pytest.raises(ValueError):
+        model.set_use_fast("fast")
+    with pytest.raises(TypeError):
+        model.set_use_fast(1)
+    g = _graph(n=6, total_charge=1.0)
+    ref = ForceStressOutput(model.set_use_fast(False)).eval()(g)
+    assert not any(b.fast_active for b in model.layers)
+    if not torch.cuda.is_available():
+        if os.environ.get("TRITON_INTERPRET") != "1":
+            pytest.skip("needs a CUDA device or Triton's interpreter")
+        import xnn.hybnn.fast.bamboo as fast
+        monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device).set_use_fast(True)
+    out = ForceStressOutput(model).eval()(_graph(n=6, total_charge=1.0).to(device))
+    assert all(b.fast_active for b in model.layers)
+    for key in ("energy", "forces"):
+        assert (out[key].detach().cpu() - ref[key].detach()).abs().max() <= 1e-12 * ref[key].abs().max()
+    planned = _graph(n=6, total_charge=1.0).to(device)
+    planned.index_plan = {}
+    out = ForceStressOutput(model).eval()(planned)
+    assert not any(b.fast_active for b in model.layers)
+    assert (out["energy"].detach().cpu() - ref["energy"].detach()).abs().max() <= 1e-12 * ref["energy"].abs().max()
+
+
+def test_scriptable_core_matches_forward():
+    """The single-structure core (node features, atomic energies and charges for a net charge) equals the
+    batched forward pass."""
+    model = _build(use_dispersion=True).eval()
+    g = _graph(n=8, total_charge=1.0)
+    ref = model(g)
+    feat, node_energy, charges = model.node_features_energy_charges(
+        g.atomic_numbers, g.edge_index, g.edge_vectors(), g.pos, torch.zeros(3, 3),
+        torch.zeros(3, dtype=torch.bool), 1.0, 1.0)
+    assert torch.allclose(feat, ref["node_features"], rtol=0, atol=1e-12)
+    assert torch.allclose(node_energy, ref["node_energy"], rtol=0, atol=1e-12)
+    assert torch.allclose(charges, ref["charges"], rtol=0, atol=1e-12)
+    assert abs(float(charges.sum()) - 1.0) < 1e-12

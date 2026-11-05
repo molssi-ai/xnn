@@ -1073,6 +1073,70 @@ def test_fast_shell_sums_gradients_interpreted():
     _check_fast_shell_sums(aimnet2_kernels, "cpu")
 
 
+def test_fast_shell_sums_split_channels_interpreted(monkeypatch):
+    """Channels just above a power of two in two passes (17 = 16 + 1) give the gathered reference
+    sums and their gradients."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast import aimnet2_kernels
+    monkeypatch.setattr(aimnet2_kernels, "SPLIT_CHANNELS", True)
+    assert aimnet2_kernels._split_channels(17) == 16
+    assert aimnet2_kernels._split_channels(5) == 0                # 8 padded against 4 + 2: one pass
+    gen = torch.Generator().manual_seed(4)
+    n, n_edges, c, s = 5, 14, 17, 4
+    a = torch.randn(n, c, s, dtype=torch.float64, generator=gen).requires_grad_(True)
+    g = torch.randn(n_edges, s, 4, dtype=torch.float64, generator=gen).requires_grad_(True)
+    w = torch.randn(n, c, s, 4, dtype=torch.float64, generator=gen)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen)
+    expect = torch.zeros(n, c, s, 4, dtype=torch.float64).index_add(
+        0, edge_index[1], a[edge_index[0]][..., None] * g[:, None])
+    got = aimnet2_kernels.shell_sums(a, g, edge_index)
+    assert torch.allclose(got, expect, rtol=0, atol=1e-13)
+    for x, y in zip(torch.autograd.grad((got * w).sum(), (a, g)), torch.autograd.grad((expect * w).sum(), (a, g))):
+        assert torch.allclose(x, y, rtol=0, atol=1e-12)
+
+
+def test_fast_path_parity_interpreted(monkeypatch):
+    """The fused shell convolutions under Triton's interpreter give the reference energies, forces
+    and charges."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.aimnet2 as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _build(seed=1, n_rbf=8).eval()
+    assert not _build(seed=1).conv_a.fast_supported(torch.device("cpu"), torch.float64)   # 6 shells
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(collate([_molecule(n=7, seed=5, charge=1.0)]))
+        assert model.conv_a.fast_active == use_fast
+        out[use_fast] = {k: res[k].detach() for k in ("energy", "forces", "charges")}
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < 1e-12, (key, float(err))
+
+
+def test_shell_sums_float32():
+    """float32 takes the other operand order of the same contraction: the float64 sums to float32
+    rounding."""
+    from xnn.gnn.models.aimnet2 import neighbor_matrix, shell_sums
+    gen = torch.Generator().manual_seed(3)
+    n, e, c, s_, h = 5, 14, 3, 4, 2
+    edge_index = torch.randint(0, n, (2, e), generator=gen)
+    nb_edge, nb_src = neighbor_matrix(edge_index, n)
+    nodes = torch.randn(n, c, s_, dtype=torch.float64, generator=gen)
+    gsv = torch.randn(e, s_, 4, dtype=torch.float64, generator=gen)
+    weight = torch.randn(c, s_, h, dtype=torch.float64, generator=gen)
+    ref = shell_sums(nodes, gsv, nb_edge, nb_src, weight)
+    got = shell_sums(nodes.float(), gsv.float(), nb_edge, nb_src, weight.float())
+    for a, b in zip(got, ref):
+        assert a.dtype == torch.float32
+        assert torch.allclose(a.double(), b, rtol=1e-5, atol=1e-5)
+
+
 def test_fast_support_needs_cuda():
     from xnn.gnn.fast.aimnet2 import supported
     assert not supported(torch.device("cpu"), torch.float64)

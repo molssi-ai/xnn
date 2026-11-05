@@ -87,6 +87,26 @@ def test_cutoff_functions_values_and_support():
     poly = cutoff_function(r, "polynomial", 5.0, exponent=3)
     assert abs(float(poly[1]) - (1 - 0.01) ** 3) < 1e-15 and poly[4] == 0
     assert cutoff_function(r, "hard", 5.0).tolist() == [1.0, 1.0, 1.0, 0.0, 0.0]
+    with pytest.raises(ValueError, match="unknown cutoff kind"):
+        cutoff_function(r, "gaussian", 5.0)
+
+
+def test_acos_margin_and_fast_support_per_dtype(monkeypatch):
+    """The angle clamp of each dtype is its machine epsilon (at least 1e-15); the fast blocks take
+    float32 and float64 on CPUs only, and the CPU kernels' policy where they build."""
+    from xnn.dnn.fast.acsf import AUTO_POLICY, AUTO_POLICY_CPU
+    from xnn.dnn.featurizers.acsf import _acos_margin
+    assert _acos_margin(torch.float64) == 1e-15
+    for dtype in (torch.float32, torch.bfloat16, torch.float16):
+        assert _acos_margin(dtype) == torch.finfo(dtype).eps
+    acsf = _acsf()
+    assert not acsf.fast_supported(torch.device("cpu"), torch.bfloat16)
+    assert not acsf.fast_supported(torch.device("meta"), torch.float64)
+    monkeypatch.setattr(type(acsf), "_cpu_kernels_ok", lambda self: True)
+    assert acsf.fast_supported(torch.device("cpu"), torch.float64)
+    assert acsf.fast_policies()[0] is AUTO_POLICY_CPU
+    monkeypatch.setattr(type(acsf), "_cpu_kernels_ok", lambda self: False)
+    assert acsf.fast_policies()[0] is AUTO_POLICY
 
 
 def test_cutoff_functions_vanish_smoothly():
@@ -642,6 +662,27 @@ def test_compiled_symmetry_functions_match_the_reference(device, generation, per
     assert torch.isfinite(gf).all()
 
 
+def test_compiler_failure_falls_back_to_the_reference_blocks(monkeypatch):
+    """When no compiled variant of a block builds, the featurizer runs the reference block (the
+    same descriptor) and keeps that choice; a block that compiled once and then fails raises."""
+    acsf = _acsf().eval()
+    s = _molecule()
+    g = _graph(s, _model(2))
+    vec = g.edge_vectors()
+    ref = acsf.compute(g.atomic_numbers, g.edge_index, vec, g.atomic_numbers.shape[0])
+
+    def broken(self, name, scalar):
+        raise RuntimeError("no compiler")
+    monkeypatch.setattr(type(acsf), "_compiled", broken)
+    acsf.fast_active = True
+    out = acsf.compute(g.atomic_numbers, g.edge_index, vec, g.atomic_numbers.shape[0])
+    assert torch.equal(out, ref)
+    assert set(acsf._compiled_modes.values()) == {"eager"}
+    acsf._compiled_modes["radial"] = "vector"
+    with pytest.raises(RuntimeError, match="no compiler"):
+        acsf.compute(g.atomic_numbers, g.edge_index, vec, g.atomic_numbers.shape[0])
+
+
 @pytest.mark.parametrize("types", [(1, 2, 3, 9), (1, 2, 3)])
 @pytest.mark.parametrize("periodic", [False, True])
 def test_direct_forces_match_the_reference(periodic, types, monkeypatch):
@@ -692,7 +733,23 @@ def test_scripted_potential_matches_eager_every_generation(generation, extra, pe
     total = 0.0 if (periodic or generation == 2) else -1.0
     s = _cell() if periodic else _molecule(charge=total)
     s = dict(s, total_charge=total)
-    eager = ForceStressOutput(model, compute_stress=periodic)(_graph(s, model))
+    g = _graph(s, model)
+    eager = ForceStressOutput(model, compute_stress=periodic)(g)
+    # the core itself, in Python: the model's atomic energies and charges
+    pbc_g = torch.tensor([periodic] * 3)
+    cell_g = g.cell[0] if periodic else torch.zeros(3, 3, dtype=torch.float64)
+    with torch.no_grad():
+        _, node, q = model.node_features_energy_charges(g.atomic_numbers, g.edge_index, g.edge_vectors(), g.pos,
+                                                        cell_g, pbc_g, total, 1.0)
+    assert torch.allclose(node.sum(), eager["energy"].detach().sum(), rtol=0, atol=1e-10)
+    if generation >= 3:
+        assert torch.allclose(q, eager["charges"].detach(), rtol=0, atol=1e-10)
+        with pytest.raises(RuntimeError, match="node_features_energy_charges"):
+            model.node_features_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+    else:
+        with torch.no_grad():
+            _, local = model.node_features_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+        assert torch.allclose(local, node, rtol=0, atol=1e-12)
     wrapper = TorchScriptPotential(model, model.cutoff, total_charge=total).eval()
     scripted = torch.jit.script(wrapper)
     pos = torch.tensor(np.asarray(s["pos"]))

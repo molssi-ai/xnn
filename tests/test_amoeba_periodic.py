@@ -648,9 +648,9 @@ def test_second_derivatives_through_the_kernels_match_the_reference(cls, device)
         assert torch.allclose(a, b, rtol=1e-9, atol=1e-9)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
-def test_parameter_gradients_through_the_kernels_match_the_reference(cls):
+def test_parameter_gradients_through_the_kernels_match_the_reference(device, cls):
     """The force field's parameters get the reference's gradients through the pair kernels (the generated
     adjoint of the forward kernel for the per-atom table)."""
     pos = BOX[:24] - BOX[:24].mean(0)
@@ -658,27 +658,29 @@ def test_parameter_gradients_through_the_kernels_match_the_reference(cls):
     for use_fast in (False, True):
         lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
         model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, trainable="all")
-        model = model.to("cuda").eval()
-        model(_graph(pos, cell=None, cutoff=30.0).to("cuda"))["energy"].sum().backward()
+        model = model.to(device).eval()
+        model(_graph(pos, cell=None, cutoff=30.0).to(device))["energy"].sum().backward()
         grads.append({k: v.grad.clone() for k, v in model.ff.params.items() if v.grad is not None})
     assert grads[0].keys() == grads[1].keys() and grads[0]
     for key in grads[0]:
         assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-9, atol=1e-10), key
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
-def test_force_loss_parameter_gradients_through_the_kernels_match_the_reference(cls):
+def test_force_loss_parameter_gradients_through_the_kernels_match_the_reference(device, cls):
     """A force loss gives the parameters the reference's gradients through the kernels: the tangents of the
     generated parameter adjoints (the mixed second derivatives)."""
+    if device == "cpu" and cls is Hippo:
+        pytest.skip("the HIPPO tangent kernels take a minute to build as C++ loops")
     pos = BOX[:24] - BOX[:24].mean(0)
-    weights = torch.tensor(np.random.default_rng(9).normal(size=(24, 3)), device="cuda")
+    weights = torch.tensor(np.random.default_rng(9).normal(size=(24, 3)), device=device)
     grads = []
     for use_fast in (False, True):
         lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
         model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, trainable="all")
-        model = model.to("cuda").eval()
-        g = _graph(pos, cell=None, cutoff=30.0).to("cuda")
+        model = model.to(device).eval()
+        g = _graph(pos, cell=None, cutoff=30.0).to(device)
         g.pos.requires_grad_(True)
         forces = -torch.autograd.grad(model(g)["energy"].sum(), g.pos, create_graph=True)[0]
         (forces * weights).sum().backward()
@@ -726,15 +728,15 @@ def test_training_through_the_kernels_matches_the_reference(cls, periodic):
         assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-8, atol=1e-9), key
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the paired solve runs on the kernels")
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
 @pytest.mark.parametrize("periodic", [True, False])
-def test_the_paired_solve_matches_the_separate_solves(periodic):
+def test_the_paired_solve_matches_the_separate_solves(device, periodic):
     """On the kernels AMOEBA solves the dipoles of the polar field together with those of the direct field, and
     its backward pass takes the adjoint from them without a solve; energy and forces stay the reference's."""
     cell = CELL if periodic else None
-    g = _graph(BOX, cell=cell).to("cuda")
-    ref = ForceStressOutput(_box(Amoeba, solver="iterative")).to("cuda").eval()
-    fast = ForceStressOutput(_box(Amoeba, solver="iterative", use_fast=True)).to("cuda").eval()
+    g = _graph(BOX, cell=cell).to(device)
+    ref = ForceStressOutput(_box(Amoeba, solver="iterative")).to(device).eval()
+    fast = ForceStressOutput(_box(Amoeba, solver="iterative", use_fast=True)).to(device).eval()
     want, got = ref(g), fast(g)
     assert fast.model.solver_stats["adjoint"] == 0
     for key in ("energy", "forces"):
@@ -788,19 +790,19 @@ def test_the_plan_checks_kernel_matches_the_tests(far):
     assert out.tolist() == want and torch.equal(kept, pos)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
-def test_the_pair_vectors_backward_on_rows_matches_the_atomic_adds():
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+def test_the_pair_vectors_backward_on_rows_matches_the_atomic_adds(device):
     """The gradient of the pair vectors summed over each atom's compressed row equals the atomic adds,
     with a padded list (a count below its length) and a pair of an atom with its own image."""
     from xnn.ffnn.models import amoeba_kernels as km
-    gen = torch.Generator(device="cuda").manual_seed(5)
+    gen = torch.Generator(device=device).manual_seed(5)
     N, M = 50, 700
-    i = torch.sort(torch.randint(0, N, (M,), device="cuda", generator=gen)).values
-    k = torch.randint(0, N, (M,), device="cuda", generator=gen)
+    i = torch.sort(torch.randint(0, N, (M,), device=device, generator=gen)).values
+    k = torch.randint(0, N, (M,), device=device, generator=gen)
     k[3] = i[3]
-    pos = torch.randn(N, 3, dtype=torch.float64, device="cuda", generator=gen).requires_grad_(True)
-    count = torch.tensor([650], dtype=torch.int32, device="cuda")
-    g = torch.randn(M, 3, device="cuda", generator=gen)
+    pos = torch.randn(N, 3, dtype=torch.float64, device=device, generator=gen).requires_grad_(True)
+    count = torch.tensor([650], dtype=torch.int32, device=device)
+    g = torch.randn(M, 3, device=device, generator=gen)
     rows = km.pair_rows(i, k, N, count, sorted_i=True)
     grads = []
     for r in (None, rows):
@@ -809,31 +811,33 @@ def test_the_pair_vectors_backward_on_rows_matches_the_atomic_adds():
     assert torch.allclose(grads[0], grads[1], rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
 @pytest.mark.parametrize("periodic", [True, False])
-def test_the_kernels_on_a_plan_visit_the_pairs_within_the_cutoff(cls, periodic):
+def test_the_kernels_on_a_plan_visit_the_pairs_within_the_cutoff(device, cls, periodic):
     """On a padded plan with a skin the pair kernels visit the pairs within the cutoff only, in order, and the
     energy, forces and dipoles stay those of the plain evaluation."""
+    if device == "cpu" and cls is Hippo and not periodic:
+        pytest.skip("the HIPPO cluster kernels take a quarter minute to build as C++ loops")
     from xnn.ffnn.models import amoeba_kernels as km
-    sel, n = km.select_pairs(torch.tensor([False, True, True, False, True, False], device="cuda"))
+    sel, n = km.select_pairs(torch.tensor([False, True, True, False, True, False], device=device))
     assert int(n) == 3 and sel[:3].tolist() == [1, 2, 4] and sel.shape[0] == 7
-    gen = torch.Generator(device="cuda").manual_seed(3)
-    r = 4.0 * torch.randn(1000, 3, device="cuda", generator=gen)
-    valid = (torch.rand(1000, device="cuda", generator=gen) > 0.1).double()
-    R, sel2, n2 = km.select_pairs_within(r, torch.full((1,), 36.0, device="cuda"), valid)
+    gen = torch.Generator(device=device).manual_seed(3)
+    r = 4.0 * torch.randn(1000, 3, device=device, generator=gen)
+    valid = (torch.rand(1000, device=device, generator=gen) > 0.1).double()
+    R, sel2, n2 = km.select_pairs_within(r, torch.full((1,), 36.0, device=device), valid)
     want, wn = km.select_pairs(((r * r).sum(1) < 36.0) & (valid > 0))
     assert int(n2) == int(wn) and torch.equal(sel2[:-1], want[:-1]) and n2.dtype == torch.int32
     assert torch.allclose(R, torch.sqrt((r * r).sum(1) + 1e-12))
-    model = _box(cls, use_fast=True).to("cuda").eval()
+    model = _box(cls, use_fast=True).to(device).eval()
     cell = CELL if periodic else None
-    g = _graph(BOX, cell=cell, cutoff=7.3).to("cuda")
+    g = _graph(BOX, cell=cell, cutoff=7.3).to(device)
     plan = model.plan_step(g, skin=1.0, capacity=64 * (int(g.edge_index.shape[1]) // 64 + 4))
     moved = BOX + np.random.default_rng(4).normal(scale=0.02, size=BOX.shape)
     results = []
     for p in (None, plan):
-        g = _graph(moved if p is None else BOX, cell=cell).to("cuda")
-        g.pos = torch.tensor(moved, dtype=g.pos.dtype, device="cuda").requires_grad_(True)
+        g = _graph(moved if p is None else BOX, cell=cell).to(device)
+        g.pos = torch.tensor(moved, dtype=g.pos.dtype, device=device).requires_grad_(True)
         out = model(g, p)
         forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
         results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
@@ -1114,3 +1118,86 @@ def test_mixed_precision_evaluates_the_ladders_in_the_working_precision():
         scale = terms if key == "energy" else float(want[key].abs().max())
         assert torch.allclose(out[torch.float64, True][key], out[torch.float64, False][key], rtol=0, atol=1e-10 * scale)
         assert torch.allclose(out[torch.float32, True][key], want[key], rtol=0, atol=tol * scale), key
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("variant", ["no-polarization", "exchange-polarization"])
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_cpu_kernels_without_polarization_and_with_exchange_polarization(cls, variant):
+    """On the CPU kernels a model without induction (no polarization energy) and one with exchange
+    polarization give the reference's energies and forces on a cluster of eight waters."""
+    lib = copy.deepcopy(builtin_amoeba("amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"))
+    kw = {"polarization": "none"} if variant == "no-polarization" else {}
+    if variant == "exchange-polarization":
+        lib.exchpol = copy.deepcopy(EXCHPOL)
+    pos = BOX[:24] - BOX[:24].mean(0)
+    results = []
+    for use_fast in (False, True):
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, **kw).eval()
+        g = _graph(pos, cell=None, cutoff=30.0)
+        g.pos.requires_grad_(True)
+        out = model(g)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), out["e_polar"].detach(), forces))
+    assert (float(results[0][1].abs().max()) == 0.0) == (variant == "no-polarization")
+    for a, b in zip(*results):
+        assert torch.allclose(a, b, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+def test_cpu_kernels_refuse_term_cutoffs_beyond_the_list_and_warn_on_unconverged_solves():
+    """On the kernels a term cutoff beyond the neighbor cutoff is refused, and a solve stopped by its
+    iteration limit warns."""
+    g = _graph(BOX[:24], cell=None)
+    for model in (Amoeba("amoeba-water-2003", _topology(8), cutoff=6.3, vdw_cutoff=7.0, use_fast=True),
+                  Hippo("hippo-water-2021", _topology(8), cutoff=6.3, repulsion_cutoff=7.0, use_fast=True)):
+        with pytest.raises(ValueError, match="exceeds the neighbor cutoff"):
+            model.eval()(g)
+    model = Hippo("hippo-water-2021", _topology(8), cutoff=6.3, use_fast=True, max_iter=2, polar_eps=1e-12,
+                  solver="iterative").eval()
+    with pytest.warns(UserWarning, match="did not converge"):
+        model(g)
+
+
+def test_a_plan_tests_its_list_without_the_kernel():
+    """A plan's tests on positions it cannot hand to the kernel (non-contiguous): outdated, due within the
+    coming steps, the solves' convergence and needed iterations, as their definitions give them, and the
+    positions kept; a refresh whose pairs exceed the plan's capacity is refused; the predictors rewind."""
+    model = _box(Amoeba, predictor="aspc").eval()
+    g = _graph(BOX, cutoff=7.3)
+    plan = model.plan_step(g, skin=1.0, capacity=int(g.edge_index.shape[1]))
+    plan.converged, plan.needed = torch.tensor(True), torch.tensor([5.0, 0.0], dtype=torch.float64)
+    rng = np.random.default_rng(6)
+    for far in (0.0, 0.4, 0.6):
+        pos = plan.reference + torch.tensor(rng.normal(scale=0.01, size=BOX.shape))
+        pos[7, 1] += far
+        last = torch.empty(3, len(BOX), dtype=torch.float64).T
+        last.copy_(pos - torch.tensor(rng.normal(scale=0.02, size=BOX.shape)))
+        moved = ((pos - plan.reference) ** 2).sum(-1)
+        stride = ((pos - last) ** 2).sum(-1).sqrt()
+        want = [float(moved.max() > 0.25), float((moved.sqrt() + 3 * stride).max() > 0.5), 1.0, 5.0, 0.0]
+        assert plan.checks(pos, last, steps=2).tolist() == want and torch.equal(last, pos)
+    g.pos = g.pos + 0.01
+    assert not model.refresh_pairs(g, plan, 11.0)
+    model(_graph(BOX))
+    assert len(model.predictor._sets) == 1
+    model.rewind_predictors()
+    assert len(model.predictor._sets) == 0
+
+
+def test_where_the_pair_kernels_run(monkeypatch):
+    """The pair kernels take float32 or float64 on a CUDA device or the CPU, there with a C++ compiler, and
+    need Triton; the GPU kernels are available with a GPU."""
+    import sys
+
+    from xnn.ffnn.models import amoeba
+    from xnn.ffnn.models import amoeba_kernels as km
+    cpu, cuda = torch.device("cpu"), torch.device("cuda")
+    assert km.available() == torch.cuda.is_available()
+    assert not amoeba._kernels_supported(cpu, torch.float16) and not amoeba._kernels_supported(
+        torch.device("meta"), torch.float64)
+    assert amoeba._kernels_supported(cuda, torch.float32)
+    monkeypatch.setattr(amoeba.cpu_kernels, "available", lambda: False)
+    assert not amoeba._kernels_supported(cpu, torch.float64)
+    monkeypatch.setitem(sys.modules, "triton", None)
+    assert not amoeba._kernels_supported(cuda, torch.float64)
