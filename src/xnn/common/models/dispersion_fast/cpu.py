@@ -1,4 +1,4 @@
-"""D3 and D4 on CPUs: C++ and OpenMP kernels (built on first use).
+"""D3 and D4 on CPUs: optional C++ and OpenMP kernels (off by default, built on first use).
 
 simple-dftd3 and dftd4 evaluate the dispersion energy in loops over the atoms and their neighbors,
 energy and gradient in one pass, without tensors per pair or triangle. The reference
@@ -295,7 +295,14 @@ static void atm(const Edges& E, const int64_t* z, int64_t nz, const T* s6m, cons
                                        : std::pow(r0s[sp] / E.r[k], alp3);
         }
   }
-#pragma omp parallel if (E.par)
+  // threads from about a thousand triangles on (the loop costs tens of nanoseconds per triangle)
+  int64_t pairs = 0;
+  for (int64_t c = 0; c < n; ++c) {
+    const int64_t deg = E.ptr[c + 1] - E.ptr[c];
+    pairs += deg * deg;
+  }
+  const bool par_atm = n_threads() > 1 && pairs >= 4096;
+#pragma omp parallel if (par_atm)
   {
     const size_t t = static_cast<size_t>(thread_id());
     T* dcn = GRAD ? dcn_t + t * n : nullptr;
@@ -843,7 +850,8 @@ static void run_d4(const Edges& E, const int64_t* z, const int64_t* batch, const
              three ? &dan[23 * i] : nullptr);
   std::vector<T> gb, galpha;
   if (GRAD) { gb.assign(3 * E.ne, T(0)); galpha.assign(23 * n, T(0)); }
-#pragma omp parallel for schedule(dynamic, 16) if (E.par)
+  // threads from a few hundred edges on (each sums 23 frequencies)
+#pragma omp parallel for schedule(dynamic, 4) if (E.ne >= 256)
   for (int64_t c = 0; c < n; ++c) {
     const int64_t zc = z[c];
     const T wc = w2 ? w2[c] : T(1);
@@ -992,11 +1000,253 @@ std::vector<torch::Tensor> d4_backward(torch::Tensor vec, torch::Tensor src, tor
                          galpha.has_value() ? ga.data_ptr<T>() : nullptr);
   return {out[3], out[4], out[5]};
 }
+
+// LU factorization with partial pivoting of a small dense (m, m) matrix in place, and a solve with it
+static void lu_factor(T* a, int64_t m, std::vector<int64_t>& piv) {
+  piv.resize(m);
+  for (int64_t k = 0; k < m; ++k) {
+    int64_t best = k;
+    for (int64_t i = k + 1; i < m; ++i)
+      if (std::abs(a[i * m + k]) > std::abs(a[best * m + k])) best = i;
+    piv[k] = best;
+    if (best != k)
+      for (int64_t j = 0; j < m; ++j) std::swap(a[k * m + j], a[best * m + j]);
+    const T inv = T(1) / a[k * m + k];
+    for (int64_t i = k + 1; i < m; ++i) {
+      const T f = a[i * m + k] * inv;
+      a[i * m + k] = f;
+      for (int64_t j = k + 1; j < m; ++j) a[i * m + j] -= f * a[k * m + j];
+    }
+  }
+}
+
+static void lu_solve(const T* a, int64_t m, const std::vector<int64_t>& piv, T* x) {
+  for (int64_t k = 0; k < m; ++k) if (piv[k] != k) std::swap(x[k], x[piv[k]]);
+  for (int64_t i = 1; i < m; ++i)
+    for (int64_t j = 0; j < i; ++j) x[i] -= a[i * m + j] * x[j];
+  for (int64_t i = m - 1; i >= 0; --i) {
+    for (int64_t j = i + 1; j < m; ++j) x[i] -= a[i * m + j] * x[j];
+    x[i] /= a[i * m + i];
+  }
+}
+
+// systems up to this size are solved here, larger ones by LAPACK through torch
+static const int64_t SMALL_SOLVE = 192;
+
+// D4 with the forces, no autograd: the coordination numbers, the EEQ charges of each structure (dense system and its
+// adjoint for the gradient; a cell's matrix comes in `given`, (m, m) bohr, and the caller differentiates it), the
+// polarizabilities and the two- and three-body terms; edge vectors from the positions, cells (B, 3, 3; empty for
+// molecules) and integer shifts; eeq = [rcov, en, eeq_rad, eeq_eta, eeq_chi, eeq_kcnchi] (Z), cprm = [kcn, k4, k5,
+// k6, cn_max, cn_reg, cutoff_cn, cutoff_eeq_cn (bohr), hartree]; returns the energies per atom and per structure
+// (B, 4: total, two-, three-body, tail = 0) in eV, the D4 coordination numbers, the charges, the polarizabilities
+// (N, 23), the forces, dE / d(strain) of the edges (B, 3, 3; eV) and the adjoint vector of the charges (N)
+std::vector<torch::Tensor> d4_direct(torch::Tensor pos, torch::Tensor cell, torch::Tensor shifts, torch::Tensor src,
+                                     torch::Tensor dst, torch::Tensor z, torch::Tensor batch, int64_t num_graphs,
+                                     torch::Tensor qtot, std::vector<torch::Tensor> tabs,
+                                     std::vector<torch::Tensor> eeq, std::vector<double> prm, std::vector<double> cprm,
+                                     std::vector<torch::Tensor> given) {
+  TORCH_CHECK(pos.scalar_type() == torch::kFloat64, "the dispersion CPU kernels compute in float64");
+  const int64_t n = z.size(0), ne = src.size(0);
+  const T* p = pos.data_ptr<T>();
+  const int64_t* s = src.data_ptr<int64_t>();
+  const int64_t* d = dst.data_ptr<int64_t>();
+  const int64_t* b = batch.data_ptr<int64_t>();
+  const int64_t* zz = z.data_ptr<int64_t>();
+  const T bohr = prm[10], hartree = cprm[8];
+  const T kcn = cprm[0], k4 = cprm[1], k5 = cprm[2], k6 = cprm[3], cn_max = cprm[4], cn_reg = cprm[5];
+  const T cut_cn = cprm[6], cut_eeq = cprm[7];
+  const T *rcov = eeq[0].data_ptr<T>(), *en = eeq[1].data_ptr<T>(), *rad = eeq[2].data_ptr<T>();
+  const T *eta = eeq[3].data_ptr<T>(), *chi = eeq[4].data_ptr<T>(), *kchi = eeq[5].data_ptr<T>();
+  auto opt = pos.options();
+  torch::Tensor node = torch::empty({n}, opt), energy = torch::zeros({num_graphs, 4}, opt);
+  torch::Tensor cn_out = torch::empty({n}, opt), q_out = torch::empty({n}, opt), alpha = torch::zeros({n, 23}, opt);
+  torch::Tensor forces = torch::zeros({n, 3}, opt), strain = torch::zeros({num_graphs, 3, 3}, opt);
+  torch::Tensor lam_out = torch::zeros({n}, opt);
+  if (n == 0) return {node, energy, cn_out, q_out, alpha, forces, strain, lam_out};
+  const bool periodic = cell.numel() > 0;
+  const T* cp = periodic ? cell.data_ptr<T>() : nullptr;
+  const T* sh = periodic ? shifts.data_ptr<T>() : nullptr;
+  std::vector<T> v(3 * ne);
+  for (int64_t e = 0; e < ne; ++e) {
+    for (int a = 0; a < 3; ++a) v[3 * e + a] = p[3 * d[e] + a] - p[3 * s[e] + a];
+    if (periodic) {
+      const T* C = cp + 9 * b[s[e]];
+      for (int a = 0; a < 3; ++a)
+        v[3 * e + a] += sh[3 * e] * C[a] + sh[3 * e + 1] * C[3 + a] + sh[3 * e + 2] * C[6 + a];
+    }
+  }
+  const Edges E = sorted_edges(v.data(), s, d, n, ne, bohr);
+  // coordination numbers: D4's (electronegativity-weighted) and the EEQ's (softly capped)
+  T* cn = cn_out.data_ptr<T>();
+  std::vector<T> cn_raw(n, T(0)), cn_eeq(n), dcap(n);
+  const T sqrt_pi = std::sqrt(T(3.141592653589793));
+#pragma omp parallel for schedule(static) if (E.par)
+  for (int64_t c = 0; c < n; ++c) {
+    T a4 = T(0), ar = T(0);
+    for (int64_t k = E.ptr[c]; k < E.ptr[c + 1]; ++k) {
+      const T r = E.r[k];
+      const int64_t j = E.js[k];
+      const T rc = rcov[zz[c]] + rcov[zz[j]];
+      const T cnt = T(0.5) * (T(1) + std::erf(-kcn * (r - rc) / rc));
+      if (r <= cut_cn) {
+        const T de = std::abs(en[zz[c]] - en[zz[j]]) + k5;
+        a4 += k4 * std::exp(-de * de / k6) * cnt;
+      }
+      if (r <= cut_eeq) ar += cnt;
+    }
+    cn[c] = a4;
+    cn_raw[c] = ar;
+    const T ex = std::exp(cn_max - ar);
+    cn_eeq[c] = std::log(T(1) + std::exp(cn_max)) - std::log(T(1) + ex);
+    dcap[c] = ex / (T(1) + ex);
+  }
+  // EEQ charges per structure
+  T* q = q_out.data_ptr<T>();
+  std::vector<int64_t> lo(num_graphs, 0), hi(num_graphs, 0);
+  for (int64_t i = n - 1; i >= 0; --i) lo[b[i]] = i;
+  for (int64_t i = 0; i < n; ++i) hi[b[i]] = i + 1;
+  const T* qt = qtot.data_ptr<T>();
+  std::vector<torch::Tensor> amats(num_graphs);
+  std::vector<std::vector<int64_t>> pivots(num_graphs);
+  const T sq2pi = std::sqrt(T(2) / T(3.141592653589793));
+  for (int64_t g = 0; g < num_graphs; ++g) {
+    const int64_t m = hi[g] - lo[g];
+    if (m <= 0) continue;
+    torch::Tensor A = torch::zeros({m + 1, m + 1}, opt), rhs = torch::empty({m + 1, 1}, opt);
+    T* a = A.data_ptr<T>();
+    T* r = rhs.data_ptr<T>();
+    const bool has = given[g].numel() > 0;
+    torch::Tensor gm = has ? given[g].contiguous() : torch::Tensor();
+    const T* ga = has ? gm.data_ptr<T>() : nullptr;
+    for (int64_t i = 0; i < m; ++i) {
+      const int64_t ai = lo[g] + i;
+      const T ri = rad[zz[ai]];
+      if (has) {
+        for (int64_t j = 0; j < m; ++j) a[i * (m + 1) + j] = ga[i * m + j];
+      } else {
+        for (int64_t j = i + 1; j < m; ++j) {
+          const int64_t aj = lo[g] + j;
+          const T rj = rad[zz[aj]];
+          const T dx = (p[3 * aj] - p[3 * ai]) / bohr, dy = (p[3 * aj + 1] - p[3 * ai + 1]) / bohr;
+          const T dz = (p[3 * aj + 2] - p[3 * ai + 2]) / bohr;
+          const T rr = std::sqrt(dx * dx + dy * dy + dz * dz);
+          const T gam = T(1) / std::sqrt(ri * ri + rj * rj);
+          const T val = std::erf(gam * rr) / rr;
+          a[i * (m + 1) + j] = val; a[j * (m + 1) + i] = val;
+        }
+        a[i * (m + 1) + i] = eta[zz[ai]] + sq2pi / ri;
+      }
+      a[i * (m + 1) + m] = T(1); a[m * (m + 1) + i] = T(1);
+      const T c = cn_eeq[ai];
+      r[i] = -chi[zz[ai]] + kchi[zz[ai]] * c / std::sqrt(c + cn_reg);
+    }
+    r[m] = qt[g];
+    if (m + 1 <= SMALL_SOLVE) {
+      lu_factor(a, m + 1, pivots[g]);
+      lu_solve(a, m + 1, pivots[g], r);
+      for (int64_t i = 0; i < m; ++i) q[lo[g] + i] = r[i];
+    } else {
+      torch::Tensor sol = at::linalg_solve(A, rhs);
+      const T* so = sol.data_ptr<T>();
+      for (int64_t i = 0; i < m; ++i) q[lo[g] + i] = so[i];
+    }
+    amats[g] = A;
+  }
+  // polarizabilities, two- and three-body energies and their gradients (hartree)
+  const D4Ref R = d4_ref(tabs, prm);
+  std::vector<T> e2(n), e3(n, T(0)), gv(3 * ne), gcn(n), gq(n);
+  run_d4<true>(E, zz, b, cn, q, R, tabs[7].data_ptr<T>(), tabs[8].data_ptr<T>(), tabs[9].data_ptr<T>(), prm, nullptr,
+               nullptr, nullptr, e2.data(), e3.data(), alpha.data_ptr<T>(), gv.data(), gcn.data(), gq.data());
+  // gradient in the positions (hartree / Angstrom): the edges' and, through the EEQ adjoint, the Coulomb matrix's
+  std::vector<T> gpos(3 * n, T(0)), gcnraw(n, T(0));
+  for (int64_t g = 0; g < num_graphs; ++g) {
+    const int64_t m = hi[g] - lo[g];
+    if (m <= 0) continue;
+    torch::Tensor rhs = torch::zeros({m + 1, 1}, opt);
+    T* r = rhs.data_ptr<T>();
+    for (int64_t i = 0; i < m; ++i) r[i] = gq[lo[g] + i];
+    torch::Tensor lam_t;
+    const T* lam;
+    if (m + 1 <= SMALL_SOLVE) {
+      // the matrix is symmetric: its LU factors solve the adjoint system too
+      lu_solve(amats[g].data_ptr<T>(), m + 1, pivots[g], r);
+      lam = r;
+    } else {
+      lam_t = at::linalg_solve(amats[g], rhs);
+      lam = lam_t.data_ptr<T>();
+    }
+    T* lo_ = lam_out.data_ptr<T>();
+    const bool has = given[g].numel() > 0;
+    for (int64_t i = 0; i < m; ++i) {
+      const int64_t ai = lo[g] + i;
+      const T ri = rad[zz[ai]];
+      lo_[ai] = lam[i];
+      // a cell's Coulomb matrix: differentiated by the caller
+      for (int64_t j = has ? m : i + 1; j < m; ++j) {
+        const int64_t aj = lo[g] + j;
+        const T rj = rad[zz[aj]];
+        const T dx = (p[3 * aj] - p[3 * ai]) / bohr, dy = (p[3 * aj + 1] - p[3 * ai + 1]) / bohr;
+        const T dz = (p[3 * aj + 2] - p[3 * ai + 2]) / bohr;
+        const T rr = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const T gam = T(1) / std::sqrt(ri * ri + rj * rj);
+        const T dval = (T(2) * gam / sqrt_pi * std::exp(-gam * gam * rr * rr) - std::erf(gam * rr) / rr) / rr;
+        // dE / dr_ij = -(lambda_i q_j + lambda_j q_i) dA_ij / dr, along (pos_j - pos_i) / r, per Angstrom
+        const T f = -(lam[i] * q[aj] + lam[j] * q[ai]) * dval / (rr * bohr);
+        gpos[3 * aj] += f * dx; gpos[3 * aj + 1] += f * dy; gpos[3 * aj + 2] += f * dz;
+        gpos[3 * ai] -= f * dx; gpos[3 * ai + 1] -= f * dy; gpos[3 * ai + 2] -= f * dz;
+      }
+      const T c = cn_eeq[ai];
+      const T sc = std::sqrt(c + cn_reg);
+      gcnraw[ai] = lam[i] * kchi[zz[ai]] * (T(1) / sc - c / (T(2) * sc * sc * sc)) * dcap[ai];
+    }
+  }
+  // the coordination-number chain into the edges
+#pragma omp parallel for schedule(static) if (E.par)
+  for (int64_t c = 0; c < n; ++c) {
+    for (int64_t k = E.ptr[c]; k < E.ptr[c + 1]; ++k) {
+      const T r = E.r[k];
+      const int64_t j = E.js[k];
+      const T rc = rcov[zz[c]] + rcov[zz[j]];
+      const T u = -kcn * (r - rc) / rc;
+      const T dcnt = -kcn / (rc * sqrt_pi) * std::exp(-u * u);
+      T gr = T(0);
+      if (r <= cut_cn) {
+        const T de = std::abs(en[zz[c]] - en[zz[j]]) + k5;
+        gr += gcn[c] * k4 * std::exp(-de * de / k6);
+      }
+      if (r <= cut_eeq) gr += gcnraw[c];
+      if (gr == T(0)) continue;
+      // per Angstrom of the edge vector
+      const T f = gr * dcnt / (r * bohr);
+      const int64_t e = E.order[k];
+      gv[3 * e] += f * E.v[3 * k]; gv[3 * e + 1] += f * E.v[3 * k + 1]; gv[3 * e + 2] += f * E.v[3 * k + 2];
+    }
+  }
+  T* fo = forces.data_ptr<T>();
+  T* sm = strain.data_ptr<T>();
+  for (int64_t e = 0; e < ne; ++e) {
+    T* M = sm + 9 * b[d[e]];
+    for (int a = 0; a < 3; ++a) {
+      gpos[3 * d[e] + a] += gv[3 * e + a];
+      gpos[3 * s[e] + a] -= gv[3 * e + a];
+      for (int c = 0; c < 3; ++c) M[3 * a + c] += v[3 * e + a] * gv[3 * e + c] * hartree;
+    }
+  }
+  for (int64_t i = 0; i < 3 * n; ++i) fo[i] = -gpos[i] * hartree;
+  T* np_ = node.data_ptr<T>();
+  T* en_ = energy.data_ptr<T>();
+  for (int64_t i = 0; i < n; ++i) {
+    np_[i] = (e2[i] + e3[i]) * hartree;
+    T* Eb = en_ + 4 * b[i];
+    Eb[0] += np_[i]; Eb[1] += e2[i] * hartree; Eb[2] += e3[i] * hartree;
+  }
+  return {node, energy, cn_out, q_out, alpha, forces, strain, lam_out};
+}
 """
 
 
 def _module():
-    return load("xnn_dispersion_cpu", _SOURCE, ["d3", "d3_backward", "d3_direct", "d4", "d4_backward"])
+    return load("xnn_dispersion_cpu", _SOURCE, ["d3", "d3_backward", "d3_direct", "d4", "d4_backward", "d4_direct"])
 
 
 def available() -> bool:
@@ -1141,20 +1391,92 @@ def _d4_tables(term) -> List[Tensor]:
     return cached[1]
 
 
+def _d4_parameters(term, dtype: torch.dtype) -> Tuple[List[float], List[float], Tensor]:
+    """D4's kernel parameters, the constants of its coordination numbers and charges, and the BJ radius
+    table in float64 (cached on the term while its parameter buffers are unchanged)."""
+    names = ("s6", "s8", "a1", "a2", "s9")
+    cached = term.__dict__.get("_cpu_parameters")
+    if cached is not None:
+        tensors, versions, cdtype, out = cached
+        if cdtype == dtype and all(term._buffers.get(k) is t and t._version == v
+                                   for k, t, v in zip(names, tensors, versions)):
+            return out
+    tensors = [term._buffers[k] for k in names]
+    s6, s8, a1, a2, s9 = torch.stack(tensors).tolist()
+    b = term.bohr
+    # sqrt(tiny) of the working precision, as the reference's weights
+    eps_norm = 1.0842021724855044e-19 if dtype == torch.float32 else 1.4916681462400413e-154
+    # energies in hartree, as the reference's terms
+    prm = [s6, s8, a1, a2, s9, term.alp / 3.0, term.cutoff_pair / b, term.cutoff_triple / b,
+           term.switch_width_pair / b, term.switch_width_triple / b, b, 1.0, term.ga, term.wf, eps_norm]
+    cprm = [term.kcn, term.k4, term.k5, term.k6, term.eeq_cn_max, term.eeq_cn_reg, term.cutoff_cn / b,
+            term.cutoff_eeq_cn / b, term.hartree]
+    out = (prm, cprm, term.pair_radius_table().detach().to(torch.float64).contiguous())
+    term.__dict__["_cpu_parameters"] = (tensors, [t._version for t in tensors], dtype, out)
+    return out
+
+
 def d4_terms(term, z: Tensor, edge_index: Tensor, edge_vec: Tensor, batch: Tensor, cn: Tensor,
              q: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
     """The two-body and three-body energies per atom (hartree) and the dynamic polarizabilities ``(N, 23)``
     of :class:`~xnn.common.models.d4.DFTD4` ``term`` on the C++ kernels (the reference's values),
     differentiable once in ``edge_vec``, ``cn`` (the D4 coordination numbers) and ``q`` (the charges)."""
     dtype, f64 = edge_vec.dtype, torch.float64
-    b = term.bohr
-    s6, s8, a1, a2, s9 = torch.stack([term.s6, term.s8, term.a1, term.a2, term.s9]).tolist()
-    # sqrt(tiny) of the working precision, as the reference's weights
-    eps_norm = 1.0842021724855044e-19 if dtype == torch.float32 else 1.4916681462400413e-154
-    # energies in hartree, as the reference's terms
-    prm = [s6, s8, a1, a2, s9, term.alp / 3.0, term.cutoff_pair / b, term.cutoff_triple / b,
-           term.switch_width_pair / b, term.switch_width_triple / b, b, 1.0, term.ga, term.wf, eps_norm]
-    tabs = _d4_tables(term) + [term.pair_radius_table().to(f64).contiguous()]
+    prm, _, r0tab = _d4_parameters(term, dtype)
+    tabs = _d4_tables(term) + [r0tab]
     out = D4CpuFunction.apply(edge_vec.to(f64), cn.to(f64), q.to(f64), edge_index[0].contiguous(),
                               edge_index[1].contiguous(), z.contiguous(), batch.contiguous(), tabs, prm)
     return out if dtype == f64 else tuple(t.to(dtype) for t in out)
+
+
+def d4_direct(term, data) -> Tuple[Tensor, ...]:
+    """D4 of a batch (molecules and cells of the dense EEQ regime) on the C++ kernels with its forces and stress:
+    the energies per atom and per structure ``(B, 4)`` (total, two-body, three-body, tail = 0; eV), the D4 coordination
+    numbers, the EEQ charges and the dynamic polarizabilities ``(N, 23)`` in the model dtype, the forces ``(N, 3)``
+    (eV / A) and ``dE / d(strain)`` ``(B, 3, 3)`` (eV) in the dtype of the positions. A cell's EEQ matrix is the
+    reference's Ewald sum; its derivative in the positions and the cell, contracted with the adjoint vector and the
+    charges the kernels return, is the one autograd pass, over that matrix alone."""
+    f64 = torch.float64
+    b = term.bohr
+    pos = data.pos.detach()
+    pos = (pos if pos.dtype == f64 else pos.to(f64)).contiguous()
+    charge = getattr(data, "total_charge", None)
+    qtot = (charge.detach().to(f64) if charge is not None else pos.new_zeros(data.num_graphs)).contiguous()
+    prm, cprm, r0tab = _d4_parameters(term, data.model_dtype)
+    tabs = _d4_tables(term) + [r0tab]
+    eeq = term.__dict__.get("_cpu_eeq_tables")
+    if eeq is None or eeq[0] != term.rcov.data_ptr():
+        eeq = (term.rcov.data_ptr(), [t.to(f64).contiguous() for t in (term.rcov, term.en, term.eeq_rad, term.eeq_eta,
+                                                                         term.eeq_chi, term.eeq_kcnchi)])
+        term.__dict__["_cpu_eeq_tables"] = eeq
+    batch = data.batch.contiguous()
+    cells = data.cell.detach().to(f64).contiguous() if data.cell is not None else None
+    empty = pos.new_zeros(0)
+    given, graphs = [empty] * int(data.num_graphs), {}
+    for g in range(int(data.num_graphs) if cells is not None else 0):
+        if cells is not None and data.pbc is not None and bool(data.pbc[g].any()) and bool(cells[g].abs().sum() > 1e-8):
+            members = torch.nonzero(batch == g).squeeze(1)
+            with torch.enable_grad():
+                p_leaf = (pos[members] / b).requires_grad_(True)
+                c_leaf = (cells[g] / b).requires_grad_(True)
+                a_graph = term._coulomb_matrix_periodic(data.atomic_numbers[members], p_leaf, c_leaf)
+            given[g] = a_graph.detach().to(f64).contiguous()
+            graphs[g] = (members, p_leaf, c_leaf, a_graph)
+    shifts = data.cell_shifts.to(f64).contiguous() if cells is not None else empty
+    out = _module().d4_direct(pos, cells if cells is not None else empty, shifts,
+                              data.edge_index[0].contiguous(), data.edge_index[1].contiguous(),
+                              data.atomic_numbers.contiguous(), batch, int(data.num_graphs), qtot, tabs, eeq[1], prm,
+                              cprm, given)
+    node, energies, cn, q, alpha, forces, strain, lam = out
+    for g, (members, p_leaf, c_leaf, a_graph) in graphs.items():
+        # dE = -lambda^T dA q over the Ewald matrix (hartree, positions and cell in bohr)
+        with torch.enable_grad():
+            gp, gc = torch.autograd.grad(-(lam[members].to(a_graph.dtype) @ a_graph @ q[members].to(a_graph.dtype)),
+                                         (p_leaf, c_leaf))
+        forces[members] -= gp.to(f64) * (term.hartree / b)
+        m = p_leaf.detach().t() @ gp + c_leaf.detach().t() @ gc
+        strain[g] += 0.5 * (m + m.t()).to(f64) * term.hartree
+    dtype, pdtype = data.model_dtype, data.pos.dtype
+    if dtype == f64 and pdtype == f64:
+        return node, energies, cn, q, alpha, forces, strain
+    return tuple(t.to(dtype) for t in (node, energies, cn, q, alpha)) + (forces.to(pdtype), strain.to(pdtype))

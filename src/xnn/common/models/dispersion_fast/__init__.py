@@ -15,11 +15,15 @@ The fast paths replace exactly those:
   its first and second derivatives as fused Triton kernels, with the pair C6
   from per-atom factors (no ``(N, N)`` matrix, so D3's three-body term has no
   atom limit);
-* :mod:`~xnn.common.models.dispersion_fast.cpu`: on CPUs, C++ / OpenMP kernels
+* :mod:`~xnn.common.models.dispersion_fast.atm_cpu`: on CPUs, the three-body
+  term on compiled tiles (``torch.compile``), with an analytic gradient for
+  :mod:`~xnn.common.models.dispersion_fast.d3_direct` and
+  :mod:`~xnn.common.models.dispersion_fast.d4_direct`, which form the forces
+  and stress of a standalone D3 or D4 term (D4: molecules) without autograd;
+* :mod:`~xnn.common.models.dispersion_fast.cpu`: optional C++ / OpenMP kernels
   for the whole of D3 and for D4's polarizabilities and two- and three-body
-  terms, the loops of the Fortran codes; where they do not build, the
-  three-body term on compiled tiles
-  (:mod:`~xnn.common.models.dispersion_fast.atm_cpu`).
+  terms, the loops of the Fortran codes (off by default, see
+  :mod:`xnn.common.models.cpu_extension`).
 
 They follow the ``use_fast`` convention of :mod:`xnn.common.models.fast`; the
 parameters, buffers and outputs of the modules are unchanged, except that the
@@ -40,7 +44,7 @@ AUTO_POLICY = AutoPolicy(default_min_edges=0, default_min_edges_float64=0,
                          # 10-20 s, which only pays from a few thousand edges (about 75 atoms) on
                          cpu_min_edges=5000, cpu_min_edges_float64=5000)
 
-#: ``AUTO_POLICY`` for a term whose C++ CPU kernels apply (D3 and D4,
+#: ``AUTO_POLICY`` for a term whose optional C++ CPU kernels are on and apply (D3 and D4,
 #: :mod:`~xnn.common.models.dispersion_fast.cpu`): on a CPU every size takes them
 AUTO_POLICY_CPU_KERNELS = AutoPolicy(default_min_edges=0, default_min_edges_float64=0,
                                      cpu_min_edges=0, cpu_min_edges_float64=0)
