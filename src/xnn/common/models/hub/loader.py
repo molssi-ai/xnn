@@ -36,6 +36,9 @@ _INHERITED = ("name", "description", "heads", "units", "license", "citation", "d
 _ASL = ("{name} is distributed under the Academic Software License "
         "(https://github.com/gabor1/ASL); by using it you accept its terms "
         "(no commercial use).")
+_NONCOMMERCIAL = ("{name} is distributed under the {license} license "
+                  "(https://creativecommons.org/licenses/); by using it you accept its "
+                  "terms (no commercial use).")
 _noticed: set[str] = set()
 
 
@@ -347,11 +350,16 @@ def fetch_model(source: Union[str, Path], *, cache_dir: Optional[Union[str, Path
 
 def _license_notice(card: Optional[ModelCard]) -> None:
     """Log the terms of a restrictively licensed model, once per process."""
-    if card is None or not str(card.license or "").upper().startswith("ASL"):
+    lic = str(card.license or "").upper() if card is not None else ""
+    if lic.startswith("ASL"):
+        text = _ASL.format(name=card.name)
+    elif "-NC" in lic:
+        text = _NONCOMMERCIAL.format(name=card.name, license=card.license)
+    else:
         return
     if card.name not in _noticed:
         _noticed.add(card.name)
-        logger.warning(_ASL.format(name=card.name))
+        logger.warning(text)
 
 
 def load_pretrained(source: Union[str, Path], *, cache_dir: Optional[Union[str, Path]] = None,

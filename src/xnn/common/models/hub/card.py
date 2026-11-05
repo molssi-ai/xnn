@@ -53,8 +53,9 @@ class ModelCard:
     units : dict of str to str
         Energy and length units of the model's inputs and outputs.
     license : str, optional
-        License identifier. ``"ASL"`` (the Academic Software License) prints
-        its terms when the model is loaded.
+        License identifier. ``"ASL"`` (the Academic Software License) and the
+        non-commercial Creative Commons licenses (``"CC-BY-NC-4.0"``) print
+        their terms when the model is loaded.
     citation : str, optional
         Reference to cite when using the model.
     doi : str, optional

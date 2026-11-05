@@ -24,6 +24,7 @@ ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")
 _PROVIDERS: dict[str, tuple[str, tuple[str, ...]]] = {
     "mace-torch": ("xnn.gnn.models.mace_foundation", (".model",)),
     "aimnet2": ("xnn.gnn.models.aimnet2_foundation", (".safetensors",)),
+    "byteff2": ("xnn.hybnn.models.byteff_foundation", ()),
 }
 
 
