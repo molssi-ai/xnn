@@ -3,6 +3,7 @@ stores with Triton's literal typing, scattered and block-summed atomic adds, a u
 per-program sums of a row loop, runtime branches and loops, runtime arguments passed by name, and the refusal
 of a block reduction it does not cover."""
 import math
+import os
 import sys
 
 import pytest
@@ -21,6 +22,30 @@ def _affine(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     m = e < n
     x = tl.load(x_ptr + e, mask=m, other=0.0)
     tl.store(y_ptr + e, x * 0.1 + 1.0, mask=m)
+
+
+@triton.jit
+def _asserted_rows(x_ptr, y_ptr, n_rows, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    tl.static_assert(WIDTH > 0)
+    e = tl.max_contiguous(tl.program_id(0) * BLOCK + tl.arange(0, BLOCK), BLOCK)
+    m = e < n_rows
+    acc = tl.zeros([BLOCK], dtype=tl.float64)
+    for j in tl.range(0, WIDTH):
+        acc += tl.load(x_ptr + e * WIDTH + j, mask=m, other=0.0)
+    tl.store(y_ptr + e, acc, mask=m)
+
+
+@pytest.mark.skipif(os.environ.get("TRITON_INTERPRET") != "1", reason="needs Triton's interpreter")
+def test_kernels_translate_after_the_interpreter_ran():
+    """Once Triton's interpreter has run a kernel in the process, it has replaced triton.language's
+    static_assert, range and max_contiguous with functions and partials of its own; the translation still
+    recognizes them."""
+    x = torch.randn(50, 4, dtype=torch.float64)
+    y = torch.zeros(50, dtype=torch.float64)
+    _affine[(1,)](x[:, 0].contiguous(), y, 50, BLOCK=64)            # Triton's interpreter
+    y.zero_()
+    cpu_kernels.launch(_asserted_rows, (triton.cdiv(50, 16),), x, y, 50, WIDTH=4, BLOCK=16)
+    assert torch.allclose(y, x.sum(1), rtol=0, atol=1e-14)
 
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])

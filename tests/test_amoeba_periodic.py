@@ -8,6 +8,7 @@ default Ewald coefficient, 48^3 meshes and Tinker's default 16^3 ones, induced d
 converged to 1e-10 Debye).
 """
 import copy
+import itertools
 import math
 
 import numpy as np
@@ -1160,18 +1161,20 @@ def test_cpu_kernels_refuse_term_cutoffs_beyond_the_list_and_warn_on_unconverged
 
 
 def test_a_plan_tests_its_list_without_the_kernel():
-    """A plan's tests on positions it cannot hand to the kernel (non-contiguous): outdated, due within the
-    coming steps, the solves' convergence and needed iterations, as their definitions give them, and the
-    positions kept; a refresh whose pairs exceed the plan's capacity is refused; the predictors rewind."""
+    """A plan's tests on the CPU (the kernel serves CUDA graphs only), with contiguous and non-contiguous
+    positions: outdated, due within the coming steps, the solves' convergence and needed iterations, as their
+    definitions give them, and the positions kept; a refresh whose pairs exceed the plan's capacity is
+    refused; the predictors rewind."""
     model = _box(Amoeba, predictor="aspc").eval()
     g = _graph(BOX, cutoff=7.3)
     plan = model.plan_step(g, skin=1.0, capacity=int(g.edge_index.shape[1]))
     plan.converged, plan.needed = torch.tensor(True), torch.tensor([5.0, 0.0], dtype=torch.float64)
     rng = np.random.default_rng(6)
-    for far in (0.0, 0.4, 0.6):
+    for far, contiguous in itertools.product((0.0, 0.4, 0.6), (False, True)):
         pos = plan.reference + torch.tensor(rng.normal(scale=0.01, size=BOX.shape))
         pos[7, 1] += far
-        last = torch.empty(3, len(BOX), dtype=torch.float64).T
+        last = torch.empty(len(BOX), 3, dtype=torch.float64) if contiguous else torch.empty(
+            3, len(BOX), dtype=torch.float64).T
         last.copy_(pos - torch.tensor(rng.normal(scale=0.02, size=BOX.shape)))
         moved = ((pos - plan.reference) ** 2).sum(-1)
         stride = ((pos - last) ** 2).sum(-1).sqrt()
