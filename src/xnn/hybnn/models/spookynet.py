@@ -294,6 +294,104 @@ def _structure_slots(batch: Tensor, num_graphs: int) -> Tuple[Tensor, int]:
     return slot, int(counts.max())
 
 
+def _padded_slots(batch: Tensor, num_graphs: int, n_max: int) -> Tensor:
+    """Position of every atom within its structure, without reading from the device, for a padded
+    batch whose real structures have at most ``n_max`` atoms (atoms sorted by structure). The
+    padding structure may be larger: its positions wrap around, so its atoms share rows of its
+    own block of the attention and of no other."""
+    n = batch.shape[0]
+    counts = scatter_sum(torch.ones(n, dtype=torch.long, device=batch.device), batch, num_graphs)
+    starts = torch.cumsum(counts, 0) - counts
+    return torch.remainder(torch.arange(n, device=batch.device) - gather_rows(starts, batch), n_max)
+
+
+class SpookyNetPlanner:
+    """The index work of a SpookyNet step, done before the step for captured steps.
+
+    A captured step (:mod:`xnn.common.train.graphed`) needs fixed shapes and no
+    host synchronization. SpookyNet selects its local edges and its long-range
+    pairs by distance, and pads the attention to the largest structure: each
+    reads values back from the device. A data-loader worker builds them on
+    the CPU instead: ``"local"`` (the edges within the local cutoff), ``"lr"``
+    (the edges within ``lr_cutoff``) or ``"lr_dst"`` and ``"lr_src"`` (all
+    ordered pairs of every structure, without ``lr_cutoff``), and ``"slot"``
+    (each atom's position in its structure, which gives the size ``n_max``
+    of the attention). :meth:`SpookyNet.forward` takes them from the batch's
+    ``index_plan``. The Ewald sum is not supported. Holds only the model's
+    cutoffs.
+
+    Parameters
+    ----------
+    local_cutoff : float
+        The cutoff of the local interactions.
+    lr_cutoff : float or None
+        The cutoff of the long-range terms (``None``: all pairs).
+    long_range : bool
+        Whether the model has electrostatics or dispersion.
+    ewald : bool
+        Whether the model sums the electrostatics of periodic structures by Ewald.
+    """
+
+    #: Plan sizes that are the largest over the structures rather than sums.
+    maxima = ("n_max",)
+
+    def __init__(self, local_cutoff: float, lr_cutoff: Optional[float], long_range: bool, ewald: bool):
+        self.local_cutoff = float(local_cutoff)
+        self.lr_cutoff = None if lr_cutoff is None else float(lr_cutoff)
+        self.long_range = bool(long_range)
+        self.ewald = bool(ewald)
+        #: The count each plan entry indexes (for batching the plans of single structures).
+        self.offsets: Dict[str, Optional[str]] = {"slot": None, "local": "edges"}
+        if self.long_range:
+            self.offsets.update({"lr": "edges"} if self.lr_cutoff is not None
+                                else {"lr_dst": "nodes", "lr_src": "nodes"})
+
+    def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        periodic = data.cell is not None and data.pbc is not None and bool(data.pbc.any())
+        if periodic and self.ewald:
+            raise ValueError("captured SpookyNet steps do not support the Ewald sum")
+        r = torch.linalg.norm(data.edge_vectors().detach(), dim=-1)
+        num_graphs = int(data.num_graphs)
+        slot = (torch.arange(data.num_nodes) if num_graphs == 1
+                else _structure_slots(data.batch.cpu(), num_graphs)[0])
+        plan = {"slot": slot, "local": (r < self.local_cutoff).nonzero().squeeze(1)}
+        if self.long_range:
+            if self.lr_cutoff is not None:
+                plan["lr"] = (r < self.lr_cutoff).nonzero().squeeze(1)
+            elif periodic:
+                raise ValueError("SpookyNet sums the long-range terms over all pairs of a "
+                                 "molecule; periodic structures need lr_cutoff")
+            else:
+                plan["lr_dst"], plan["lr_src"] = all_pairs(data.batch.cpu())
+        return plan
+
+    def sizes(self, plan: Dict[str, Tensor]) -> Dict[str, int]:
+        """The sizes a padded batch fixes: atoms, local edges, long-range pairs and ``n_max``."""
+        slot = plan["slot"]
+        out = {"nodes": int(slot.shape[0]), "n_max": int(slot.max()) + 1 if slot.numel() else 1,
+               "local": int(plan["local"].shape[0])}
+        if "lr" in plan:
+            out["lr"] = int(plan["lr"].shape[0])
+        elif "lr_dst" in plan:
+            out["pairs"] = int(plan["lr_dst"].shape[0])
+        return out
+
+    @staticmethod
+    def pad(plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:
+        """``plan`` filled up to ``sizes``: edges with the padding edge ``dummy_edge``, pairs
+        with the first two padding atoms (both outside every real structure)."""
+        def fill(v: Tensor, size: int, value: int) -> Tensor:
+            return torch.cat([v, v.new_full((size - v.shape[0],), value)])
+        n = int(plan["slot"].shape[0])
+        out = {"local": fill(plan["local"], sizes["local"], dummy_edge)}
+        if "lr" in plan:
+            out["lr"] = fill(plan["lr"], sizes["lr"], dummy_edge)
+        elif "lr_dst" in plan:
+            out["lr_dst"] = fill(plan["lr_dst"], sizes["pairs"], n)
+            out["lr_src"] = fill(plan["lr_src"], sizes["pairs"], n + 1)
+        return out
+
+
 class Swish(nn.Module):
     """Generalized SiLU ``alpha x sigmoid(beta x)`` with learned per-feature ``alpha, beta`` (eq 6).
 
@@ -314,11 +412,21 @@ class Swish(nn.Module):
         return self.alpha * x * torch.sigmoid(self.beta * x)
 
 
-class _Residual(nn.Module):
-    """Pre-activation residual block ``x + W2 silu(W1 silu(x))`` (eq 7); ``W2`` starts at zero."""
+def _plain(acts: List[nn.Module], lins: List[nn.Module]) -> bool:
+    """Whether layers are plain linear layers with Swish activations (no adapters): the fused layers
+    of the training fast path take them."""
+    return all(type(a) is Swish for a in acts) and all(type(lin) is nn.Linear for lin in lins)
+
+
+class _Residual(FastPathModule, nn.Module):
+    """Pre-activation residual block ``x + W2 silu(W1 silu(x))`` (eq 7); ``W2`` starts at zero.
+
+    On the fast path (training) its two layers are fused layers (:mod:`xnn.hybnn.fast.mlp_kernels`).
+    """
 
     def __init__(self, n_features: int, bias: bool = True):
         super().__init__()
+        self.fast_active = False
         self.activation1 = Swish(n_features)
         self.linear1 = nn.Linear(n_features, n_features, bias=bias)
         self.activation2 = Swish(n_features)
@@ -329,16 +437,34 @@ class _Residual(nn.Module):
             nn.init.zeros_(self.linear1.bias)
             nn.init.zeros_(self.linear2.bias)
 
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.hybnn.fast.spookynet import fused_supported
+        return fused_supported(device, dtype)
+
     def forward(self, x: Tensor) -> Tensor:
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x)
         return x + self.linear2(self.activation2(self.linear1(self.activation1(x))))
 
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor) -> Tensor:
+        if torch.compiler.is_compiling() or not _plain([self.activation1, self.activation2],
+                                                        [self.linear1, self.linear2]):
+            return x + self.linear2(self.activation2(self.linear1(self.activation1(x))))
+        from xnn.hybnn.fast.spookynet import residual_block
+        return residual_block(x, self)
 
-class _ResidualMLP(nn.Module):
-    """``linear(silu(residual(x)))`` (eq 8), with a stack of ``n_residual`` residual blocks."""
+
+class _ResidualMLP(FastPathModule, nn.Module):
+    """``linear(silu(residual(x)))`` (eq 8), with a stack of ``n_residual`` residual blocks.
+
+    On the fast path (training) every layer is a fused layer (:mod:`xnn.hybnn.fast.mlp_kernels`).
+    """
 
     def __init__(self, n_features: int, n_residual: int = 1, bias: bool = True,
                  zero_init: bool = False):
         super().__init__()
+        self.fast_active = False
         self.residual = nn.ModuleList([_Residual(n_features, bias) for _ in range(n_residual)])
         self.activation = Swish(n_features)
         self.linear = nn.Linear(n_features, n_features, bias=bias)
@@ -349,10 +475,25 @@ class _ResidualMLP(nn.Module):
         if bias:
             nn.init.zeros_(self.linear.bias)
 
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.hybnn.fast.spookynet import fused_supported
+        return fused_supported(device, dtype)
+
     def forward(self, x: Tensor) -> Tensor:
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x)
         for block in self.residual:
             x = block(x)
         return self.linear(self.activation(x))
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor) -> Tensor:
+        if torch.compiler.is_compiling() or not _groupable([self]):
+            for block in self.residual:
+                x = block(x)
+            return self.linear(self.activation(x))
+        from xnn.hybnn.fast.spookynet import residual_mlps
+        return residual_mlps(x, [self])[0]
 
 
 def _groupable(mlps: List[nn.Module]) -> bool:
@@ -395,6 +536,17 @@ def _grouped_residual_mlps(x: Tensor, mlps: List[nn.Module]) -> List[Tensor]:
         h = h + y
     out = linear(swish(h, [m.activation for m in mlps]), [m.linear for m in mlps])
     return list(out.unbind(0))
+
+
+def _mlps(x: Tensor, mlps: List[nn.Module]) -> List[Tensor]:
+    """``[m(x) for m in mlps]``: one grouped evaluation when the MLPs allow it, on the fused layers
+    when they are on their fast path (training)."""
+    if not _groupable(mlps):
+        return [m(x) for m in mlps]
+    if mlps[0].fast_active and not torch.compiler.is_compiling():
+        from xnn.hybnn.fast.spookynet import residual_mlps
+        return residual_mlps(x, mlps)
+    return _grouped_residual_mlps(x, mlps)
 
 
 class _NuclearEmbedding(nn.Module):
@@ -458,13 +610,12 @@ class _ElectronicEmbedding(nn.Module):
         return self.resmlp((a / (norm + 1e-8)).unsqueeze(-1) * v)
 
 
-class _LocalInteraction(FastPathModule, nn.Module):
+class _LocalInteraction(nn.Module):
     """s-, p- and d-orbital-like message passing within the cutoff (eq 12)."""
 
     def __init__(self, n_features: int, n_rbf: int, n_residual: int):
         super().__init__()
         self.n_features = n_features
-        self.fast_active = False
         self.radial_s = nn.Linear(n_rbf, n_features, bias=False)
         self.radial_p = nn.Linear(n_rbf, n_features, bias=False)
         self.radial_d = nn.Linear(n_rbf, n_features, bias=False)
@@ -494,17 +645,14 @@ class _LocalInteraction(FastPathModule, nn.Module):
             m_d = self.resmlp_d(x) if use_d else x
         else:
             m_c, m_s, m_p, m_d = self._feature_mlps(x, use_p, use_d)
-        if self.fast_active and not torch.jit.is_scripting():
-            s_sum, p, d = self._sums_fast(m_s, m_p, m_d, rho, y1, y2, use_p, use_d)
-        else:
-            s_sum = scatter_sum(self.radial_s(rho) * gather_rows(m_s, src), dst, n)
-            p, d = x, x
-            if use_p:
-                g = (self.radial_p(rho) * gather_rows(m_p, src)).unsqueeze(1) * y1.unsqueeze(-1)
-                p = scatter_sum(g, dst, n)                                   # (N, 3, F)
-            if use_d:
-                g = (self.radial_d(rho) * gather_rows(m_d, src)).unsqueeze(1) * y2.unsqueeze(-1)
-                d = scatter_sum(g, dst, n)                                   # (N, 5, F)
+        s_sum = scatter_sum(self.radial_s(rho) * gather_rows(m_s, src), dst, n)
+        p, d = x, x
+        if use_p:
+            g = (self.radial_p(rho) * gather_rows(m_p, src)).unsqueeze(1) * y1.unsqueeze(-1)
+            p = scatter_sum(g, dst, n)                                       # (N, 3, F)
+        if use_d:
+            g = (self.radial_d(rho) * gather_rows(m_d, src)).unsqueeze(1) * y2.unsqueeze(-1)
+            d = scatter_sum(g, dst, n)                                       # (N, 5, F)
         total = m_c + s_sum
         if use_p:
             parts = torch.split(self.projection_p(p), self.n_features, dim=-1)
@@ -514,43 +662,12 @@ class _LocalInteraction(FastPathModule, nn.Module):
             total = total + (parts[0] * parts[1]).sum(1)
         return self.resmlp_l(total)
 
-    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """Triton on ``device`` (the fused continuous-filter convolution of
-        :mod:`xnn.gnn.fast.schnet`, see :mod:`xnn.hybnn.fast.spookynet`)."""
-        from xnn.hybnn.fast.spookynet import supported
-        return supported(device, dtype)
-
-    @torch.jit.unused
-    def _sums_fast(self, m_s: Tensor, m_p: Tensor, m_d: Tensor, rho: Tensor, y1: Tensor, y2: Tensor,
-                   use_p: bool, use_d: bool) -> Tuple[Tensor, Tensor, Tensor]:
-        """The s, p and d sums by the fused convolution, over the feature blocks ``[s | p (3)]`` and
-        ``[d (5)]``: the features repeated per block, the filter times the angular function (``m_p`` /
-        ``m_d`` for an unused one). Two calls rather than one: ``4F`` columns are a power of two for the
-        usual widths, and one call over ``9F`` pads to ``16F`` and runs one edge per step. The edges are
-        the ones :meth:`SpookyNet._share_fast_edges` stored."""
-        from xnn.gnn.fast.schnet_kernels import cfconv
-        edges = self.__dict__["_fast_edges"]
-        n, f = m_s.shape
-        zs = self.radial_s(rho)
-        if use_p:
-            h = torch.cat([m_s.unsqueeze(1), m_p.unsqueeze(1).expand(n, 3, f)], dim=1).reshape(n, 4 * f)
-            z = torch.cat([zs.unsqueeze(1), self.radial_p(rho).unsqueeze(1) * y1.unsqueeze(-1)], dim=1)
-            sp = cfconv(h, z.reshape(-1, 4 * f), None, edges).view(n, 4, f)
-            s_sum, p = sp[:, 0], sp[:, 1:]
-        else:
-            s_sum, p = cfconv(m_s, zs, None, edges), m_p
-        d = m_d
-        if use_d:
-            z = (self.radial_d(rho).unsqueeze(1) * y2.unsqueeze(-1)).reshape(-1, 5 * f)
-            d = cfconv(m_d.unsqueeze(1).expand(n, 5, f).reshape(n, 5 * f), z, None, edges).view(n, 5, f)
-        return s_sum, p, d
-
     @torch.jit.unused
     def _feature_mlps(self, x: Tensor, use_p: bool, use_d: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """``resmlp_c``, ``_s``, ``_p``, ``_d`` of ``x``, batched when they allow it (``x`` for an unused one)."""
         mlps = [self.resmlp_c, self.resmlp_s] + ([self.resmlp_p] if use_p else []) \
             + ([self.resmlp_d] if use_d else [])
-        out = _grouped_residual_mlps(x, mlps) if _groupable(mlps) else [m(x) for m in mlps]
+        out = _mlps(x, mlps)
         m_c, m_s = out[0], out[1]
         m_p = out[2] if use_p else x
         m_d = out[-1] if use_d else x
@@ -628,8 +745,7 @@ class _NonlocalInteraction(nn.Module):
     @torch.jit.unused
     def _qkv(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """``resmlp_q``, ``_k``, ``_v`` of ``x``, batched when they allow it."""
-        mlps = [self.resmlp_q, self.resmlp_k, self.resmlp_v]
-        out = _grouped_residual_mlps(x, mlps) if _groupable(mlps) else [m(x) for m in mlps]
+        out = _mlps(x, [self.resmlp_q, self.resmlp_k, self.resmlp_v])
         return out[0], out[1], out[2]
 
     def _exact(self, q: Tensor, k: Tensor, v: Tensor, batch: Tensor, num_graphs: int,
@@ -677,6 +793,55 @@ class _InteractionModule(nn.Module):
         for block in self.residual_post:
             h = block(h)
         return h, self.resmlp_y(h)
+
+
+class _InteractionStack(nn.Module):
+    """All interaction modules as one compiled block. It holds the model's own modules (it is not a
+    child of the model, so the parameters and the ``state_dict`` stay the model's)."""
+
+    def __init__(self, interactions: nn.ModuleList):
+        super().__init__()
+        self.interactions = interactions
+
+    def _reference(self, x: Tensor, rho: Tensor, y1: Tensor, y2: Tensor, src: Tensor, dst: Tensor,
+                   batch: Tensor, slot: Tensor, shape: Tensor, use_p: bool, use_d: bool,
+                   use_nonlocal: bool) -> Tensor:
+        """The sum ``f`` of the modules' outputs (eq 12). ``shape`` ``(B, n_max, 0)`` carries the sizes of
+        the attention's padding as a tensor shape, so that new sizes do not compile the block again."""
+        num_graphs, n_max = shape.shape[0], shape.shape[1]
+        f = torch.zeros_like(x)
+        for module in self.interactions:
+            x, y = module(x, rho, y1, y2, src, dst, batch, num_graphs, slot, n_max, use_p, use_d, use_nonlocal)
+            f = f + y
+        return f
+
+
+class _CompiledInteractions(FastPathModule, nn.Module):
+    """The fast path of the interaction modules: one compiled block (:class:`_InteractionStack`,
+    :mod:`xnn.common.models.compiled`). Holds no parameters."""
+
+    def __init__(self):
+        super().__init__()
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """torch.compile on a CUDA device (:mod:`xnn.common.models.compiled`)."""
+        from xnn.common.models.compiled import supported
+        return supported(device, dtype)
+
+    @torch.jit.unused
+    def run(self, interactions: nn.ModuleList, x: Tensor, rho: Tensor, y1: Tensor, y2: Tensor,
+            src: Tensor, dst: Tensor, batch: Tensor, num_graphs: int, slot: Tensor, n_max: int,
+            use_p: bool, use_d: bool, use_nonlocal: bool) -> Tensor:
+        """The sum ``f`` of the modules' outputs on the compiled path."""
+        from xnn.common.models.compiled import run_compiled
+        block = self.__dict__.get("_block")
+        if block is None or block.interactions is not interactions:
+            block = self.__dict__["_block"] = _InteractionStack(interactions)
+        # the block is not a child of this module, so it follows its mode here
+        block.training = self.training
+        shape = x.new_empty((num_graphs, n_max, 0), dtype=torch.bool)
+        return run_compiled(block, x, rho, y1, y2, src, dst, batch, slot, shape, use_p, use_d, use_nonlocal)
 
 
 class _ZBLRepulsion(nn.Module):
@@ -794,6 +959,7 @@ class _ChargeD4(nn.Module):
     k5: float
     k6: float
     lr_cutoff: Optional[float]
+    n_gauss: int
 
     def __init__(self, s6: float = 1.0, s8: float = 1.61679827, a1: float = 0.44959224,
                  a2: float = 3.35743605, lr_cutoff: Optional[float] = None):
@@ -804,6 +970,8 @@ class _ChargeD4(nn.Module):
         self.ga, self.gc, self.wf = constants["ga"], constants["gc"], constants["wf"]
         self.kcn, self.k4, self.k5, self.k6 = (constants["kcn"], constants["k4"],
                                                constants["k5"], constants["k6"])
+        # the largest Gaussian count, known here: the weights then read nothing from the device
+        self.n_gauss = int(tables["ngw"].max())
         dtype = torch.get_default_dtype()
         for name, table in tables.items():
             self.register_buffer(name, table.clone() if not table.is_floating_point()
@@ -851,7 +1019,8 @@ class _ChargeD4(nn.Module):
         cn = scatter_sum(count, dst, n)
         refcn = self.refcn[:, z].t()
         valid = torch.arange(refcn.shape[1], device=z.device)[None, :] < self.nref[z][:, None]
-        weights = gaussian_reference_weights(cn, refcn, valid, self.wf, self.ngw[:, z].t(), 1e-8)
+        weights = gaussian_reference_weights(cn, refcn, valid, self.wf, self.ngw[:, z].t(), 1e-8,
+                                             self.n_gauss)
         scale_q = F.softplus(self._scaleq)
         zeff = self.zeff[z][:, None]
         zeta = self._zeta(self.hardness[z][:, None], zeff + self.refq[:, z].t() * scale_q,
@@ -1009,6 +1178,8 @@ class SpookyNet(InteratomicPotential):
         self.interactions = nn.ModuleList([
             _InteractionModule(n_features, n_rbf, n_residual, nonlocal_interactions, m, generator)
             for _ in range(n_interactions)])
+        # the fast path of the interaction modules (no parameters of its own)
+        self.compiled_interactions = _CompiledInteractions()
         self.output = nn.Linear(n_features, 2, bias=False)
         glorot_orthogonal_(self.output.weight)
         self.atom_ref = nn.Embedding(MAX_Z, 1)
@@ -1019,7 +1190,7 @@ class SpookyNet(InteratomicPotential):
         self.electrostatics = (_Electrostatics(self.local_cutoff, self.lr_cutoff)
                                if electrostatics else None)
         self.dispersion = _ChargeD4(lr_cutoff=self.lr_cutoff) if d4_dispersion else None
-        # the fused local message sums (see set_use_fast); "auto" takes them where measured faster
+        # the fast path (see set_use_fast); "auto" takes it where measured faster
         self.use_fast = "auto"
         if atomic_energies is not None:
             if species is None:
@@ -1027,19 +1198,25 @@ class SpookyNet(InteratomicPotential):
             self.set_atomic_energies(species, atomic_energies)
 
     @torch.jit.unused
+    @torch.jit.unused
+    def index_planner(self) -> SpookyNetPlanner:
+        """The index plan of a captured step (see :class:`SpookyNetPlanner`)."""
+        return SpookyNetPlanner(self.local_cutoff, self.lr_cutoff,
+                                self.electrostatics is not None or self.dispersion is not None, self.ewald)
+
     def set_use_fast(self, use_fast) -> "SpookyNet":
-        """Choose the implementation of the local message sums.
+        """Choose the implementation of the interaction modules.
+
+        The fast path (:mod:`xnn.hybnn.fast.spookynet`) is the compiled interaction block in
+        evaluation mode and the fused MLP layers, differentiable twice, in training mode.
 
         Parameters
         ----------
         use_fast : bool or str
-            ``"auto"`` (the default): the fused continuous-filter convolution
-            (:mod:`xnn.hybnn.fast.spookynet`) where it is available and faster for the
-            input (a CUDA device, Triton, a graph above the size crossover measured for
-            evaluation, ``AUTO_POLICY``, or for training, ``AUTO_POLICY_TRAINING``);
-            ``True``: wherever it is available; ``False``: always the reference
-            implementation. The kernels are twice differentiable, so force training
-            takes them as well.
+            ``"auto"`` (the default): the fast path where it is available and faster for the input
+            (a CUDA device and the edge counts measured for evaluation, ``AUTO_POLICY``, and for
+            training, ``AUTO_POLICY_TRAINING``); ``True``: wherever it is available; ``False``:
+            always the reference implementation.
 
         Returns
         -------
@@ -1051,27 +1228,27 @@ class SpookyNet(InteratomicPotential):
         return self
 
     @torch.jit.unused
-    def _select_fast(self, num_edges: int) -> None:
-        """Switch the fused local sums on or off for one evaluation."""
+    def _select_fast(self, num_edges: int, planned: bool = False) -> None:
+        """Switch the fast path on or off for one evaluation: the compiled interaction block in
+        evaluation mode, the fused MLPs in training mode (with their own policy for a padded batch with
+        an index plan, ``planned``: a captured step)."""
         from xnn.common.models.fast import fast_modules, select
-        from xnn.hybnn.fast.spookynet import AUTO_POLICY, AUTO_POLICY_TRAINING
-        blocks = self.__dict__.get("_fast_blocks")
-        if blocks is None:
-            blocks = fast_modules(self)
-            self.__dict__["_fast_blocks"] = blocks
+        from xnn.hybnn.fast.spookynet import AUTO_POLICY, AUTO_POLICY_CAPTURED, AUTO_POLICY_TRAINING
+        groups = self.__dict__.get("_fast_blocks")
+        if groups is None:
+            modules = fast_modules(self)
+            groups = ([m for m in modules if isinstance(m, _CompiledInteractions)],
+                      [m for m in modules if not isinstance(m, _CompiledInteractions)])
+            self.__dict__["_fast_blocks"] = groups
+        compiled, fused = groups
         like = self.output.weight
-        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
-        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
-
-    @torch.jit.unused
-    def _share_fast_edges(self, src: Tensor, dst: Tensor) -> None:
-        """Give the fused local sums one edge list for the whole evaluation (one edge sort)."""
-        blocks = self.__dict__.get("_fast_blocks") or []
-        if any(b.fast_active for b in blocks):
-            edges = torch.stack([src, dst])
-            for b in blocks:
-                b.__dict__["_fast_edges"] = edges
-
+        if self.training:
+            select(compiled, False, None, like.device, like.dtype, num_edges)
+            policy = AUTO_POLICY_CAPTURED if planned else AUTO_POLICY_TRAINING
+            select(fused, self.use_fast, policy, like.device, like.dtype, num_edges)
+        else:
+            select(fused, False, None, like.device, like.dtype, num_edges)
+            select(compiled, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
 
     def _apply(self, fn, recurse=True):
         # constant tables built in float32 are rebuilt exactly once float64
@@ -1098,6 +1275,17 @@ class SpookyNet(InteratomicPotential):
         with torch.no_grad():
             self.atom_ref.weight[torch.tensor(species), 0] = ae
 
+    def _planned_pairs(self, plan: Dict[str, Tensor], edge_index: Tensor, r_all: Tensor,
+                       pos: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The long-range pairs of a padded batch, from its index plan."""
+        if "lr" in plan:
+            keep = plan["lr"].long()
+            return (edge_index[0].index_select(0, keep), edge_index[1].index_select(0, keep),
+                    r_all.index_select(0, keep))
+        dst, src = plan["lr_dst"].long(), plan["lr_src"].long()
+        r = torch.linalg.norm(gather_rows(pos, dst) - gather_rows(pos, src), dim=-1)
+        return src, dst, r
+
     def _long_range_pairs(self, edge_index: Tensor, r_all: Tensor, pos: Tensor,
                           batch: Tensor, periodic: bool) -> Tuple[Tensor, Tensor, Tensor]:
         """Ordered pairs ``(src, dst)`` and distances of the electrostatics and dispersion."""
@@ -1116,13 +1304,18 @@ class SpookyNet(InteratomicPotential):
 
     def _evaluate(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, pos: Tensor,
                   cell: Optional[Tensor], pbc: Optional[Tensor], batch: Tensor,
-                  num_graphs: int, total_charge: Tensor, n_unpaired: Tensor) -> Dict[str, Tensor]:
-        """Features, energies and charges of a batch (the scriptable core)."""
+                  num_graphs: int, total_charge: Tensor, n_unpaired: Tensor,
+                  plan: Optional[Dict[str, Tensor]] = None, n_max_planned: int = 0) -> Dict[str, Tensor]:
+        """Features, energies and charges of a batch (the scriptable core). ``plan`` and
+        ``n_max_planned``: the index plan of a padded batch (:class:`SpookyNetPlanner`)."""
         dtype = self.output.weight.dtype
         n = z.shape[0]
         r_all = torch.linalg.norm(edge_vec, dim=-1)
-        # one index list instead of four masks (each mask is a host synchronization)
-        local = (r_all < self.local_cutoff).nonzero().squeeze(1)
+        if plan is None:
+            # one index list instead of four masks (each mask is a host synchronization)
+            local = (r_all < self.local_cutoff).nonzero().squeeze(1)
+        else:
+            local = plan["local"].long()
         src, dst = edge_index[0].index_select(0, local), edge_index[1].index_select(0, local)
         r = r_all.index_select(0, local)
         # the paper's r_ij = r_j - r_i is the negative of the xnn edge vector
@@ -1146,15 +1339,21 @@ class SpookyNet(InteratomicPotential):
 
         slot = torch.arange(n, device=z.device)
         n_max = n
-        if num_graphs > 1:
+        if plan is not None:
+            n_max = n_max_planned
+            slot = _padded_slots(batch, num_graphs, n_max)
+        elif num_graphs > 1:
             slot, n_max = _structure_slots(batch, num_graphs)
-        if not torch.jit.is_scripting():
-            self._share_fast_edges(src, dst)
-        f = torch.zeros_like(x)
-        for module in self.interactions:
-            x, y = module(x, rho, y1, y2, src, dst, batch, num_graphs, slot, n_max,
-                          self.use_p_orbitals, self.use_d_orbitals, self.use_nonlocal)
-            f = f + y
+        compiled = self.compiled_interactions
+        if compiled.fast_active and not torch.jit.is_scripting():
+            f = compiled.run(self.interactions, x, rho, y1, y2, src, dst, batch, num_graphs, slot, n_max,
+                             self.use_p_orbitals, self.use_d_orbitals, self.use_nonlocal)
+        else:
+            f = torch.zeros_like(x)
+            for module in self.interactions:
+                x, y = module(x, rho, y1, y2, src, dst, batch, num_graphs, slot, n_max,
+                              self.use_p_orbitals, self.use_d_orbitals, self.use_nonlocal)
+                f = f + y
 
         out = self.output(f)
         e_nn = out[:, 0] + self.atom_ref(z).squeeze(-1)
@@ -1173,10 +1372,14 @@ class SpookyNet(InteratomicPotential):
         if electrostatics is not None or dispersion is not None:
             periodic_atoms = torch.zeros(n, dtype=torch.bool, device=z.device)
             any_periodic = False
-            if cell is not None and pbc is not None:
-                periodic_atoms = pbc.any(dim=1)[batch]
-                any_periodic = bool(periodic_atoms.any())      # molecules: no read-back
-            lr_src, lr_dst, lr_r = self._long_range_pairs(edge_index, r_all, pos, batch, any_periodic)
+            if plan is not None:
+                # the planner refused the Ewald sum: no periodic branch, no read-back
+                lr_src, lr_dst, lr_r = self._planned_pairs(plan, edge_index, r_all, pos)
+            else:
+                if cell is not None and pbc is not None:
+                    periodic_atoms = pbc.any(dim=1)[batch]
+                    any_periodic = bool(periodic_atoms.any())      # molecules: no read-back
+                lr_src, lr_dst, lr_r = self._long_range_pairs(edge_index, r_all, pos, batch, any_periodic)
             if electrostatics is not None:
                 if self.ewald and cell is not None and pbc is not None \
                         and any_periodic:
@@ -1286,13 +1489,10 @@ class SpookyNet(InteratomicPotential):
             e Angstrom) and the per-structure terms ``"energy_repulsion"``,
             ``"energy_electrostatics"`` and ``"energy_dispersion"``.
         """
-        if getattr(data, "index_plan", None) is not None:
-            # a padded batch of a captured training step: the reference path (the fused kernels
-            # sort the edges once per edge list, which a replay would not repeat)
-            from xnn.common.models.fast import deactivate
-            deactivate(self)
-        else:
-            self._select_fast(int(data.edge_index.shape[1]))
+        plan = getattr(data, "index_plan", None)
+        self._select_fast(int(data.edge_index.shape[1]), plan is not None)
+        # a padded batch of a captured step carries its index plan and the attention's size
+        n_max_planned = int(data.index_sizes["n_max"]) if plan is not None else 0
         dtype = self.output.weight.dtype
         b = data.num_graphs
         device = data.atomic_numbers.device
@@ -1303,7 +1503,7 @@ class SpookyNet(InteratomicPotential):
                       else torch.zeros(b, dtype=dtype, device=device))
         out = self._evaluate(data.atomic_numbers, data.edge_index, data.edge_vectors(),
                              data.pos.to(dtype), data.cell, data.pbc, data.batch, b, q_tot,
-                             n_unpaired)
+                             n_unpaired, plan, n_max_planned)
         charges = out["charges"]
         # the three per-structure terms in one float64 reduction
         terms = scatter_sum(torch.stack([out["node_repulsion"], out["node_electrostatics"],

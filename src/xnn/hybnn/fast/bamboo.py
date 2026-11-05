@@ -18,15 +18,15 @@ from xnn.common.models.fast import AutoPolicy
 #: forces). Below them the kernels' fixed cost loses (1.1-1.2 of the reference); above them they take
 #: 0.80-0.96 of its time (to 136k edges on an A100). An unmeasured GPU takes 60k.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"A100": 60_000, "A30": 20_000, "T4": 20_000, "V100": 40_000},
-    min_edges_float64={"A100": 60_000, "A30": 12_000, "T4": 5_000, "V100": 30_000},
+    min_edges={"A100": 60_000, "A30": 20_000, "T4": 20_000, "V100": 40_000, "L40S": 60_000},
+    min_edges_float64={"A100": 60_000, "A30": 12_000, "T4": 5_000, "V100": 30_000, "L40S": 20_000},
     default_min_edges=60_000, default_min_edges_float64=60_000,
 )
 
 #: The same for training mode (a step with a force loss, second derivatives included).
 AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"A100": 60_000, "A30": 20_000, "T4": 20_000, "V100": 60_000},
-    min_edges_float64={"A100": 60_000, "A30": 12_000, "T4": 5_000, "V100": 30_000},
+    min_edges={"A100": 60_000, "A30": 20_000, "T4": 20_000, "V100": 60_000, "L40S": 60_000},
+    min_edges_float64={"A100": 60_000, "A30": 12_000, "T4": 5_000, "V100": 30_000, "L40S": 20_000},
     default_min_edges=60_000, default_min_edges_float64=60_000,
 )
 

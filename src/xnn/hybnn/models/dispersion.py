@@ -21,7 +21,8 @@ MD, so it never enters the trained BAMBOO weights). It is provided for
 MD/inference use and is **off by default**. Distances are handled in bohr and
 the returned per-atom energy is converted to BAMBOO's native kcal/mol.
 """
-from __future__ import annotations
+# no ``from __future__ import annotations``: BAMBOO's TorchScript export compiles this module
+from typing import Optional
 
 import torch
 from torch import Tensor, nn
@@ -59,12 +60,15 @@ class D3CSODispersion(nn.Module):
     """
 
     def __init__(self, s6: float = 1.0, a1: float = 0.86, rc_bohr: float = 7.75,
-                 disp_cutoff: float | None = 10.0, references: str = "2010"):
+                 disp_cutoff: Optional[float] = 10.0, references: str = "2010"):
         super().__init__()
         self.s6 = s6
         self.a1 = a1
         self.rc_bohr = rc_bohr
         self.disp_cutoff = disp_cutoff
+        # unit constants as attributes: a TorchScript export reads no module globals
+        self.autoang = float(d3.d3_autoang)
+        self.hartree_kcal_mol = HARTREE_KCAL_MOL
         dt = torch.get_default_dtype()
         # device-resident copies of the standard D3 reference tables
         self.register_buffer("_c6ab", d3.legacy_c6_table(str(references)).to(dt),
@@ -93,9 +97,11 @@ class D3CSODispersion(nn.Module):
             Per-atom dispersion energy ``(N,)`` in kcal/mol.
         """
         idx_j, idx_i = edge_index[0], edge_index[1]
-        r_bohr = edge_vec.norm(dim=-1) / d3.d3_autoang
-        cutoff_bohr = (None if self.disp_cutoff is None
-                       else self.disp_cutoff / d3.d3_autoang)
+        r_bohr = torch.linalg.norm(edge_vec, dim=-1) / self.autoang
+        disp_cutoff = self.disp_cutoff
+        cutoff_bohr: Optional[float] = None
+        if disp_cutoff is not None:
+            cutoff_bohr = disp_cutoff / self.autoang
 
         Zi, Zj = atomic_numbers[idx_i], atomic_numbers[idx_j]
         nc = d3._ncoord(Zi, Zj, r_bohr, idx_i, n_atoms, cutoff=cutoff_bohr,
@@ -111,4 +117,4 @@ class D3CSODispersion(nn.Module):
             e_pair = torch.where(r_bohr < cutoff_bohr, e_pair,
                                  torch.zeros_like(e_pair))
         e_atom = d3._scatter_add(e_pair, idx_i, n_atoms)
-        return e_atom * HARTREE_KCAL_MOL
+        return e_atom * self.hartree_kcal_mol

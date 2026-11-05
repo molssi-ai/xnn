@@ -41,9 +41,8 @@ Given the same weights this matches the original ``bamboo`` package
 (bytedance/bamboo) to machine precision -- see ``tests/test_bamboo.py`` and
 ``notebooks/fidelity_checks/hybnn/bamboo/bamboo_verification.ipynb``.
 """
-from __future__ import annotations
-
-from typing import Optional
+# no ``from __future__ import annotations``: the TorchScript core resolves the annotations
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -220,8 +219,9 @@ class GETLayer(FastPathModule, nn.Module):
             # attention gate onto the centre atom, heads then merge back to dim
             weighted = values * edge_feat * gate.unsqueeze(-1)
             scal_msg = scatter_sum(weighted, center, n_atoms).flatten(-2)
-            vec_msg = None
+            vec_msg: Optional[Tensor] = None
             if not self.is_last:
+                assert edge_vec is not None
                 lifted = values.unsqueeze(-3) * edge_vec
                 vec_msg = scatter_sum(lifted, center, n_atoms).flatten(-2)
 
@@ -248,14 +248,17 @@ class GETLayer(FastPathModule, nn.Module):
         vec_gate, scale, shift = torch.split(proj, self.dim, dim=-1)
 
         delta_x = invariant * scale + shift
+        assert vec_msg is not None
         delta_v = carry * vec_gate.unsqueeze(-2) + vec_msg
         return delta_x, delta_v
 
+    @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
         """Triton on ``device`` (see :mod:`xnn.hybnn.fast.bamboo`)."""
         from xnn.hybnn.fast.bamboo import supported
         return supported(device, dtype)
 
+    @torch.jit.unused
     def _messages_fast(self, node_feat: Tensor, edge_feat: Tensor, edge_vec: Optional[Tensor],
                        envelope: Tensor) -> tuple[Tensor, Optional[Tensor]]:
         """The scalar and vector messages by the fused kernels: the attention logits of ET, then one
@@ -469,7 +472,7 @@ class BAMBOO(InteratomicPotential):
         Tensor
             Per-pair Coulomb energy ``(P,)``.
         """
-        dist = edge_vec.norm(dim=-1)
+        dist = torch.linalg.norm(edge_vec, dim=-1)
         bare = self.ele_factor * charges[row] * charges[col] / dist
         r0 = self.coul_damping_r0
         damp = self.coul_softplus((dist - r0) / r0)
@@ -516,6 +519,7 @@ class BAMBOO(InteratomicPotential):
                 b.__dict__["_fast_edges"] = edge_index
 
 
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Predict energies, partial charges and the dipole for a graph.
 
@@ -535,11 +539,6 @@ class BAMBOO(InteratomicPotential):
             ``(B, 3)`` in Debye, and the component energies ``"energy_nn"`` /
             ``"energy_elec"`` ``(B,)``.
         """
-        Z = data.atomic_numbers
-        batch = data.batch
-        N = data.num_nodes
-        B = data.num_graphs
-
         if getattr(data, "index_plan", None) is not None:
             # a padded batch of a captured training step: the reference path (the fused kernels
             # sort the edges once per edge list, which a replay would not repeat)
@@ -547,11 +546,41 @@ class BAMBOO(InteratomicPotential):
             deactivate(self)
         else:
             self._select_fast(int(data.edge_index.shape[1]))
-        edge_vec = data.edge_vectors()               # (E,3) = pos[dst]-pos[src]
-        center = data.edge_index[1]                  # receiver (upstream "row")
-        neighbor = data.edge_index[0]                # sender   (upstream "col")
         self._share_fast_edges(data.edge_index)
-        r = edge_vec.norm(dim=-1)
+        batch = data.batch
+        B = data.num_graphs
+        edge_vec = data.edge_vectors()               # (E,3) = pos[dst]-pos[src]
+        total_charge = getattr(data, "total_charge", None)
+        if total_charge is None:
+            total_charge = torch.zeros(B, dtype=edge_vec.dtype, device=edge_vec.device)
+        node_feat, node_energy, charges, node_nn, node_elec = self._evaluate(
+            data.atomic_numbers, data.edge_index, edge_vec, data.pos, batch, B, total_charge)
+        energy_nn = self.aggregate_energy(node_nn, data)
+        energy_elec = torch.zeros(B, dtype=node_energy.dtype, device=node_energy.device)
+        if self.use_electrostatics:
+            energy_elec = self.aggregate_energy(node_nn + node_elec, data) - energy_nn
+        energy = self.aggregate_energy(node_energy, data)
+        dipole = scatter_sum(charges.unsqueeze(-1) * data.pos.to(charges.dtype), batch, B) / DEBYE_EA
+        return {
+            "node_energy": node_energy,
+            "energy": energy,
+            "node_features": node_feat,
+            "charges": charges,
+            "dipole": dipole,
+            "energy_nn": energy_nn,
+            "energy_elec": energy_elec,
+        }
+
+    def _evaluate(self, Z: Tensor, edge_index: Tensor, edge_vec: Tensor, pos: Tensor, batch: Tensor,
+                  num_graphs: int, total_charge: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """The model on tensors (TorchScript-compatible): node features ``(N, dim)``, atomic energies
+        ``(N,)`` (every term), charges ``(N,)`` conserved to ``total_charge`` ``(B,)``, and the atomic
+        energies of the semi-local network and of the electrostatics ``(N,)``. The Coulomb sum runs over
+        every pair of a structure from the raw positions ``pos``."""
+        N = Z.shape[0]
+        center = edge_index[1]                       # receiver (upstream "row")
+        neighbor = edge_index[0]                     # sender   (upstream "col")
+        r = torch.linalg.norm(edge_vec, dim=-1)
         unit = edge_vec / r.unsqueeze(-1)
         radial_emb = self.dis_rbf(r)
         envelope = self.cutoff_fn(r)
@@ -580,47 +609,47 @@ class BAMBOO(InteratomicPotential):
         # partial charges (bounded), conserved to the total charge
         raw_charge = self.charge_mlp(node_feat).squeeze(-1)
         charge = self.charge_ub * torch.tanh(raw_charge / self.charge_ub)
-        total_charge = getattr(data, "total_charge", None)
-        if total_charge is None:
-            total_charge = torch.zeros(B, dtype=charge.dtype, device=charge.device)
         # atoms per structure by a scatter (a CUDA bincount reads its maximum back to the host)
-        n_per = scatter_sum(torch.ones_like(charge), batch, B)
-        q_sum = scatter_sum(charge, batch, B)
-        charges = charge + ((total_charge - q_sum) / n_per)[batch]
+        n_per = scatter_sum(torch.ones_like(charge), batch, num_graphs)
+        q_sum = scatter_sum(charge, batch, num_graphs)
+        charges = charge + ((total_charge.to(charge.dtype) - q_sum) / n_per)[batch]
 
         # semi-local NN energy
-        node_energy = self.energy_mlp(node_feat).squeeze(-1)
-        energy_nn = self.aggregate_energy(node_energy, data)
-
+        node_nn = self.energy_mlp(node_feat).squeeze(-1)
+        node_energy = node_nn
+        node_elec = torch.zeros_like(node_nn)
         # electrostatics: on-site electronegativity/hardness + damped Coulomb
-        energy_elec = torch.zeros(B, dtype=node_energy.dtype, device=node_energy.device)
         if self.use_electrostatics:
-            electroneg_atom = chi ** 2 * charges + hardness ** 2 * charges ** 2
-            node_energy = node_energy + electroneg_atom
+            node_elec = chi ** 2 * charges + hardness ** 2 * charges ** 2
             row, col = all_pairs(batch)
             if row.numel() > 0:
-                pair_vec = (data.pos[row] - data.pos[col]).to(charges.dtype)
+                pair_vec = (pos[row] - pos[col]).to(charges.dtype)
                 ecoul = self.coulomb_energy(charges, pair_vec, row, col)
-                node_coul = 0.5 * scatter_sum(ecoul, row, N)
-                node_energy = node_energy + node_coul
-            energy_elec = self.aggregate_energy(node_energy, data) - energy_nn
+                node_elec = node_elec + 0.5 * scatter_sum(ecoul, row, N)
+            node_energy = node_energy + node_elec
 
         # optional D3(CSO) dispersion (semi-local, from the cutoff graph)
-        if self.dispersion is not None:
-            disp_atom = self.dispersion(Z, edge_vec, data.edge_index, N)
-            node_energy = node_energy + disp_atom
+        dispersion = self.dispersion
+        if dispersion is not None:
+            node_energy = node_energy + dispersion(Z, edge_vec, edge_index, N)
+        return node_feat, node_energy, charges, node_nn, node_elec
 
-        energy = self.aggregate_energy(node_energy, data)
-        dipole = scatter_sum(charges.unsqueeze(-1) * data.pos.to(charges.dtype), batch, B) / DEBYE_EA
-        return {
-            "node_energy": node_energy,
-            "energy": energy,
-            "node_features": node_feat,
-            "charges": charges,
-            "dipole": dipole,
-            "energy_nn": energy_nn,
-            "energy_elec": energy_elec,
-        }
+    @torch.jit.export
+    def node_features_energy_charges(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                                     pos: Tensor, cell: Tensor, pbc: Tensor, total_charge: float,
+                                     spin_multiplicity: float) -> Tuple[Tensor, Tensor, Tensor]:
+        """TorchScript core of one structure (the export of
+        :func:`~xnn.common.deploy.export_torchscript_potential`, also for LAMMPS through its
+        ``forward_lammps``): the node features ``(N, dim)``, the atomic energies ``(N,)`` with the
+        electrostatics and the charges ``(N,)`` for the net charge ``total_charge``. The Coulomb sum
+        runs over every atom pair from ``pos``, as in :meth:`forward`, so the whole structure must be
+        on one rank; ``cell``, ``pbc`` and ``spin_multiplicity`` are not used."""
+        n = atomic_numbers.shape[0]
+        batch = torch.zeros(n, dtype=torch.long, device=atomic_numbers.device)
+        total = torch.full((1,), total_charge, dtype=edge_vec.dtype, device=edge_vec.device)
+        node_feat, node_energy, charges, _, _ = self._evaluate(atomic_numbers, edge_index, edge_vec, pos, batch, 1,
+                                                               total)
+        return node_feat, node_energy, charges
 
     @classmethod
     def from_config(cls, cfg) -> "BAMBOO":
