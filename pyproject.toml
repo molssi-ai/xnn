@@ -155,6 +155,24 @@ where = ["src"]
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
 "xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
 
+# coverage (the Tests workflow): the derivative kernels written by
+# tools/generate_amoeba_derivatives.py and tools/generate_amoeba_ladders.py are
+# generated code, not counted
+[tool.coverage.run]
+omit = [
+    "*/xnn/ffnn/models/amoeba_tangents.py",
+    "*/xnn/ffnn/models/classical_tangents.py",
+    "*/xnn/ffnn/models/reaxff_tangents.py",
+    "*/xnn/ffnn/models/amoeba_ladders.py",
+    "*/xnn/common/models/dispersion_fast/atm_tangents.py",
+]
+
+[tool.coverage.report]
+# Triton kernels never run as Python lines: Triton compiles them for the GPU and
+# xnn.common.cpu_kernels translates them to C++ loops (the tests compare their
+# results with the references)
+exclude_also = ["@triton\\.jit"]
+
 # ruff: the linter the Lint workflow runs (ruff check). The formatter is not
 # enforced (ruff format --check is advisory there); the layout of the code,
 # including its aligned trailing comments, is kept as written.
