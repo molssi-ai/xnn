@@ -1,5 +1,6 @@
-"""Network blocks shared by several model families (PaiNN in ``gnn``, ET in ``trfnn``)."""
-from typing import Optional, Tuple
+"""Network blocks shared by several model families (PaiNN in ``gnn``, ET in ``trfnn``, ByteFF in ``gnn``
+and ``hybnn``)."""
+from typing import Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -73,3 +74,38 @@ class GatedEquivariantBlock(nn.Module):
         if self.scalar_activation:
             s_out = self.act(s_out)
         return s_out, v_out
+
+
+class MLP(nn.Module):
+    """A stack of dense layers with one activation between consecutive layers.
+
+    Parameters
+    ----------
+    sizes : sequence of int
+        Feature sizes from the input to the output, at least two.
+    activation : str or torch.nn.Module, optional
+        Activation (see :func:`~xnn.common.models.ops.make_activation`), by
+        default ``"gelu"``.
+    activate_last : bool, optional
+        Apply the activation after the last layer too. Default ``False``.
+    bias : bool, optional
+        Give the layers biases. Default ``True``.
+    """
+
+    def __init__(self, sizes: Sequence[int], activation="gelu", activate_last: bool = False,
+                 bias: bool = True):
+        super().__init__()
+        sizes = [int(s) for s in sizes]
+        if len(sizes) < 2:
+            raise ValueError("an MLP needs an input and an output size")
+        self.layers = nn.ModuleList(nn.Linear(a, b, bias=bias) for a, b in zip(sizes[:-1], sizes[1:]))
+        self.act = make_activation(activation)
+        self.activate_last = bool(activate_last)
+
+    def forward(self, x: Tensor) -> Tensor:
+        last = len(self.layers) - 1
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i < last or self.activate_last:
+                x = self.act(x)
+        return x
