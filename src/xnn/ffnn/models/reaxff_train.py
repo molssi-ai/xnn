@@ -50,7 +50,10 @@ class _KernelGrad(torch.autograd.Function):
             if ctx.needs_input_grad[1]:
                 out = torch.zeros(c["N"], c["K"], dtype=torch.float64, device=g.device)
                 g_g = torch.zeros_like(out)
-                _launch(c, getattr(rt, c["kernel"] + "_t"), cast, out, **tangents, out_ptr_t=g_g)
+                tangent = getattr(rt, c["kernel"] + "_t")
+                # the output's tangent under the kernel's own name (the nonbonded kernel writes e_ptr)
+                out_t = "e_ptr_t" if "e_ptr_t" in tangent.arg_names else "out_ptr_t"
+                _launch(c, tangent, cast, out, **tangents, **{out_t: g_g})
                 g_g = g_g.to(g.dtype)
             wanted = [(j, name) for j, name in c["diff"] if ctx.needs_input_grad[2 + j]]
             if wanted:
