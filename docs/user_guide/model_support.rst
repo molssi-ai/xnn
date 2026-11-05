@@ -306,7 +306,7 @@ Notes on individual models:
   fast path there. For training, its fast path fuses every residual MLP with its
   second derivatives. Captured training steps run up to 1.2 times faster with it
   at every size, and ``"auto"`` takes it there. In ordinary steps it wins only
-  on large systems, from 16k to 70k edges depending on the GPU and precision
+  on large systems, from 16k to 150k edges depending on the GPU and precision
   (on an A100 only in float64), and ``"auto"`` takes it there. Captured steps themselves make training and evaluation 3 to 5 times
   faster on small and medium systems (see :ref:`howto-fast-paths`).
 - **DimeNet++ and GemNet in float64.** Both fast paths run in float32 and

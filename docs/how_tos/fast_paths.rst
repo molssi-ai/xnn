@@ -129,7 +129,7 @@ float64 throughput is low. The PhysNet kernels win on large systems, from about
 except in float64 on an L40S or a T4. ``"auto"`` takes the
 compiled block of SpookyNet for evaluations below about 30k edges (on a T4, at
 every size in float32 and never in float64). It trains SpookyNet on its fused
-MLPs in captured steps, and in ordinary steps from 16k to 70k edges depending
+MLPs in captured steps, and in ordinary steps from 16k to 150k edges depending
 on the GPU and precision. The thresholds may change in any release as we rerun our benchmarks, so report the xnn version with results
 obtained with ``"auto"``.
 

@@ -5,8 +5,8 @@ Export to LAMMPS and TorchScript
 **********************************
 
 SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, NequIP, MACE, Allegro,
-CACE, AIMNet2, ANI, PhysNet, HDNNP, ET, Equiformer, EquiformerV2, BAMBOO and
-SpookyNet export to a self-contained
+CACE, AIMNet2, ANI, PhysNet, HDNNP, ET, Equiformer, EquiformerV2, BAMBOO,
+SpookyNet and PM3 / PM6 / PM6-ORG / PM7 export to a self-contained
 TorchScript file that needs nothing but ``libtorch`` or ``torch.jit.load``: no
 xnn, no Python model code, no config. The scripted models match their eager
 variants to about 1e-15.

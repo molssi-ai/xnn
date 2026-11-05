@@ -167,7 +167,8 @@ Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every model trains,
 evaluates and runs under ASE deployment interface. SchNet, DimeNet, GemNet,
 PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
-Allegro, CACE, AIMNet2, ANI, PhysNet and HDNNP also export to TorchScript for
+Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP and PM3 / PM6 / PM6-ORG / PM7 also
+export to TorchScript for
 LAMMPS. OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and HIPPO
 deploy as LAMMPS inputs. Any checkpoint can also serve as an MDI engine
 (:ref:`deployment`).
