@@ -803,7 +803,7 @@ class Trainer:
         self._planner = index_planner(self.model)
         if self._planner is None:
             raise ValueError("trainer.cuda_graph needs a model with an index plan "
-                             "(DimeNet, DimeNet++, GemNet, PhysNet)")
+                             "(DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet)")
         cfg = self.cfg
         if len(train_set) < cfg.data.batch_size:
             raise ValueError("trainer.cuda_graph drops the last smaller batch: the training set "
