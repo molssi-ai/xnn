@@ -642,11 +642,13 @@ def test_compiled_symmetry_functions_match_the_reference(device, generation, per
     assert torch.isfinite(gf).all()
 
 
+@pytest.mark.parametrize("types", [(1, 2, 3, 9), (1, 2, 3)])
 @pytest.mark.parametrize("periodic", [False, True])
-def test_direct_forces_match_the_reference(periodic, monkeypatch):
+def test_direct_forces_match_the_reference(periodic, types, monkeypatch):
     """On a CPU a 2G model without type-8 functions forms its forces and stress from the written-out
     gradient of the symmetry functions (xnn.dnn.fast.acsf_direct; every other type and cutoff kind, a
-    scaling mode): the reference's energies, forces, stress and descriptor; type 8 keeps the autograd path."""
+    scaling mode; with type 3 as the only angular type, the triplets beyond the third side's cutoff are
+    dropped): the reference's energies, forces, stress and descriptor; type 8 keeps the autograd path."""
     from xnn.dnn.fast import acsf_direct
     from xnn.dnn.fast.acsf import available
     if not available():
@@ -656,7 +658,7 @@ def test_direct_forces_match_the_reference(periodic, monkeypatch):
     species = (11, 17) if periodic else (1, 6, 8)
     full = _acsf(species, mode="center_scale")
     acsf = AtomCenteredSymmetryFunctions(list(species), full.cutoffs,
-                                         [f for f in full.functions if f["type"] != 8], mode="center_scale")
+                                         [f for f in full.functions if f["type"] in types], mode="center_scale")
     acsf.fit_scaling([structure_to_graph(s, acsf.cutoff)])
     model = HDNNP(list(species), acsf, generation=2, hidden=(8, 6),
                   activation=["tanh", "softplus", "linear"]).double().eval()
