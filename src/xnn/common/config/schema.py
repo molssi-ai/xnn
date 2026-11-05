@@ -328,8 +328,8 @@ class TrainerConfig:
     progress_bar : bool
         Show a progress bar over each epoch's batches. Defaults to ``False``.
     cuda_graph : bool
-        Replay every training step as one CUDA graph (DimeNet, DimeNet++ and
-        GemNet on one GPU, single head): faster where a step is bound by kernel launches,
+        Replay every training step as one CUDA graph (DimeNet, DimeNet++,
+        GemNet, PhysNet and SpookyNet on one GPU, single head): faster where a step is bound by kernel launches,
         as with small molecules. Batches are padded to fixed counts and the
         last, smaller batch of an epoch is dropped. Where the model's fast
         kernels take the batches (``use_fast``), the first steps time ordinary
@@ -350,7 +350,7 @@ class TrainerConfig:
     early_stopping_min_delta: float = 0.0
     early_stopping_threshold: Optional[float] = None   # stop once better than this
     progress_bar: bool = False
-    cuda_graph: bool = False           # replay the training step as one CUDA graph (DimeNet, GemNet)
+    cuda_graph: bool = False           # one CUDA graph per step (DimeNet(++), GemNet, PhysNet, SpookyNet)
 
     def validate(self) -> None:
         """Normalize the list options and reject unknown names."""
