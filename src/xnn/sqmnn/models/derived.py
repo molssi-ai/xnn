@@ -224,13 +224,15 @@ def element_quantities(z: Sequence[int], p: Dict[str, Tensor]) -> Dict[str, Tens
         sel = col(tm) > 0
         es = torch.where(sel, zsn, torch.ones_like(zsn))
         ep = torch.where(sel, zpn, torch.ones_like(zpn))
+        # the other elements' values are discarded; their shell is raised to 2 where the first row (hydrogen)
+        # would leave R^2 undefined
         r_gss, r_gsp, r_hsp, r_f0, r_f2 = (torch.stack(v) for v in zip(*[
             (slater_condon(0, ns, es[i], ns, es[i], ns, es[i], ns, es[i]),
              slater_condon(0, ns, es[i], ns, es[i], ns, ep[i], ns, ep[i]),
              slater_condon(1, ns, es[i], ns, ep[i], ns, es[i], ns, ep[i]) / 3.0,
              slater_condon(0, ns, ep[i], ns, ep[i], ns, ep[i], ns, ep[i]),
              slater_condon(2, ns, ep[i], ns, ep[i], ns, ep[i], ns, ep[i]))
-            for i, ns in enumerate(row)]))
+            for i, ns in enumerate(r if tm[j] else max(r, 2) for j, r in enumerate(row))]))
         gss = torch.where(sel, r_gss, gss)
         gsp = torch.where(sel, r_gsp, gsp)
         hsp = torch.where(sel, r_hsp, hsp)
