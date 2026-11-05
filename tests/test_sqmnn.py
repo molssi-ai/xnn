@@ -362,6 +362,32 @@ def test_host_terms_match_their_torch_form():
             assert torch.allclose(a, b, rtol=1e-12, atol=1e-12), kind
 
 
+def test_pm7_hbond_search_forms_agree():
+    """The host (NumPy) and the PyTorch searches of the PM7 hydrogen bonds give the same tables on crowded
+    random boxes (centers with five or more bonded atoms, every kind of reference frame)."""
+    import xnn.sqmnn.models.corrections as cr
+    tables = correction_tables(torch.device("cpu"))
+    seen = {"capped": 0, "one bond": 0, "rows": 0}
+    for seed in range(12):
+        rng = np.random.default_rng(seed)
+        n = 30 + 5 * seed
+        z = [int(v) for v in rng.choice([1, 1, 1, 6, 7, 8], size=n)]
+        x = rng.uniform(0.0, (n / 0.25) ** (1.0 / 3.0), size=(n, 3))
+        host = cr._np_pm7_hbond_tables(z, x)
+        torch_form = cr._pm7_hbond_tables(z, torch.tensor(x), tables)
+        assert (host is None) == (torch_form is None)
+        if host is None:
+            continue
+        assert host.keys() == torch_form.keys()
+        for key, value in host.items():
+            assert np.array_equal(value, torch_form[key].numpy()), key
+        _, count, _, k = cr._np_bonded_lists(cr._distances(x), cr._NP_HB_RADIUS[np.asarray(z)], 4)
+        seen["capped"] += int((count >= 5).sum())
+        seen["one bond"] += int((k[host["atoms"][..., 0]] == 1).sum())
+        seen["rows"] += len(host["ahb"])
+    assert min(seen.values()) > 0, seen
+
+
 def _build_graphs(model, kind):
     """The captured build graphs of one kind of a model on the fast path."""
     return [g for plan in model._plans.values() for (k, _), g in plan.graphs.items() if k == kind and g]
@@ -403,6 +429,7 @@ def test_fast_path_matches_reference_on_gpu(cls):
         grads = torch.cat([q.grad.reshape(-1) for q in t.parameters() if q.grad is not None])
         if fast:
             assert any(g.second for g in _build_graphs(t, "train")) and _build_graphs(t, "response")
+            assert any(key[0] == "cphf" for key in t._scf_graphs.entries)     # the density response
         results.append((e.detach(), f.detach(), hv, grads))
     for a, b in zip(*results):
         assert torch.allclose(a, b, rtol=1e-9, atol=1e-9 * float(b.abs().max()))
@@ -422,6 +449,33 @@ def test_pseudo_diagonalization_matches_full_diagonalization(monkeypatch):
     full = model(graph)
     assert torch.allclose(ref["energy"], full["energy"], rtol=0.0, atol=1e-7)
     assert torch.allclose(ref["forces"], full["forces"], rtol=0.0, atol=1e-6)
+
+
+def test_warm_start_from_previous_orbitals(monkeypatch):
+    """A warm start that rotates the previous geometry's orbitals from its first iteration (WARM_ORBITALS) needs
+    one full diagonalization fewer and reaches the solution of the warm start from the density alone."""
+    rng = np.random.default_rng(4)
+    pos = np.vstack([np.asarray(WATER[0]) + 2.9 * np.array(s) for s in np.ndindex(2, 2, 2)])
+    pos += 0.05 * rng.normal(size=pos.shape)
+    step = pos + 0.01 * rng.normal(size=pos.shape)
+    z = WATER[1] * 8
+    n = 6 * len(z) // 3                                                # basis functions
+    monkeypatch.setattr(scf, "PSEUDO_MIN_BASIS", 0)
+    calls = []
+    full = scf.eigh
+    monkeypatch.setattr(scf, "eigh", lambda A: calls.append(A.shape[-1]) or full(A))
+    results = []
+    for seed in (False, True):
+        monkeypatch.setattr(scf, "WARM_ORBITALS", {"cpu": seed, "cuda": seed})
+        model = ForceStressOutput(PM6())
+        model(_graph(pos, z))
+        calls.clear()
+        results.append(model(_graph(step, z)))
+        results[-1]["full diagonalizations"] = sum(1 for m in calls if m == n)
+    plain, seeded = results
+    assert seeded["full diagonalizations"] == plain["full diagonalizations"] - 1
+    assert torch.allclose(plain["energy"], seeded["energy"], rtol=0.0, atol=1e-7)
+    assert torch.allclose(plain["forces"], seeded["forces"], rtol=0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize("cls", METHODS)
