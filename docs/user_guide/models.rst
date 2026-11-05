@@ -546,6 +546,53 @@ Other options, including ``nonlocal_interactions``, ``attention`` (favor /
 exact), ``zbl_repulsion`` and ``ewald``, are also available. The outputs also
 include ``charges`` and ``dipole``.
 
+ByteFF and ByteFF-Pol
+=====================
+:class:`~xnn.hybnn.models.byteff.ByteFF` and
+:class:`~xnn.hybnn.models.byteff.ByteFFPol` (`ByteDance-Seed/byteff2
+<https://github.com/ByteDance-Seed/byteff2>`_) are classical force fields whose
+parameters a graph transformer predicts from the two-dimensional molecular
+graph. ByteFF (`Zheng et al., Chem. Sci. 16, 2730 (2025)
+<https://doi.org/10.1039/D4SC06640E>`_) has the AMBER functional form.
+ByteFF-Pol (`Zheng et al., Nat. Commun. 17, 8276 (2026)
+<https://doi.org/10.1038/s41467-026-73566-3>`_) adds polarization and splits the
+non-bonded energy into repulsion, dispersion, electrostatics, polarization and
+charge transfer terms.
+
+.. code-block:: python
+
+   from xnn.hybnn.models import ByteFF, ByteFFPol
+
+   model = ByteFF.from_foundation("byteff-26")       # five networks, averaged
+   model.bind("CC(=O)Nc1ccc(O)cc1")                  # SMILES, RDKit Mol or ase.Atoms
+   params = model.predicted_parameters()             # kcal/mol, Angstrom, radians, e
+
+   pol = ByteFFPol.from_foundation()                 # ByteFF-Pol-25
+   pol.bind(["CCOC(=O)OC", "[Li+]"])                 # a cluster
+
+- A model is bound to one system. Every structure it evaluates is a
+  conformation of that system, in the atom order of the bound molecules.
+- The parameters are predicted once per distinct molecule and reused until the
+  weights change.
+- Every pair of atoms interacts by default. ByteFF also takes a cutoff
+  (``all_pairs: false``) for periodic cells. ByteFF-Pol is for molecules and
+  clusters.
+- With a cutoff on a GPU, ByteFF evaluates its terms with the fused kernels of
+  the classical force fields (``use_fast``), for inference and training alike.
+- On a GPU, ByteFF-Pol compiles its energy terms (``use_fast``). Compiling
+  takes tens of seconds per system and batch size, so ``"auto"`` waits for
+  1000 evaluations. Pass ``use_fast=True`` for molecular dynamics and training.
+- The released networks are licensed for non-commercial use only (CC BY-NC
+  4.0). They download on first use, and xnn states their terms when they load.
+
+.. code-block:: yaml
+
+   model:
+     name: byteff                # or byteff_pol
+     cutoff: 0.1                 # Neighbor-list radius; every pair interacts
+     structure: CCO
+     members: 1
+
 ReaxFF / ReaxFF-nn
 ==================
 :class:`~xnn.ffnn.models.reaxff.ReaxFF` is the bond-order reactive force field
@@ -824,6 +871,28 @@ Verlet pair list built with ``cutoff + skin``, and ``plan.outdated(pos)``
 tells when to rebuild it. The MDI engine turns the predictor on, sets
 ``use_fast="auto"``, runs the steps on a plan on a GPU and replays each step
 as one CUDA graph (``--step-graph``).
+
+.. code-block:: python
+
+   from xnn.common.deploy import StepGraph
+
+   steps = StepGraph(model, cutoff, skin=1.5)
+   slow = steps(structure, terms="nonbonded")["forces"]      # outer step, e.g. 2 fs
+   for _ in range(8):
+       ...                                                   # move the atoms by 0.25 fs
+       fast = steps(structure, terms="valence")["forces"]    # inner step
+
+``StepGraph`` also splits a step for multiple time step integrators (RESPA):
+
+- ``terms="valence"`` evaluates the bonded terms and the reference energies
+  of an inner step.
+- ``terms="nonbonded"`` evaluates the rest of an outer step: pairs, meshes
+  and the induced dipoles.
+- The two subsets add up to the whole energy, forces and stress.
+- Outer steps make every decision of the run. Inner steps replay their own
+  CUDA graph and wait for nothing.
+- Long outer steps move the atoms further between pair lists. A skin of
+  about 1.5 Angstrom rebuilds them less often.
 
 Training and files
 ------------------

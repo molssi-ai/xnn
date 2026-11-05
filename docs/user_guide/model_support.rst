@@ -219,6 +219,20 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |O|
      - |Y|
+   * - ByteFF
+     - |O|
+     - |N|
+     - |O|
+     - |Y|
+     - |Y|
+     - |Y|
+   * - ByteFF-Pol
+     - |O|
+     - |N|
+     - |O|
+     - |Y|
+     - |Y|
+     - |O|
    * - PM3 / PM6 / PM6-ORG / PM7
      - |Y|
      - |Y|
@@ -296,6 +310,17 @@ Notes on individual models:
   differentiated twice, so the upstream cannot train on forces. On a single
   molecule in float32 evaluation, it pads the spectra to take all degrees in
   one product, which needs about a third more memory than the upstream.
+- **ByteFF and ByteFF-Pol.** A model serves one system at a time: bind it with
+  ``model.bind(...)`` before an ASE calculator evaluates it, or with the
+  ``structure`` option of the checkpoint's config for the MDI engine. ByteFF-Pol is for
+  molecules and clusters, without a cell. The upstream is
+  ByteDance-Seed/byteff2 1.1.0 (commit ``663451d``); the reference is faster
+  than it on its CPU and on an A100. ByteFF's fast path runs its terms on the
+  classical force-field kernels. ``"auto"`` takes them with a neighbor-list
+  cutoff and keeps molecule batches with every pair on the reference.
+  ByteFF-Pol's fast path compiles its energy terms. It compiles after 1000
+  evaluations of one system under ``"auto"``, at once with ``use_fast=True``. Its
+  float64 evaluation runs uncompiled, because the compiler fails on it.
 - **BAMBOO.** The upstream is release 202404 (commit ``386ac0f``). Its forces
   are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.

@@ -159,7 +159,7 @@ Models at a glance
    * - Transformer neural networks (``trfnn``)
      - ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2
    * - Hybrid neural networks (``hybnn``)
-     - BAMBOO, SpookyNet
+     - BAMBOO, SpookyNet, ByteFF, ByteFF-Pol
    * - Add-ons for any model (``common``)
      - LES long-range electrostatics, D3 and D4 dispersion
 

@@ -133,6 +133,13 @@ Numerical agreement under identical weights involves:
   about 1e-15 layer by layer. xnn's forces are the exact gradient of the
   energy. The forces the upstream reports differ from that gradient by about
   one part in 10^10.
+- **ByteFF and ByteFF-Pol** (`ByteDance-Seed/byteff2
+  <https://github.com/ByteDance-Seed/byteff2>`_): the molecular graphs
+  (features, terms, symmetry classes, pair shells) are identical, the predicted
+  parameters are identical bit for bit, and energies and forces of molecules and
+  clusters agree to about 1e-14 with the released ByteFF-26 and ByteFF-Pol-25
+  networks. The upstream's float64 polarization keeps a small self-interaction
+  term that float32 rounds away and the paper does not have. xnn leaves it out.
 - **LES** (``cace.modules.EwaldPotential``): ``LatentEwald(CACE)`` reproduces
   CACE-LR to float32 round-off and each kernel to about 1e-16 in float64.
 - **D4 and D3** (`dftd4 <https://github.com/dftd4/dftd4>`_,
