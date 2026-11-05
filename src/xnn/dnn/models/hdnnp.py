@@ -496,6 +496,24 @@ class HDNNP(DescriptorPotential):
         short = self.energy_scale.to(desc.dtype) * self.element_nets(desc, atomic_numbers, None)
         return desc, short + self._self_energies_by_z.to(desc.dtype)[atomic_numbers]
 
+    @torch.jit.unused
+    def forms_forces(self, data: AtomicGraph) -> bool:
+        """Whether :meth:`forward_direct` serves this evaluation: a 2G model evaluated on a CPU, not restricted
+        to the reference (``use_fast`` not ``False``: it takes 0.2-0.5 of the reference's time), whose symmetry
+        functions the written-out gradient of :mod:`xnn.dnn.fast.acsf_direct` covers."""
+        if self.training or self.generation != 2 or self.use_fast is False or data.pos.device.type != "cpu":
+            return False
+        from xnn.dnn.fast import acsf_direct
+        return acsf_direct.applies(self.featurizer)
+
+    @torch.jit.unused
+    def forward_direct(self, data: AtomicGraph) -> dict[str, Tensor]:
+        """:meth:`forward` with the forces ``"forces"`` and ``"virial"`` (``dE / d(strain)``) from the
+        written-out gradient of the symmetry functions (see :meth:`forms_forces`); the outputs carry no
+        autograd graph."""
+        from xnn.dnn.fast import acsf_direct
+        return acsf_direct.forward_direct(self, data)
+
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
         """Energies (and for 3G/4G charges and electrostatics) of a batch.

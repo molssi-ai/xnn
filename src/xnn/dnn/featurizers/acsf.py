@@ -659,7 +659,10 @@ class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
     def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
                 num_nodes: int) -> Tensor:
         """:meth:`forward` on tensors (TorchScript-compatible)."""
-        g = self.compute_raw(atomic_numbers, edge_index, edge_vec, num_nodes)
+        return self.scale(self.compute_raw(atomic_numbers, edge_index, edge_vec, num_nodes), atomic_numbers)
+
+    def scale(self, g: Tensor, atomic_numbers: Tensor) -> Tensor:
+        """The scaled descriptor from the unscaled one ``g`` ``(N, output_dim)``."""
         if self.mode == "none":
             return g
         sp = self._z2i[atomic_numbers].clamp(min=0)

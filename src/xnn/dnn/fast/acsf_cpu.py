@@ -1,4 +1,4 @@
-"""CPU kernels of the HDNNP symmetry functions (C++ and OpenMP, built on first use).
+"""Optional CPU kernels of the HDNNP symmetry functions (C++ and OpenMP, off by default).
 
 RuNNer evaluates the symmetry functions in loops over the atoms, their neighbors and their neighbor
 pairs, without storing anything per triplet. These kernels do the same: one OpenMP loop over the
@@ -10,9 +10,7 @@ the center's own edges, so no two threads write the same memory. Types 1, 2, 3 a
 cosine or tanh cutoffs, as the GPU kernels; the derivative is not differentiable again, so the
 kernels serve evaluation.
 
-The source is compiled with :func:`torch.utils.cpp_extension.load_inline` on first use (a C++
-compiler with OpenMP is needed; :func:`available` reports whether the build works) and kept in
-PyTorch's extension cache.
+They are turned on and built through :mod:`xnn.common.models.cpu_extension`.
 """
 from __future__ import annotations
 

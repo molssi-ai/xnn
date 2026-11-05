@@ -243,8 +243,8 @@ class DescriptorPotential(InteratomicPotential):
             ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
             ``False``: always the reference implementation. The kernels are
             twice differentiable, so force training takes them as well. The
-            HDNNP symmetry functions have GPU kernels and, in evaluation, C++
-            kernels on a CPU (:mod:`xnn.dnn.fast.acsf`).
+            HDNNP symmetry functions have GPU kernels and, in evaluation, a
+            compiled CPU path and optional C++ kernels (:mod:`xnn.dnn.fast.acsf`).
 
         Returns
         -------
