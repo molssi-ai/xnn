@@ -14,8 +14,13 @@ updates:
         patterns: ["*"]
     # torch is pinned to the CUDA build the GPU environments use and is
     # bumped by hand together with the e3nn / mace-torch reference versions.
+    # e3nn is held at the version mace-torch pins, and nequip at the reference
+    # version the NequIP comparisons use; newer releases cannot be resolved
+    # together with mace-torch.
     ignore:
       - dependency-name: "torch"
+      - dependency-name: "e3nn"
+      - dependency-name: "nequip"
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "dev"
