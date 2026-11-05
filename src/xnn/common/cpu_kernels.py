@@ -530,9 +530,12 @@ class _Scope:
         if fn is not None and not mod.startswith("triton."):
             return self.inline(fn, node)
         name = getattr(fn or f, "__name__", "")
-        if name == "<lambda>" and isinstance(func, ast.Attribute):
+        if fn is None and isinstance(f, functools.partial):
+            mod = getattr(f.func, "__module__", "") or ""
+        if isinstance(func, ast.Attribute) and (name == "<lambda>" or mod.startswith("triton.runtime.interpreter")):
             # Triton's interpreter, once it ran a kernel in this process, replaces triton.language's functions
-            # with lambdas: the call's own name says which one it was
+            # with lambdas, functions of its own (range, static_assert, reduce) and partials of them
+            # (multiple_of, max_contiguous): the call's own name says which one it was
             name = func.attr
         if not mod.startswith("triton"):
             raise Unsupported(f"call {name}")

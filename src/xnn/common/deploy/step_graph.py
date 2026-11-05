@@ -68,6 +68,13 @@ class StepGraph:
     unless an atom moves further than predicted; a step evaluated again first
     takes its dipoles back out of the predictors.
 
+    The cell may change from step to step (constant-pressure dynamics). A
+    changed cell brings the terms the plan keeps for it (the mesh influence
+    functions, inverse cells and volumes) up to date in place before the step
+    runs, so the recorded step follows it, and until the next pair list the
+    rebuild test also counts how far the cell has moved the periodic images.
+    The mesh and the Ewald coefficients stay those the plan was made with.
+
     Parameters
     ----------
     model : torch.nn.Module
@@ -138,6 +145,10 @@ class StepGraph:
         self.gridded = False
         self._cell_key = None
         self._grid_cache: Optional[tuple] = None
+        # the cell the pair list was built in, and the bound on the image shifts of its pairs (per axis)
+        # once the cell has changed since then (constant-pressure dynamics), else None
+        self.list_cell: Optional[Tensor] = None
+        self.shift_bound: Optional[Tensor] = None
         self.side = None
         self.staged = None
         self.stream = None
@@ -174,12 +185,13 @@ class StepGraph:
             with torch.no_grad():
                 self.pos.copy_(pos)
                 if cell is not None:
-                    self.cell.copy_(cell.reshape(self.cell.shape))
+                    self._new_cell(cell.reshape(self.cell.shape))
             if self.cuda_graph is not None:
                 out = self._replay(struct)
                 if out is not None:
                     return out
-            elif self.pending or bool(self.plan.outdated(self.pos)):
+            elif self.pending or bool(self.plan.outdated(self.pos)) or (
+                    self.shift_bound is not None and bool(self._cell_outdated())):
                 self.pending = False
                 self._refresh(struct)
         out = self._eager()
@@ -211,6 +223,50 @@ class StepGraph:
         self.graph, self.pos, self.cell = graph, graph.pos, graph.cell
         self.gridded = cell_grid(self.pos, self.cutoff + self.skin, *self._box()) is not None
         self.cuda_graph = None
+        self._listed()
+
+    def _listed(self) -> None:
+        """Note that the pair list was built at the current positions and cell."""
+        self.list_cell = None if self.cell is None else self.cell.detach().clone()
+        self.shift_bound = None
+
+    def _new_cell(self, cell: Tensor) -> None:
+        """Take the cell of a step into the buffer. A changed cell brings the cell terms the plan keeps
+        (the model's ``refresh_cell``) up to date in place, so the recorded step follows it, and from then
+        on until the next pair list the rebuild test also counts how far the cell moved the images."""
+        if torch.equal(self.cell, cell.to(self.cell.dtype)):
+            return
+        self.cell.copy_(cell)
+        self._grid_cache = None
+        refresh = getattr(self.core, "refresh_cell", None)
+        if callable(refresh):
+            refresh(self.plan, self.cell)
+        if self.shift_bound is None:
+            self.shift_bound = self._shift_bound()
+
+    def _shift_bound(self) -> Tensor:
+        """The largest image shift along each axis of a pair within ``cutoff + skin`` in the cell the pair
+        list was built in, ``(B, 3)`` (zero along an axis that is not periodic)."""
+        cell = self.list_cell.detach().reshape(-1, 3, 3)
+        cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
+                             torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
+        volume = (cell[:, 0] * cross[:, 0]).sum(-1).abs()
+        heights = volume[:, None] / torch.linalg.norm(cross, dim=-1)
+        bound = torch.floor((self.cutoff + self.skin) / heights) + 1.0
+        pbc = self.graph.pbc
+        if pbc is not None:
+            bound = bound * pbc.reshape(-1, 3).to(bound.dtype)
+        return bound
+
+    def _cell_outdated(self) -> Tensor:
+        """Whether a pair may have come within the cutoff unlisted since the pair list was built, counting
+        the cell's change: twice the largest step of an atom plus the largest move of an image of a pair
+        (its shifts times the change of the lattice vectors) above the skin, as a boolean on the device."""
+        cell = self.cell.detach().reshape(-1, 3, 3)
+        drift = (torch.linalg.norm(cell - self.list_cell.reshape(-1, 3, 3), dim=-1) * self.shift_bound).sum(-1).max()
+        step = self.pos.detach() - self.plan.reference.to(self.pos.dtype)
+        moved = (step * step).sum(-1).max().sqrt()
+        return 2.0 * moved + drift > self.skin
 
     def _refresh(self, struct: dict) -> bool:
         """Rebuild the pair list at the current positions: in place when it fits
@@ -219,6 +275,7 @@ class StepGraph:
         back into the cell (a jump of half a cell height or more) also changes
         the image shifts of its bonded vectors, and the whole plan is recorded."""
         self.rebuilds += 1
+        self._listed()
         if (hasattr(self.core, "refresh_pairs") and self.graph.num_graphs == 1 and not self._jumped()
                 and self.core.refresh_pairs(self.graph, self.plan, self.cutoff + self.skin)):
             # the pairs found once each at the plan's positions, without a graph
@@ -317,6 +374,7 @@ class StepGraph:
         if fresh is not None and self.plan.update(fresh, bonded=False):
             self.rebuilds += 1
             self.overlapped += 1
+            self._listed()
             return True
         return self._refresh(struct)
 
@@ -340,12 +398,17 @@ class StepGraph:
             flags = [self.flag, self.due, self.plan.converged]
             status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]
                                + ([] if jump is None else [jump.reshape(1).to(torch.float64)]))
+        if self.shift_bound is not None:
+            # the cell has changed since the pair list: the test that counts the images' move too
+            status = torch.cat([status, self._cell_outdated().reshape(1).to(torch.float64)])
         status = status.tolist()
         n = int(self.plan.needed.numel())
         (outdated, due, converged), needed = status[:3], status[3:3 + n]
         if jump is not None and status[3 + n]:
             # an atom wrapped back into the cell: its bonded image shifts change too
             fresh = None
+        if self.shift_bound is not None and status[-1]:
+            outdated = True
         if outdated or not converged:
             # the step is evaluated again at the same positions
             self._rewind()

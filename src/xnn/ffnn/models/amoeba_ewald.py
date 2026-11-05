@@ -470,6 +470,89 @@ def _mesh_sizes(mesh: List[int], dtype: torch.dtype, device: torch.device) -> Te
     return _MODULI_CACHE[key]
 
 
+def mesh_influence(inv: Tensor, volume: Tensor, mesh: List[int], order: int, alpha: float, kind: str) -> Tensor:
+    """The influence function of structures with the inverse cells ``inv`` ``(G, 3, 3)`` and volumes ``volume``
+    ``(G,)`` on the half spectrum of the real FFT, ``(G, K_1, K_2, K_3 // 2 + 1)``, with the ``1 / (K_1 K_2 K_3)``
+    of the unscaled inverse transform folded in (``kind`` ``"coulomb"`` or ``"r6"``, see
+    :meth:`MeshPlan.influence`)."""
+    dtype, device = inv.dtype, inv.device
+    k1, k2, k3 = mesh
+    h3 = k3 // 2 + 1
+    axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
+    axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
+    moduli = _moduli(mesh, order, dtype, device)[:, :, :h3]
+    # the inverse transforms run unscaled (norm="forward"), so the 1 / (K1 K2 K3) of the
+    # inverse FFT is folded in here: one multiply fewer per transform
+    scale = (1.0 / volume)[:, None, None, None]
+
+    def kernel(frequencies):
+        grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
+        miller = torch.stack(grid, dim=-1)                                    # (K1, K2, H3, 3)
+        kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, inv)
+        k2sq = (kvec * kvec).sum(-1)                                           # (G, K1, K2, H3)
+        if kind == "coulomb":
+            m2 = k2sq / (4.0 * math.pi * math.pi)
+            safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
+            g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
+            return torch.where(m2 > 0, g, torch.zeros_like(g))
+        b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
+        f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
+        return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
+
+    g = kernel(axes)
+    # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
+    # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
+    # the full complex transform applies through its real part
+    flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
+               for a, k in zip(axes, (k1, k2, k3))]
+    if any(k % 2 == 0 for k in (k1, k2, k3)):
+        g = 0.5 * (g + kernel(flipped))
+    return g
+
+
+def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
+    """Bring the cell terms a step plan keeps for one mesh group (the ``influence_cache`` of
+    :class:`MeshPlan`: inverse cells, volumes, per-atom inverses and influence functions) to the cells
+    ``cells`` ``(G, 3, 3)``, in place, so that a recorded step that reads them follows a changed cell
+    (constant-pressure dynamics). ``batch`` gives the structure of every atom of the group. Reads the cells
+    on the host; returns whether they had changed.
+
+    Parameters
+    ----------
+    cache : dict
+        The cache of the group.
+    cells : Tensor
+        Lattice vectors as rows ``(G, 3, 3)``.
+    batch : Tensor
+        Structure of every atom ``(N,)``, from zero to ``G - 1``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the kept terms described other cells and were recomputed.
+    """
+    kept = cache.get("cell")
+    if kept is None:
+        return False
+    cells = cells.detach().to(kept.dtype)
+    if torch.equal(kept, cells):
+        return False
+    with torch.no_grad():
+        inv = torch.linalg.inv_ex(cells)[0]
+        volume = cell_volume(cells)
+        for key, value in cache.items():
+            if isinstance(key, tuple) and key[0] == "geometry":
+                value[0].copy_(inv)
+                value[1].copy_(inv.index_select(0, batch))
+                value[2].copy_(volume)
+        for key, value in cache.items():
+            if isinstance(key, tuple) and key[0] != "geometry":
+                alpha, kind, mesh, order, _ = key
+                value.copy_(mesh_influence(inv, volume, list(mesh), order, alpha, kind))
+        kept.copy_(cells)
+    return True
+
+
 class MeshPlan:
     """The fixed particle-mesh data of a group of periodic structures on one mesh.
 
@@ -519,10 +602,13 @@ class MeshPlan:
         self.groups = int(cells.shape[0])
         k1, k2, k3 = self.mesh
         sizes = _mesh_sizes(self.mesh, dtype, device)
-        # the cell-only quantities (inverse, volume, per-atom inverse) of a cell that does not move
-        # and carries no gradient are kept with the influence functions across evaluations
+        # the cell-only quantities (inverse, volume, per-atom inverse) of a cell that carries no gradient
+        # are kept with the influence functions across evaluations, for the cell they were made for: a
+        # changed cell brings them up to date in place (refresh_cell_terms), where a recorded step reads them
         geometry = ("geometry", tuple(self.mesh), dtype)
         fixed = influence_cache is not None and not cells.requires_grad
+        if fixed and not (cells.is_cuda and torch.cuda.is_current_stream_capturing()):
+            refresh_cell_terms(influence_cache, cells, batch)
         if fixed and geometry in influence_cache:
             inv, inv_n, self.volume = influence_cache[geometry]
         else:
@@ -532,6 +618,7 @@ class MeshPlan:
             self.volume = cell_volume(cells)
             if fixed:
                 influence_cache[geometry] = (inv.detach(), inv_n.detach(), self.volume.detach())
+                influence_cache.setdefault("cell", cells.detach().clone())
         u = vecmat(pos, inv_n) * sizes
         self.jac = inv_n * sizes                                            # (N, 3, 3): J[n, beta, a]
         self.inv = inv
@@ -577,38 +664,7 @@ class MeshPlan:
                 and not self.cells.requires_grad):
             self._influence[key] = self._cache[shared]
         if key not in self._influence:
-            dtype, device = self.cells.dtype, self.cells.device
-            k1, k2, k3 = self.mesh
-            h3 = k3 // 2 + 1
-            axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
-            axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
-            moduli = _moduli(self.mesh, self.order, dtype, device)[:, :, :h3]
-            # the inverse transforms run unscaled (norm="forward"), so the 1 / (K1 K2 K3) of the
-            # inverse FFT is folded in here: one multiply fewer per transform
-            scale = (1.0 / self.volume)[:, None, None, None]
-
-            def kernel(frequencies):
-                grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
-                miller = torch.stack(grid, dim=-1)                            # (K1, K2, H3, 3)
-                kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, self.inv)
-                k2sq = (kvec * kvec).sum(-1)                                   # (G, K1, K2, H3)
-                if kind == "coulomb":
-                    m2 = k2sq / (4.0 * math.pi * math.pi)
-                    safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
-                    g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
-                    return torch.where(m2 > 0, g, torch.zeros_like(g))
-                b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
-                f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
-                return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
-
-            g = kernel(axes)
-            # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
-            # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
-            # the full complex transform applies through its real part
-            flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
-                       for a, k in zip(axes, (k1, k2, k3))]
-            if any(k % 2 == 0 for k in (k1, k2, k3)):
-                g = 0.5 * (g + kernel(flipped))
+            g = mesh_influence(self.inv, self.volume, self.mesh, self.order, alpha, kind)
             self._influence[key] = g
             if self._cache is not None and not self.cells.requires_grad:
                 self._cache[shared] = g.detach()
@@ -1011,4 +1067,5 @@ __all__ = ["fused", "fused_active", "fusable", "matvec", "vecmat", "matmul3", "e
            "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
-           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "MeshPlan"]
+           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "mesh_influence", "refresh_cell_terms",
+           "MeshPlan"]

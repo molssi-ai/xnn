@@ -102,6 +102,7 @@ from .amoeba_ewald import (
     multipole_pme,
     multipole_self_energy,
     pme_grid_size,
+    refresh_cell_terms,
     region,
     self_field_coefficient,
     switching,
@@ -1139,7 +1140,7 @@ class StepPlan:
         Tensor
             ``(3 + len(needed),)``, float64.
         """
-        if _kernels_supported(pos.device, torch.float64) and last.is_contiguous():
+        if pos.is_cuda and _kernels_supported(pos.device, torch.float64) and last.is_contiguous():
             return _kernels().plan_checks(pos, self.reference, last, self.converged, self.needed, self.skin, steps)
         out = torch.cat([torch.stack([self.outdated(pos), self.due(pos, last, steps),
                                       self.converged.reshape(())]).to(torch.float64),
@@ -3321,6 +3322,33 @@ class Amoeba(InteratomicPotential):
         for predictor in (self.predictor, self.adjoint_predictor):
             if predictor is not None:
                 predictor.rewind()
+
+    def refresh_cell(self, plan: StepPlan, cells: Tensor) -> bool:
+        """Bring the cell terms the step plan ``plan`` keeps across evaluations (the mesh influence
+        functions, inverse cells and volumes of every mesh group) to the cells ``cells`` ``(B, 3, 3)``, in
+        place, so that a recorded step follows a changed cell. Reads the cells on the host.
+
+        Parameters
+        ----------
+        plan : StepPlan
+            The plan.
+        cells : Tensor
+            The lattice vectors of the batch as rows.
+
+        Returns
+        -------
+        bool
+            Whether any kept term described other cells.
+        """
+        layout = plan.ewald
+        if not layout:
+            return False
+        cells = cells.detach().reshape(-1, 3, 3)
+        changed = False
+        for key in ("groups", "dgroups"):
+            for (_, _, bs, _, batch), cache in zip(layout.get(key) or [], layout.get("influence_" + key) or []):
+                changed = refresh_cell_terms(cache, _take(cells, bs), batch) or changed
+        return changed
 
     def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
         """Switch the induced-dipole predictor on (``"aspc"``, ``"gear"``,
