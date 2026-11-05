@@ -1,12 +1,12 @@
 """Fast path of EquiformerV2: each transformer block compiled into fused kernels.
 
-The blocks are compiled (:mod:`xnn.trfnn.fast.compiled`) with compiled first and
+The blocks are compiled (:mod:`xnn.common.models.compiled`) with compiled first and
 second derivatives in training mode. In compiled code the rotations of the
 attention are the plain batched products, differentiated by the compiler,
 instead of the reference's multilinear blocks.
 """
+from xnn.common.models.compiled import supported  # noqa: F401
 from xnn.common.models.fast import AutoPolicy
-from xnn.trfnn.fast.compiled import supported  # noqa: F401
 
 #: Edge counts below which ``use_fast="auto"`` takes the compiled blocks in evaluation mode
 #: (energy and forces): they save kernel launches, so they win on small graphs (a single

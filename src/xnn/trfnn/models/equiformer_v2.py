@@ -1093,7 +1093,7 @@ class TransformerBlockV2(nn.Module, FastPathModule):
 
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
         """torch.compile on a CUDA device."""
-        from xnn.trfnn.fast.compiled import supported
+        from xnn.common.models.compiled import supported
         return supported(device, dtype)
 
     def forward(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
@@ -1107,7 +1107,7 @@ class TransformerBlockV2(nn.Module, FastPathModule):
     @torch.jit.unused
     def _forward_fast(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
                       rot: Tensor, rot_inv: Tensor, envelope: Optional[Tensor], batch: Tensor) -> Tensor:
-        from xnn.trfnn.fast.compiled import run_compiled
+        from xnn.common.models.compiled import run_compiled
         # no dropout acts on the compiled path, so the drop path ignores the graph count
         return run_compiled(self, x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope, batch, 1)
 

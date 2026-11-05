@@ -4,12 +4,12 @@ The reference blocks run as many small operations per irreps block (the
 depth-wise tensor products, the irreps linear maps, the gates, the equivariant
 layer norms and the heads), and their backward passes add zero fills and
 accumulations for every slice: thousands of kernels per evaluation, most of the
-time elementwise. Here every block is compiled (:mod:`xnn.trfnn.fast.compiled`;
+time elementwise. Here every block is compiled (:mod:`xnn.common.models.compiled`;
 its tensor products are plain ``fx`` code, so the whole block is one graph), with
 compiled first and second derivatives in training mode.
 """
+from xnn.common.models.compiled import supported  # noqa: F401
 from xnn.common.models.fast import AutoPolicy
-from xnn.trfnn.fast.compiled import supported  # noqa: F401
 
 #: Edge counts below which ``use_fast="auto"`` takes the compiled blocks in evaluation mode
 #: (energy and forces): they save kernel launches, so they win on small graphs, and lose on
