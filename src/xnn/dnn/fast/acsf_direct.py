@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
-
-from xnn.common.models.ops import build_triplets
 
 _TORCH = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
 
@@ -261,6 +259,60 @@ def angular_raw(feat, vec: Tensor, sp: Tensor, src: Tensor, e1: Tensor, e2: Tens
     return angular_table(feat, vec, r, he, dhe, sp, src, e1, e2, center, n)
 
 
+def _triplet_rows(order: Tensor, offsets: Tensor, pair_start: Tensor, pair_end: Tensor, total: int, vec: Tensor,
+                  reach: float):
+    """The triplets of :func:`~xnn.common.models.ops.build_triplets` (same order) from the edges grouped by
+    center (``order``, each center's first row ``offsets``, its pairs from ``pair_start`` to ``pair_end``), with
+    whether each triplet's third side is shorter than ``reach``: pair ``p`` of a center is ``(a, b)`` with
+    ``p = b (b - 1) / 2 + a``, ``a < b``."""
+    p = torch.arange(total, device=order.device)
+    center = torch.bucketize(p, pair_end, right=True)
+    local = p - pair_start[center]
+    b = torch.floor((1.0 + torch.sqrt(1.0 + 8.0 * local.to(torch.float64))) * 0.5).to(torch.long)
+    # exact integer b despite rounding: b (b - 1) / 2 <= local < b (b + 1) / 2
+    b = b - (b * (b - 1) // 2 > local).to(torch.long)
+    b = b + ((b + 1) * b // 2 <= local).to(torch.long)
+    a = local - b * (b - 1) // 2
+    first, second = order[offsets[center] + a], order[offsets[center] + b]
+    d12 = vec[first] - vec[second]
+    return first, second, center, (d12 * d12).sum(-1) < reach * reach
+
+
+@functools.lru_cache(maxsize=None)
+def _triplets_compiled() -> Callable:
+    return torch.compile(_triplet_rows, dynamic=True)
+
+
+def triplets(edge_index: Tensor, n: int, vec: Tensor, reach: Optional[float]) -> Tuple[Tensor, Tensor, Tensor]:
+    """The triplets of the edges ``edge_index`` (rows of ``vec``), as :func:`~xnn.common.models.ops.build_triplets`
+    gives them, generated in a compiled call; with ``reach``, only those whose third side is shorter."""
+    dst = edge_index[1]
+    order = torch.argsort(dst, stable=True)
+    counts = torch.bincount(dst, minlength=n)
+    pairs = counts * (counts - 1) // 2
+    pair_end = torch.cumsum(pairs, 0)
+    total = int(pair_end[-1]) if n > 0 else 0
+    if total == 0:
+        empty = torch.zeros(0, dtype=torch.long, device=dst.device)
+        return empty, empty, empty
+    offsets = torch.cumsum(counts, 0) - counts
+    first, second, center, near = _triplets_compiled()(order, offsets, pair_end - pairs, pair_end, total, vec,
+                                                       reach if reach is not None else float("inf"))
+    if reach is None:
+        return first, second, center
+    keep = torch.nonzero(near).squeeze(-1)
+    return first[keep], second[keep], center[keep]
+
+
+def _third_side_reach(feat) -> Optional[float]:
+    """The largest cutoff of the third side when every factorized angular function is of type 3 (cut off in all
+    three sides), else ``None``."""
+    _, _, _, _, type3, cuts = _constants(feat)
+    if not type3 or not all(type3):
+        return None
+    return max(feat._cut_r[c] for c in cuts)
+
+
 def applies(feat) -> bool:
     """Whether the written-out gradient covers ``feat`` (no type 8) and ``torch.compile`` produces CPU code."""
     from xnn.common.models.dispersion_fast.atm_cpu import available
@@ -307,7 +359,8 @@ def forward_direct(model, data) -> Dict[str, Tensor]:
         e1, e2, center = empty, empty, empty
         if feat._ang_lookup.shape[-1] > 0:
             eidx = (r < feat._ang_cutoff).nonzero().squeeze(-1)
-            e1, e2, center = build_triplets(data.edge_index[:, eidx], n)
+            # with every angular function cut off in the third side, the triplets beyond it add exact zeros
+            e1, e2, center = triplets(data.edge_index[:, eidx], n, vec[eidx], _third_side_reach(feat))
             if center.numel() > 0:
                 e1, e2 = eidx[e1], eidx[e2]
                 raw = raw + angular_columns(feat, _run("angular", feat, vec, sp, src, e1, e2, center, n), sp, n)
