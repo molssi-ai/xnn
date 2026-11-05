@@ -293,7 +293,9 @@ and the integral build with its derivatives:
    model.set_use_fast(False)            # always launched
 
 The eigenvalue problem runs between the replays. The results equal those of
-launched evaluations up to round-off. Gradients taken with ``create_graph``
+launched evaluations up to round-off. In a molecular dynamics run or a geometry
+optimization on a GPU, each SCF starts from the previous step's orbitals and
+rotates them from its first iteration. That saves one diagonalization per step. Gradients taken with ``create_graph``
 (Hessians, force training) and their gradients replay graphs of their own,
 recorded at the next evaluation after the first such gradient. With trainable
 parameters the build is replayed from the parameters and the density response
