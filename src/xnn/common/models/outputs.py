@@ -133,9 +133,9 @@ class ForceStressOutput(nn.Module):
 
         # a model that forms its forces and strain derivative itself in evaluation (a standalone
         # dispersion term on its CPU kernels): no autograd pass
-        direct_forces = getattr(self.model, "direct_forces", None)
-        if (direct_forces is not None and not self.training and self.compute_forces and plan is None
-                and direct_forces(data)):
+        forms_forces = getattr(self.model, "forms_forces", None)
+        if (callable(forms_forces) and not self.training and self.compute_forces and plan is None
+                and forms_forces(data)):
             out = self.model.forward_direct(data)
             virial = out.pop("virial")
             if self.compute_stress and data.cell is not None:
