@@ -1,0 +1,21 @@
+# Codecov status checks. The Tests workflow runs on CPUs only, so code that runs
+# on a CUDA device alone (CUDA graphs, Triton launches) is not executed there;
+# the targets are fixed rather than taken from the base commit.
+coverage:
+  status:
+    project:
+      default:
+        target: 85%
+        threshold: 1%
+    patch:
+      default:
+        target: 85%
+
+ignore:
+  # Derivative kernels written by tools/generate_amoeba_derivatives.py and
+  # tools/generate_amoeba_ladders.py
+  - "src/xnn/ffnn/models/amoeba_tangents.py"
+  - "src/xnn/ffnn/models/classical_tangents.py"
+  - "src/xnn/ffnn/models/reaxff_tangents.py"
+  - "src/xnn/ffnn/models/amoeba_ladders.py"
+  - "src/xnn/common/models/dispersion_fast/atm_tangents.py"

@@ -30,20 +30,25 @@ species. No ``(N, N)`` table and no per-triplet gather of 23 values. The pair
 damping radii come from a small table over the species present.
 
 Derivatives: the backward kernel returns the gradients with respect to the
-edge vectors and both factor matrices in closed form; they are not themselves
-differentiable. When a second derivative is needed (``create_graph=True``, e.g.
-force training) the backward pass runs the reference implementation instead,
-which is differentiable to second order.
+edge vectors and both factor matrices in closed form. When a second derivative
+is needed (``create_graph=True``, e.g. force training), that gradient is itself
+differentiable: its Jacobian is the Hessian of the energy, which is symmetric,
+so its backward is the gradient kernel's tangent along the incoming cotangents
+(a Hessian-vector product), and the derivative with respect to the per-atom
+cotangents is the energy kernel's tangent. Both tangent kernels are generated
+from the kernels here
+(:mod:`~xnn.common.models.dispersion_fast.atm_tangents`). Third derivatives
+and gradients with respect to the scalars and the damping table are not
+provided.
 """
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+from torch.autograd.function import once_differentiable
 
 #: pairs per tile side: a program holds ``BLOCK x BLOCK`` pairs in registers
 BLOCK = 32
@@ -368,80 +373,148 @@ def _launch_meta(like: Tensor) -> dict:
     return {"num_warps": 4 if like.dtype == torch.float32 else 8}
 
 
+def _meta(launch: _Launch, consts: ATMConstants, like: Tensor) -> dict:
+    return {"MODE": launch.mode, "BLOCK": BLOCK, "HAS_SWITCH": consts.width > 0.0, **_launch_meta(like)}
+
+
+def _energies(vec: Tensor, fa: Tensor, fb: Tensor, plan: TripletPlan, consts: ATMConstants,
+              tangents: Optional[tuple] = None) -> Tensor:
+    """The per-atom energies of the sorted edge vectors ``vec``; with ``tangents``
+    (directions ``vec_t, fa_t, fb_t``) their derivative along those instead."""
+    cst = _const_tensor(consts, vec)
+    energy = torch.zeros(plan.n_atoms, dtype=vec.dtype, device=vec.device)
+    table = consts.table.to(vec.dtype).contiguous()
+    k, s = int(fa.shape[1]), int(table.shape[0])
+    if tangents is not None:
+        from .atm_tangents import _atm_forward_t
+        energy_t = torch.zeros_like(energy)
+    for launch in plan.launches:
+        grid = (int(launch.centers.shape[0]), launch.blocks)
+        args = (vec, plan.src, launch.centers, launch.lo, launch.hi, consts.species, fa, fb, table, cst,
+                energy, k, s)
+        if tangents is None:
+            _atm_forward[grid](*args, **_meta(launch, consts, vec))
+        else:
+            _atm_forward_t[grid](*args, *tangents, energy_t, **_meta(launch, consts, vec))
+    return energy if tangents is None else energy_t
+
+
+def _center_sides(g_c6: Tensor, fa: Tensor, fb: Tensor, g_fa: Tensor, g_fb: Tensor, plan: TripletPlan):
+    """Add the center sides of the factor gradients, ``C6_cj = <f_c, g_j>`` per sorted edge."""
+    src_l = plan.src.to(torch.long)
+    for e0 in range(0, g_c6.shape[0], _EDGE_CHUNK):
+        e1 = min(e0 + _EDGE_CHUNK, g_c6.shape[0])
+        gc = g_c6[e0:e1, None]
+        c_idx, j_idx = plan.dst[e0:e1], src_l[e0:e1]
+        g_fa.index_add_(0, c_idx, gc * fb.index_select(0, j_idx))
+        g_fb.index_add_(0, j_idx, gc * fa.index_select(0, c_idx))
+
+
+def _gradients(vec: Tensor, fa: Tensor, fb: Tensor, go: Tensor, plan: TripletPlan, consts: ATMConstants,
+               tangents: Optional[tuple] = None):
+    """The gradients of ``sum_a go_a E_a`` in the sorted edge vectors and both factor
+    matrices; with ``tangents`` (directions ``vec_t, fa_t, fb_t``) the tangents of those
+    gradients along them instead, a Hessian-vector product."""
+    cst = _const_tensor(consts, vec)
+    table = consts.table.to(vec.dtype).contiguous()
+    g_vec = torch.zeros_like(vec)
+    g_c6 = torch.zeros(vec.shape[0], dtype=vec.dtype, device=vec.device)
+    g_fa = torch.zeros_like(fa)
+    g_fb = torch.zeros_like(fb)
+    k, s = int(fa.shape[1]), int(table.shape[0])
+    out = (g_vec, g_c6, g_fa, g_fb)
+    if tangents is not None:
+        from .atm_tangents import _atm_backward_t
+        out_t = tuple(torch.zeros_like(t) for t in out)
+    for launch in plan.launches:
+        grid = (int(launch.centers.shape[0]), launch.blocks)
+        args = (vec, plan.src, launch.centers, launch.lo, launch.hi, consts.species, fa, fb, table, cst, go,
+                *out, k, s)
+        if tangents is None:
+            _atm_backward[grid](*args, **_meta(launch, consts, vec))
+        else:
+            _atm_backward_t[grid](*args, *tangents, *out_t, **_meta(launch, consts, vec))
+    if tangents is None:
+        _center_sides(g_c6, fa, fb, g_fa, g_fb, plan)
+        return g_vec, g_fa, g_fb
+    g_vec_t, g_c6_t, g_fa_t, g_fb_t = out_t
+    _center_sides(g_c6_t, fa, fb, g_fa_t, g_fb_t, plan)
+    _center_sides(g_c6, tangents[1], tangents[2], g_fa_t, g_fb_t, plan)
+    return g_vec_t, g_fa_t, g_fb_t
+
+
 class _ATMEnergy(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, edge_vec: Tensor, feat_a: Tensor, feat_b: Tensor, plan: TripletPlan,
-                consts: ATMConstants, reference: Optional[Callable]):
+                consts: ATMConstants):
         vec = edge_vec.detach().index_select(0, plan.order).contiguous()
-        fa = feat_a.detach().contiguous()
-        fb = feat_b.detach().contiguous()
-        cst = _const_tensor(consts, vec)
-        energy = torch.zeros(plan.n_atoms, dtype=vec.dtype, device=vec.device)
-        table = consts.table.to(vec.dtype).contiguous()
-        k, s = int(fa.shape[1]), int(table.shape[0])
-        for launch in plan.launches:
-            grid = (int(launch.centers.shape[0]), launch.blocks)
-            _atm_forward[grid](vec, plan.src, launch.centers, launch.lo, launch.hi,
-                               consts.species, fa, fb, table, cst, energy, k, s,
-                               MODE=launch.mode, BLOCK=BLOCK, HAS_SWITCH=consts.width > 0.0,
-                               **_launch_meta(vec))
+        energy = _energies(vec, feat_a.detach().contiguous(), feat_b.detach().contiguous(), plan, consts)
         ctx.save_for_backward(edge_vec, feat_a, feat_b)
-        ctx.plan, ctx.consts, ctx.reference = plan, consts, reference
-        ctx.shared = feat_a is feat_b
+        ctx.plan, ctx.consts = plan, consts
         return energy
 
     @staticmethod
     def backward(ctx, grad_energy: Tensor):
         edge_vec, feat_a, feat_b = ctx.saved_tensors
-        if torch.is_grad_enabled() and ctx.reference is not None:
-            # a differentiable backward is asked for: the reference is
-            # differentiable to second order, the kernel to first
-            inputs = [edge_vec, feat_a] if ctx.shared else [edge_vec, feat_a, feat_b]
-            wanted = [t for t in inputs if t.requires_grad]
-            with torch.enable_grad():
-                energy = ctx.reference(edge_vec, feat_a, feat_a if ctx.shared else feat_b)
-                found = iter(torch.autograd.grad(energy, wanted, grad_energy, create_graph=True,
-                                                 allow_unused=True))
-            grads = [next(found) if t.requires_grad else None for t in inputs]
-            if ctx.shared:
-                grads.append(None)
-            return (*grads, None, None, None)
         plan, consts = ctx.plan, ctx.consts
+        if torch.is_grad_enabled():
+            # a differentiable backward (create_graph): the gradient as a function of its own
+            vec = edge_vec.index_select(0, plan.order)
+            g_vec, g_fa, g_fb = _ATMGrad.apply(vec, feat_a, feat_b, grad_energy, plan, consts)
+            return torch.zeros_like(edge_vec).index_copy(0, plan.order, g_vec), g_fa, g_fb, None, None
         with torch.no_grad():
             vec = edge_vec.detach().index_select(0, plan.order).contiguous()
-            fa = feat_a.detach().contiguous()
-            fb = feat_b.detach().contiguous()
             go = grad_energy.detach().to(vec.dtype).contiguous()
-            cst = _const_tensor(consts, vec)
-            table = consts.table.to(vec.dtype).contiguous()
-            g_vec = torch.zeros_like(vec)
-            g_c6 = torch.zeros(vec.shape[0], dtype=vec.dtype, device=vec.device)
-            g_fa = torch.zeros_like(fa)
-            g_fb = torch.zeros_like(fb)
-            k, s = int(fa.shape[1]), int(table.shape[0])
-            for launch in plan.launches:
-                grid = (int(launch.centers.shape[0]), launch.blocks)
-                _atm_backward[grid](vec, plan.src, launch.centers, launch.lo, launch.hi,
-                                    consts.species, fa, fb, table, cst, go, g_vec, g_c6, g_fa, g_fb,
-                                    k, s, MODE=launch.mode, BLOCK=BLOCK,
-                                    HAS_SWITCH=consts.width > 0.0, **_launch_meta(vec))
-            # the center sides: C6_cj = <f_c, g_j> per sorted edge
-            src_l = plan.src.to(torch.long)
-            for e0 in range(0, vec.shape[0], _EDGE_CHUNK):
-                e1 = min(e0 + _EDGE_CHUNK, vec.shape[0])
-                gc = g_c6[e0:e1, None]
-                c_idx, j_idx = plan.dst[e0:e1], src_l[e0:e1]
-                g_fa.index_add_(0, c_idx, gc * fb.index_select(0, j_idx))
-                g_fb.index_add_(0, j_idx, gc * fa.index_select(0, c_idx))
+            g_vec, g_fa, g_fb = _gradients(vec, feat_a.detach().contiguous(), feat_b.detach().contiguous(), go,
+                                           plan, consts)
             grad_vec = torch.zeros_like(g_vec).index_copy_(0, plan.order, g_vec)
-        return grad_vec.to(edge_vec.dtype), g_fa, g_fb, None, None, None
+        return grad_vec.to(edge_vec.dtype), g_fa, g_fb, None, None
+
+
+class _ATMGrad(torch.autograd.Function):
+    """The gradient of ``sum_a go_a E_a`` in the sorted edge vectors and both factor
+    matrices, as a function of those and of the cotangents ``go``.
+
+    Its Jacobian in the first three inputs is the Hessian of ``sum_a go_a E_a``
+    (symmetric), so the backward is the gradient kernel's tangent along the incoming
+    cotangents; the gradient with respect to ``go`` is the energy kernel's tangent
+    along them.
+    """
+
+    @staticmethod
+    def forward(ctx, vec: Tensor, feat_a: Tensor, feat_b: Tensor, go: Tensor, plan: TripletPlan,
+                consts: ATMConstants):
+        ctx.save_for_backward(vec, feat_a, feat_b, go)
+        ctx.plan, ctx.consts = plan, consts
+        return _gradients(vec.detach().contiguous(), feat_a.detach().contiguous(), feat_b.detach().contiguous(),
+                          go.detach().to(vec.dtype).contiguous(), plan, consts)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, u_vec: Tensor, u_fa: Tensor, u_fb: Tensor):
+        vec, feat_a, feat_b, go = ctx.saved_tensors
+        plan, consts = ctx.plan, ctx.consts
+        vec, fa, fb = vec.contiguous(), feat_a.contiguous(), feat_b.contiguous()
+        # an output that reached no loss has no cotangent: a zero direction
+        dirs = tuple(torch.zeros_like(x) if u is None else u.to(x.dtype).contiguous()
+                     for x, u in ((vec, u_vec), (fa, u_fa), (fb, u_fb)))
+        need = ctx.needs_input_grad
+        h_vec = h_fa = h_fb = g_go = None
+        if any(need[:3]):
+            h_vec, h_fa, h_fb = _gradients(vec, fa, fb, go.to(vec.dtype).contiguous(), plan, consts, dirs)
+        if need[3]:
+            g_go = _energies(vec, fa, fb, plan, consts, dirs).to(go.dtype)
+        return (h_vec if need[0] else None, h_fa if need[1] else None, h_fb if need[2] else None, g_go,
+                None, None)
 
 
 def atm_energy(edge_index: Tensor, edge_vec: Tensor, feat_a: Tensor, feat_b: Tensor,
-               consts: ATMConstants, n_atoms: int,
-               reference: Optional[Callable] = None) -> Tensor:
+               consts: ATMConstants, n_atoms: int) -> Tensor:
     """Per-atom ATM energies ``(N,)`` in hartree, with the Triton kernels.
+
+    Differentiable twice in ``edge_vec``, ``feat_a`` and ``feat_b`` (forces,
+    stress, and the second derivatives of a force loss).
 
     Parameters
     ----------
@@ -457,11 +530,6 @@ def atm_energy(edge_index: Tensor, edge_vec: Tensor, feat_a: Tensor, feat_b: Ten
         Species, the damping-radius table and the scalars.
     n_atoms : int
         Number of atoms.
-    reference : callable, optional
-        ``reference(edge_vec, feat_a, feat_b) -> (N,)``: the same energy in
-        differentiable torch ops, run by the backward pass when a second
-        derivative is needed; without it the kernel's (first-order) gradient
-        is used throughout.
     """
     plan = plan_triplets(edge_index, n_atoms)
-    return _ATMEnergy.apply(edge_vec, feat_a, feat_b, plan, consts, reference)
+    return _ATMEnergy.apply(edge_vec, feat_a, feat_b, plan, consts)

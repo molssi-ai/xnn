@@ -93,6 +93,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from . import cpu_extension
 from .dispersion import (
     BOHR,
     HARTREE,
@@ -699,16 +700,122 @@ class DFTD4(nn.Module, FastPathModule):
 
     @torch.jit.unused
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA."""
+        """The fast paths (:mod:`~xnn.common.models.dispersion_fast`) run on CUDA; on CPUs the
+        two- and three-body terms run on C++ kernels where they build, else the three-body term
+        on compiled tiles where ``torch.compile`` produces code."""
+        if device.type == "cpu":
+            from .dispersion_fast import cpu
+            from .dispersion_fast.atm_cpu import available
+            return dtype in (torch.float32, torch.float64) and (cpu.available() or available())
         from .dispersion_fast import supported
         return supported(device, dtype)
 
     @torch.jit.unused
-    def _fast_three_body_allowed(self) -> bool:
-        """Whether the ATM kernels apply: fixed damping parameters (no gradient to
-        them), and not a training step, whose second derivatives (a force loss)
-        the kernels would hand to the reference anyway."""
-        if self.training and torch.is_grad_enabled():
+    def cpu_kernels_apply(self, n_atoms: int) -> bool:
+        """Whether the C++ kernels of :mod:`~xnn.common.models.dispersion_fast.cpu` evaluate the
+        two- and three-body terms on a CPU: they build, no parameter is trained and, with a
+        three-body term, the structure fits their dense C6 arrays."""
+        if not cpu_extension.enabled():
+            return False
+        from .dispersion_fast import cpu
+        if any(p is not None and p.requires_grad for p in self._parameters.values()):
+            return False
+        if n_atoms > cpu.MAX_DENSE_ATOMS and float(self.s9) != 0.0:
+            return False
+        return cpu.available()
+
+    @torch.jit.unused
+    def direct_applies(self, data, use_fast) -> bool:
+        """Whether :meth:`evaluate_direct` serves ``data`` on a CPU for the setting ``use_fast``: no EEQ reuse
+        between calls, and the optional C++ kernels are on and apply (:meth:`_cpp_direct`), or the PyTorch
+        path of :mod:`~xnn.common.models.dispersion_fast.d4_direct` does (no trained parameter; molecules of
+        its dense path at every size, else with a three-body term compiled tiles, at most ``MAX_DENSE_ATOMS``
+        atoms and for ``"auto"`` the edge count from which they pay off)."""
+        if self.__dict__.get("_eeq_reuse") is not None:
+            return False
+        n = int(data.atomic_numbers.shape[0])
+        if self._cpp_direct(data):
+            return True
+        if any(p is not None and p.requires_grad for p in self._parameters.values()):
+            return False
+        if float(self.s9) == 0.0 or _d4_direct().dense_applies(self, data):
+            return True
+        from .dispersion_fast import AUTO_POLICY
+        from .dispersion_fast.atm_cpu import available
+        from .dispersion_fast.cpu import MAX_DENSE_ATOMS
+        if n > MAX_DENSE_ATOMS or not available():
+            return False
+        return use_fast is True or AUTO_POLICY.decide(data.pos.device, data.model_dtype,
+                                                       int(data.edge_index.shape[1]))
+
+    @torch.jit.unused
+    def _cpp_direct(self, data) -> bool:
+        """Whether the optional C++ kernels form the direct evaluation of ``data``: they are on and apply, every
+        structure's charges come from the dense EEQ solve, and no cell carries the tail correction (whose
+        derivative feeds the charges: the PyTorch path takes those)."""
+        n = int(data.atomic_numbers.shape[0])
+        if not self.cpu_kernels_apply(n) or (self.tail_correction and self._periodic(data)):
+            return False
+        if self.regime == "large":
+            return False
+        if self.regime == "auto":
+            sizes = [n] if data.num_graphs == 1 else torch.bincount(data.batch, minlength=data.num_graphs).tolist()
+            cells = data.cell
+            for g, size in enumerate(sizes):
+                periodic = (cells is not None and data.pbc is not None and bool(data.pbc[g].any())
+                            and bool(cells[g].abs().sum() > 1e-8))
+                if self.select_regime(int(size), periodic) != "dense":
+                    return False
+        return True
+
+    @staticmethod
+    def _periodic(data) -> bool:
+        """Whether a structure of ``data`` is a cell."""
+        return (data.cell is not None and data.pbc is not None
+                and bool(((data.cell.abs().sum(dim=(1, 2)) > 1e-8) & data.pbc.any(-1).to(data.cell.device)).any()))
+
+    @torch.jit.unused
+    def evaluate_direct(self, data) -> Dict[str, Tensor]:
+        """:meth:`forward` on a CPU (the optional C++ kernels, else the PyTorch path of
+        :mod:`~xnn.common.models.dispersion_fast.d4_direct`) with the forces ``"forces"`` and the strain derivative
+        ``"virial"`` formed without an autograd pass through the evaluation (evaluation)."""
+        if self._cpp_direct(data):
+            from .dispersion_fast import cpu
+            node, energies, cn, q, alpha, forces, virial = cpu.d4_direct(self, data)
+        else:
+            out = _d4_direct().d4_direct(self, data)
+            if isinstance(out, dict):
+                return out
+            node, energies, cn, q, alpha, forces, virial = out
+        return {
+            "node_energy": node,
+            "energy": energies[:, 0],
+            "energy_2body": energies[:, 1],
+            "energy_3body": energies[:, 2],
+            "energy_tail": energies[:, 3],
+            "coordination_numbers": cn,
+            "charges": q,
+            "polarizabilities": alpha[:, 0],
+            "dynamic_polarizabilities": alpha,
+            "node_features": torch.stack([cn, q, alpha[:, 0]], dim=1),
+            "forces": forces,
+            "virial": virial,
+        }
+
+    @torch.jit.unused
+    def _terms_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, batch: Tensor, cn: Tensor,
+                   q: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The two- and three-body energies per atom (hartree) and the dynamic polarizabilities on the
+        C++ kernels."""
+        from .dispersion_fast import cpu
+        return cpu.d4_terms(self, z, edge_index, edge_vec, batch, cn, q)
+
+    @torch.jit.unused
+    def _fast_three_body_allowed(self, cuda: bool) -> bool:
+        """Whether the fast ATM term applies: fixed damping parameters (no gradient
+        to them) and, on a CPU, not a training step. The Triton kernels give the second
+        derivatives of a force loss; the compiled CPU tiles are differentiable once."""
+        if not cuda and self.training and torch.is_grad_enabled():
             return False
         return not any(t.requires_grad for t in (self.s9, self.a1, self.a2))
 
@@ -756,7 +863,8 @@ class DFTD4(nn.Module, FastPathModule):
         # the system's identity for the reuse: atom count and element sequence
         signature = (int(z.shape[0]), int(z.sum()),
                      int((z * torch.arange(1, z.shape[0] + 1, device=z.device)).sum()))
-        fast = self.fast_active
+        # the fast EEQ system is GPU code (a CPU fast request covers the three-body term only)
+        fast = self.fast_active and pos.is_cuda
         if fast:
             from .dispersion_fast.eeq import FastEEQSystem
         if periodic:
@@ -802,6 +910,16 @@ class DFTD4(nn.Module, FastPathModule):
         return energy
 
     @torch.jit.unused
+    def _three_body_cpu(self, z: Tensor, edge_index: Tensor, edge_vec: Tensor, r: Tensor, c6_neutral: Tensor,
+                        n_atoms: int) -> Tensor:
+        """The ATM term on the compiled CPU tiles of
+        :mod:`~xnn.common.models.dispersion_fast.atm_cpu` (the dense reference's values)."""
+        from .dispersion_fast.atm_cpu import three_body_energy_cpu
+        return three_body_energy_cpu(z, edge_index, edge_vec, r, c6_neutral, self.pair_radius_table(), self.s9,
+                                     self.alp / 3.0, self.cutoff_triple / self.bohr,
+                                     self.switch_width_triple / self.bohr, n_atoms)
+
+    @torch.jit.unused
     def _three_body_chunked(self, z: Tensor, pos: Tensor, edge_index: Tensor, edge_vec: Tensor,
                             r: Tensor, alpha_neutral: Tensor, cell: Tensor, batch: Tensor,
                             n_atoms: int) -> Tensor:
@@ -824,7 +942,7 @@ class DFTD4(nn.Module, FastPathModule):
                                              c6_edge=c6_edge, edge_shift=shifts,
                                              chunk=self.triplet_chunk, triplet_cache=cache)
 
-        if self.fast_active and self._fast_three_body_allowed():
+        if self.fast_active and pos.is_cuda and self._fast_three_body_allowed(True):
             from .dispersion_fast.atm import ATMConstants, atm_energy
             # C6_AB = (3 / pi) sum_w cp_w alpha_A(iw) alpha_B(iw) = <f_A, f_B>
             feat = alpha_neutral * torch.sqrt((3.0 / math.pi) * self.cp_weights)
@@ -834,9 +952,7 @@ class DFTD4(nn.Module, FastPathModule):
             consts = ATMConstants(spec.to(torch.int32).contiguous(), table, float(self.s9),
                                   self.alp / 3.0, self.cutoff_triple / self.bohr,
                                   self.switch_width_triple / self.bohr)
-            return atm_energy(edge_index, edge_vec, feat, feat, consts, n_atoms,
-                              reference=lambda v, f_a, f_b: reference(
-                                  v, (f_a[edge_index[1]] * f_b[edge_index[0]]).sum(-1), 0.0))
+            return atm_energy(edge_index, edge_vec, feat, feat, consts, n_atoms)
         alpha_a = (3.0 / math.pi) * alpha_neutral * self.cp_weights
         c6_edge = (alpha_a[edge_index[1]] * alpha_neutral[edge_index[0]]).sum(-1)
         return reference(edge_vec, c6_edge, self.triplet_cache)
@@ -866,7 +982,7 @@ class DFTD4(nn.Module, FastPathModule):
                  < self.nref[z][:, None])
         # sqrt(tiny) of the working precision, as upstream
         eps_norm = 1.0842021724855044e-19 if cn.dtype == torch.float32 else 1.4916681462400413e-154
-        weights = gaussian_reference_weights(cn, refcn, valid, self.wf, ngw, eps_norm)
+        weights = gaussian_reference_weights(cn, refcn, valid, self.wf, ngw, eps_norm, self.max_ngw)
         # charge scaling of paper eqs 2-4
         zi = self.zeff[z][:, None]
         gi = (self.hardness[z] * self.gc)[:, None]
@@ -1074,14 +1190,25 @@ class DFTD4(nn.Module, FastPathModule):
                                                 cell_b, periodic))
         q = torch.cat(charges)
 
-        weights = self.reference_weights(z, cn_d4, q)
-        alpha_iw = self.dynamic_polarizabilities(z, weights)
+        # on a CPU the C++ kernels evaluate the polarizabilities and the two- and three-body terms
+        # (differentiable once: not in a training step)
+        kernels = False
+        if not torch.jit.is_scripting():
+            kernels = (self.fast_active and not z.is_cuda and not (self.training and torch.is_grad_enabled())
+                       and self.cpu_kernels_apply(n_atoms))
+        e2_cpu, e3_cpu = torch.zeros_like(cn_d4), torch.zeros_like(cn_d4)
+        if kernels:
+            e2_cpu, e3_cpu, alpha_iw = self._terms_cpu(z, edge_index, edge_vec, batch, cn_d4, q)
+        else:
+            alpha_iw = self.dynamic_polarizabilities(z, self.reference_weights(z, cn_d4, q))
 
         in_pair = r <= self.cutoff_pair / self.bohr
         edge_pair, r_pair = edge_index, r
         if not bool(in_pair.all()):
             edge_pair, r_pair = edge_index[:, in_pair], r[in_pair]
-        if self.recompute_pairs and not torch.jit.is_scripting():
+        if kernels:
+            e2 = e2_cpu
+        elif self.recompute_pairs and not torch.jit.is_scripting():
             e2 = self._two_body_chunked(z, edge_pair, r_pair, alpha_iw, n_atoms)
         else:
             e2 = self.two_body_energy(z, edge_pair, r_pair, alpha_iw, n_atoms)
@@ -1096,12 +1223,23 @@ class DFTD4(nn.Module, FastPathModule):
                         0, members, self.tail_energy(z[members], alpha_iw[members], cell_b))
             node_energy = node_energy + e_tail
         e3 = torch.zeros_like(e2)
-        if bool(self.s9 != 0.0):
+        if kernels:
+            e3 = e3_cpu
+            node_energy = node_energy + e3
+        elif bool(self.s9 != 0.0):
             # the ATM term uses C6 coefficients of the *neutral* atoms
             weights_neutral = self.reference_weights(z, cn_d4, torch.zeros_like(q))
             alpha_neutral = self.dynamic_polarizabilities(z, weights_neutral)
             in_triple = r <= self.cutoff_triple / self.bohr
-            if self.checkpoint_triplets and not torch.jit.is_scripting():
+            cpu_tiles = False
+            if not torch.jit.is_scripting():
+                cpu_tiles = (self.fast_active and not z.is_cuda and n_atoms <= 20000
+                             and self._fast_three_body_allowed(False))
+            if cpu_tiles:
+                c6_neutral = (3.0 / math.pi) * (alpha_neutral * self.cp_weights) @ alpha_neutral.t()
+                e3 = self._three_body_cpu(z, edge_index[:, in_triple], vec_au[in_triple], r[in_triple],
+                                          c6_neutral, n_atoms)
+            elif self.checkpoint_triplets and not torch.jit.is_scripting():
                 e3 = self._three_body_chunked(z, pos_au, edge_index[:, in_triple], vec_au[in_triple],
                                               r[in_triple], alpha_neutral, cell / self.bohr, batch,
                                               n_atoms)
@@ -1192,6 +1330,18 @@ class D4Dispersion(DispersionCorrection):
         under that model's ``extra["dispersion"]`` instead.
         """
         return cls(None, **options_from_extra(cfg.extra or {}, _D4_KEYS))
+
+
+_D4_DIRECT = None
+
+
+def _d4_direct():
+    """:mod:`~xnn.common.models.dispersion_fast.d4_direct`, imported once."""
+    global _D4_DIRECT
+    if _D4_DIRECT is None:
+        from .dispersion_fast import d4_direct
+        _D4_DIRECT = d4_direct
+    return _D4_DIRECT
 
 
 _D4_KEYS = ("s6", "s8", "a1", "a2", "s9", "alp", "ga", "gc", "wf",

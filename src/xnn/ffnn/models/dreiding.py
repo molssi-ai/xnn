@@ -60,10 +60,23 @@ from torch.nn import Parameter, ParameterDict
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
+from xnn.common.models.fast import resolve_use_fast
 from xnn.common.models.ops import scatter_sum
 
+from .classical_fast import (
+    ClassicalFastPath,
+    evaluate_spec,
+    fast_bonded,
+    fast_nonbonded,
+    image_shifts,
+    lj_table,
+    needs_twice,
+    used_types,
+    wants_fast,
+    x6_table,
+)
 from .dreidinglib import TORSION_RULES, DreidingLibrary, read_dreiding, torsion_rule
-from .geometry import TINY, dihedral_cos, geometric_mean, pair_vectors
+from .geometry import TINY, dihedral_cos, geometric_mean, half_edges, pair_image_shifts, pair_vectors
 from .oplslib import KCAL_TO_EV
 from .topology import MolecularTopology, read_topology
 
@@ -308,7 +321,7 @@ class DreidingForceField(nn.Module):
 
 
 @register_model("dreiding")
-class Dreiding(InteratomicPotential):
+class Dreiding(ClassicalFastPath, InteratomicPotential):
     """The DREIDING rule-generated force field, bound to one topology.
 
     An instance binds the parameter library to one molecular topology: all
@@ -349,11 +362,20 @@ class Dreiding(InteratomicPotential):
         Include the explicit hydrogen-bond term (eq 38) on donor
         triplets; default ``True`` (it vanishes without ``H__HB`` atoms).
     hbond_cutoff : float, optional
-        Donor-acceptor distance cutoff of the hydrogen-bond term, by
-        default the nonbonded ``cutoff``.
+        Donor-acceptor distance cutoff of the hydrogen-bond term, at most
+        the nonbonded ``cutoff`` (the donor-acceptor pairs come from the
+        neighbor list); by default the nonbonded ``cutoff``.
     hbond_angle : float, optional
         Donor-hydrogen-acceptor angle cutoff in degrees (the term counts
         only angles beyond it); by default 90.0, the paper's restriction.
+    use_fast : bool or "auto", optional
+        Evaluate the terms with the fused GPU kernels of
+        :mod:`~xnn.ffnn.models.classical_kernels` (the same numbers to
+        round-off). ``"auto"`` (default) and ``True`` take them on a CUDA
+        device with Triton, in evaluation and in training; ``False``
+        evaluates every term eagerly. The kernels are differentiable twice
+        (force training, Hessians), and once with a cell gradient (stress);
+        training with a stress loss evaluates every term eagerly.
     trainable : sequence of str or "all", optional
         Trainable parameter groups, forwarded to
         :class:`DreidingForceField` (ignored when ``ffield`` is already
@@ -384,7 +406,8 @@ class Dreiding(InteratomicPotential):
                  hbond_cutoff: Optional[float] = None,
                  hbond_angle: float = 90.0,
                  trainable: Union[Sequence[str], str] = (),
-                 keep_intermediates: bool = False):
+                 keep_intermediates: bool = False,
+                 use_fast: Union[bool, str] = "auto"):
         super().__init__()
         if topology is None:
             raise ValueError("Dreiding needs a topology (or use "
@@ -413,10 +436,14 @@ class Dreiding(InteratomicPotential):
         self.use_hbond = bool(hbond)
         self.hbond_cutoff = self.cutoff if hbond_cutoff is None \
             else float(hbond_cutoff)
+        if self.hbond_cutoff > self.cutoff + 1e-9:
+            raise ValueError(f"hbond_cutoff {self.hbond_cutoff} exceeds the nonbonded cutoff {self.cutoff}: "
+                             "the hydrogen bonds come from the neighbor list")
         self.hbond_cos = math.cos(float(hbond_angle) * DEG)
         self.keep_intermediates = bool(keep_intermediates)
         self.intermediates: dict = {}
         self.node_feature_dim = 1
+        self.use_fast = resolve_use_fast(use_fast)
         self._bind_topology(
             topology if isinstance(topology, MolecularTopology)
             else read_topology(topology), charges)
@@ -537,7 +564,7 @@ class Dreiding(InteratomicPotential):
                   for _, j, _ in top.angles]
         buf("angle_linear", linear, (-1,), torch.bool)
 
-        # --- torsions: rule per dihedral, total barrier per central bond -
+        # torsions: the rule per dihedral, the total barrier per central bond
         n_shared: dict[tuple[int, int], int] = {}
         for _i, j, k, _l in top.dihedrals:
             key = (min(j, k), max(j, k))
@@ -560,7 +587,7 @@ class Dreiding(InteratomicPotential):
         buf("dihedral_rule", d_rule, (-1,))
         buf("dihedral_weight", d_w, (-1,), dtype)
 
-        # --- inversions: three axis choices per listed 3-coordinate center
+        # inversions: three axis choices per listed 3-coordinate center
         neighbors: dict[int, list[int]] = {}
         for i, j in top.bonds:
             neighbors.setdefault(i, []).append(j)
@@ -578,27 +605,28 @@ class Dreiding(InteratomicPotential):
         buf("excl_index", [list(p) for p in top.exclusions], (-1, 2))
         self.excl_index = self.excl_index.t().contiguous()
 
-        # hydrogen-bond triplets (donor, H, acceptor)
+        # hydrogen bonds: the donor hydrogens of every heavy atom ``(n, K)``, padded with -1, and the
+        # acceptors; the (donor, H, acceptor) triplets come from the neighbor list's donor-acceptor pairs
+        # within the hydrogen-bond cutoff at evaluation (rebuilt from the topology: not saved)
         donors = [i for i, name in enumerate(top.types)
                   if name in ff.donor_types]
         acceptor = [bool(ff.type_acceptor[ti]) for ti in t_idx]
-        excl = set(top.exclusions)
-        hb = []
+        hydrogens: dict[int, list[int]] = {}
         for h in donors:
             nb = neighbors.get(h, [])
             if len(nb) != 1:
                 raise ValueError(
                     f"hydrogen-bond donor atom {h} ({top.types[h]}) must "
                     f"have exactly one bond, found {len(nb)}")
-            d = nb[0]
-            for a in range(n):
-                if a == d or a == h or not acceptor[a]:
-                    continue
-                if (min(d, a), max(d, a)) in excl:
-                    continue
-                hb.append([d, h, a])
-        buf("hbond_index", hb, (-1, 3))
-        self.hbond_index = self.hbond_index.t().contiguous()
+            hydrogens.setdefault(nb[0], []).append(h)
+        width = max((len(v) for v in hydrogens.values()), default=0)
+        table = [[-1] * width for _ in range(n)]
+        for d, hs in hydrogens.items():
+            table[d][:len(hs)] = hs
+        self.register_buffer("hbond_hydrogens", torch.tensor(table, dtype=torch.long).reshape(n, width),
+                             persistent=False)
+        self.register_buffer("hbond_acceptor", torch.tensor(acceptor, dtype=torch.bool).reshape(n),
+                             persistent=False)
 
         # charges
         if charges is None:
@@ -612,6 +640,132 @@ class Dreiding(InteratomicPotential):
             self.charge = Parameter(q)
         else:
             self.register_buffer("charge", q)
+
+    def _fast_spec(self, B: int, n: int, q: Tensor) -> dict:
+        """The terms of a batch of ``B`` copies for the kernels of :mod:`.classical_kernels` (see
+        :func:`~xnn.ffnn.models.classical_fast.evaluate_spec`): the harmonic or Morse bonds with their
+        generated parameters, the angle forms per center, the cosine series of the torsion rules, the inversions and the
+        neighbor list's pairs (the hydrogen bonds are evaluated eagerly)."""
+        P, ff = self.ff.params, self.ff
+        t = self.top_type.repeat(B)
+        starts = torch.arange(B, device=q.device) * n
+
+        def expand(idx: Tensor) -> Tensor:
+            return (idx.unsqueeze(1) + starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
+        bi, ai, di = expand(self.bond_index), expand(self.angle_index), expand(self.dihedral_index)
+        r0 = P["radius"][t[bi[0]]] + P["radius"][t[bi[1]]] - ff.delta
+        th0 = P["theta0"][t[ai[1]]]
+        ka = P["angle_k"] * torch.ones_like(th0)
+        lin = self.angle_linear.repeat(B)
+        if self.angle_style == "harmonic":
+            style, k, x0 = torch.zeros_like(th0, dtype=torch.int32), 0.5 * ka, th0
+        else:
+            sin2 = torch.clamp(torch.sin(th0) ** 2, min=TINY)
+            style, k, x0 = torch.ones_like(th0, dtype=torch.int32), 0.5 * ka / sin2, torch.cos(th0)
+        style = torch.where(lin, torch.full_like(style, 2), style)
+        dr = self.dihedral_rule.repeat(B)
+        kd = (0.5 * self.dihedral_weight.repeat(B) * P["torsion_v"][dr])[:, None]
+        # inversions: K (1 - cos psi) / 3 at a planar center, K / (2 sin^2 psi0) (cos psi - cos psi0)^2 / 3 else
+        ii = expand(self.inversion_index)
+        k_i = P["oop_k"][t[ii[0]]]
+        psi0 = P["oop_psi0"][t[ii[0]]]
+        planar = psi0.abs() < 1e-8
+        sin2_psi0 = torch.clamp(torch.sin(psi0) ** 2, min=TINY)
+        k_inv = torch.where(planar, k_i, 0.5 * k_i / sin2_psi0) / 3.0
+        used, compact = used_types(self, self.top_type)
+        bo = self.bond_order.repeat(B)
+        if self.bond_style == "morse":
+            k_n, d_n = bo * P["bond_k"], bo * P["bond_d"]
+            bonds = ("e_bond_node", "morse", bi, (d_n, torch.sqrt(k_n / (2.0 * d_n + TINY)), r0), None)
+        else:
+            bonds = ("e_bond_node", "bond", bi, (0.5 * bo * P["bond_k"], r0), None)
+        return {
+            "bonded": [
+                bonds,
+                ("e_angle_node", "angle", ai, (style, torch.where(lin, ka, k), x0), None),
+                ("e_tors_node", "torsion", di, (di[1], kd, ff.rule_n[dr].to(torch.int32)[:, None],
+                                                -ff.rule_sign[dr][:, None], torch.zeros_like(kd),
+                                                torch.zeros_like(kd[:, 0])), dict(FORM=0, S=1, NMAX=6)),
+                ("e_inv_node", "inversion", ii, (k_inv, planar.to(torch.int32), torch.cos(psi0)), None),
+            ],
+            "pairs14": None,
+            "nonbonded": (("e_vdw_node", "e_coul_node"), compact, q if self.has_coulomb else torch.zeros_like(q),
+                          self._pair_table(used), KE, self.excl_index, n, self.cutoff, self.switch_width,
+                          1 if self.ff.form == "x6" else 0),
+        }
+
+    def _edges(self, data: AtomicGraph, N: int, B: int, expand) -> tuple:
+        """The neighbor list's pairs once each (:func:`~.geometry.half_edges`) with their distances."""
+        src, dst, vec, r2, half, included, shift = half_edges(data, self.excl_index, N // B, self)
+        return src, dst, vec, torch.sqrt(r2 + TINY), half, included, shift
+
+    def _eager_nonbonded(self, data: AtomicGraph, N: int, B: int, t: Tensor, q: Tensor, P, expand,
+                         inter: dict) -> tuple:
+        """The per-atom van der Waals and Coulomb energies of the neighbor list's pairs (each pair once, half
+        to each atom), without the excluded pairs, switched, and the edges (see :meth:`_edges`); the
+        reference."""
+        src, dst, vec, r, half, included, shift = self._edges(data, N, B, expand)
+        r2 = (vec * vec).sum(1)
+        r0_t, d0_t = P["vdw_r0"][t], P["vdw_d0"][t]
+        d0 = geometric_mean(d0_t[src], d0_t[dst])
+        if self.ff.form == "x6":
+            zeta_t = torch.clamp(P["x6_zeta"][t], min=6.0 + 1e-6)
+            a_t = d0_t * (6.0 / (zeta_t - 6.0)) * torch.exp(zeta_t)
+            b_t = d0_t * (zeta_t / (zeta_t - 6.0)) \
+                * torch.clamp(r0_t, min=TINY) ** 6
+            c_t = zeta_t / torch.clamp(r0_t, min=TINY)
+            a_ij = geometric_mean(a_t[src], a_t[dst])
+            b_ij = geometric_mean(b_t[src], b_t[dst])
+            c_ij = 0.5 * (c_t[src] + c_t[dst])
+            vdw_e = a_ij * torch.exp(-c_ij * r) - b_ij / (r2 ** 3 + TINY)
+        else:
+            if self.ff.combination == "geometric":
+                r0_ij = geometric_mean(r0_t[src], r0_t[dst])
+            else:
+                r0_ij = 0.5 * (r0_t[src] + r0_t[dst])
+            s2 = (r0_ij * r0_ij) / (r2 + TINY)
+            s6 = s2 * s2 * s2
+            vdw_e = d0 * (s6 * s6 - 2.0 * s6)
+        coul_e = KE * q[src] * q[dst] / r if self.has_coulomb \
+            else torch.zeros_like(r)
+
+        w = included.to(r.dtype) * half
+        if self.switch_width > 0.0:
+            x = torch.clamp((r - (self.cutoff - self.switch_width))
+                            / self.switch_width, 0.0, 1.0)
+            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
+        h_vdw, h_coul = 0.5 * w * vdw_e, 0.5 * w * coul_e
+        e_vdw_node = scatter_sum(h_vdw, src, N) + scatter_sum(h_vdw, dst, N)
+        e_coul_node = scatter_sum(h_coul, src, N) + scatter_sum(h_coul, dst, N)
+        if self.keep_intermediates:
+            inter.update(nb_r=r, nb_weight=w, nb_vdw=vdw_e, nb_coulomb=coul_e)
+        return e_vdw_node, e_coul_node, (src, dst, vec, r, half, included, shift)
+
+    def _pair_table(self, used: Tensor) -> Tensor:
+        """The van der Waals table ``(T, T, 3)`` of the types ``used`` (see :mod:`.classical_fast`): the
+        12-6 form with the library's combination rule for ``R0``, or the exponential-6 form."""
+        P = self.ff.params
+        r0, d0 = P["vdw_r0"][used], P["vdw_d0"][used]
+        T = len(used)
+
+        def pairs(x):
+            return x[:, None].expand(-1, T), x[None, :].expand(T, -1)
+        d0_ij = geometric_mean(*pairs(d0))
+        if self.ff.form == "x6":
+            zeta = torch.clamp(P["x6_zeta"][used], min=6.0 + 1e-6)
+            a = d0 * (6.0 / (zeta - 6.0)) * torch.exp(zeta)
+            b = d0 * (zeta / (zeta - 6.0)) * torch.clamp(r0, min=TINY) ** 6
+            c = zeta / torch.clamp(r0, min=TINY)
+            ci, ck = pairs(c)
+            return x6_table(geometric_mean(*pairs(a)), geometric_mean(*pairs(b)), 0.5 * (ci + ck))
+        r0_ij = geometric_mean(*pairs(r0)) if self.ff.combination == "geometric" else 0.5 * sum(pairs(r0))
+        return lj_table(d0_ij, 2.0, r0_ij)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # the hydrogen-bond triplets of earlier versions were saved; they now come from the neighbor list
+        state_dict.pop(prefix + "hbond_index", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     # forward
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -664,130 +818,133 @@ class Dreiding(InteratomicPotential):
             """Tile per-interaction rows ``(m,)`` to ``(B*m,)``."""
             return v.repeat(B)
 
-        # bonds (eqs 4-9)
-        bi = expand(self.bond_index)
-        bo = tile(self.bond_order)
-        bt0, bt1 = t[bi[0]], t[bi[1]]
-        bvec = pair_vectors(data, bi[0], bi[1])
-        br = torch.sqrt((bvec * bvec).sum(1) + TINY)
-        r0 = P["radius"][bt0] + P["radius"][bt1] - self.ff.delta
-        k_n = bo * P["bond_k"]
-        if self.bond_style == "morse":
-            d_n = bo * P["bond_d"]
-            alpha = torch.sqrt(k_n / (2.0 * d_n + TINY))
-            e_bond = d_n * (torch.exp(-alpha * (br - r0)) - 1.0) ** 2
+        q = self.charge.repeat(B)
+        fast = wants_fast(self, self.use_fast, data, q)
+        if fast:
+            spec = self._fast_spec(B, n, q)
+            ev = evaluate_spec(data, {"bonded": spec["bonded"]}, self)
+        if fast:
+            e_bond_node, e_angle_node, e_tors_node = ev["e_bond_node"], ev["e_angle_node"], ev["e_tors_node"]
+            e_inv_node = ev["e_inv_node"]
         else:
-            e_bond = 0.5 * k_n * (br - r0) ** 2
-        e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
-            + scatter_sum(0.5 * e_bond, bi[1], N)
+            bi, ai = expand(self.bond_index), expand(self.angle_index)
+            di, ii = expand(self.dihedral_index), expand(self.inversion_index)
+            # the image shifts of every bonded vector from one search
+            sb, sa, sd, si = (([None] * 3) if s is None else s for s in image_shifts(
+                data, [(bi, "bond"), (ai, "angle"), (di, "torsion"), (ii, "inversion")]))
 
-        # angles (eqs 10-12)
-        ai = expand(self.angle_index)
-        lin = tile(self.angle_linear)
-        u = pair_vectors(data, ai[1], ai[0])
-        v = pair_vectors(data, ai[1], ai[2])
-        cos_th = (u * v).sum(1) / torch.sqrt(
-            (u * u).sum(1) * (v * v).sum(1) + TINY)
-        th0 = P["theta0"][t[ai[1]]]
-        ka = P["angle_k"]
-        if self.angle_style == "harmonic":
-            bound = min(0.9999999999,
-                        1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
-            theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
-            e_nonlin = 0.5 * ka * (theta - th0) ** 2
-        else:
-            sin2 = torch.clamp(torch.sin(th0) ** 2, min=TINY)
-            e_nonlin = 0.5 * (ka / sin2) * (cos_th - torch.cos(th0)) ** 2
-        e_lin = ka * (1.0 + cos_th)
-        e_angle = torch.where(lin, e_lin, e_nonlin)
-        e_angle_node = scatter_sum(e_angle, ai[1], N)
+            # bonds (eqs 4-9)
+            bo = tile(self.bond_order)
+            bt0, bt1 = t[bi[0]], t[bi[1]]
+            bvec = pair_vectors(data, bi[0], bi[1], sb[0])
+            br = torch.sqrt((bvec * bvec).sum(1) + TINY)
+            r0 = P["radius"][bt0] + P["radius"][bt1] - self.ff.delta
+            k_n = bo * P["bond_k"]
+            if self.bond_style == "morse":
+                d_n = bo * P["bond_d"]
+                alpha = torch.sqrt(k_n / (2.0 * d_n + TINY))
+                e_bond = d_n * (torch.exp(-alpha * (br - r0)) - 1.0) ** 2
+            else:
+                e_bond = 0.5 * k_n * (br - r0) ** 2
+            e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
+                + scatter_sum(0.5 * e_bond, bi[1], N)
 
-        # torsions (eqs 13-23)
-        di = expand(self.dihedral_index)
-        dr = tile(self.dihedral_rule)
-        dw = tile(self.dihedral_weight)
-        c1 = dihedral_cos(data, di)
-        t2 = 2.0 * c1 * c1 - 1.0
-        t3 = c1 * (4.0 * c1 * c1 - 3.0)
-        t6 = 2.0 * t3 * t3 - 1.0
-        n_d = self.ff.rule_n[dr]
-        tn = torch.where(n_d == 2, t2, torch.where(n_d == 3, t3, t6))
-        e_tors = dw * 0.5 * P["torsion_v"][dr] \
-            * (1.0 - self.ff.rule_sign[dr] * tn)
-        e_tors_node = scatter_sum(e_tors, di[1], N)
+            # angles (eqs 10-12)
+            lin = tile(self.angle_linear)
+            u = pair_vectors(data, ai[1], ai[0], sa[0])
+            v = pair_vectors(data, ai[1], ai[2], sa[1])
+            cos_th = (u * v).sum(1) / torch.sqrt(
+                (u * u).sum(1) * (v * v).sum(1) + TINY)
+            th0 = P["theta0"][t[ai[1]]]
+            ka = P["angle_k"]
+            if self.angle_style == "harmonic":
+                bound = min(0.9999999999,
+                            1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
+                theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
+                e_nonlin = 0.5 * ka * (theta - th0) ** 2
+            else:
+                sin2 = torch.clamp(torch.sin(th0) ** 2, min=TINY)
+                e_nonlin = 0.5 * (ka / sin2) * (cos_th - torch.cos(th0)) ** 2
+            e_lin = ka * (1.0 + cos_th)
+            e_angle = torch.where(lin, e_lin, e_nonlin)
+            e_angle_node = scatter_sum(e_angle, ai[1], N)
 
-        # inversions (eq 28)
-        ii = expand(self.inversion_index)
-        it = t[ii[0]]
-        rij = pair_vectors(data, ii[0], ii[1])
-        rik = pair_vectors(data, ii[0], ii[2])
-        ril = pair_vectors(data, ii[0], ii[3])
-        nrm = torch.cross(rij, rik, dim=1)
-        nrm = nrm / torch.sqrt((nrm * nrm).sum(1, keepdim=True) + TINY)
-        ril = ril / torch.sqrt((ril * ril).sum(1, keepdim=True) + TINY)
-        sin_psi = (nrm * ril).sum(1)
-        cos_psi = torch.sqrt(torch.clamp(1.0 - sin_psi * sin_psi, min=TINY))
-        k_i = P["oop_k"][it]
-        psi0 = P["oop_psi0"][it]
-        planar = psi0.abs() < 1e-8
-        sin2_psi0 = torch.clamp(torch.sin(psi0) ** 2, min=TINY)
-        e_pl = k_i * (1.0 - cos_psi)
-        e_np = 0.5 * (k_i / sin2_psi0) * (cos_psi - torch.cos(psi0)) ** 2
-        e_inv = torch.where(planar, e_pl, e_np) / 3.0
-        e_inv_node = scatter_sum(e_inv, ii[0], N)
+            # torsions (eqs 13-23)
+            dr = tile(self.dihedral_rule)
+            dw = tile(self.dihedral_weight)
+            c1 = dihedral_cos(data, di, sd)
+            t2 = 2.0 * c1 * c1 - 1.0
+            t3 = c1 * (4.0 * c1 * c1 - 3.0)
+            t6 = 2.0 * t3 * t3 - 1.0
+            n_d = self.ff.rule_n[dr]
+            tn = torch.where(n_d == 2, t2, torch.where(n_d == 3, t3, t6))
+            e_tors = dw * 0.5 * P["torsion_v"][dr] \
+                * (1.0 - self.ff.rule_sign[dr] * tn)
+            e_tors_node = scatter_sum(e_tors, di[1], N)
+
+            # inversions (eq 28)
+            it = t[ii[0]]
+            rij = pair_vectors(data, ii[0], ii[1], si[0])
+            rik = pair_vectors(data, ii[0], ii[2], si[1])
+            ril = pair_vectors(data, ii[0], ii[3], si[2])
+            nrm = torch.cross(rij, rik, dim=1)
+            nrm = nrm / torch.sqrt((nrm * nrm).sum(1, keepdim=True) + TINY)
+            ril = ril / torch.sqrt((ril * ril).sum(1, keepdim=True) + TINY)
+            sin_psi = (nrm * ril).sum(1)
+            cos_psi = torch.sqrt(torch.clamp(1.0 - sin_psi * sin_psi, min=TINY))
+            k_i = P["oop_k"][it]
+            psi0 = P["oop_psi0"][it]
+            planar = psi0.abs() < 1e-8
+            sin2_psi0 = torch.clamp(torch.sin(psi0) ** 2, min=TINY)
+            e_pl = k_i * (1.0 - cos_psi)
+            e_np = 0.5 * (k_i / sin2_psi0) * (cos_psi - torch.cos(psi0)) ** 2
+            e_inv = torch.where(planar, e_pl, e_np) / 3.0
+            e_inv_node = scatter_sum(e_inv, ii[0], N)
 
         # nonbonded: neighbor list minus 1,2 / 1,3 exclusions
-        src, dst = data.edge_index[0], data.edge_index[1]
-        vec = data.edge_vectors()
-        r2 = (vec * vec).sum(1)
-        r = torch.sqrt(r2 + TINY)
-        r0_t, d0_t = P["vdw_r0"][t], P["vdw_d0"][t]
-        d0 = geometric_mean(d0_t[src], d0_t[dst])
-        if self.ff.form == "x6":
-            zeta_t = torch.clamp(P["x6_zeta"][t], min=6.0 + 1e-6)
-            a_t = d0_t * (6.0 / (zeta_t - 6.0)) * torch.exp(zeta_t)
-            b_t = d0_t * (zeta_t / (zeta_t - 6.0)) \
-                * torch.clamp(r0_t, min=TINY) ** 6
-            c_t = zeta_t / torch.clamp(r0_t, min=TINY)
-            a_ij = geometric_mean(a_t[src], a_t[dst])
-            b_ij = geometric_mean(b_t[src], b_t[dst])
-            c_ij = 0.5 * (c_t[src] + c_t[dst])
-            vdw_e = a_ij * torch.exp(-c_ij * r) - b_ij / (r2 ** 3 + TINY)
+        edges = None
+        if fast:
+            names, compact, qq, table, ke, excl, n_local, cutoff, width, form = spec["nonbonded"]
+            e_vdw_node, e_coul_node = fast_nonbonded(data, n_local, B, compact, qq, table, ke, excl, cutoff, width,
+                                                     form, self, needs_twice(self, data))
         else:
-            if self.ff.combination == "geometric":
-                r0_ij = geometric_mean(r0_t[src], r0_t[dst])
-            else:
-                r0_ij = 0.5 * (r0_t[src] + r0_t[dst])
-            s2 = (r0_ij * r0_ij) / (r2 + TINY)
-            s6 = s2 * s2 * s2
-            vdw_e = d0 * (s6 * s6 - 2.0 * s6)
-        q = self.charge.repeat(B)
-        coul_e = KE * q[src] * q[dst] / r if self.has_coulomb \
-            else torch.zeros_like(r)
-
-        lo = torch.minimum(src, dst)
-        hi = torch.maximum(src, dst)
-        edge_key = lo * N + hi
-        if self.excl_index.shape[1] > 0:
-            ex = expand(self.excl_index)
-            excl_keys = ex[0] * N + ex[1]
-            w = (~torch.isin(edge_key, excl_keys)).to(r.dtype)
-        else:
-            w = torch.ones_like(r)
-        if self.switch_width > 0.0:
-            x = torch.clamp((r - (self.cutoff - self.switch_width))
-                            / self.switch_width, 0.0, 1.0)
-            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
-        e_vdw_node = scatter_sum(0.5 * w * vdw_e, dst, N)
-        e_coul_node = scatter_sum(0.5 * w * coul_e, dst, N)
+            e_vdw_node, e_coul_node, edges = self._eager_nonbonded(data, N, B, t, q, P, expand, inter)
 
         # hydrogen bonds (eq 38)
-        if self.use_hbond and self.hbond_index.shape[1] > 0:
-            hb = expand(self.hbond_index)
-            vec_da = pair_vectors(data, hb[0], hb[2])
-            r_da = torch.sqrt((vec_da * vec_da).sum(1) + TINY)
+        if self.use_hbond and self.hbond_hydrogens.shape[1] > 0:
+            src, dst, vec, r, _, included, shift = edges if edges is not None else self._edges(data, N, B, expand)
+            # the donor-acceptor pairs of the neighbor list in either direction (the donor heavy atom first;
+            # an own image's two directions are both in the list), not excluded, within the cutoff, once per
+            # donor hydrogen of the heavy atom
+            K = int(self.hbond_hydrogens.shape[1])
+            hyd = self.hbond_hydrogens.repeat(B, 1)
+            hyd = torch.where(hyd >= 0, hyd + starts.repeat_interleave(n)[:, None], hyd)
+            acceptor = self.hbond_acceptor.repeat(B)
+            near = included & (r.detach() < self.hbond_cutoff)
+            fwd = ((hyd[src, 0] >= 0) & acceptor[dst] & near).nonzero()[:, 0]
+            rev = ((hyd[dst, 0] >= 0) & acceptor[src] & near & (src != dst)).nonzero()[:, 0]
+            donor = torch.cat([src[fwd], dst[rev]])
+            accept = torch.cat([dst[fwd], src[rev]])
+            h_all = hyd[donor].reshape(-1)
+            keep = h_all >= 0
+            e_da = torch.arange(donor.shape[0], device=device).repeat_interleave(K)[keep]
+            h_i = h_all[keep]
+            hb = torch.stack([donor[e_da], h_i, accept[e_da]])
+            # the donor-acceptor vectors take the list's image (a small cell has several within the cutoff)
+            s_da = None if shift is None else torch.cat([shift[fwd], -shift[rev]])[e_da]
+        if fast and self.use_hbond and self.hbond_hydrogens.shape[1] > 0:
+            # the triplets' energies from the kernel (the vectors by the minimum image)
+            M = int(hb.shape[1])
+            s_hd = pair_image_shifts(data, hb[1], hb[0])
+            shifts = None if s_hd is None else torch.stack([s_da.to(s_hd.dtype), s_hd])
+            e_hb_node = fast_bonded(data, hb, "hbond", (P["hbond_d0"].expand(M), P["hbond_r0"].expand(M)),
+                                    shifts, None, (self.hbond_cutoff ** 2, self.hbond_cos),
+                                    twice=needs_twice(self, data))
+        elif self.use_hbond and self.hbond_hydrogens.shape[1] > 0:
+            vec_da = torch.cat([vec[fwd], -vec[rev]])[e_da]
+            r_da = torch.cat([r[fwd], r[rev]])[e_da]
             v_hd = pair_vectors(data, hb[1], hb[0])
-            v_ha = pair_vectors(data, hb[1], hb[2])
+            v_ha = v_hd + vec_da
             cos_dha = (v_hd * v_ha).sum(1) / torch.sqrt(
                 (v_hd * v_hd).sum(1) * (v_ha * v_ha).sum(1) + TINY)
             rho2 = (P["hbond_r0"] / r_da) ** 2
@@ -799,7 +956,7 @@ class Dreiding(InteratomicPotential):
             e_hb = e_hb * mask
             e_hb_node = scatter_sum(e_hb, hb[1], N)
         else:
-            e_hb_node = torch.zeros(N, dtype=r.dtype, device=device)
+            e_hb_node = torch.zeros_like(e_vdw_node)
 
         node_energy = (e_bond_node + e_angle_node + e_tors_node
                        + e_inv_node + e_vdw_node + e_coul_node + e_hb_node)
@@ -810,10 +967,9 @@ class Dreiding(InteratomicPotential):
                          angle_cos=cos_th, e_angle=e_angle,
                          dihedral_cos=c1, e_torsion=e_tors,
                          inversion_sin=sin_psi, e_inversion=e_inv,
-                         nb_r=r, nb_weight=w, nb_vdw=vdw_e,
-                         nb_coulomb=coul_e, type_index=t)
-            if self.use_hbond and self.hbond_index.shape[1] > 0:
-                inter.update(hb_r=r_da, hb_cos=cos_dha, e_hbond=e_hb)
+                         type_index=t)
+            if self.use_hbond and self.hbond_hydrogens.shape[1] > 0:
+                inter.update(hb_index=hb, hb_r=r_da, hb_cos=cos_dha, e_hbond=e_hb)
             self.intermediates = inter
 
         return {

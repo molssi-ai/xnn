@@ -45,6 +45,7 @@ Conventions worth knowing:
 import math
 from typing import Dict, Final, List, Optional, Tuple
 
+import e3nn
 import torch
 from e3nn import o3
 from torch import Tensor, nn
@@ -52,6 +53,7 @@ from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import BesselRBF, ExpNormalSmearing, PolynomialCutoff
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import scatter_sum
 from xnn.common.models.registry import register_model
 
@@ -184,9 +186,16 @@ def depthwise_tensor_product(irreps_in, irreps_sh, irreps_target,
                     outs.append((mul, ir_out))
     irreps_out, new_of_old = _sort_even_first(o3.Irreps(outs))
     instructions = [(i, j, new_of_old[k], mode, train) for i, j, k, mode, train in instructions]
-    tp = o3.TensorProduct(irreps_in, irreps_sh, irreps_out, instructions,
-                          internal_weights=internal_weights, shared_weights=internal_weights,
-                          irrep_normalization="component", path_normalization="none")
+    # the generated code as fx modules rather than TorchScript: torch.compile traces through
+    # them (the fast path), and scripting the model scripts them as before
+    defaults = e3nn.get_optimization_defaults()
+    e3nn.set_optimization_defaults(jit_script_fx=False)
+    try:
+        tp = o3.TensorProduct(irreps_in, irreps_sh, irreps_out, instructions,
+                              internal_weights=internal_weights, shared_weights=internal_weights,
+                              irrep_normalization="component", path_normalization="none")
+    finally:
+        e3nn.set_optimization_defaults(**defaults)
     if internal_weights:
         with torch.no_grad():
             for weight, ins in zip(tp.weight_views(), tp.instructions):
@@ -266,6 +275,10 @@ class IrrepsLinear(nn.Module):
             for k in range(self.path_lo[o], self.path_hi[o]):
                 mul_i = self.p_in_mul[k]
                 xi = x.narrow(1, self.p_in_start[k], mul_i * d).reshape(n, mul_i, d)
+                if d == 1:
+                    # a copy of the block (the product would otherwise save a view
+                    # that keeps all of x alive for the backward)
+                    xi = xi.contiguous()
                 wk = self.weight.narrow(0, self.p_w_start[k], mul_i * mul_o).view(mul_i, mul_o)
                 y = y + torch.einsum("nud,uw->nwd", xi, wk)
             y = y.reshape(n, mul_o * d)
@@ -750,8 +763,12 @@ class FeedForward(nn.Module):
         return self.proj_drop(self.lin_2(self.gate(self.lin_1(x))))
 
 
-class TransformerBlock(nn.Module):
-    """Pre-norm block: norm, graph attention, residual; norm, feed-forward, residual."""
+class TransformerBlock(nn.Module, FastPathModule):
+    """Pre-norm block: norm, graph attention, residual; norm, feed-forward, residual.
+
+    Compiled into fused kernels when :attr:`fast_active` is set (see
+    :meth:`Equiformer.set_use_fast`).
+    """
 
     def __init__(self, irreps_in, irreps_sh, irreps_out, radial: List[int], irreps_head,
                  num_heads: int, irreps_pre_attn, irreps_mlp_mid, attention: str,
@@ -769,9 +786,28 @@ class TransformerBlock(nn.Module):
         self.ffn_shortcut: Optional[IrrepsLinear] = None
         if irreps_in != irreps_out:
             self.ffn_shortcut = IrrepsLinear(irreps_in, irreps_out)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """torch.compile on a CUDA device."""
+        from xnn.common.models.compiled import supported
+        return supported(device, dtype)
 
     def forward(self, x: Tensor, src: Tensor, dst: Tensor, sh: Tensor, edge_scalars: Tensor,
                 envelope: Optional[Tensor], batch: Tensor, num_graphs: int) -> Tensor:
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x, src, dst, sh, edge_scalars, envelope, batch, num_graphs)
+        return self._reference(x, src, dst, sh, edge_scalars, envelope, batch, num_graphs)
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor, src: Tensor, dst: Tensor, sh: Tensor, edge_scalars: Tensor,
+                      envelope: Optional[Tensor], batch: Tensor, num_graphs: int) -> Tensor:
+        from xnn.common.models.compiled import run_compiled
+        # no dropout acts on the compiled path, so the drop path ignores the graph count
+        return run_compiled(self, x, src, dst, sh, edge_scalars, envelope, batch, 1)
+
+    def _reference(self, x: Tensor, src: Tensor, dst: Tensor, sh: Tensor, edge_scalars: Tensor,
+                   envelope: Optional[Tensor], batch: Tensor, num_graphs: int) -> Tensor:
         h = self.ga(self.norm_1(x), src, dst, sh, edge_scalars, envelope)
         x = x + self.drop_path(h, batch, num_graphs)
         h = self.ffn(self.norm_2(x))
@@ -886,6 +922,7 @@ class Equiformer(TransformerPotential):
         Per-species reference energies loaded into ``atom_ref``.
     """
 
+    fast_path = "xnn.trfnn.fast.equiformer"
     head_modules = ("head", "energy_scale", "energy_shift", "atom_ref")
     exact_float64 = True
     smooth: Final[bool]
@@ -1010,6 +1047,8 @@ class Equiformer(TransformerPotential):
             ``"node_energy"`` ``(N,)``, ``"energy"`` ``(B,)`` and
             ``"node_features"`` (the even scalars of the final features).
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(data.edge_index.shape[1]))
         x, y = self._evaluate(data.atomic_numbers, data.edge_index, data.edge_vectors(),
                               data.batch, data.num_graphs)
         node_energy = self._energy(y, data.atomic_numbers)

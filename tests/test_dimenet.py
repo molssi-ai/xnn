@@ -19,11 +19,13 @@ import torch
 from xnn.common.config import from_dict
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, available_models, build_model
+from xnn.common.models.ops import make_activation
 from xnn.gnn.featurizers import (
     BesselRBF,
     PolynomialCutoff,
     SphericalBesselBasis,
     spherical_bessel_jn,
+    spherical_bessel_rows,
     spherical_bessel_zeros,
     zonal_harmonics,
 )
@@ -141,6 +143,28 @@ def test_spherical_bessel_functions():
     j32 = spherical_bessel_jn(6, x.float())
     assert j32.dtype == torch.float32
     assert torch.allclose(j32.double(), spherical_bessel_jn(6, x)[:, :7], atol=1e-6)
+
+
+def test_spherical_bessel_rows():
+    """One order per row: the values of spherical_bessel_jn bitwise, and the
+    recurrence-identity derivative to second order (force training)."""
+    x = torch.linspace(0.0, 25.0, 7 * 40, dtype=torch.float64).reshape(40, 7)
+    x = x.T.reshape(1, 7, 40).expand(3, 7, 40).contiguous()
+    for first in (0, 2):
+        rows = spherical_bessel_rows(x, first)
+        for r in range(7):
+            ref = spherical_bessel_jn(first + r, x[:, r, :])[..., first + r]
+            assert torch.equal(rows[:, r, :], ref), (first, r)
+    assert spherical_bessel_rows(x.float()).dtype == torch.float32
+    with torch.enable_grad():          # the gradient path keeps the same values
+        assert torch.equal(spherical_bessel_rows(x.clone().requires_grad_()).detach(), spherical_bessel_rows(x))
+    xg = (torch.rand(2, 5, 4, dtype=torch.float64) * 12 + 0.1).requires_grad_()
+    for first in (0, 1):
+        def rows(t, first=first):
+            return spherical_bessel_rows(t, first)
+        assert torch.autograd.gradcheck(rows, (xg,))
+        assert torch.autograd.gradgradcheck(rows, (xg,))
+        assert torch.autograd.gradgradcheck(rows, (xg,), gen_non_contig_grad_outputs=True)
 
 
 def test_spherical_bessel_zeros():
@@ -664,3 +688,119 @@ def test_fidelity_vs_reference_pretrained():
     four molecules: energies 1e-7 relative (float32 epsilon), forces 1.5e-5
     of the largest force component (gradients of a 4-block float32 net)."""
     assert _fidelity("pretrained") < 1e-4
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_silu_fused_derivative(device, monkeypatch):
+    """make_activation("silu"): torch's values and derivative kernel, derivatives to third order, scriptable."""
+    from xnn.common.models import ops
+    from xnn.common.models.ops import SiLU
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    act = make_activation("silu")
+    monkeypatch.setattr(ops, "FUSED_SLOPE_MIN_ELEMENTS", 1)        # the fused path on a small input
+    assert isinstance(act, SiLU) and isinstance(act, torch.nn.SiLU)
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(7, 3, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    assert torch.equal(act(x), torch.nn.functional.silu(x))
+    probe = torch.randn(7, 3, dtype=torch.float64, generator=gen).to(device)
+    a, = torch.autograd.grad((act(x) * probe).sum(), x, create_graph=True)
+    assert torch.equal(a.detach(), torch.ops.aten.silu_backward(probe, x.detach()))
+    assert torch.autograd.gradgradcheck(act, (x,))
+
+    def slope(t):
+        g, = torch.autograd.grad(act(t).sum(), t, create_graph=True)
+        return g
+    assert torch.autograd.gradgradcheck(slope, (x,))
+    assert torch.equal(torch.jit.script(SiLU())(x), act(x))
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.dimenet import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fast_batch(dtype):
+    batch = collate([_graph(n=9, seed=3), _graph(n=7, seed=4, periodic=True)]).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+_FAST_CASES = [(False, "kj"), (False, "ji"), (True, "kj")]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_parity(dtype, pp, radial_gate):
+    """The triplet-sum kernels give the reference energies and forces."""
+    pytest.importorskip("triton")
+    model = _small(pp=pp, radial_gate=radial_gate).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_training(dtype, pp, radial_gate):
+    """Force training through the triplet-sum kernels gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    model = _small(pp=pp, seed=1, radial_gate=radial_gate).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+def test_fast_path_pp_ji_gate_keeps_reference():
+    """DimeNet++ with the gate of the edge j -> i has no edge sums: never the kernels."""
+    model = _small(pp=True, radial_gate="ji")
+    assert not any(b.fast_supported(torch.device("cuda"), torch.float64) for b in model.interactions)
+
+
+@pytest.mark.parametrize("pp,radial_gate", _FAST_CASES)
+def test_fast_path_training_interpreted(monkeypatch, pp, radial_gate):
+    """Under Triton's interpreter, force training through the triplet-sum kernels gives the
+    reference's energies, forces and weight gradients."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.dimenet as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    model = _small(pp=pp, seed=1, radial_gate=radial_gate, n_features=8, n_interactions=1)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_graph(n=5, seed=3))
+        assert all(b.fast_active == use_fast for b in model.interactions)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = {"energy": out["energy"].detach(), "forces": out["forces"].detach()}
+        res[use_fast].update({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                              if p.grad is not None})
+    assert res[False].keys() == res[True].keys()
+    for name, ref in res[False].items():
+        err = (res[True][name] - ref).abs().max() / ref.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))

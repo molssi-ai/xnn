@@ -72,6 +72,27 @@ class ForceStressOutput(nn.Module):
         self.compute_stress = compute_stress
         self.cutoff = getattr(model, "cutoff", None)
 
+    def _model_dtype(self):
+        """The floating dtype of the wrapped model: its first floating parameter, or without
+        one its first floating buffer, found once (a parameter keeps its identity under
+        ``.to()``, a buffer is checked against its module; walking the modules every call costs
+        a fraction of a millisecond)."""
+        cached = self.__dict__.get("_dtype_source")
+        if cached is not None and cached[0] is self.model:
+            owner, name, t = cached[1], cached[2], cached[3]
+            if owner is None or owner._buffers.get(name) is t:
+                return t.dtype
+        for t in self.model.parameters():
+            if t.is_floating_point():
+                self.__dict__["_dtype_source"] = (self.model, None, None, t)
+                return t.dtype
+        for owner in self.model.modules():
+            for name, t in owner._buffers.items():
+                if t is not None and t.is_floating_point():
+                    self.__dict__["_dtype_source"] = (self.model, owner, name, t)
+                    return t.dtype
+        return None
+
     def forward(self, data: AtomicGraph, plan: Optional[Any] = None) -> dict[str, Tensor]:
         """Run the wrapped model and add forces and stress via autograd.
 
@@ -110,11 +131,22 @@ class ForceStressOutput(nn.Module):
         """
         create_graph = self.training  # needed for force-loss backprop
 
+        # a model that forms its forces and strain derivative itself in evaluation (a standalone
+        # dispersion term on its CPU kernels): no autograd pass
+        forms_forces = getattr(self.model, "forms_forces", None)
+        if (callable(forms_forces) and not self.training and self.compute_forces and plan is None
+                and forms_forces(data)):
+            out = self.model.forward_direct(data)
+            virial = out.pop("virial")
+            if self.compute_stress and data.cell is not None:
+                out["stress"] = _stress(virial, data)
+            return out
+
         # a geometry kept in float64 for a float32 model (the deploy paths): the
         # model sees its own dtype through edge_vectors(); forces and stress
         # are derivatives with respect to the float64 leaves
         if data.compute_dtype is None:
-            dtype = _float_dtype(self.model)
+            dtype = self._model_dtype()
             if dtype is not None and dtype != data.pos.dtype:
                 data.compute_dtype = dtype
 
@@ -164,29 +196,22 @@ class ForceStressOutput(nn.Module):
             out["forces"] = -g["pos"] if g.get("pos") is not None else torch.zeros_like(data.pos)
         if strain is not None:
             if g.get("strain") is not None:
-                # a batch mixing molecules and cells gives each molecule a zero
-                # cell: its stress is zero (dividing its virial by a clamped
-                # zero volume would give ~1e8 times the virial)
-                volume = cell_volume(data.cell)                       # (B,)
-                periodic = volume > 1e-8
-                if data.pbc is not None:
-                    # graphs built on a GPU keep pbc on the CPU (structure_to_graph)
-                    periodic = periodic & data.pbc.any(-1).to(periodic.device)
-                safe = torch.where(periodic, volume, torch.ones_like(volume))
-                out["stress"] = torch.where(periodic[:, None, None],
-                                            g["strain"] / safe[:, None, None],
-                                            torch.zeros_like(g["strain"]))
+                out["stress"] = _stress(g["strain"], data)
             else:
                 out["stress"] = torch.zeros_like(strain)
         return out
 
 
-def _float_dtype(model: nn.Module):
-    """The floating dtype of ``model``'s parameters (or buffers), None if it has none."""
-    for t in model.parameters():
-        if t.is_floating_point():
-            return t.dtype
-    for t in model.buffers():
-        if t.is_floating_point():
-            return t.dtype
-    return None
+def _stress(strain_gradient: Tensor, data: AtomicGraph) -> Tensor:
+    """The stress ``dE / d(strain) / V`` per structure, zero for the molecules of a batch."""
+    # a batch mixing molecules and cells gives each molecule a zero cell: its stress
+    # is zero (dividing its virial by a clamped zero volume would give ~1e8 times the
+    # virial)
+    volume = cell_volume(data.cell)                       # (B,)
+    periodic = volume > 1e-8
+    if data.pbc is not None:
+        # graphs built on a GPU keep pbc on the CPU (structure_to_graph)
+        periodic = periodic & data.pbc.any(-1).to(periodic.device)
+    safe = torch.where(periodic, volume, torch.ones_like(volume))
+    return torch.where(periodic[:, None, None], strain_gradient / safe[:, None, None],
+                       torch.zeros_like(strain_gradient))

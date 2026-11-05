@@ -6,6 +6,8 @@ stress, upstream constructor-key translation, and -- when the original
 ``cace`` package is installed -- machine-precision weight-transplant fidelity
 against it.
 """
+import os
+
 import numpy as np
 import pytest
 import torch
@@ -225,3 +227,143 @@ def test_fidelity_vs_original_cace():
         assert abs(float(ox["energy"]) - float(e_up)) / abs(float(e_up)) < 1e-13
         assert ((ox["forces"].detach() - f_up).abs().max()
                 / f_up.abs().max()) < 1e-12
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.cace import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _fast_batch(dtype):
+    from xnn.common.data import collate
+    batch = collate([_graph(n=9, seed=3), _graph(n=6, seed=4)]).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("num_mp", [1, 2])
+def test_fast_path_parity(dtype, num_mp):
+    """The fused edge-basis sums give the reference energies and forces (A basis and Bchi messages)."""
+    pytest.importorskip("triton")
+    torch.manual_seed(5)
+    model = _build(num_mp=num_mp).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert model.edge_sums.fast_active == use_fast
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("num_mp", [1, 2])
+def test_fast_path_training(dtype, num_mp):
+    """Force training through the fused edge-basis sums gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    torch.manual_seed(6)
+    model = _build(num_mp=num_mp).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype))
+        assert model.edge_sums.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))
+
+
+def _check_message_sums(device, fast_mode=False):
+    """The fused Ar message sums against the dense sum, and every first and second derivative."""
+    from xnn.gnn.fast.cace_kernels import message_sums
+    gen = torch.Generator().manual_seed(8)
+    n, n_edges, n_l, n_s = 5, 14, 4, 3
+    groups = torch.tensor([0, 1, 1, 1], device=device)
+    a = torch.randn(n, n_l, n_s, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    d = torch.randn(n_edges, 2, n_s, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    edge_index = torch.randint(0, n, (2, n_edges), generator=gen).to(device)
+
+    def fn(a, d):
+        return message_sums(a, d, groups, edge_index)
+
+    with torch.no_grad():
+        expect = torch.zeros(n, n_l, n_s, dtype=torch.float64, device=device).index_add(
+            0, edge_index[1], a[edge_index[0]] * d[:, groups])
+        assert torch.allclose(fn(a, d), expect, rtol=0, atol=1e-13)
+    assert torch.autograd.gradcheck(fn, (a, d), fast_mode=fast_mode)
+    assert torch.autograd.gradgradcheck(fn, (a, d), fast_mode=fast_mode)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_message_sums_gradients():
+    """The fused Ar message sums against the dense sum, and every first and second derivative."""
+    pytest.importorskip("triton")
+    _check_message_sums("cuda")
+
+
+def _needs_interpreter():
+    """Skip unless Triton's interpreter is on (chosen by conftest.py on machines without CUDA)."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+
+
+def test_fast_message_sums_gradients_interpreted():
+    """The same under Triton's interpreter."""
+    _needs_interpreter()
+    _check_message_sums("cpu", fast_mode=True)
+
+
+def test_fast_path_training_interpreted(monkeypatch):
+    """Under Triton's interpreter, force training through the fused sums (A basis, Ar and Bchi
+    messages) gives the reference's energies, forces and weight gradients."""
+    _needs_interpreter()
+    import xnn.gnn.fast.cace as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    torch.manual_seed(6)
+    model = _build(num_mp=2, max_l=2, max_nu=2)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_graph(n=5, seed=3))
+        assert model.edge_sums.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = {"energy": out["energy"].detach(), "forces": out["forces"].detach()}
+        res[use_fast].update({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                              if p.grad is not None})
+    assert res[False].keys() == res[True].keys()
+    for name, ref in res[False].items():
+        err = (res[True][name] - ref).abs().max() / ref.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))
+
+
+@pytest.mark.parametrize("num_mp", [1, 2])
+def test_scriptable_and_lammps_export(tmp_path, num_mp):
+    """The TorchScript core equals the eager model, and the LAMMPS export gives its energy and forces."""
+    from xnn.common.deploy import export_to_lammps
+    model = _build(num_mp=num_mp).eval()
+    g = _graph(n=7, periodic=True, seed=2)
+    scripted = torch.jit.script(model)
+    d = (scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+         - model.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors()))
+    assert d.abs().max() < 1e-12
+    path = str(tmp_path / "cace_lammps.pt")
+    export_to_lammps(model, 4.5, path)
+    out = torch.jit.load(path)(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, g.cell[0])
+    ref = ForceStressOutput(model)(g)
+    assert abs(float(out["total_energy"]) - float(ref["energy"])) < 1e-10
+    assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-10

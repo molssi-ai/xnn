@@ -59,6 +59,7 @@ from torch.nn import Parameter, ParameterDict
 from xnn.common.data import AtomicGraph
 from xnn.common.data.elements import CHEMICAL_SYMBOLS
 from xnn.common.models import InteratomicPotential, register_model
+from xnn.common.models.fast import resolve_use_fast
 from xnn.common.models.ops import scatter_sum
 
 from .amberlib import (
@@ -73,7 +74,8 @@ from .amberlib import (
     resolve_dihedral_type,
     resolve_improper_type,
 )
-from .geometry import TINY, dihedral_cos_sin, geometric_mean, pair_vectors
+from .classical_fast import ClassicalFastPath, evaluate_spec, image_shifts, lj_table, used_types, wants_fast
+from .geometry import TINY, dihedral_cos_sin, geometric_mean, half_edges, pair_vectors
 from .topology import MolecularTopology, read_topology, residue_name_list
 
 # Coulomb constant of the AMBER programs in eV Angstrom: charges in the
@@ -371,7 +373,7 @@ class AmberForceField(nn.Module):
 
 
 @register_model("amber")
-class Amber(InteratomicPotential):
+class Amber(ClassicalFastPath, InteratomicPotential):
     """The AMBER fixed-topology force field (Cornell *et al.* 1995 form).
 
     An instance binds a parameter library to one molecular topology; the
@@ -419,6 +421,14 @@ class Amber(InteratomicPotential):
         fixes that value in e, ``False`` registers no constraint. The
         charges the model evaluates are the per-atom parameters shifted
         uniformly onto the constraint.
+    use_fast : bool or "auto", optional
+        Evaluate the terms with the fused GPU kernels of
+        :mod:`~xnn.ffnn.models.classical_kernels` (the same numbers to
+        round-off). ``"auto"`` (default) and ``True`` take them on a CUDA
+        device with Triton, in evaluation and in training; ``False``
+        evaluates every term eagerly. The kernels are differentiable twice
+        (force training, Hessians), and once with a cell gradient (stress);
+        training with a stress loss evaluates every term eagerly.
     atomic_energies : mapping, optional
         Per-element reference energies in eV, ``{Z or symbol: E0}``, loaded
         into ``atom_ref``; the offset between the labels' zero and the force
@@ -454,6 +464,7 @@ class Amber(InteratomicPotential):
                  keep_intermediates: bool = False,
                  auto_impropers: bool = True,
                  constrain_charge: Union[bool, float] = True,
+                 use_fast: Union[bool, str] = "auto",
                  atomic_energies=None):
         super().__init__()
         groups, model_groups = _split_trainable(trainable)
@@ -473,6 +484,7 @@ class Amber(InteratomicPotential):
         self.keep_intermediates = bool(keep_intermediates)
         self.intermediates: dict = {}
         self.node_feature_dim = 1
+        self.use_fast = resolve_use_fast(use_fast)
         self._bind_topology(
             topology if isinstance(topology, MolecularTopology)
             else read_topology(topology), charges)
@@ -647,18 +659,95 @@ class Amber(InteratomicPotential):
         return eps * (x * x - 2.0 * x), KE * q_i * q_j / r
 
     def _periodic(self, idx: Tensor, types: Tensor, k_par: Tensor, n_buf: Tensor,
-                  cos_buf: Tensor, sin_buf: Tensor, mask: Tensor, data: AtomicGraph
-                  ) -> tuple[Tensor, Tensor]:
+                  cos_buf: Tensor, sin_buf: Tensor, mask: Tensor, data: AtomicGraph,
+                  n_max: int, shifts=None) -> tuple[Tensor, Tensor]:
         """``sum_m K_m [1 + cos(n_m phi - gamma_m)]`` per quadruple, from the
-        dihedral's ``cos phi`` / ``sin phi`` by multiple-angle recurrences."""
-        c1, s1 = dihedral_cos_sin(data, idx)
+        dihedral's ``cos phi`` / ``sin phi`` by multiple-angle recurrences up to
+        ``n_max`` (the library's largest multiplicity); ``shifts`` the image
+        shifts of the bond vectors, when already found."""
+        c1, s1 = dihedral_cos_sin(data, idx, shifts=shifts)
         n = n_buf[types]
-        n_max = int(n.max()) if n.numel() else 1
         cos_n, sin_n = multiple_angles(c1, s1, n_max)
         cn = torch.gather(cos_n, 1, n - 1)
         sn = torch.gather(sin_n, 1, n - 1)
         e = k_par[types] * mask[types] * (1.0 + cos_buf[types] * cn + sin_buf[types] * sn)
         return e.sum(1), c1
+
+    def _nmax(self, device: torch.device) -> tuple:
+        """The largest multiplicities of the library's torsions and impropers (at least 1), read once per
+        device."""
+        nmax = self.__dict__.setdefault("_nmax_cache", {})
+        key = str(device)
+        if key not in nmax:
+            ff = self.ff
+            nmax[key] = (max(int(ff.dihedral_n.max()), 1) if ff.dihedral_n.numel() else 1,
+                         max(int(ff.improper_n.max()), 1) if ff.improper_n.numel() else 1)
+        return nmax[key]
+
+    def _fast_spec(self, B: int, n: int, q: Tensor) -> dict:
+        """The terms of a batch of ``B`` copies for the kernels of :mod:`.classical_kernels` (see
+        :func:`~xnn.ffnn.models.classical_fast.evaluate_spec`): bonds, angles, the phased Fourier torsions and
+        impropers, the 1,4 pairs and the neighbor list's pairs."""
+        P, ff = self.ff.params, self.ff
+        starts = torch.arange(B, device=q.device) * n
+
+        def expand(idx: Tensor) -> Tensor:
+            return (idx.unsqueeze(1) + starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
+        bi, ai = expand(self.bond_index), expand(self.angle_index)
+        di, ii = expand(self.dihedral_index), expand(self.improper_index)
+        bt, at = self.bond_type.repeat(B), self.angle_type.repeat(B)
+        dt, it = self.dihedral_type.repeat(B), self.improper_type.repeat(B)
+        nmax = self._nmax(q.device)
+
+        def periodic(types, k, n_, c, s, mask, owner, top):
+            k = k[types] * mask[types]
+            return ((owner, k, n_[types].to(torch.int32), c[types], s[types], torch.zeros_like(k[:, 0])),
+                    dict(FORM=1, S=int(k.shape[1]), NMAX=top))
+        tors = periodic(dt, P["dihedral_k"], ff.dihedral_n, ff.dihedral_cos, ff.dihedral_sin, ff.dihedral_mask,
+                        di[1], nmax[0])
+        impr = periodic(it, P["improper_k"], ff.improper_n, ff.improper_cos, ff.improper_sin, ff.improper_mask,
+                        ii[2], nmax[1])
+        used, compact = used_types(self, self.top_type)
+        rs, ep = P["rstar"][used], P["epsilon"][used]
+        T = len(used)
+        well = geometric_mean(ep[:, None].expand(-1, T), ep[None, :].expand(T, -1))
+        rstar = rs[:, None] + rs[None, :]
+        return {
+            "bonded": [
+                ("e_bond_node", "bond", bi, (P["bond_k"][bt], P["bond_r0"][bt]), None),
+                ("e_angle_node", "angle", ai, (torch.zeros_like(at, dtype=torch.int32), P["angle_k"][at],
+                                               P["angle_theta0"][at]), None),
+                ("e_tors_node", "torsion", di, *tors),
+                ("e_impr_node", "torsion", ii, *impr),
+            ],
+            "pairs14": (("e_vdw14_node", "e_coul14_node"), expand(self.pair14_index), compact, q,
+                        lj_table(self.fudge_lj * well, 2.0, rstar), KE * self.fudge_qq),
+            "nonbonded": (("e_vdw_node", "e_coul_node"), compact, q, lj_table(well, 2.0, rstar), KE, self.excl_index,
+                          n, self.cutoff, self.switch_width, 0),
+        }
+
+    def _eager_nonbonded(self, data: AtomicGraph, N: int, B: int, t: Tensor, q: Tensor, P, expand,
+                         nb: dict) -> tuple[Tensor, Tensor]:
+        """The per-atom van der Waals and Coulomb energies of the neighbor list's pairs (each pair once,
+        half to each atom, :func:`~.geometry.half_edges`), without the excluded pairs, switched; the
+        reference."""
+        src, dst, vec, r2, half, included, _ = half_edges(data, self.excl_index, N // B, self)
+        r = torch.sqrt(r2 + TINY)
+        rs_t, eps_t = P["rstar"][t], P["epsilon"][t]
+        vdw_e, coul_e = self._vdw_coulomb(rs_t[src], rs_t[dst], eps_t[src], eps_t[dst],
+                                          q[src], q[dst], r, r2)
+        w = included.to(r.dtype) * half
+        if self.switch_width > 0.0:
+            x = torch.clamp((r - (self.cutoff - self.switch_width)) / self.switch_width,
+                            0.0, 1.0)
+            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
+        h_vdw, h_coul = 0.5 * w * vdw_e, 0.5 * w * coul_e
+        e_vdw_node = scatter_sum(h_vdw, src, N) + scatter_sum(h_vdw, dst, N)
+        e_coul_node = scatter_sum(h_coul, src, N) + scatter_sum(h_coul, dst, N)
+        if self.keep_intermediates:
+            nb.update(nb_r=r, nb_weight=w, nb_vdw=vdw_e, nb_coulomb=coul_e)
+        return e_vdw_node, e_coul_node
 
     # forward
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:
@@ -708,79 +797,73 @@ class Amber(InteratomicPotential):
             """Tile per-interaction type rows ``(m,)`` to ``(B*m,)``."""
             return v.repeat(B)
 
-        # bonds
-        bi = expand(self.bond_index)
-        bt = tile(self.bond_type)
-        bvec = pair_vectors(data, bi[0], bi[1])
-        br = torch.sqrt((bvec * bvec).sum(1) + TINY)
-        e_bond = P["bond_k"][bt] * (br - P["bond_r0"][bt]) ** 2
-        e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
-            + scatter_sum(0.5 * e_bond, bi[1], N)
+        q = self.charges.repeat(B)
+        fast = wants_fast(self, self.use_fast, data, q, P["rstar"], P["epsilon"])
+        if fast:
+            ev = evaluate_spec(data, self._fast_spec(B, n, q), self)
+            e_bond_node, e_angle_node, e_tors_node, e_impr_node, e_vdw14_node, e_coul14_node = (
+                ev[k] for k in ("e_bond_node", "e_angle_node", "e_tors_node", "e_impr_node", "e_vdw14_node",
+                                "e_coul14_node"))
+        else:
+            bi, ai = expand(self.bond_index), expand(self.angle_index)
+            di, ii, pi = expand(self.dihedral_index), expand(self.improper_index), expand(self.pair14_index)
+            # the image shifts of every bonded vector from one search
+            sb, sa, sd, si, sp = (([None] * 3) if s is None else s for s in image_shifts(
+                data, [(bi, "bond"), (ai, "angle"), (di, "torsion"), (ii, "torsion"), (pi, "bond")]))
+            nmax = self._nmax(data.pos.device)
 
-        # angles
-        ai = expand(self.angle_index)
-        at = tile(self.angle_type)
-        u = pair_vectors(data, ai[1], ai[0])
-        v = pair_vectors(data, ai[1], ai[2])
-        cos_th = (u * v).sum(1) / torch.sqrt((u * u).sum(1) * (v * v).sum(1) + TINY)
-        bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
-        theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
-        e_angle = P["angle_k"][at] * (theta - P["angle_theta0"][at]) ** 2
-        e_angle_node = scatter_sum(e_angle, ai[1], N)
+            # bonds
+            bt = tile(self.bond_type)
+            bvec = pair_vectors(data, bi[0], bi[1], sb[0])
+            br = torch.sqrt((bvec * bvec).sum(1) + TINY)
+            e_bond = P["bond_k"][bt] * (br - P["bond_r0"][bt]) ** 2
+            e_bond_node = scatter_sum(0.5 * e_bond, bi[0], N) \
+                + scatter_sum(0.5 * e_bond, bi[1], N)
 
-        # proper dihedrals
-        di = expand(self.dihedral_index)
-        dt = tile(self.dihedral_type)
-        e_tors, c_tors = self._periodic(di, dt, P["dihedral_k"], self.ff.dihedral_n,
-                                        self.ff.dihedral_cos, self.ff.dihedral_sin,
-                                        self.ff.dihedral_mask, data)
-        e_tors_node = scatter_sum(e_tors, di[1], N)
+            # angles
+            at = tile(self.angle_type)
+            u = pair_vectors(data, ai[1], ai[0], sa[0])
+            v = pair_vectors(data, ai[1], ai[2], sa[1])
+            cos_th = (u * v).sum(1) / torch.sqrt((u * u).sum(1) * (v * v).sum(1) + TINY)
+            bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(cos_th.dtype).eps)
+            theta = torch.arccos(torch.clamp(cos_th, -bound, bound))
+            e_angle = P["angle_k"][at] * (theta - P["angle_theta0"][at]) ** 2
+            e_angle_node = scatter_sum(e_angle, ai[1], N)
 
-        # impropers (center third)
-        ii = expand(self.improper_index)
-        it = tile(self.improper_type)
-        e_impr, c_impr = self._periodic(ii, it, P["improper_k"], self.ff.improper_n,
-                                        self.ff.improper_cos, self.ff.improper_sin,
-                                        self.ff.improper_mask, data)
-        e_impr_node = scatter_sum(e_impr, ii[2], N)
+            # proper dihedrals
+            dt = tile(self.dihedral_type)
+            e_tors, c_tors = self._periodic(di, dt, P["dihedral_k"], self.ff.dihedral_n,
+                                            self.ff.dihedral_cos, self.ff.dihedral_sin,
+                                            self.ff.dihedral_mask, data, nmax[0], sd)
+            e_tors_node = scatter_sum(e_tors, di[1], N)
+
+            # impropers (center third)
+            it = tile(self.improper_type)
+            e_impr, c_impr = self._periodic(ii, it, P["improper_k"], self.ff.improper_n,
+                                            self.ff.improper_cos, self.ff.improper_sin,
+                                            self.ff.improper_mask, data, nmax[1], si)
+            e_impr_node = scatter_sum(e_impr, ii[2], N)
 
         # nonbonded: neighbor list minus exclusions
-        src, dst = data.edge_index[0], data.edge_index[1]
-        vec = data.edge_vectors()
-        r2 = (vec * vec).sum(1)
-        r = torch.sqrt(r2 + TINY)
-        q = self.charges.repeat(B)
-        rs_t, eps_t = P["rstar"][t], P["epsilon"][t]
-        vdw_e, coul_e = self._vdw_coulomb(rs_t[src], rs_t[dst], eps_t[src], eps_t[dst],
-                                          q[src], q[dst], r, r2)
-        lo = torch.minimum(src, dst)
-        hi = torch.maximum(src, dst)
-        edge_key = lo * N + hi
-        if self.excl_index.shape[1] > 0:
-            ex = expand(self.excl_index)
-            w = (~torch.isin(edge_key, ex[0] * N + ex[1])).to(r.dtype)
+        nb: dict = {}
+        if fast:
+            e_vdw_node, e_coul_node = ev["e_vdw_node"], ev["e_coul_node"]
         else:
-            w = torch.ones_like(r)
-        if self.switch_width > 0.0:
-            x = torch.clamp((r - (self.cutoff - self.switch_width)) / self.switch_width,
-                            0.0, 1.0)
-            w = w * (1.0 - x ** 3 * (10.0 - 15.0 * x + 6.0 * x * x))
-        e_vdw_node = scatter_sum(0.5 * w * vdw_e, dst, N)
-        e_coul_node = scatter_sum(0.5 * w * coul_e, dst, N)
+            e_vdw_node, e_coul_node = self._eager_nonbonded(data, N, B, t, q, P, expand, nb)
 
-        # scaled 1,4 pairs (exact, cutoff-independent)
-        pi = expand(self.pair14_index)
-        p0, p1 = t[pi[0]], t[pi[1]]
-        pvec = pair_vectors(data, pi[0], pi[1])
-        pr2 = (pvec * pvec).sum(1)
-        pr = torch.sqrt(pr2 + TINY)
-        vdw14, coul14 = self._vdw_coulomb(P["rstar"][p0], P["rstar"][p1],
-                                          P["epsilon"][p0], P["epsilon"][p1],
-                                          q[pi[0]], q[pi[1]], pr, pr2)
-        vdw14 = self.fudge_lj * vdw14
-        coul14 = self.fudge_qq * coul14
-        e_vdw14_node = scatter_sum(0.5 * vdw14, pi[0], N) + scatter_sum(0.5 * vdw14, pi[1], N)
-        e_coul14_node = scatter_sum(0.5 * coul14, pi[0], N) + scatter_sum(0.5 * coul14, pi[1], N)
+        if not fast:
+            # scaled 1,4 pairs (exact, cutoff-independent)
+            p0, p1 = t[pi[0]], t[pi[1]]
+            pvec = pair_vectors(data, pi[0], pi[1], sp[0])
+            pr2 = (pvec * pvec).sum(1)
+            pr = torch.sqrt(pr2 + TINY)
+            vdw14, coul14 = self._vdw_coulomb(P["rstar"][p0], P["rstar"][p1],
+                                              P["epsilon"][p0], P["epsilon"][p1],
+                                              q[pi[0]], q[pi[1]], pr, pr2)
+            vdw14 = self.fudge_lj * vdw14
+            coul14 = self.fudge_qq * coul14
+            e_vdw14_node = scatter_sum(0.5 * vdw14, pi[0], N) + scatter_sum(0.5 * vdw14, pi[1], N)
+            e_coul14_node = scatter_sum(0.5 * coul14, pi[0], N) + scatter_sum(0.5 * coul14, pi[1], N)
 
         e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
         node_energy = (e_bond_node + e_angle_node + e_tors_node + e_impr_node
@@ -792,9 +875,8 @@ class Amber(InteratomicPotential):
             self.intermediates = dict(
                 bond_r=br, e_bond=e_bond, angle_theta=theta, e_angle=e_angle,
                 dihedral_cos=c_tors, e_torsion=e_tors, improper_cos=c_impr,
-                e_improper=e_impr, nb_r=r, nb_weight=w, nb_vdw=vdw_e,
-                nb_coulomb=coul_e, pair14_r=pr, e_vdw14=vdw14, e_coulomb14=coul14,
-                type_index=t)
+                e_improper=e_impr, pair14_r=pr, e_vdw14=vdw14, e_coulomb14=coul14,
+                type_index=t, **nb)
 
         return {
             "node_energy": node_energy,

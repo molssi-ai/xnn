@@ -73,8 +73,10 @@ from torch.nn import Parameter, ParameterDict
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential, register_model
-from xnn.common.models.ops import build_triplets, scatter_sum
+from xnn.common.models.fast import resolve_use_fast
+from xnn.common.models.ops import build_triplets, gather_rows, scatter_sum
 
+from .classical_fast import ClassicalFastPath
 from .ffield import (
     CHEMICAL_SYMBOLS,
     P_ANGLE,
@@ -134,6 +136,77 @@ _P_PAIR = ("Desi", "Depi", "Depp", "be1", "be2", "bo1", "bo2", "bo3", "bo4",
 # Pair parameters needed for the nonbonded terms of *every* pair, bonded or
 # not (filled by the geometric-mean combination rule when unlisted).
 _P_PAIR_VDW = ("Devdw", "rvdw", "alfa")
+
+
+# structures larger than this solve the EEM system by conjugate gradients (the dense solve is O(n^3))
+EEM_DENSE_MAX = 2048
+# the conjugate-gradient tolerance (relative residual) per precision, and its iteration cap
+EEM_CG_TOL = {torch.float64: 1.0e-13, torch.float32: 1.0e-6}
+EEM_CG_MAXITER = 1000
+
+
+def _eem_cg(gterm: Tensor, diag: Tensor, rhs: Tensor, total: Tensor, src: Tensor, dst: Tensor, batch: Tensor,
+            n_graphs: int, fast: bool = False) -> Tensor:
+    """The charges ``q`` of ``(H + diag) q + lambda_g = rhs`` with ``sum_g q = total_g`` per structure ``g``,
+    ``H[dst, src] += gterm`` over the edges (symmetric), by Jacobi-preconditioned conjugate gradients for
+    ``A s = rhs`` and ``A t = 1``; then ``q = s - lambda t``, ``lambda_g = (sum_g s - total_g) / sum_g t``;
+    ``fast`` the products of ``H`` on one GPU kernel (:func:`~.reaxff_kernels.eem_products`)."""
+    dtype = gterm.dtype
+    tol = EEM_CG_TOL.get(dtype, 1.0e-6)
+    if fast:
+        from .reaxff_kernels import eem_products
+        product = eem_products(src, dst, gterm)
+
+        def matvec(x):
+            return diag[:, None] * x + product(x)
+    else:
+        def matvec(x):
+            return diag[:, None] * x + scatter_sum(gterm[:, None] * x.index_select(0, src), dst, x.shape[0])
+
+    b = torch.stack([rhs, torch.ones_like(rhs)], 1)
+    inv = 1.0 / diag
+    x = b * inv[:, None]
+    r = b - matvec(x)
+    z = r * inv[:, None]
+    p_ = z.clone()
+    rz = (r * z).sum(0)
+    bnorm = torch.linalg.vector_norm(b, dim=0).clamp_min(1e-300)
+    for it in range(EEM_CG_MAXITER):
+        ap = matvec(p_)
+        alpha = rz / (p_ * ap).sum(0)
+        x = x + alpha * p_
+        r = r - alpha * ap
+        if it % 8 == 7 and bool((torch.linalg.vector_norm(r, dim=0) <= tol * bnorm).all()):
+            break
+        z = r * inv[:, None]
+        rz_new = (r * z).sum(0)
+        p_ = z + (rz_new / rz) * p_
+        rz = rz_new
+    s_, t_ = x[:, 0], x[:, 1]
+    lam = (scatter_sum(s_, batch, n_graphs) - total) / scatter_sum(t_, batch, n_graphs)
+    return s_ - lam.index_select(0, batch) * t_
+
+
+class _EEMSolve(torch.autograd.Function):
+    """The constrained EEM solve of :func:`_eem_cg` with its implicit derivative: the system is symmetric, so
+    the adjoint is the same solve with the incoming gradient as right-hand side and no net charge, and the
+    backward calls this function again (differentiable at any order)."""
+
+    @staticmethod
+    def forward(ctx, gterm, diag, rhs, total, src, dst, batch, n_graphs, fast=False):
+        with torch.no_grad():
+            q = _eem_cg(gterm, diag, rhs, total, src, dst, batch, n_graphs, fast)
+        ctx.save_for_backward(gterm, diag, q, src, dst, batch)
+        ctx.n_graphs, ctx.fast = n_graphs, fast
+        return q
+
+    @staticmethod
+    def backward(ctx, g_q):
+        gterm, diag, q, src, dst, batch = ctx.saved_tensors
+        a = _EEMSolve.apply(gterm, diag, g_q, torch.zeros(ctx.n_graphs, dtype=q.dtype, device=q.device), src, dst,
+                            batch, ctx.n_graphs, ctx.fast)
+        g_gterm = -a.index_select(0, dst) * q.index_select(0, src)
+        return g_gterm, -a * q, a, None, None, None, None, None, None
 
 
 def taper_up(x: Tensor, rmin: float, rmax: float) -> Tensor:
@@ -433,7 +506,7 @@ def _lammps_vdw_type(p: dict, spec: Sequence[str]) -> int:
 
 
 @register_model("reaxff")
-class ReaxFF(InteratomicPotential):
+class ReaxFF(ClassicalFastPath, InteratomicPotential):
     """ReaxFF / ReaxFF-nn reactive force field.
 
     The model is fully specified by a parameter library (a ``.frc`` file or
@@ -485,6 +558,17 @@ class ReaxFF(InteratomicPotential):
         (bond orders, per-interaction energies, angle/torsion indices, ...)
         in ``self.intermediates`` for inspection -- used by the fidelity
         notebook. Default ``False``.
+    use_fast : bool or "auto", optional
+        Evaluate the terms with the fused GPU kernels of
+        :mod:`~xnn.ffnn.models.reaxff_kernels` (the same numbers to
+        round-off) on a CUDA device with Triton, in evaluation, forces and
+        stress included: the van der Waals and Coulomb pairs, the angles,
+        torsions and hydrogen bonds and the products of the
+        conjugate-gradient charge solve, and for classical fields with
+        ``conventions="lammps"`` also the corrected bond orders with the bond
+        energy. ``"auto"``
+        (default) and ``True`` take them wherever they apply; ``False``
+        evaluates every term eagerly.
 
     Notes
     -----
@@ -509,8 +593,10 @@ class ReaxFF(InteratomicPotential):
                  hb_short: float = 6.75,
                  hb_long: float = 7.5,
                  trainable: Union[Sequence[str], str] = (),
-                 keep_intermediates: bool = False):
+                 keep_intermediates: bool = False,
+                 use_fast: Union[bool, str] = "auto"):
         super().__init__()
+        self.use_fast = resolve_use_fast(use_fast)
         lib = ffield if isinstance(ffield, FFieldLibrary) else read_ffield(ffield)
         self.cutoff = float(vdw_cutoff)
         self.hb_short = float(hb_short)
@@ -1016,10 +1102,14 @@ class ReaxFF(InteratomicPotential):
                      eterm3=eterm3, bop_si=bop_si, bop_pi=bop_pi,
                      bop_pp=bop_pp, bop=bop, deltap=deltap)
 
-        # corrected bond orders
+        # corrected bond orders (and, on the kernel, the bond energy with them)
+        fast_bonds = lammps and not self.nn and self._fast_terms(data) and not self._twice()
         if self.nn:
             bo0, bosi, bopi, bopp = self._message_passing(
                 s, b_src, b_dst, b_shift, bop, bop_si, bop_pi, bop_pp, N)
+        elif fast_bonds:
+            bo0, bosi, bopi, bopp, e_bond_node = self._fast_bond_corrections(
+                s, b_src, b_dst, bop_si, bop_pi, bop_pp, deltap, data.model_dtype)
         else:
             bo0, bosi, bopi, bopp = self._bond_order_corrections(
                 s, b_src, b_dst, bop, bop_si, bop_pi, bop_pp, deltap, inter)
@@ -1034,14 +1124,89 @@ class ReaxFF(InteratomicPotential):
                      delta=delta, dpi=dpi)
 
         # bond energy
-        esi = self._bond_energy(bsi, bsj, bo0, bosi, bopi, bopp, pb)
-        e_bond_node = scatter_sum(-0.5 * esi, b_dst, N)
+        if not fast_bonds:
+            esi = self._bond_energy(bsi, bsj, bo0, bosi, bopi, bopp, pb)
+            e_bond_node = scatter_sum(-0.5 * esi, b_dst, N)
+            inter["esi"] = esi
         if lammps:
             e_bond_node = e_bond_node + self._triple_bond_stabilization(
                 s, N, b_src, b_dst, bo0, delta, dv)
-        inter["esi"] = esi
 
         # lone pair / over- / under-coordination
+        (e_lone_node, e_over_node, e_under_node, nlp, delta_lp, dpil,
+         delta_lpcorr) = self._atom_terms(s, N, b_src, b_dst, bo0, bopi, bopp, delta, dv, so)
+        inter.update(nlp=nlp, delta_lp=delta_lp, dpil=dpil,
+                     delta_lpcorr=delta_lpcorr)
+
+        if lammps:
+            e_ang_node, e_pen_node, e_tcon_node = self._lammps_angle_terms(
+                s, N, b_src, b_dst, b_vec, b_r, bo0, delta, dv, dpi, nlp,
+                inter, fast=fast_bonds)
+            e_tor_node, e_fcon_node = self._lammps_torsion_terms(
+                s, N, b_src, b_dst, b_vec, b_r, b_shift, bo0, bopi, delta,
+                inter, fast=fast_bonds)
+            e_hb_node = self._lammps_hbond_terms(
+                s, N, src, dst, vec, r, b_src, b_dst, b_vec, b_r, bo0, inter, fast=fast_bonds)
+        else:
+            fast_terms = self._fast_terms(data)
+            # valence angles (+ penalty + three-body conjugation)
+            amask = b_r < self.rcuta_pair[bsi, bsj]
+            e_ang_node, e_pen_node, e_tcon_node = self._angle_terms(
+                s, N, b_src, b_dst, b_vec, b_r, amask, bo, fbo, delta, dv, dpi,
+                nlp, inter, fast=fast_terms)
+
+            # torsions (+ four-body conjugation)
+            e_tor_node, e_fcon_node = self._torsion_terms(
+                s, N, b_src, b_dst, b_vec, b_r, b_shift, amask, bo, bopi, fbo,
+                delta, inter, fast=fast_terms)
+
+            # hydrogen bonds
+            e_hb_node = self._hbond_terms(s, N, src, dst, vec, r, b_src, b_dst,
+                                          b_vec, b_r, amask, bo0, fhb, inter, fast=fast_terms)
+
+        ke = LAMMPS_C_ELE * KCAL_TO_EV if lammps else KE
+        if self._fast_nonbonded(data):
+            e_vdw_node, e_coul_node = self._fast_pairs(
+                data.pos, data.cell, data.batch, src, dst, data.cell_shifts if data.cell is not None else None, s,
+                q, data.model_dtype)
+            return self._finish(data, s, q, inter, e_vdw_node, e_coul_node, delta, nlp,
+                                (e_bond_node, e_lone_node, e_over_node, e_under_node, e_ang_node, e_pen_node,
+                                 e_tcon_node, e_tor_node, e_fcon_node, e_hb_node))
+        # van der Waals + Coulomb on the pairs once each (src <= dst; an atom's own images keep both
+        # directions at half weight), half of each energy to each atom
+        once = (src <= dst).nonzero()[:, 0]
+        h_src, h_dst = src.index_select(0, once), dst.index_select(0, once)
+        h_r, h_tap, h_rth = r.index_select(0, once), tap.index_select(0, once), rth.index_select(0, once)
+        h_si, h_sj = si.index_select(0, once), sj.index_select(0, once)
+        weight = torch.where(h_src == h_dst, 0.5, 1.0).to(h_r.dtype)
+        rvdw2 = 2.0 * self._pair("rvdw")[h_si, h_sj]
+        if lammps and self.vdw_type == 2:
+            f13 = h_r
+        else:
+            f13 = (h_r ** P["vdw1"]
+                   + (1.0 / self._comb("gammaw")[h_si, h_sj]) ** P["vdw1"]) \
+                ** (1.0 / P["vdw1"])
+        expvdw1 = torch.exp(0.5 * self._pair("alfa")[h_si, h_sj]
+                            * (1.0 - f13 / rvdw2))
+        evdw_e = h_tap * self._pair("Devdw")[h_si, h_sj] * (expvdw1 ** 2 - 2.0 * expvdw1)
+        if lammps and self.vdw_type in (2, 3):
+            evdw_e = evdw_e + h_tap * self._inner_wall(h_r, h_si, h_sj)
+        ecoul_e = h_tap * ke * q[h_dst] * q[h_src] / h_rth
+        h_vdw, h_coul = 0.5 * weight * evdw_e, 0.5 * weight * ecoul_e
+        e_vdw_node = scatter_sum(h_vdw, h_src, N) + scatter_sum(h_vdw, h_dst, N)
+        e_coul_node = scatter_sum(h_coul, h_src, N) + scatter_sum(h_coul, h_dst, N)
+        inter.update(f13=f13, evdw=evdw_e, ecoul=ecoul_e)
+
+        return self._finish(data, s, q, inter, e_vdw_node, e_coul_node, delta, nlp,
+                            (e_bond_node, e_lone_node, e_over_node, e_under_node, e_ang_node, e_pen_node,
+                             e_tcon_node, e_tor_node, e_fcon_node, e_hb_node))
+
+    def _atom_terms(self, s, N, b_src, b_dst, bo0, bopi, bopp, delta, dv, so) -> tuple:
+        """The lone-pair, over- and under-coordination energies per atom from the corrected bond orders of
+        the bond list (a bond of order zero adds nothing), with ``so`` the per-atom sum of
+        ``ovun1 Desi BO``; also ``nlp``, ``delta_lp``, ``dpil`` and ``delta_lpcorr``."""
+        P = self.params
+        lammps = self.conventions == "lammps"
         vale, val = P["vale"][s], P["val"][s]
         if lammps:
             # LAMMPS counts lone pairs from the truncated half electron
@@ -1063,7 +1228,7 @@ class ReaxFF(InteratomicPotential):
             # over-coordination term, neither their own nor as neighbors
             light = (self.mass[s] <= 21.0).to(delta.dtype)
             dlp_temp = light * delta_lp
-            dpil = scatter_sum((dv[b_src] - light[b_dst] * dlp_temp[b_src])
+            dpil = scatter_sum((gather_rows(dv, b_src) - light[b_dst] * gather_rows(dlp_temp, b_src))
                                * (bopi + bopp), b_dst, N)
             lpcorr = light * dlp_temp \
                 / (1.0 + P["ovun3"] * guarded_exp(P["ovun4"] * dpil))
@@ -1082,53 +1247,70 @@ class ReaxFF(InteratomicPotential):
         eu1 = torch.sigmoid(P["ovun2"][s] * delta_lpcorr)
         eu2 = 1.0 / (1.0 + P["ovun7"] * guarded_exp(P["ovun8"] * dpil))
         e_under_node = -P["ovun5"][s] * (1.0 - expeu1) * eu1 * eu2
-        inter.update(nlp=nlp, delta_lp=delta_lp, dpil=dpil,
-                     delta_lpcorr=delta_lpcorr)
+        return e_lone_node, e_over_node, e_under_node, nlp, delta_lp, dpil, delta_lpcorr
 
-        if lammps:
-            e_ang_node, e_pen_node, e_tcon_node = self._lammps_angle_terms(
-                s, N, b_src, b_dst, b_vec, b_r, bo0, delta, dv, dpi, nlp,
-                inter)
-            e_tor_node, e_fcon_node = self._lammps_torsion_terms(
-                s, N, b_src, b_dst, b_vec, b_r, b_shift, bo0, bopi, delta,
-                inter)
-            e_hb_node = self._lammps_hbond_terms(
-                s, N, src, dst, vec, r, b_src, b_dst, b_vec, b_r, bo0, inter)
-        else:
-            # valence angles (+ penalty + three-body conjugation)
-            amask = b_r < self.rcuta_pair[bsi, bsj]
-            e_ang_node, e_pen_node, e_tcon_node = self._angle_terms(
-                s, N, b_src, b_dst, b_vec, b_r, amask, bo, fbo, delta, dv, dpi,
-                nlp, inter)
+    def _fast_bond_corrections(self, s, b_src, b_dst, bop_si, bop_pi, bop_pp, deltap, dtype,
+                               act: Optional[Tensor] = None) -> tuple:
+        """``(bo0, bosi, bopi, bopp)`` per bond and the bond energy per atom on the kernel of
+        :mod:`.reaxff_kernels` (LAMMPS conventions; ``act`` the flags of the bonds that take part)."""
+        from .reaxff_fast import bond_corrections
+        P, pr = self.params, self._pair
+        table = torch.stack([self._comb("boc3"), self._comb("boc4"), self._comb("boc5"),
+                             (pr("ovcorr") >= 0.001).to(bop_si.dtype), (pr("corr13") >= 0.001).to(bop_si.dtype),
+                             pr("Desi"), pr("Depi"), pr("Depp"), pr("be1"), pr("be2")], -1)
+        return bond_corrections(b_src, b_dst, bop_si, bop_pi, bop_pp, deltap, s,
+                                torch.stack([P["val"], P["valboc"]], -1), table,
+                                torch.stack([P["boc1"].reshape(()), P["boc2"].reshape(())]), dtype, act)
 
-            # torsions (+ four-body conjugation)
-            e_tor_node, e_fcon_node = self._torsion_terms(
-                s, N, b_src, b_dst, b_vec, b_r, b_shift, amask, bo, bopi, fbo,
-                delta, inter)
-
-            # hydrogen bonds
-            e_hb_node = self._hbond_terms(s, N, src, dst, vec, r, b_src, b_dst,
-                                          b_vec, b_r, amask, bo0, fhb, inter)
-
-        # van der Waals + Coulomb
-        rvdw2 = 2.0 * self._pair("rvdw")[si, sj]
-        if lammps and self.vdw_type == 2:
-            f13 = r
-        else:
-            f13 = (r ** P["vdw1"]
-                   + (1.0 / self._comb("gammaw")[si, sj]) ** P["vdw1"]) \
-                ** (1.0 / P["vdw1"])
-        expvdw1 = torch.exp(0.5 * self._pair("alfa")[si, sj]
-                            * (1.0 - f13 / rvdw2))
-        evdw_e = tap * self._pair("Devdw")[si, sj] * (expvdw1 ** 2 - 2.0 * expvdw1)
-        if lammps and self.vdw_type in (2, 3):
-            evdw_e = evdw_e + tap * self._inner_wall(r, si, sj)
+    def _fast_pairs(self, pos, cell, batch, src, dst, shifts, s, q, dtype, vdw1: Optional[float] = None,
+                    forces: bool = False) -> tuple:
+        """The van der Waals and Coulomb energies per atom of the directed pair list ``(src, dst)`` on the
+        kernel of :mod:`.reaxff_kernels` (its pairs ``src <= dst``, the ones beyond the cutoff inactive);
+        ``vdw1`` the shielding exponent as a number (read from the parameters without); ``forces`` the two
+        totals and their position gradient in one pass (:func:`~.reaxff_fast.nonbonded`)."""
+        from .reaxff_fast import nonbonded
+        from .reaxff_kernels import nonbonded_table
+        P = self.params
+        lammps = self.conventions == "lammps"
+        wall = lammps and self.vdw_type in (2, 3)
+        table = nonbonded_table(self._pair("rvdw"), self._pair("alfa"), self._pair("Devdw"), self._comb("gammaw"),
+                                self._comb("gamma"), P["vdw1"],
+                                *((self._comb("rcore2"), self._comb("acore2"), self._comb("ecore2")) if wall
+                                  else ()))
         ke = LAMMPS_C_ELE * KCAL_TO_EV if lammps else KE
-        ecoul_e = tap * ke * q[dst] * q[src] / rth
-        e_vdw_node = scatter_sum(0.5 * evdw_e, dst, N)
-        e_coul_node = scatter_sum(0.5 * ecoul_e, dst, N)
-        inter.update(f13=f13, evdw=evdw_e, ecoul=ecoul_e)
+        return nonbonded(pos, cell, batch, src, dst, shifts, s, q, table, dtype, ke, self.cutoff,
+                         float(P["vdw1"]) if vdw1 is None else vdw1, SAFETY, not (lammps and self.vdw_type == 2),
+                         wall, twice=self._twice() and not forces, forces=forces)
 
+    def _fast_terms(self, data: AtomicGraph) -> bool:
+        """Whether the terms with kernels run on them: ``use_fast`` on, a CUDA device with Triton, no
+        intermediates kept and, where they must be differentiable twice (:meth:`_twice`), no cell gradient (a
+        stress loss takes the reference terms)."""
+        from .classical_fast import fast_supported
+        if not self.use_fast or self.keep_intermediates:
+            return False
+        if not fast_supported(data.pos.device, data.model_dtype):
+            return False
+        return not (self._twice() and data.cell is not None and data.cell.requires_grad)
+
+    def _twice(self) -> bool:
+        """Whether the kernels run differentiable twice (:mod:`.reaxff_train`): gradients on and the model
+        training or a classical parameter trained (a force loss differentiates the forces once more)."""
+        return torch.is_grad_enabled() and (self.training or any(p.requires_grad for p in self.params.values()))
+
+    def _fast_nonbonded(self, data: AtomicGraph) -> bool:
+        """Whether the van der Waals and Coulomb pairs run on the kernel (:meth:`_fast_terms`, ``vdw1`` not
+        trained)."""
+        return self._fast_terms(data) and not self.params["vdw1"].requires_grad
+
+    def _finish(self, data: AtomicGraph, s: Tensor, q: Tensor, inter: dict, e_vdw_node: Tensor,
+                e_coul_node: Tensor, delta: Tensor, nlp: Tensor, terms: tuple) -> dict[str, Tensor]:
+        """The charge self energy, the atomic references and the outputs of an evaluation from its per-atom
+        terms."""
+        P = self.params
+        lammps = self.conventions == "lammps"
+        (e_bond_node, e_lone_node, e_over_node, e_under_node, e_ang_node, e_pen_node, e_tcon_node, e_tor_node,
+         e_fcon_node, e_hb_node) = terms
         # charge self energy + atomic reference
         e_self_node = q * (P["chi"][s] + q * P["mu"][s])
         if lammps:
@@ -1164,6 +1346,7 @@ class ReaxFF(InteratomicPotential):
         if self.keep_intermediates:
             self.intermediates = inter
         return out
+
 
     # blocks
     def _correction_factors(self, s: Tensor, b_src: Tensor, b_dst: Tensor,
@@ -1389,7 +1572,7 @@ class ReaxFF(InteratomicPotential):
         return pb("Desi") * bosi + pb("Depi") * bopi - pb("Depp") * bopp
 
     def _angle_terms(self, s, N, b_src, b_dst, b_vec, b_r, amask, bo, fbo,
-                     delta, dv, dpi, nlp, inter):
+                     delta, dv, dpi, nlp, inter, fast: bool = False):
         """Valence angle, penalty and three-body-conjugation energies.
 
         Angles ``i-j-k`` are every unordered pair of valence neighbors of a
@@ -1436,6 +1619,8 @@ class ReaxFF(InteratomicPotential):
             return zero, zero.clone(), zero.clone()
         e1, e2 = a_ids[e1_loc], a_ids[e2_loc]          # bonded-edge indices
         ai, ak = b_src[e1], b_src[e2]                   # end atoms i, k
+        if fast:
+            return self._fast_angles(s, N, b_dst, b_vec, b_r, bo, fbo, delta, dv, dpi, nlp, e1, e2, center, ai, ak)
 
         # geometry: r_ij, r_jk from the two edges; r_ik composed
         rij, rjk = b_r[e1], b_r[e2]
@@ -1504,7 +1689,7 @@ class ReaxFF(InteratomicPotential):
                 scatter_sum(etcon, center, N))
 
     def _torsion_terms(self, s, N, b_src, b_dst, b_vec, b_r, b_shift, amask,
-                       bo, bopi, fbo, delta, inter):
+                       bo, bopi, fbo, delta, inter, fast: bool = False):
         """Torsion and four-body-conjugation energies.
 
         Torsions ``i-j-k-l`` are enumerated around every valence bond
@@ -1568,6 +1753,15 @@ class ReaxFF(InteratomicPotential):
         e_c = a_ids[central[c2]]                        # bonded-edge indices
         e_i, e_l = a_ids[i2], a_ids[l_loc]
         ti, tj, tk, tl = b_src[e_i], b_dst[e_i], b_src[e_c], b_src[e_l]
+        if fast:
+            from .reaxff_fast import kernel_terms
+            tor = torch.stack([self._tor(n) for n in ("tor1", "V1", "V2", "V3", "cot1")], -1)
+            exptol = torch.exp(-P["cot2"] * (self.atol - 1.5) ** 2)
+            gen = torch.stack([P[n].reshape(()) for n in ("tor2", "tor3", "tor4", "cot2")] + [exptol.reshape(())])
+            e = kernel_terms("_torsions_nn_forward", (e_i, e_c, e_l, ti, tj, tk, tl),
+                             (b_vec, b_r, bo, bopi, fbo, s, delta - P["valang"][s], tor, gen), N, 2,
+                             (len(self.species),), b_r.dtype, twice=self._twice())
+            return e[:, 0], e[:, 1]
 
         v_ij = -b_vec[e_i]                              # x_i - x_j
         v_jk = b_vec[e_c]                               # x_j - x_k
@@ -1639,7 +1833,7 @@ class ReaxFF(InteratomicPotential):
         return scatter_sum(etor, tj, N), scatter_sum(efcon, tj, N)
 
     def _hbond_terms(self, s, N, src, dst, vec, r, b_src, b_dst, b_vec, b_r,
-                     amask, bo0, fhb, inter):
+                     amask, bo0, fhb, inter, fast: bool = False):
         """Hydrogen-bond energy over the ``X-H`` donor pairs and ``Z`` acceptors.
 
         The donor pair ``X-H`` is a valence bond; acceptors ``Z`` are any
@@ -1688,6 +1882,17 @@ class ReaxFF(InteratomicPotential):
             return zero
 
         hi, hj, hk = b_dst[d_e], b_src[d_e], src[a_e]  # X, H, Z
+        if fast:
+            from .reaxff_fast import kernel_terms
+            P = self.params
+            hb = torch.stack([P["hb_rohb"], P["hb_Dehb"], P["hb_hb1"], P["hb_hb2"]], -1)
+            gen = torch.tensor([self.hb_short, self.hb_long, 1.0 / (self.hb_long - self.hb_short) ** 3],
+                               dtype=r.dtype, device=r.device)
+            # only the acceptor edges in use (their gradient stays small)
+            e = kernel_terms("_hbonds_nn_forward", (d_e, torch.arange(a_e.shape[0], device=a_e.device), hi, hj, hk),
+                             (b_vec, b_r, bo0, fhb, vec[a_e], r[a_e], s, hb, gen), N, 1, (len(self.species),),
+                             r.dtype, twice=self._twice())
+            return e[:, 0]
         rij = b_r[d_e]
         rjk = r[a_e]
         v_ik = b_vec[d_e] + vec[a_e]                   # (x_i-x_j) + (x_j-x_k)
@@ -1740,8 +1945,17 @@ class ReaxFF(InteratomicPotential):
         """
         cand = (r <= LAMMPS_BOND_CUT) & self.has_bond[si, sj] & (src != dst)
         idx = torch.nonzero(cand, as_tuple=False)[:, 0]
-        rc, a, b = r[idx], si[idx], sj[idx]
+        e1, e2, e3 = self._lammps_channels(r[idx], si[idx], sj[idx])
+        keep = (e1 + e2 + e3) >= self.botol
+        bmask = torch.zeros_like(cand)
+        bmask[idx[keep]] = True
+        e1, e2, e3 = e1[keep], e2[keep], e3[keep]
+        return bmask, e1, e2, e3, e1 - self.botol, e2, e3
 
+    def _lammps_channels(self, rc: Tensor, a: Tensor, b: Tensor) -> tuple:
+        """The sigma, pi and double-pi exponentials ``exp(p1 (r / r0)^p2)`` of pairs at distances ``rc``
+        with the species ``a`` (first atom) and ``b`` (LAMMPS conventions: zero where a channel is off; the
+        sigma one times ``1 + botol``)."""
         def channel(on, radius, p1, p2):
             """``exp(p1 (r / radius)^p2)`` where the channel exists, else 0."""
             on = on[a, b]
@@ -1750,14 +1964,8 @@ class ReaxFF(InteratomicPotential):
             x = torch.where(on, x, torch.zeros_like(x))
             return torch.where(on, torch.exp(x), torch.zeros_like(x))
 
-        e1 = (1.0 + self.botol) * channel(self.si_on, "rosi", "bo1", "bo2")
-        e2 = channel(self.pi_on, "ropi", "bo3", "bo4")
-        e3 = channel(self.pp_on, "ropp", "bo5", "bo6")
-        keep = (e1 + e2 + e3) >= self.botol
-        bmask = torch.zeros_like(cand)
-        bmask[idx[keep]] = True
-        e1, e2, e3 = e1[keep], e2[keep], e3[keep]
-        return bmask, e1, e2, e3, e1 - self.botol, e2, e3
+        return ((1.0 + self.botol) * channel(self.si_on, "rosi", "bo1", "bo2"),
+                channel(self.pi_on, "ropi", "bo3", "bo4"), channel(self.pp_on, "ropp", "bo5", "bo6"))
 
     def _triple_bond_stabilization(self, s, N, b_src, b_dst, bo0, delta, dv):
         """Terminal triple-bond stabilization energy per atom (LAMMPS).
@@ -1789,9 +1997,9 @@ class ReaxFF(InteratomicPotential):
         if not self.triple_all:
             on = on & self.co_pair[s[b_dst], s[b_src]]
         exphu = torch.exp(-P["trip2"] * (bo0 - 2.5) ** 2)
-        exphua = guarded_exp(-P["trip4"] * (delta[b_dst] - bo0))
-        exphub = guarded_exp(-P["trip4"] * (delta[b_src] - bo0))
-        exphuov = guarded_exp(P["trip3"] * (dv[b_dst] + dv[b_src]))
+        exphua = guarded_exp(-P["trip4"] * (gather_rows(delta, b_dst) - bo0))
+        exphub = guarded_exp(-P["trip4"] * (gather_rows(delta, b_src) - bo0))
+        exphuov = guarded_exp(P["trip3"] * (gather_rows(dv, b_dst) + gather_rows(dv, b_src)))
         e = P["trip1"] * exphu / (1.0 + 25.0 * exphuov) * (exphua + exphub)
         return scatter_sum(0.5 * torch.where(on, e, torch.zeros_like(e)),
                            b_dst, N)
@@ -1818,7 +2026,7 @@ class ReaxFF(InteratomicPotential):
             Per-atom energy (counted on both carbons of a bond).
         """
         kc2 = self.params["kc2"]
-        di = dv[b_dst]
+        di = gather_rows(dv, b_dst)
         vov3 = bo0 - di - 0.04 * di ** 4
         on = (self.is_carbon[s[b_dst]] & self.is_carbon[s[b_src]]
               & (vov3 > 3.0) & (kc2 > 0.001 * KCAL_TO_EV))
@@ -1849,7 +2057,7 @@ class ReaxFF(InteratomicPotential):
         return torch.where(on, e, torch.zeros_like(e))
 
     def _lammps_angle_terms(self, s, N, b_src, b_dst, b_vec, b_r, bo0, delta,
-                            dv, dpi, nlp, inter):
+                            dv, dpi, nlp, inter, fast: bool = False):
         """Valence angle, penalty and three-body conjugation, as in LAMMPS.
 
         Every atom, hydrogen included, is an angle center; an angle needs
@@ -1897,6 +2105,9 @@ class ReaxFF(InteratomicPotential):
         if center.numel() == 0:
             return zero, zero.clone(), zero.clone()
         sa_i, sa_j, sa_k = s[ai], s[center], s[ak]
+        if fast:
+            return self._fast_angles(s, N, b_dst, b_vec, b_r, bo0, None, delta, dv, dpi, nlp, e1, e2, center, ai,
+                                     ak)
 
         def pa(name):
             """Gather angle parameter ``name`` per angle."""
@@ -1959,8 +2170,91 @@ class ReaxFF(InteratomicPotential):
         return (scatter_sum(eang, center, N), scatter_sum(epen, center, N),
                 scatter_sum(etcon, center, N))
 
+    def _fast_angles(self, s, N, b_dst, b_vec, b_r, bo, fbo, delta, dv, dpi, nlp, e1, e2, center, ai,
+                     ak, act: Optional[Tensor] = None) -> tuple:
+        """The angle, penalty and three-body conjugation energies per atom of the angles ``(e1, e2)`` on the
+        kernel of :mod:`.reaxff_kernels`, the per-atom factors as in :meth:`_lammps_angle_terms` (``fbo`` None,
+        ``bo`` the corrected bond orders) or :meth:`_angle_terms` (``bo`` the cut bond orders, ``fbo`` their
+        tapers); ``act`` the flags of the angles that take part."""
+        from .reaxff_fast import kernel_terms
+        P = self.params
+        nn = fbo is not None
+        dang = delta - P["valang"][s]
+        if nn:
+            pbo = torch.exp(scatter_sum(-((bo + SAFETY) ** 8), b_dst, N))
+            sbo = dpi - (1.0 - pbo) * (dang + P["val8"] * nlp)
+        else:
+            pbo = torch.exp(scatter_sum(-(bo ** 8), b_dst, N))
+            delta_e = delta - P["vale"][s]
+            vlpex = delta_e - 2.0 * torch.trunc(delta_e / 2.0)
+            vlpadj = torch.where(vlpex >= 0.0, torch.zeros_like(nlp), nlp)
+            sbo = dpi - (1.0 - pbo) * (dang + P["val8"] * vlpadj)
+        ok1 = (sbo > 0.0) & (sbo <= 1.0)
+        s1 = torch.where(ok1, sbo, torch.ones_like(sbo))
+        ok2 = (sbo > 1.0) & (sbo < 2.0)
+        s2 = torch.where(ok2, 2.0 - sbo, torch.ones_like(sbo))
+        top = sbo > 2.0 if nn else sbo >= 2.0
+        sbo2 = (torch.where(ok1, s1 ** P["val9"], torch.zeros_like(sbo))
+                + torch.where(ok2, 2.0 - s2 ** P["val9"], torch.zeros_like(sbo))
+                + 2.0 * top.to(sbo.dtype))
+        exp3 = guarded_exp(-P["pen3"] * dv)
+        exp4 = guarded_exp(P["pen4"] * dv)
+        f9 = (2.0 + exp3) / (1.0 + exp3 + exp4)
+        sig = torch.sigmoid(-P["coa2"] * (delta - P["valboc"][s]))
+        ang = torch.stack([self._ang(n) for n in ("val1", "theta0", "val4", "val7", "val2", "pen1", "coa1")], -1)
+        sp = torch.stack([P["val3"], P["val5"]], -1)
+        bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(b_r.dtype).eps)
+        # the bond-order offset and the angle unit: SAFETY and the degrees of a radian (ReaxFF-nn), the
+        # three-body cut and pi (LAMMPS)
+        consts = [SAFETY, 57.29577951] if nn else [LAMMPS_THB_CUT, LAMMPS_PI]
+        from .classical_kernels import _scalars
+        gen = torch.cat([torch.stack([P[n].reshape(()) for n in ("val6", "val10", "pen2", "coa3", "coa4")]),
+                         _scalars(tuple(consts + [bound]), b_r.device).to(b_r.dtype)])
+        e = kernel_terms("_angles_forward", (e1, e2, center, ai, ak),
+                         (b_vec, b_r, bo, bo if fbo is None else fbo, s, sbo2, dang, f9, sig, delta, ang, sp, gen),
+                         N, 3, (len(self.species),), b_r.dtype, {"NN": nn}, twice=self._twice(), act=act)
+        return e[:, 0], e[:, 1], e[:, 2]
+
+    def _fast_torsions(self, s, N, b_vec, b_r, bo0, bopi, delta, index: tuple, act: Optional[Tensor] = None,
+                       gate: Optional[float] = None) -> tuple:
+        """The torsion and four-body conjugation energies per atom of the torsions ``index`` (bonds ``i-j``,
+        ``j-k``, ``k-l``, atoms ``i, j, k, l``) on the kernel of :mod:`.reaxff_kernels` (LAMMPS conventions;
+        ``act`` the flags of the torsions that take part; ``gate`` the three-body cut the kernel tests their bond
+        orders against, with their 1-4 vectors)."""
+        from .reaxff_fast import kernel_terms
+        P = self.params
+        tor = torch.stack([self._tor(n) for n in ("tor1", "V1", "V2", "V3", "cot1")], -1)
+        from .classical_kernels import _scalars
+        gen = torch.cat([torch.stack([P[n].reshape(()) for n in ("tor2", "tor3", "tor4", "cot2")]),
+                         _scalars((LAMMPS_THB_CUT,), b_r.device).to(b_r.dtype)])
+        consts = None if gate is None else {"ACT": 2, "THB": float(gate)}
+        e = kernel_terms("_torsions_forward", index, (b_vec, b_r, bo0, bopi, s, delta - P["valang"][s], tor, gen),
+                         N, 2, (len(self.species),), b_r.dtype, consts, twice=self._twice(), act=act)
+        return e[:, 0], e[:, 1]
+
+    def _fast_hbonds(self, s, N, b_vec, b_r, bo0, a_vec, a_r, index: tuple, act: Optional[Tensor] = None,
+                     off: Optional[Tensor] = None, gate: Optional[tuple] = None) -> Tensor:
+        """The hydrogen-bond energy per atom of the hydrogen bonds ``index`` (the X-H bond, the H...Z pair
+        among ``a_vec, a_r``, atoms X, H, Z) on the kernel of :mod:`.reaxff_kernels` (LAMMPS conventions;
+        ``act`` the flags of the hydrogen bonds that take part). With ``off`` (the hydrogen bonds' Cartesian
+        image offsets) ``a_vec`` holds the positions and the kernel forms the H...Z vectors itself; ``gate``
+        (with ``off``) the donor bond-order threshold and the squared H...Z cutoff the kernel tests them
+        against."""
+        from .reaxff_fast import kernel_terms
+        rohb = self.params["hb_rohb"]
+        hb = torch.stack([torch.where(rohb > 0.0, rohb, torch.ones_like(rohb)), (rohb > 0.0).to(rohb.dtype),
+                          self.params["hb_Dehb"], self.params["hb_hb1"], self.params["hb_hb2"]], -1)
+        pos = off is not None
+        consts = {"POS": pos}
+        if gate is not None:
+            consts.update(ACT=2, HBT=float(gate[0]), HBL2=float(gate[1]), SAFE=SAFETY)
+        e = kernel_terms("_hbonds_forward", index, (b_vec, b_r, bo0, a_vec, a_r, s, hb, a_vec if off is None else off),
+                         N, 1, (len(self.species),), b_r.dtype, consts, twice=self._twice(), act=act,
+                         keep=("ev_ptr", "off_ptr") if pos else ())
+        return e[:, 0]
+
     def _lammps_torsion_terms(self, s, N, b_src, b_dst, b_vec, b_r, b_shift,
-                              bo0, bopi, delta, inter):
+                              bo0, bopi, delta, inter, fast: bool = False):
         """Torsion and four-body conjugation energies, as in LAMMPS.
 
         Torsions ``i-j-k-l`` are enumerated around every bond ``j-k`` of any
@@ -2026,6 +2320,9 @@ class ReaxFF(InteratomicPotential):
             x[keep] for x in (e_c, e_i, e_l, ti, tj, tk, tl, b1, b2, b3))
         if e_c.numel() == 0:
             return zero, zero.clone()
+        if fast:
+            # the torsions on the kernel of reaxff_kernels (the bond vectors as in b1, b2, b3 above)
+            return self._fast_torsions(s, N, b_vec, b_r, bo0, bopi, delta, (e_i, e_c, e_l, ti, tj, tk, tl))
         rij, rjk, rkl = b_r[e_i], b_r[e_c], b_r[e_l]
         c_ijk = -(b1 * b2).sum(dim=1) / (rij * rjk)
         c_jkl = -(b2 * b3).sum(dim=1) / (rjk * rkl)
@@ -2069,7 +2366,7 @@ class ReaxFF(InteratomicPotential):
         return scatter_sum(etor, tj, N), scatter_sum(efcon, tj, N)
 
     def _lammps_hbond_terms(self, s, N, src, dst, vec, r, b_src, b_dst, b_vec,
-                            b_r, bo0, inter):
+                            b_r, bo0, inter, fast: bool = False):
         """Hydrogen-bond energy, as in LAMMPS.
 
         Hydrogen atoms (``hbond`` flag 1) bonded to a donor ``X`` (flag 2)
@@ -2117,6 +2414,11 @@ class ReaxFF(InteratomicPotential):
         if d_e.numel() == 0:
             return zero
         hx, hh, hz = b_src[d_e], b_dst[d_e], src[a_e]  # X, H, Z
+        if fast:
+            # the hydrogen bonds on the kernel of reaxff_kernels, only the acceptor edges in use (their
+            # gradient stays small)
+            return self._fast_hbonds(s, N, b_vec, b_r, bo0, vec[a_e], r[a_e],
+                                     (d_e, torch.arange(a_e.shape[0], device=a_e.device), hx, hh, hz))
         r_hz = r[a_e]
         cos_th = (b_vec[d_e] * vec[a_e]).sum(dim=1) / (b_r[d_e] * r_hz)
         sin4 = (0.5 - 0.5 * torch.clamp(cos_th, -1.0, 1.0)) ** 2
@@ -2143,7 +2445,8 @@ class ReaxFF(InteratomicPotential):
 
         Solves, for each structure, the electronegativity-equalization
         system ``2 mu_i q_i + sum_j H_ij q_j + chi_i = lambda`` under the
-        total-charge constraint, with the tapered, gamma-shielded Coulomb
+        total-charge constraint (densely, or by conjugate gradients for structures of more than
+        ``EEM_DENSE_MAX`` atoms), with the tapered, gamma-shielded Coulomb
         kernel ``H_ij = ke Tap(r) / (r^3 + gamma_ij^-3)^(1/3)`` accumulated
         over the nonbonded neighbor list (periodic images included). This is
         the variational minimum of ``E_self + E_Coulomb``, so making the
@@ -2178,6 +2481,15 @@ class ReaxFF(InteratomicPotential):
         mu = P["mu"][s]
         total = getattr(data, "total_charge", None)
 
+        if int(data.n_atoms.max()) > EEM_DENSE_MAX:
+            # large structures: the matrix-free solve (its derivative through the same solve)
+            B = data.num_graphs
+            if total is None:
+                tot = torch.zeros(B, dtype=dtype, device=device)
+            else:
+                tot = (total.to(device=device, dtype=dtype).reshape(-1) if torch.is_tensor(total)
+                       else torch.full((B,), float(total), dtype=dtype, device=device))
+            return _EEMSolve.apply(gterm, 2.0 * mu, -chi, tot, src, dst, data.batch, B, self._fast_terms(data))
         q = torch.zeros(data.num_nodes, dtype=dtype, device=device)
         offsets = torch.cumsum(data.n_atoms, 0) - data.n_atoms
         batch_dst = data.batch[dst]

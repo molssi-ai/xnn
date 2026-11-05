@@ -129,13 +129,39 @@ class ExpNormalSmearing(nn.Module):
             self.register_buffer("betas", torch.empty(n_rbf))
         self.reset_parameters()
 
-    def reset_parameters(self) -> None:
-        """Reset the centers and widths to their default values in place."""
+    def _initial(self, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+        """The default centers and widths, evaluated in ``dtype``."""
         first_center = math.exp(self.cutoff_lower - self.cutoff_upper)
         shared_width = (2.0 / self.n_rbf * (1.0 - first_center)) ** -2
+        return (torch.linspace(first_center, 1.0, self.n_rbf, dtype=dtype),
+                torch.full((self.n_rbf,), shared_width, dtype=dtype))
+
+    def reset_parameters(self) -> None:
+        """Reset the centers and widths to their default values in place."""
+        means, betas = self._initial(self.means.dtype)
         with torch.no_grad():
-            self.means.copy_(torch.linspace(first_center, 1.0, self.n_rbf))
-            self.betas.fill_(shared_width)
+            self.means.copy_(means)
+            self.betas.copy_(betas)
+
+    def exact_constants(self) -> bool:
+        """Rebuild fixed float64 centers and widths exactly.
+
+        A float32 build or checkpoint leaves them float32-rounded; trainable
+        ones are learned values and stay, as do stored ones that are not the
+        defaults up to rounding. See
+        :func:`~xnn.common.models.constants.exact_float64_constants`.
+
+        Returns
+        -------
+        bool
+            Whether any value changed.
+        """
+        from ..models.constants import restore_exact
+        if isinstance(self.means, nn.Parameter) or self.means.dtype != torch.float64:
+            return False
+        means, betas = self._initial(torch.float64)
+        changed = restore_exact(self.means, means)
+        return restore_exact(self.betas, betas) or changed
 
     def forward(self, r: Tensor) -> Tensor:
         """Expand distances onto the basis.

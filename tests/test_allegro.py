@@ -5,6 +5,8 @@ TorchScript/LAMMPS export, upstream yaml key translation, and -- when the
 original ``allegro`` package is installed -- machine-precision
 weight-transplant fidelity to it.
 """
+import os
+
 import numpy as np
 import pytest
 import torch
@@ -181,3 +183,171 @@ def test_fidelity_vs_original_allegro():
         structure_to_graph({"pos": pos, "atomic_numbers": Z}, CUT))
     assert abs(float(ox["energy"]) - float(E_m)) < 1e-12
     assert (ox["forces"].detach() - F_m).abs().max() < 1e-12
+
+
+def test_fast_support_needs_cuda():
+    from xnn.gnn.fast.allegro import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+
+
+def _check_fast_contract(device):
+    from e3nn import o3
+
+    from xnn.gnn.fast.allegro_kernels import contract
+    from xnn.gnn.models.allegro import _Contracter
+    irs = [o3.Irrep("0e"), o3.Irrep("1o"), o3.Irrep("2e")]
+    instr = [(i1, i2, ir) for i1, a in enumerate(irs) for i2, b in enumerate(irs[:2])
+             for ir in a * b if ir.l <= 2]
+    tp = _Contracter(irs, irs[:2], instr).to(device)
+    k, i, j = torch.tensor(tp.__dict__["_pattern"][0], device=device).unbind(1)
+    c = tp._w3j[k, i, j]
+    gen = torch.Generator().manual_seed(4)
+    x = torch.randn(13, 9, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+    y = torch.randn(13, 4, dtype=torch.float64, generator=gen).to(device).requires_grad_(True)
+
+    def f(x, y):
+        return contract(x, y, c, tp.__dict__["_pattern"])
+
+    with torch.no_grad():
+        expect = torch.einsum("kij,ri,rj->rk", tp._w3j, x, y)
+        assert torch.allclose(f(x, y), expect, rtol=0, atol=1e-13)
+    assert torch.autograd.gradcheck(f, (x, y))
+    assert torch.autograd.gradgradcheck(f, (x, y))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_contract_gradients():
+    """Values and every first and second derivative of the sparse contraction."""
+    pytest.importorskip("triton")
+    _check_fast_contract("cuda")
+
+
+def test_fast_contract_gradients_interpreted():
+    """The same under Triton's interpreter (chosen by conftest.py on machines without CUDA)."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    _check_fast_contract("cpu")
+
+
+def test_fast_contract_unused_components_interpreted():
+    """Under Triton's interpreter, a coupling with an output component and an operand component in
+    no nonzero entry gives zero rows and zero gradients there, as the dense contraction does."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.allegro_kernels import contract
+    pattern = (((0, 0, 0), (0, 1, 1), (1, 1, 0)), (3, 3, 2))
+    c = torch.tensor([0.5, -1.25, 2.0], dtype=torch.float64)
+    dense = torch.zeros(3, 3, 2, dtype=torch.float64)
+    for t, (k, i, j) in enumerate(pattern[0]):
+        dense[k, i, j] = c[t]
+    gen = torch.Generator().manual_seed(5)
+    x = torch.randn(7, 3, dtype=torch.float64, generator=gen).requires_grad_(True)
+    y = torch.randn(7, 2, dtype=torch.float64, generator=gen).requires_grad_(True)
+
+    def f(x, y):
+        return contract(x, y, c, pattern)
+
+    with torch.no_grad():
+        out = f(x, y)
+        assert torch.allclose(out, torch.einsum("kij,ri,rj->rk", dense, x, y), rtol=0, atol=1e-14)
+        assert torch.equal(out[:, 2], torch.zeros(7, dtype=torch.float64))
+    gx, gy = torch.autograd.grad(f(x, y).sum(), (x, y))
+    assert torch.equal(gx[:, 2], torch.zeros(7, dtype=torch.float64))
+    assert torch.autograd.gradcheck(f, (x, y), fast_mode=True)
+    assert torch.autograd.gradgradcheck(f, (x, y), fast_mode=True)
+
+
+def test_channel_weighter_scales_unless_prescaled():
+    """A weighter with ``alpha != 1`` scales the weights itself, unless they come prescaled."""
+    from e3nn import o3
+
+    from xnn.gnn.models.allegro import _ChannelWeighter
+    irreps = o3.Irreps("1x0e+1x1o+1x2e")
+    weighter = _ChannelWeighter(irreps, 3, alpha=0.25)
+    gen = torch.Generator().manual_seed(2)
+    attr = torch.randn(4, irreps.dim, dtype=torch.float64, generator=gen)
+    weights = torch.randn(4, weighter.weight_numel, dtype=torch.float64, generator=gen)
+    expect = attr[:, None, :] * (0.25 * weights.view(4, 3, 3)).repeat_interleave(
+        torch.tensor([1, 3, 5]), dim=-1)
+    assert torch.allclose(weighter(attr, weights), expect, rtol=0, atol=1e-15)
+    assert torch.allclose(weighter(attr, 0.25 * weights, True), expect, rtol=0, atol=1e-15)
+
+
+def test_fast_path_training_interpreted(monkeypatch):
+    """Under Triton's interpreter, force training through the sparse kernels gives the reference's
+    energies, forces, stress and weight gradients."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.allegro as fast
+    monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    torch.manual_seed(6)
+    model = _build(num_layers=2, l_max=1, n_features=4)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model, compute_stress=True).train()(_graph(n=4, periodic=True))
+        assert all(tp.fast_active == use_fast for tp in model.tps)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = {k: out[k].detach() for k in ("energy", "forces", "stress")}
+        res[use_fast].update({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                              if p.grad is not None})
+    assert res[False].keys() == res[True].keys()
+    for name, ref in res[False].items():
+        err = (res[True][name] - ref).abs().max() / ref.abs().max().clamp_min(1e-30)
+        assert err < 1e-11, (name, float(err))
+
+
+def _fast_batch(dtype):
+    from xnn.common.data import collate
+    batch = collate([_graph(n=9, periodic=True), _graph(n=6, periodic=True)]).to("cuda")
+    batch.pos = batch.pos.to(dtype)
+    batch.cell = batch.cell.to(dtype)
+    return batch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("l_max", [1, 2])
+def test_fast_path_parity(dtype, l_max):
+    """The sparse tensor-product kernels give the reference energies, forces and stress."""
+    pytest.importorskip("triton")
+    torch.manual_seed(5)
+    model = _build(num_layers=3, l_max=l_max).to("cuda", dtype).eval()
+    wrapped = ForceStressOutput(model, compute_stress=True).eval()
+    out = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res = wrapped(_fast_batch(dtype))
+        assert all(tp.fast_active == use_fast for tp in model.tps)
+        out[use_fast] = {k: res[k].detach().double() for k in ("energy", "forces", "stress")}
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    for key, ref in out[False].items():
+        err = (out[True][key] - ref).abs().max() / ref.abs().max().clamp(min=1.0)
+        assert err < tol, (key, float(err))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_training(dtype):
+    """Force training through the sparse kernels gives the reference's weight gradients."""
+    pytest.importorskip("triton")
+    torch.manual_seed(6)
+    model = _build(num_layers=3).to("cuda", dtype)
+    grads = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast).train()
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(_fast_batch(dtype))
+        assert all(tp.fast_active == use_fast for tp in model.tps)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        grads[use_fast] = {name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                           if p.grad is not None}
+    assert grads[False].keys() == grads[True].keys()
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for name, g in grads[False].items():
+        err = (grads[True][name] - g).abs().max() / g.abs().max().clamp_min(1e-30)
+        assert err < tol, (name, float(err))

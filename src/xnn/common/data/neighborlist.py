@@ -104,7 +104,7 @@ def _n_repeats(cell: Tensor, cutoff: float, pbc: Tensor) -> list[int]:
     return reps
 
 
-def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
+def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction, full_list=True):
     """Neighbour list via vesin's cell list, or None when it does not apply.
 
     vesin returns exactly what the reference implementation below does -- the
@@ -139,6 +139,8 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
         Boolean periodicity flags of shape ``(3,)``.
     self_interaction : bool
         Whether self-edges were asked for; vesin cannot produce them.
+    full_list : bool, optional
+        Both directions of every pair (default), or each pair once.
 
     Returns
     -------
@@ -182,7 +184,7 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
             pos, box = pos.detach().cpu(), box.detach().cpu()
 
     def compute(points, lattice):
-        return VesinNeighborList(cutoff=cutoff, full_list=True).compute(
+        return VesinNeighborList(cutoff=cutoff, full_list=full_list).compute(
             points=points, box=lattice, periodic=not molecular, quantities="ijS")
 
     try:
@@ -207,6 +209,137 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction):
 
 
 _CPU_FALLBACK_WARNED = False
+
+
+def half_list(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
+              pbc: Optional[Tensor] = None) -> Optional[tuple]:
+    """vesin's half neighbor list: every pair within ``cutoff`` once, in either
+    order, with an atom's own periodic images, as ``((i, j), shift)``; ``None``
+    where vesin does not apply (see :func:`unique_pairs`).
+
+    Parameters
+    ----------
+    pos : Tensor
+        Cartesian positions of shape ``(N, 3)``.
+    cutoff : float
+        Neighbor cutoff radius.
+    cell : Tensor, optional
+        Lattice vectors as rows, of shape ``(3, 3)``.
+    pbc : Tensor, optional
+        Boolean periodicity flags of shape ``(3,)``.
+
+    Returns
+    -------
+    tuple of Tensor, or None
+        The atoms ``(2, M)`` and the integer image shifts ``(M, 3)``.
+    """
+    return _vesin_neighbor_list(pos, cutoff, cell, pbc, False, full_list=False)
+
+
+GRID_CPU_ATOMS = 4096
+
+
+def cell_grid(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
+              pbc: Optional[Tensor] = None) -> Optional[tuple]:
+    """The grid :func:`unique_pairs` searches: an orthorhombic cell, periodic on
+    every axis, with room for at least three cells of ``cutoff`` per axis, and
+    positions on a CUDA device with Triton, or on the CPU with at least
+    ``GRID_CPU_ATOMS`` atoms where the CPU kernels compile
+    (:mod:`xnn.common.cpu_kernels`; vesin's search is single-threaded).
+
+    Parameters
+    ----------
+    pos : Tensor
+        Cartesian positions of shape ``(N, 3)``.
+    cutoff : float
+        Neighbor cutoff radius.
+    cell : Tensor, optional
+        Lattice vectors as rows, of shape ``(3, 3)``.
+    pbc : Tensor, optional
+        Boolean periodicity flags of shape ``(3,)``.
+
+    Returns
+    -------
+    tuple or None
+        The cell's edges ``(3,)`` and the cells per axis (and, on a CPU, no
+        capacity and the cells per cutoff), or ``None`` where the pairs come from
+        vesin.
+    """
+    if cell is None or pbc is None or not bool(pbc.all()):
+        return None
+    if not pos.is_cuda:
+        from xnn.common import cpu_kernels
+        if pos.device.type != "cpu" or int(pos.shape[0]) < GRID_CPU_ATOMS or not cpu_kernels.available():
+            return None
+    try:
+        from .grid_pairs import grid_shape
+    except ImportError:
+        return None
+    rows = cell.detach().reshape(3, 3).double().cpu()
+    if bool((rows - torch.diag(torch.diagonal(rows))).abs().max() > 0):
+        return None
+    lengths = torch.diagonal(rows).abs().tolist()
+    # on a CPU, cells of half the cutoff where the cell has room for five per axis
+    shape = None if pos.is_cuda else grid_shape(lengths, cutoff, 2)
+    if shape is not None:
+        return torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape, None, 2
+    shape = grid_shape(lengths, cutoff)
+    return None if shape is None else (torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape)
+
+
+def unique_pairs(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
+                 pbc: Optional[Tensor] = None, half: Optional[tuple] = None) -> tuple[Tensor, Tensor, Tensor]:
+    """Every pair within ``cutoff`` once, as ``(i, k, shift)`` with ``i < k``, sorted
+    by ``i``.
+
+    The same pairs as the edges ``src < dst`` of :func:`build_neighbor_list`,
+    with the displacement ``pos[k] - pos[i] + shift @ cell``. vesin's half
+    list gives them directly, without the second direction of every pair;
+    without vesin they are filtered from the full list. An atom's own periodic
+    images are not pairs. In an orthorhombic cell on the GPU (:func:`cell_grid`)
+    a grid search finds them instead, sorted by ``i``, with one host read.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Cartesian positions of shape ``(N, 3)``.
+    cutoff : float
+        Neighbor cutoff radius.
+    cell : Tensor, optional
+        Lattice vectors as rows, of shape ``(3, 3)``.
+    pbc : Tensor, optional
+        Boolean periodicity flags of shape ``(3,)``.
+    half : tuple, optional
+        The :func:`half_list` of these positions, when already found.
+
+    Returns
+    -------
+    tuple of Tensor
+        ``i`` and ``k`` of shape ``(M,)`` and the integer image shifts
+        ``(M, 3)``.
+    """
+    if half is None:
+        grid = cell_grid(pos, cutoff, cell, pbc)
+        if grid is not None:
+            from .grid_pairs import grid_pairs
+            return grid_pairs(pos, cutoff, *grid)
+        half = half_list(pos, cutoff, cell, pbc)
+    if half is None:
+        edge_index, shifts = build_neighbor_list(pos, cutoff, cell, pbc)
+        a, b = edge_index[0], edge_index[1]
+        keep = (a < b).nonzero()[:, 0]
+    else:
+        (i, j), shifts = half
+        # each pair once in either order: put the smaller index first (the reversed
+        # displacement takes the negated shift) and drop an atom's own images
+        swap = i > j
+        a, b = torch.where(swap, j, i), torch.where(swap, i, j)
+        shifts = torch.where(swap[:, None], -shifts, shifts)
+        keep = (a != b).nonzero()[:, 0]
+    a, b, shifts = a[keep], b[keep], shifts[keep]
+    # by the first atom (stable on int32 keys, half the radix passes of int64)
+    order = torch.argsort(a.to(torch.int32), stable=True)
+    return a[order], b[order], shifts[order]
 
 
 def _warn_cpu_fallback(n_atoms: int, cutoff: float) -> None:

@@ -198,11 +198,14 @@ class EquivariantGNN(GNNPotential):
     @torch.jit.unused
     def _select_fast(self, num_edges: int, like: Tensor) -> None:
         """Switch the fast-path blocks on or off for one evaluation."""
+        import xnn.gnn.fast as fast
         from xnn.common.models.fast import fast_modules, select
-        from xnn.gnn.fast import AUTO_POLICY
         blocks = self.__dict__.get("_fast_blocks")
         if blocks is None:
             blocks = fast_modules(self)
             self.__dict__["_fast_blocks"] = blocks
         if blocks:
-            select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
+            # the model's measured crossovers, one per mode (evaluation, training)
+            names = getattr(type(self), "fast_policies", ("AUTO_POLICY", "AUTO_POLICY_TRAINING"))
+            policy = getattr(fast, names[1] if self.training else names[0])
+            select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)

@@ -22,7 +22,8 @@ You can list the force-field files that are available in your xnn installation:
    from xnn.ffnn.common import list_forcefields
 
    sorted(list_forcefields())
-   # ['CL&P', 'charmm22', 'dreiding', 'dreiding/X6', 'ff94', 'lopls', 'oplsaa',
+   # ['CL&P', 'amoeba-water-2003', 'amoebapro13', 'charmm22', 'dreiding', 'dreiding/X6', 'ff94',
+   #  'hippo-water-2021', 'lopls', 'oplsaa',
    #  'oplsaa+', 'oplsaa-1996', 'reaxff/CHLiOFSi_Yun_2017', ..., 'reaxff/CHO_cho_2008', ...]
 
 Among the force-field files shipped with xnn, ``oplsaa`` is the OPLS-AA
@@ -163,7 +164,9 @@ differences). The ReaxFF-nn's network weights have no place in a force-field
 file and stay in JSON. The ``write_ffield()`` writes in the ``ffield`` text
 format of LAMMPS's ``pair_style reaxff``. So, a ReaxFF field refit with
 ``conventions="lammps"`` (the default for classical fields) can run in LAMMPS
-without any changes.
+without any changes. To run OPLS, AMBER, CHARMM, DREIDING or classical ReaxFF
+in LAMMPS, :func:`~xnn.ffnn.models.write_lammps_input` writes the inputs for
+LAMMPS's own styles (see :ref:`howto-lammps`).
 
 The format in brief
 ===================

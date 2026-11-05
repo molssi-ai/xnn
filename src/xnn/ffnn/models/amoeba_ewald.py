@@ -103,12 +103,21 @@ def fused_active() -> bool:
     return _FUSED.get()
 
 
+def _compile_options() -> dict:
+    """The inductor options of the fused blocks: its combo kernels merge the independent small
+    kernels of a block (the valence terms, the frames) into shared launches, where this version
+    of PyTorch has them."""
+    import torch._inductor.config as inductor_config
+    return {"combo_kernels": True} if hasattr(inductor_config, "combo_kernels") else {}
+
+
 def fusable(fn):
     """Mark a pure function of per-pair tensors for the fused path.
 
     Inside :func:`fused` it runs through ``torch.compile`` with dynamic sizes,
     which turns its chain of small elementwise operations into a few generated
-    kernels in the forward and in the backward pass. The first fused call runs
+    kernels in the forward and in the backward pass (independent ones merged
+    into shared launches by the inductor's combo kernels). The first fused call runs
     eagerly, so evaluations that happen once never pay for the compilation.
     A compiled function has no double backward: the fused path serves
     evaluations with first derivatives (molecular dynamics, inference).
@@ -120,8 +129,12 @@ def fusable(fn):
         if torch.compiler.is_compiling() or not _FUSED.get():
             return fn(*args, **kwargs)
         if "compiled" not in state:
-            state["compiled"] = torch.compile(fn, dynamic=True)
+            state["compiled"] = torch.compile(fn, dynamic=True, options=_compile_options())
             return fn(*args, **kwargs)
+        if torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing():
+            # no compilation can run inside a CUDA-graph capture: the compiled code of an earlier
+            # call serves while its guards hold, the eager function otherwise
+            return torch._dynamo.run(fn)(*args, **kwargs)
         return state["compiled"](*args, **kwargs)
     return inner
 
@@ -187,6 +200,24 @@ def fft_mesh_size(n: int, minimum: int = 16) -> int:
     while not _fft_friendly(n):
         n += 1
     return n
+
+
+def mesh_rfftn(grid: Tensor) -> Tensor:
+    """``rfftn`` of the mesh groups ``(G, K1, K2, K3)`` over their three axes. On a CPU the groups go one at a
+    time: a batched transform runs MKL's threaded transforms inside a parallel loop over the groups, which starts
+    a second OpenMP team beside the first on every call."""
+    if grid.device.type == "cpu" and grid.shape[0] > 1:
+        return torch.stack([torch.fft.rfftn(g, dim=(0, 1, 2)) for g in grid])
+    return torch.fft.rfftn(grid, dim=(1, 2, 3))
+
+
+def mesh_irfftn(spectrum: Tensor, mesh: Sequence[int]) -> Tensor:
+    """The inverse of :func:`mesh_rfftn` onto the mesh ``mesh`` with ``norm="forward"`` (the influence function
+    carries the scaling), the groups one at a time on a CPU."""
+    s = tuple(int(k) for k in mesh)
+    if spectrum.device.type == "cpu" and spectrum.shape[0] > 1:
+        return torch.stack([torch.fft.irfftn(x, s=s, dim=(0, 1, 2), norm="forward") for x in spectrum])
+    return torch.fft.irfftn(spectrum, s=s, dim=(1, 2, 3), norm="forward")
 
 
 def pme_grid_size(lengths: Sequence[float], density: float = 1.2, minimum: int = 16) -> List[int]:
@@ -439,6 +470,89 @@ def _mesh_sizes(mesh: List[int], dtype: torch.dtype, device: torch.device) -> Te
     return _MODULI_CACHE[key]
 
 
+def mesh_influence(inv: Tensor, volume: Tensor, mesh: List[int], order: int, alpha: float, kind: str) -> Tensor:
+    """The influence function of structures with the inverse cells ``inv`` ``(G, 3, 3)`` and volumes ``volume``
+    ``(G,)`` on the half spectrum of the real FFT, ``(G, K_1, K_2, K_3 // 2 + 1)``, with the ``1 / (K_1 K_2 K_3)``
+    of the unscaled inverse transform folded in (``kind`` ``"coulomb"`` or ``"r6"``, see
+    :meth:`MeshPlan.influence`)."""
+    dtype, device = inv.dtype, inv.device
+    k1, k2, k3 = mesh
+    h3 = k3 // 2 + 1
+    axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
+    axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
+    moduli = _moduli(mesh, order, dtype, device)[:, :, :h3]
+    # the inverse transforms run unscaled (norm="forward"), so the 1 / (K1 K2 K3) of the
+    # inverse FFT is folded in here: one multiply fewer per transform
+    scale = (1.0 / volume)[:, None, None, None]
+
+    def kernel(frequencies):
+        grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
+        miller = torch.stack(grid, dim=-1)                                    # (K1, K2, H3, 3)
+        kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, inv)
+        k2sq = (kvec * kvec).sum(-1)                                           # (G, K1, K2, H3)
+        if kind == "coulomb":
+            m2 = k2sq / (4.0 * math.pi * math.pi)
+            safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
+            g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
+            return torch.where(m2 > 0, g, torch.zeros_like(g))
+        b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
+        f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
+        return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
+
+    g = kernel(axes)
+    # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
+    # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
+    # the full complex transform applies through its real part
+    flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
+               for a, k in zip(axes, (k1, k2, k3))]
+    if any(k % 2 == 0 for k in (k1, k2, k3)):
+        g = 0.5 * (g + kernel(flipped))
+    return g
+
+
+def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
+    """Bring the cell terms a step plan keeps for one mesh group (the ``influence_cache`` of
+    :class:`MeshPlan`: inverse cells, volumes, per-atom inverses and influence functions) to the cells
+    ``cells`` ``(G, 3, 3)``, in place, so that a recorded step that reads them follows a changed cell
+    (constant-pressure dynamics). ``batch`` gives the structure of every atom of the group. Reads the cells
+    on the host; returns whether they had changed.
+
+    Parameters
+    ----------
+    cache : dict
+        The cache of the group.
+    cells : Tensor
+        Lattice vectors as rows ``(G, 3, 3)``.
+    batch : Tensor
+        Structure of every atom ``(N,)``, from zero to ``G - 1``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the kept terms described other cells and were recomputed.
+    """
+    kept = cache.get("cell")
+    if kept is None:
+        return False
+    cells = cells.detach().to(kept.dtype)
+    if torch.equal(kept, cells):
+        return False
+    with torch.no_grad():
+        inv = torch.linalg.inv_ex(cells)[0]
+        volume = cell_volume(cells)
+        for key, value in cache.items():
+            if isinstance(key, tuple) and key[0] == "geometry":
+                value[0].copy_(inv)
+                value[1].copy_(inv.index_select(0, batch))
+                value[2].copy_(volume)
+        for key, value in cache.items():
+            if isinstance(key, tuple) and key[0] != "geometry":
+                alpha, kind, mesh, order, _ = key
+                value.copy_(mesh_influence(inv, volume, list(mesh), order, alpha, kind))
+        kept.copy_(cells)
+    return True
+
+
 class MeshPlan:
     """The fixed particle-mesh data of a group of periodic structures on one mesh.
 
@@ -464,11 +578,23 @@ class MeshPlan:
         Mesh dimensions ``(K_1, K_2, K_3)``, shared by the structures.
     order : int
         B-spline order.
+    kernels : bool, optional
+        Run the spreading, interpolation and their adjoint as fused kernels
+        (:mod:`.amoeba_kernels`) on spline tables made once, instead of the
+        ``(N, p^3)`` stencils; the result is the same to round-off, with
+        first derivatives.
     """
 
     @region("mesh.plan")
-    def __init__(self, pos: Tensor, cells: Tensor, batch: Tensor, mesh: List[int], order: int):
+    def __init__(self, pos: Tensor, cells: Tensor, batch: Tensor, mesh: List[int], order: int,
+                 kernels: bool = False, influence_cache: Optional[dict] = None):
         dtype, device = pos.dtype, pos.device
+        # with ``kernels`` the spreading and interpolation run as fused kernels on the 1D splines
+        # (xnn.ffnn.models.amoeba_kernels) instead of forming the (N, p^3) stencils
+        self.kernels = bool(kernels)
+        # the influence functions of a structure whose cell does not move (a step plan's) are kept
+        # across evaluations in this dict, unless the cell carries a gradient
+        self._cache = influence_cache
         self.mesh = [int(mesh[0]), int(mesh[1]), int(mesh[2])]
         self.order = int(order)
         self.cells = cells
@@ -476,10 +602,39 @@ class MeshPlan:
         self.groups = int(cells.shape[0])
         k1, k2, k3 = self.mesh
         sizes = _mesh_sizes(self.mesh, dtype, device)
-        inv = torch.linalg.inv_ex(cells)[0]                                       # (G, 3, 3)
-        # gathers by index_select: their backward adds atomically, without sorting the indices
-        inv_n = inv.index_select(0, batch)
+        # the cell-only quantities (inverse, volume, per-atom inverse) of a cell that carries no gradient
+        # are kept with the influence functions across evaluations, for the cell they were made for: a
+        # changed cell brings them up to date in place (refresh_cell_terms), where a recorded step reads them
+        geometry = ("geometry", tuple(self.mesh), dtype)
+        fixed = influence_cache is not None and not cells.requires_grad
+        if fixed and not (cells.is_cuda and torch.cuda.is_current_stream_capturing()):
+            refresh_cell_terms(influence_cache, cells, batch)
+        if fixed and geometry in influence_cache:
+            inv, inv_n, self.volume = influence_cache[geometry]
+        else:
+            inv = torch.linalg.inv_ex(cells)[0]                                   # (G, 3, 3)
+            # gathers by index_select: their backward adds atomically, without sorting the indices
+            inv_n = inv.index_select(0, batch)
+            self.volume = cell_volume(cells)
+            if fixed:
+                influence_cache[geometry] = (inv.detach(), inv_n.detach(), self.volume.detach())
+                influence_cache.setdefault("cell", cells.detach().clone())
         u = vecmat(pos, inv_n) * sizes
+        self.jac = inv_n * sizes                                            # (N, 3, 3): J[n, beta, a]
+        self.inv = inv
+        self._stencils: dict = {}
+        self._influence: dict = {}
+        self._self: dict = {}
+        if self.kernels:
+            # the scaled coordinates keep their graph; the spline tables are constants of the
+            # evaluation, since the adjoint kernel returns the gradient with respect to ``u``
+            from . import amoeba_kernels as km
+            self.u = u
+            self.tables = km.spline_tables(u.detach(), self.mesh, self.order)
+            self.jac_g = (inv * sizes).contiguous()                          # (G, 3, 3): J of every structure
+            self._zero = self.tables[0].new_zeros(self.tables[0].shape[0])    # the absent charges of a pass
+            self._paired: Optional[tuple] = None
+            return
         base = torch.floor(u)
         self._splines = bspline_with_derivatives(u - base, self.order)      # (N, 3, p) each
         offsets = torch.arange(self.order, dtype=dtype, device=device)
@@ -487,12 +642,7 @@ class MeshPlan:
         n = pos.shape[0]
         self.flat = (batch[:, None, None, None] * (k1 * k2 * k3) + index[:, 0, :, None, None] * (k2 * k3)
                      + index[:, 1, None, :, None] * k3 + index[:, 2, None, None, :]).reshape(n, -1)
-        self.jac = inv_n * sizes                                            # (N, 3, 3): J[n, beta, a]
-        self.inv = inv
-        self.volume = cell_volume(cells)
-        self._stencils: dict = {}
-        self._influence: dict = {}
-        self._self: dict = {}
+        self.start = base.remainder(sizes).to(torch.long)                   # (N, 3): the stencil start
 
     def stencils(self, second: bool = False) -> dict:
         """The 3D spline weights ``"0"``, their first derivatives ``"a_"`` and, with
@@ -509,38 +659,15 @@ class MeshPlan:
         """The influence function of every structure on the half spectrum of the
         real FFT, ``(G, K_1, K_2, K_3 // 2 + 1)`` (see :func:`_influence`)."""
         key = (float(alpha), kind)
+        shared = (float(alpha), kind, tuple(self.mesh), self.order, self.cells.dtype)
+        if (key not in self._influence and self._cache is not None and shared in self._cache
+                and not self.cells.requires_grad):
+            self._influence[key] = self._cache[shared]
         if key not in self._influence:
-            dtype, device = self.cells.dtype, self.cells.device
-            k1, k2, k3 = self.mesh
-            h3 = k3 // 2 + 1
-            axes = [torch.fft.fftfreq(k, d=1.0 / k, dtype=dtype, device=device) for k in (k1, k2)]
-            axes.append(torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3])
-            moduli = _moduli(self.mesh, self.order, dtype, device)[:, :, :h3]
-            scale = ((k1 * k2 * k3) / self.volume)[:, None, None, None]
-
-            def kernel(frequencies):
-                grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
-                miller = torch.stack(grid, dim=-1)                            # (K1, K2, H3, 3)
-                kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, self.inv)
-                k2sq = (kvec * kvec).sum(-1)                                   # (G, K1, K2, H3)
-                if kind == "coulomb":
-                    m2 = k2sq / (4.0 * math.pi * math.pi)
-                    safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
-                    g = scale / math.pi * torch.exp(-(math.pi ** 2) * safe / (alpha * alpha)) / safe * moduli
-                    return torch.where(m2 > 0, g, torch.zeros_like(g))
-                b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
-                f = (1.0 - 2.0 * b * b) * torch.exp(-b * b) + 2.0 * b ** 3 * SQRT_PI * torch.erfc(b)
-                return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
-
-            g = kernel(axes)
-            # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
-            # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
-            # the full complex transform applies through its real part
-            flipped = [torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a
-                       for a, k in zip(axes, (k1, k2, k3))]
-            if any(k % 2 == 0 for k in (k1, k2, k3)):
-                g = 0.5 * (g + kernel(flipped))
+            g = mesh_influence(self.inv, self.volume, self.mesh, self.order, alpha, kind)
             self._influence[key] = g
+            if self._cache is not None and not self.cells.requires_grad:
+                self._cache[shared] = g.detach()
         return self._influence[key]
 
     @region("mesh.convolve")
@@ -550,8 +677,8 @@ class MeshPlan:
         k1, k2, k3 = self.mesh
         grid = torch.zeros(self.groups * k1 * k2 * k3, dtype=coeff.dtype, device=coeff.device)
         grid = grid.index_add(0, self.flat.reshape(-1), coeff.reshape(-1))
-        spectrum = torch.fft.rfftn(grid.view(self.groups, k1, k2, k3), dim=(1, 2, 3))
-        potential = torch.fft.irfftn(spectrum * influence, s=(k1, k2, k3), dim=(1, 2, 3)).reshape(-1)
+        spectrum = mesh_rfftn(grid.view(self.groups, k1, k2, k3))
+        potential = mesh_irfftn(spectrum * influence, (k1, k2, k3)).reshape(-1)
         return potential.index_select(0, self.flat.reshape(-1)).view(self.flat.shape)
 
     @region("mesh.potential")
@@ -560,18 +687,115 @@ class MeshPlan:
         """The mesh potential, its gradient and (with ``hessian``) its Hessian at the
         atoms of the group, for multipoles ``q``, ``d``, ``Q`` (any of which may be
         ``None``); see :func:`multipole_pme`."""
+        if self.kernels:
+            return self._potential_kernels(q, d, Q, alpha, hessian)
         st = self.stencils(second=hessian or Q is not None)
         coeff = stencil_coefficients(q, d, Q, self.jac, st)
         at = self.convolve(coeff, self.influence(alpha, "coulomb"))
         return stencil_potential(at, self.jac, st, hessian)
 
+    def _potential_kernels(self, q, d, Q, alpha: float, hessian: bool):
+        from . import amoeba_kernels as km
+        w, start = self.tables
+        n = w.shape[0]
+        zeros = w.new_zeros
+        order = 2 if Q is not None else (1 if d is not None else 0)
+        if not self.cells.requires_grad:
+            # the Jacobians are constants: Cartesian multipoles in, Cartesian derivatives out
+            phi, dphi, hess = km.MeshConvolutionCartesian.apply(
+                self.u, self._zero if q is None else q, d, Q, self.jac_g, self.batch, self.influence(alpha, "coulomb"),
+                w, start, self.mesh, self.groups, order, 2 if hessian else 1)
+            return phi, dphi, hess if hessian else None
+        c0 = zeros(n) if q is None else q
+        c1 = zeros(n, 3) if d is None else vecmat(d, self.jac)
+        if Q is None:
+            c2 = zeros(n, 6)
+        else:
+            Qf = matmul3(matmul3(self.jac.transpose(1, 2), Q), self.jac)    # J^T Q J
+            c2 = torch.stack([Qf[:, 0, 0], Qf[:, 1, 1], Qf[:, 2, 2], 2.0 * Qf[:, 0, 1], 2.0 * Qf[:, 0, 2],
+                              2.0 * Qf[:, 1, 2]], 1)
+        at = km.MeshConvolution.apply(self.u, c0, c1, c2, self.influence(alpha, "coulomb"), w, start, self.batch,
+                                      self.mesh, self.groups, order, 2 if hessian else 1)
+        phi = at[:, 0]
+        dphi = matvec(self.jac, at[:, 1:4])
+        if not hessian:
+            return phi, dphi, None
+        h = at[:, 4:10]
+        hf = torch.stack([torch.stack([h[:, 0], h[:, 3], h[:, 4]], -1), torch.stack([h[:, 3], h[:, 1], h[:, 5]], -1),
+                          torch.stack([h[:, 4], h[:, 5], h[:, 2]], -1)], -2)
+        return phi, dphi, matmul3(matmul3(self.jac, hf), self.jac.transpose(1, 2))
+
+    def field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float, guard: Optional[Tensor] = None) -> Tensor:
+        """``acc += coef d - grad(mesh potential of the dipoles d)`` in place, the mesh part of the
+        induction solve's field on the kernels (no graph: the solve runs without gradients; the
+        Jacobians constants). One spread, two FFTs and one gather, no intermediate per atom. With
+        the scalars ``guard`` of a conjugate-gradient iteration the spread and the gather do nothing
+        once the solve has converged."""
+        from . import amoeba_kernels as km
+        w, start = self.tables
+        k1, k2, k3 = self.mesh
+        grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh, self.groups, 1,
+                                   guard)
+        pot = mesh_irfftn(mesh_rfftn(grid) * self.influence(alpha, "coulomb"), (k1, k2, k3))
+        return km.gather_field(pot, self.jac_g, w, start, self.batch, self.mesh, acc, d, coef, guard)
+
+    def paired_field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float,
+                          guard: Optional[Tensor] = None) -> Tensor:
+        """:meth:`field_into` for two sets of dipoles stacked ``(2 N, 3)`` (the paired solve of the
+        induction): the second set spreads into a second batch of grids, both are transformed
+        together, and one gather serves both. The doubled tables are made once per plan."""
+        from . import amoeba_kernels as km
+        if self._paired is None or self._paired[0] != float(alpha):
+            w, start = self.tables
+            self._paired = (float(alpha), torch.cat([w, w]), torch.cat([start, start]),
+                            torch.cat([self.batch, self.batch + self.groups]),
+                            torch.cat([self.jac_g, self.jac_g]).contiguous(),
+                            self.influence(alpha, "coulomb").repeat(2, 1, 1, 1),
+                            self._zero.new_zeros(2 * self._zero.shape[0]))
+        _, w, start, batch, jac, influence, zero = self._paired
+        k1, k2, k3 = self.mesh
+        grid = km.spread_cartesian(zero, d, None, jac, w, start, batch, self.mesh, 2 * self.groups, 1, guard)
+        pot = mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
+        return km.gather_field(pot, jac, w, start, batch, self.mesh, acc, d, coef, guard)
+
+    def dipole_adjoint(self, mu: Tensor, lam: Tensor, alpha: float, scale: Optional[float] = None) -> Tensor:
+        """The gradient with respect to the scaled coordinates of ``sum(lam . E(mu))``, the mesh field of
+        dipoles ``mu`` probed by ``lam`` (the mesh part of the induction's implicit backward), as the
+        backward of the mesh convolution forms it but without the gathers that term does not need: the
+        potentials of ``mu`` and of the probes, then one adjoint kernel. With ``lam`` equal to ``scale``
+        times ``mu`` one spread and FFT pair serves both."""
+        from . import amoeba_kernels as km
+        w, start = self.tables
+        k1, k2, k3 = self.mesh
+        influence = self.influence(alpha, "coulomb")
+
+        def potential(d):
+            grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh,
+                                       self.groups, 1)
+            return mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
+
+        pot = potential(mu)
+        # the field is minus the potential's gradient: the probes are -lam
+        probe = -lam
+        psi = -scale * pot if scale is not None else potential(probe)
+        return km.adjoint_cartesian(pot, (self._zero, probe, None), 1, psi, (self._zero, mu, None), 1, self.jac_g,
+                                    w, start, self.batch, self.mesh)
+
     @region("mesh.dispersion")
     def dispersion(self, c: Tensor, alpha: float) -> Tensor:
         """Per-atom reciprocal energies of the ``-c_i c_j / R^6`` sum, self term
         included (see :func:`dispersion_pme`)."""
-        w0 = self.stencils()["0"]
-        at = self.convolve(c[:, None] * w0, self.influence(alpha, "r6"))
-        phi6 = (at * w0).sum(-1)
+        if self.kernels:
+            from . import amoeba_kernels as km
+            w, start = self.tables
+            n = w.shape[0]
+            influence = self.influence(alpha, "r6")
+            phi6 = km.MeshConvolution.apply(self.u, c, w.new_zeros(n, 3), w.new_zeros(n, 6), influence, w, start,
+                                            self.batch, self.mesh, self.groups, 0, 0)[:, 0]
+        else:
+            w0 = self.stencils()["0"]
+            at = self.convolve(c[:, None] * w0, self.influence(alpha, "r6"))
+            phi6 = (at * w0).sum(-1)
         return -(0.5 * c * phi6 - alpha ** 6 / 12.0 * c * c)
 
     def self_moments(self, alpha: float, kind: str, max_rank: int = 4):
@@ -843,4 +1067,5 @@ __all__ = ["fused", "fused_active", "fusable", "matvec", "vecmat", "matmul3", "e
            "pme_grid_size", "switching", "ewald_ladder",
            "bspline_with_derivatives", "multipole_pme", "multipole_reciprocal_energy",
            "multipole_self_energy", "self_field_coefficient", "dispersion_pme",
-           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "MeshPlan"]
+           "dispersion_real_kernel", "mesh_self_moments", "mesh_self_energy", "mesh_influence", "refresh_cell_terms",
+           "MeshPlan"]

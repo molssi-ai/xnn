@@ -17,6 +17,10 @@ import torch
 from torch import Tensor, nn
 
 from ..data import structure_to_graph
+from ..data.neighborlist import cell_grid, half_list, unique_pairs
+
+# the phases of the fixed-length solves, in the order of a plan's ``needed`` counts
+PHASES = ("forward", "adjoint")
 
 
 def plan_core(model: nn.Module) -> Optional[nn.Module]:
@@ -49,7 +53,27 @@ class StepGraph:
     converged solves; then the solves run the largest count of the last two
     steps plus a quarter, and on a GPU the step is recorded as a CUDA graph
     and replayed from then on. A step whose solves did not converge in that
-    length is evaluated again with converged solves, and the length raised.
+    length is evaluated again with converged solves, and the length raised
+    above the one that failed. Every ``shorten`` steps the lengths are
+    lowered to the largest count the solves needed in them plus a quarter,
+    when that is shorter, and the step is recorded again: the dipole
+    predictor keeps improving after the warm-up, and a length set then would
+    be paid at every step. A failed length stops being a floor after four
+    times ``shorten`` converged steps. The replayed step also tells whether
+    an atom will pass half the skin within two more steps like the last; the
+    pair list then still holds for the next step, and is built again at that
+    step's positions while it replays, on a second stream: in an orthorhombic
+    cell the whole of it (a grid search), otherwise all but vesin's neighbor
+    list, found before the replay starts. A rebuild costs no second replay
+    unless an atom moves further than predicted; a step evaluated again first
+    takes its dipoles back out of the predictors.
+
+    The cell may change from step to step (constant-pressure dynamics). A
+    changed cell brings the terms the plan keeps for it (the mesh influence
+    functions, inverse cells and volumes) up to date in place before the step
+    runs, so the recorded step follows it, and until the next pair list the
+    rebuild test also counts how far the cell has moved the periodic images.
+    The mesh and the Ewald coefficients stay those the plan was made with.
 
     Parameters
     ----------
@@ -66,6 +90,9 @@ class StepGraph:
     warmup : int, optional
         Steps with converged solves before the lengths are fixed, by default
         8 (it also fills the history of the dipole predictor).
+    shorten : int, optional
+        Steps between the checks that lower the lengths, by default 25; 0
+        keeps the lengths once fixed.
     capture : bool, optional
         Record the step as a CUDA graph on a GPU, by default ``True``.
     compute_dtype : torch.dtype, optional
@@ -78,7 +105,7 @@ class StepGraph:
     """
 
     def __init__(self, model: nn.Module, cutoff: float, skin: float = 1.0, margin: float = 1.2, warmup: int = 8,
-                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None):
+                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None, shorten: int = 25):
         # in training mode the forces would carry a graph for a force loss, and the
         # backward pass would solve the dipoles again
         self.model = model.eval()
@@ -87,7 +114,12 @@ class StepGraph:
             raise ValueError("the model records no step plans")
         self.cutoff, self.skin, self.margin = float(cutoff), float(skin), float(margin)
         self.warmup, self.capture, self.compute_dtype = int(warmup), bool(capture), compute_dtype
+        self.shorten = int(shorten)
         self.rebuilds = 0
+        # rebuilds found only after a replay, which then replays again
+        self.late_rebuilds = 0
+        # rebuilds done behind a replay
+        self.overlapped = 0
         self.full_rebuilds = 0
         self.recordings = 0
         self.replays = 0
@@ -102,10 +134,31 @@ class StepGraph:
         self.cuda_graph = None
         self.outputs: Optional[dict] = None
         self.flag: Optional[Tensor] = None
+        # the rebuild ahead of time: its flag, and the positions of the step before (graph buffers)
+        self.due: Optional[Tensor] = None
+        self.last: Optional[Tensor] = None
+        # with a plan that has them, both flags, the convergence and the iterations needed in one buffer
+        self.status: Optional[Tensor] = None
+        # a rebuild flagged by the last step, done during the next replay on the stream ``side``
+        self.pending = False
+        # the pairs are found by the grid search, all of it on the second stream
+        self.gridded = False
+        self._cell_key = None
+        self._grid_cache: Optional[tuple] = None
+        # the cell the pair list was built in, and the bound on the image shifts of its pairs (per axis)
+        # once the cell has changed since then (constant-pressure dynamics), else None
+        self.list_cell: Optional[Tensor] = None
+        self.shift_bound: Optional[Tensor] = None
+        self.side = None
+        self.staged = None
         self.stream = None
         self.steps = 0
         self.recent: collections.deque = collections.deque(maxlen=2)
         self.floor: dict = {}
+        # the iterations the fixed solves needed, per step since the last check, and the converged
+        # steps of fixed length since the last failed length
+        self.needed: list = []
+        self.settled = 0
 
     def __call__(self, struct: dict) -> dict:
         """Evaluate one step.
@@ -122,6 +175,9 @@ class StepGraph:
             ``energy``, ``forces`` and, when the model computes it, ``stress``.
         """
         pos, cell = struct["pos"], struct.get("cell")
+        # the caller's cell as given: while it stays the same tensor, unchanged, the grid of the
+        # staged pair search is not decided again (that reads the cell on the host)
+        self._cell_key = None if cell is None else (id(cell), getattr(cell, "_version", None))
         if self.plan is None or pos.shape != self.pos.shape or (cell is None) != (self.cell is None):
             self.reset()
             self._new_plan(struct)
@@ -129,12 +185,14 @@ class StepGraph:
             with torch.no_grad():
                 self.pos.copy_(pos)
                 if cell is not None:
-                    self.cell.copy_(cell.reshape(self.cell.shape))
+                    self._new_cell(cell.reshape(self.cell.shape))
             if self.cuda_graph is not None:
                 out = self._replay(struct)
                 if out is not None:
                     return out
-            elif bool(self.plan.outdated(self.pos)):
+            elif self.pending or bool(self.plan.outdated(self.pos)) or (
+                    self.shift_bound is not None and bool(self._cell_outdated())):
+                self.pending = False
                 self._refresh(struct)
         out = self._eager()
         self._record()
@@ -163,7 +221,52 @@ class StepGraph:
         self.plan = self.core.plan_step(graph, self.skin, capacity)
         self.plan.solve_iterations = lengths
         self.graph, self.pos, self.cell = graph, graph.pos, graph.cell
+        self.gridded = cell_grid(self.pos, self.cutoff + self.skin, *self._box()) is not None
         self.cuda_graph = None
+        self._listed()
+
+    def _listed(self) -> None:
+        """Note that the pair list was built at the current positions and cell."""
+        self.list_cell = None if self.cell is None else self.cell.detach().clone()
+        self.shift_bound = None
+
+    def _new_cell(self, cell: Tensor) -> None:
+        """Take the cell of a step into the buffer. A changed cell brings the cell terms the plan keeps
+        (the model's ``refresh_cell``) up to date in place, so the recorded step follows it, and from then
+        on until the next pair list the rebuild test also counts how far the cell moved the images."""
+        if torch.equal(self.cell, cell.to(self.cell.dtype)):
+            return
+        self.cell.copy_(cell)
+        self._grid_cache = None
+        refresh = getattr(self.core, "refresh_cell", None)
+        if callable(refresh):
+            refresh(self.plan, self.cell)
+        if self.shift_bound is None:
+            self.shift_bound = self._shift_bound()
+
+    def _shift_bound(self) -> Tensor:
+        """The largest image shift along each axis of a pair within ``cutoff + skin`` in the cell the pair
+        list was built in, ``(B, 3)`` (zero along an axis that is not periodic)."""
+        cell = self.list_cell.detach().reshape(-1, 3, 3)
+        cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
+                             torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
+        volume = (cell[:, 0] * cross[:, 0]).sum(-1).abs()
+        heights = volume[:, None] / torch.linalg.norm(cross, dim=-1)
+        bound = torch.floor((self.cutoff + self.skin) / heights) + 1.0
+        pbc = self.graph.pbc
+        if pbc is not None:
+            bound = bound * pbc.reshape(-1, 3).to(bound.dtype)
+        return bound
+
+    def _cell_outdated(self) -> Tensor:
+        """Whether a pair may have come within the cutoff unlisted since the pair list was built, counting
+        the cell's change: twice the largest step of an atom plus the largest move of an image of a pair
+        (its shifts times the change of the lattice vectors) above the skin, as a boolean on the device."""
+        cell = self.cell.detach().reshape(-1, 3, 3)
+        drift = (torch.linalg.norm(cell - self.list_cell.reshape(-1, 3, 3), dim=-1) * self.shift_bound).sum(-1).max()
+        step = self.pos.detach() - self.plan.reference.to(self.pos.dtype)
+        moved = (step * step).sum(-1).max().sqrt()
+        return 2.0 * moved + drift > self.skin
 
     def _refresh(self, struct: dict) -> bool:
         """Rebuild the pair list at the current positions: in place when it fits
@@ -172,6 +275,11 @@ class StepGraph:
         back into the cell (a jump of half a cell height or more) also changes
         the image shifts of its bonded vectors, and the whole plan is recorded."""
         self.rebuilds += 1
+        self._listed()
+        if (hasattr(self.core, "refresh_pairs") and self.graph.num_graphs == 1 and not self._jumped()
+                and self.core.refresh_pairs(self.graph, self.plan, self.cutoff + self.skin)):
+            # the pairs found once each at the plan's positions, without a graph
+            return True
         struct = dict(struct, pos=self.pos.detach().clone(),
                       cell=None if self.cell is None else self.cell.detach().clone())
         graph = self._graph(struct)
@@ -189,15 +297,86 @@ class StepGraph:
     def _jumped(self) -> bool:
         """Whether an atom moved by half the smallest height of its cell or more
         since the pairs were found."""
-        if self.cell is None:
-            return False
+        return self.cell is not None and bool(self._jump())
+
+    def _jump(self) -> Tensor:
+        """:meth:`_jumped` as a boolean on the device, for a cell."""
         cell = self.cell.detach().reshape(-1, 3, 3)
-        volume = torch.linalg.det(cell).abs()
         cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
                              torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
+        # the volume as a triple product: a determinant would factorize the cell
+        volume = (cell[:, 0] * cross[:, 0]).sum(-1).abs()
         height = (volume[:, None] / torch.linalg.norm(cross, dim=-1)).min()
         step = self.pos.detach() - self.plan.reference.to(self.pos.dtype)
-        return bool((step * step).sum(-1).max() >= (0.5 * height) ** 2)
+        return (step * step).sum(-1).max() >= (0.5 * height) ** 2
+
+    def _box(self) -> tuple:
+        """The cell and periodicity of the one structure, as the neighbor lists take them."""
+        cell = None if self.cell is None else self.cell.detach().reshape(-1, 3, 3)[0]
+        pbc = None if self.graph.pbc is None else self.graph.pbc.reshape(-1, 3)[0]
+        return cell, pbc
+
+    def _half(self) -> Optional[tuple]:
+        """What :meth:`_stage` needs before the replay is queued: vesin's half
+        neighbor list at the current positions, empty when the grid search finds
+        the pairs on the second stream, ``None`` when the pairs are found otherwise."""
+        if not (hasattr(self.core, "stage_pairs") and self.graph.num_graphs == 1 and self.pos.is_cuda):
+            return None
+        half = () if self.gridded else half_list(self.pos.detach(), self.cutoff + self.skin, *self._box())
+        if half is not None:
+            if self.side is None:
+                self.side = torch.cuda.Stream(self.pos.device)
+            # the positions and the list are ready before the replay is queued
+            self.side.wait_stream(torch.cuda.current_stream(self.pos.device))
+        return half
+
+    def _grid(self):
+        """:func:`cell_grid` of the staged search, kept while the caller's cell is unchanged."""
+        key = (self._cell_key, self.cutoff + self.skin)
+        if self._grid_cache is None or self._grid_cache[0] != key or self._cell_key is None:
+            self._grid_cache = (key, cell_grid(self.pos, self.cutoff + self.skin, *self._box()))
+        return self._grid_cache[1]
+
+    def _stage(self, half: tuple) -> tuple:
+        """The new pair list from ``half`` and whether an atom jumped, queued on the
+        second stream while the replay runs; the current stream waits for them."""
+        with torch.cuda.stream(self.side):
+            cut = self.cutoff + self.skin
+            grid = None if half else self._grid()
+            over = None
+            if grid is not None:
+                from ..data.grid_pairs import grid_pairs
+                # the grid's cell is three cutoffs wide: one image of every pair; the pairs go into
+                # buffers of the plan's capacity with their number on the device, so the host reads
+                # nothing while the replay runs (more pairs than fit count as a jump: a full rebuild)
+                pairs = grid_pairs(self.pos.detach(), cut, *grid, capacity=self.plan.capacity)
+                if len(pairs) == 4:
+                    over = pairs[3][0] > int(self.plan.capacity)
+                fresh = self.core.stage_pairs(self.graph, self.plan, pairs, single_image=True)
+            else:
+                fresh = self.core.stage_pairs(self.graph, self.plan,
+                                              unique_pairs(self.pos.detach(), cut, *self._box(), half=half or None))
+            jump = None if self.cell is None else self._jump()
+            if over is not None:
+                jump = over if jump is None else torch.logical_or(jump, over)
+        torch.cuda.current_stream(self.pos.device).wait_stream(self.side)
+        # kept until the next stage: the copies into the plan read it on the current stream
+        self.staged = fresh
+        return fresh, jump
+
+    def _rewind(self) -> None:
+        """Take the dipoles of a step evaluated again out of the predictors."""
+        if callable(getattr(self.core, "rewind_predictors", None)):
+            self.core.rewind_predictors()
+
+    def _rebuild(self, struct: dict, fresh) -> bool:
+        """Take the staged pair list ``fresh``, or rebuild as :meth:`_refresh`."""
+        if fresh is not None and self.plan.update(fresh, bonded=False):
+            self.rebuilds += 1
+            self.overlapped += 1
+            self._listed()
+            return True
+        return self._refresh(struct)
 
     def _run(self) -> dict:
         graph = self.graph
@@ -206,23 +385,89 @@ class StepGraph:
         return {key: out[key].detach() for key in ("energy", "forces", "stress") if key in out}
 
     def _replay(self, struct: dict) -> Optional[dict]:
+        rebuild, self.pending = self.pending, False
+        half = self._half() if rebuild else None
         self.cuda_graph.replay()
-        outdated, converged = torch.stack([self.flag, self.plan.converged]).tolist()
+        fresh = jump = None
+        if half is not None:
+            fresh, jump = self._stage(half)
+        # one read from the device: the rebuild flags, the convergence, the iterations needed and a jump
+        if self.status is not None:
+            status = self.status if jump is None else torch.cat([self.status, jump.reshape(1).to(torch.float64)])
+        else:
+            flags = [self.flag, self.due, self.plan.converged]
+            status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]
+                               + ([] if jump is None else [jump.reshape(1).to(torch.float64)]))
+        if self.shift_bound is not None:
+            # the cell has changed since the pair list: the test that counts the images' move too
+            status = torch.cat([status, self._cell_outdated().reshape(1).to(torch.float64)])
+        status = status.tolist()
+        n = int(self.plan.needed.numel())
+        (outdated, due, converged), needed = status[:3], status[3:3 + n]
+        if jump is not None and status[3 + n]:
+            # an atom wrapped back into the cell: its bonded image shifts change too
+            fresh = None
+        if self.shift_bound is not None and status[-1]:
+            outdated = True
+        if outdated or not converged:
+            # the step is evaluated again at the same positions
+            self._rewind()
         if outdated:
-            if self._refresh(struct):
+            self.late_rebuilds += 1
+            if self._rebuild(struct, fresh) if rebuild else self._refresh(struct):
                 return self._replay(struct)
             return None
         if not converged:
+            if rebuild:
+                self._rebuild(struct, fresh)
             self._lengthen()
             return None
         self.replays += 1
-        return {key: value.clone() for key, value in self.outputs.items()}
+        out = {key: value.clone() for key, value in self.outputs.items()}
+        # a shortened length drops the graph: the next step records it again
+        self._shorten(needed)
+        if rebuild:
+            # these results are valid on the old pairs; the next step takes the new ones
+            self._rebuild(struct, fresh)
+        elif due:
+            # the pairs hold for one more step: it builds them again while it replays
+            self.pending = True
+        return out
+
+    def _length(self, phase: str, count: int) -> int:
+        """The fixed length for solves whose largest count over the last ``shorten`` steps was
+        ``count``: one more, and above a length that failed."""
+        return max(count + 1, self.floor[phase] + 2 if phase in self.floor else 0)
 
     def _lengthen(self) -> None:
         """The fixed length did not suffice: the next steps converge, and the length
         is raised from their counts."""
         self.floor, self.plan.solve_iterations = dict(self.plan.solve_iterations), None
+        # the counts of the steps before the failure no longer set the length
+        self.recent.clear()
+        self.needed.clear()
+        self.settled = 0
         self.cuda_graph = None
+
+    def _shorten(self, needed: list) -> None:
+        """Note the iterations the fixed solves needed; every ``shorten`` steps lower
+        the lengths to what they needed, when that is shorter."""
+        if not self.shorten or self.plan.solve_iterations is None:
+            return
+        self.needed.append(needed)
+        self.settled += 1
+        if self.settled > 4 * self.shorten:
+            self.floor = {}
+        if len(self.needed) < self.shorten:
+            return
+        lengths = dict(self.plan.solve_iterations)
+        for slot, phase in enumerate(PHASES):
+            if phase in lengths:
+                lengths[phase] = min(lengths[phase], self._length(phase, max(int(row[slot]) for row in self.needed)))
+        self.needed.clear()
+        if lengths != self.plan.solve_iterations:
+            self.plan.solve_iterations = lengths
+            self.cuda_graph = None
 
     def _eager(self) -> dict:
         if self.capture and self.pos.is_cuda and self.stream is None:
@@ -236,20 +481,22 @@ class StepGraph:
         else:
             out = self._step()
         self.steps += 1
-        if self.plan.solve_iterations is None and self.steps >= self.warmup:
+        if self.plan.solve_iterations is None and self.steps >= self.warmup and len(self.recent) == 2:
             counts: dict = {}
             for seen in self.recent:
                 for phase, n in seen.items():
                     counts[phase] = max(counts.get(phase, 0), n)
-            self.plan.solve_iterations = {phase: max(int(math.ceil(1.25 * n)) + 1, self.floor.get(phase, 0) + 2)
-                                          for phase, n in counts.items()}
+            self.plan.solve_iterations = {phase: self._length(phase, n) for phase, n in counts.items()}
         return out
 
     def _step(self) -> dict:
         out = self._run()
         if self.plan.solve_iterations is not None and not bool(self.plan.converged):
             self._lengthen()
+            self._rewind()
             out = self._run()
+        elif self.plan.solve_iterations is not None:
+            self._shorten(self.plan.needed.tolist())
         if self.plan.solve_iterations is None:
             stats = self.core.solver_stats
             self.recent.append({phase: int(stats[phase]) for phase in ("forward", "adjoint") if phase in stats})
@@ -260,8 +507,19 @@ class StepGraph:
                 or self.plan.solve_iterations is None):
             return
         graph = torch.cuda.CUDAGraph()
+        self.last = self.pos.detach().clone()
+        checks = getattr(self.plan, "checks", None)
+        if callable(checks):
+            # its kernel is built before the capture (no kernel is loaded during one); last stays pos
+            checks(self.pos, self.last, steps=2)
         with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
             outputs = self._run()
-            flag = self.plan.outdated(self.pos)
-        self.cuda_graph, self.outputs, self.flag = graph, outputs, flag
+            flag = due = status = None
+            if callable(checks):
+                status = checks(self.pos, self.last, steps=2)
+            else:
+                flag = self.plan.outdated(self.pos)
+                due = self.plan.due(self.pos, self.last, steps=2)
+                self.last.copy_(self.pos.detach())
+        self.cuda_graph, self.outputs, self.flag, self.due, self.status = graph, outputs, flag, due, status
         self.recordings += 1

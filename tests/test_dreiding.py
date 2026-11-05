@@ -444,6 +444,24 @@ def test_vdw_lennard_jones_and_combination_rule():
         -lib.vdw_d0["C_3"], rel=1e-12)
 
 
+def test_vdw_geometric_combination_of_radii():
+    """A library with the geometric combination of radii (eq 35) gives ``R0 = sqrt(R0_I R0_J)`` in the eager
+    terms; a state dict with the hydrogen-bond triplets of earlier versions still loads."""
+    import copy
+    lib = copy.deepcopy(read_dreiding("dreiding"))
+    lib.combination = "geometric"
+    r = 3.6
+    top = MolecularTopology.from_bonds(["C_3", "O_3"], [])
+    model = Dreiding(lib, top, cutoff=14.0, use_fast=False)
+    out = model(_graph([[0, 0, 0], [r, 0, 0]], [6, 8], 14.0))
+    d0 = math.sqrt(lib.vdw_d0["C_3"] * lib.vdw_d0["O_3"])
+    rho = r / math.sqrt(lib.vdw_r0["C_3"] * lib.vdw_r0["O_3"])
+    assert float(out["e_vdw"]) * EV_TO_KCAL == pytest.approx(d0 * (rho ** -12 - 2.0 * rho ** -6), rel=1e-12)
+    state = model.state_dict()
+    state["hbond_index"] = torch.zeros(3, 0, dtype=torch.long)
+    model.load_state_dict(state)
+
+
 def test_vdw_exponential_6_form():
     # eq 32': E = D0 [6/(zeta-6) exp(zeta (1-rho)) - zeta/(zeta-6) rho^-6]
     lib = read_dreiding("dreiding/X6")
@@ -493,6 +511,12 @@ def test_hydrogen_bond_minimum_and_angle_factor():
     # switching the term off removes it entirely
     off = Dreiding("dreiding", top, cutoff=14.0, hbond=False)
     assert float(off(_graph(pos, z, 14.0))["e_hbond"]) == 0.0
+    # the donor-acceptor pairs come from the neighbor list: a pair beyond the hydrogen-bond cutoff is not
+    # counted, and that cutoff cannot exceed the neighbor list's
+    short = Dreiding("dreiding", top, cutoff=14.0, hbond_cutoff=3.0)
+    assert float(short(_graph(pos, z, 14.0))["e_hbond"]) == 0.0
+    with pytest.raises(ValueError, match="hbond_cutoff"):
+        Dreiding("dreiding", top, cutoff=10.0, hbond_cutoff=12.0)
 
 
 def test_fourteen_pairs_are_included_in_full():
@@ -505,8 +529,8 @@ def test_fourteen_pairs_are_included_in_full():
     model(_graph(_ethane_pos(0.0), z, 14.0))
     w = model.intermediates["nb_weight"]
     assert float(w.min()) == 0.0 and float(w.max()) == 1.0
-    # the nine 1,4 H-H pairs survive (each direction of the edge list)
-    assert int((w > 0).sum()) == 2 * len(top.pairs14)
+    # the nine 1,4 H-H pairs survive (each pair once)
+    assert int((w > 0).sum()) == len(top.pairs14)
 
 
 # invariances, batching, periodicity

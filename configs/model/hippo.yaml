@@ -30,6 +30,7 @@ solver: auto                    # auto (dense for molecules up to 1000 atoms), d
 predictor: null                 # aspc, gear or previous: predict the starting dipoles from the last steps (MD)
 preconditioner: diagonal        # diagonal, block, neumann or block-neumann (fewer iterations, rarely a faster step)
 use_fast: false                 # true or auto: fused GPU kernels for the pair terms (evaluation only)
+mixed_precision: false          # true: the fast kernels evaluate the pair ladders in float32 like Tinker9 (float32 models)
 # HIPPO: AMOEBA's valence terms and atomic multipoles with intermolecular terms derived
 # from a model electron density: charge penetration, density-damped induction,
 # multipolar Pauli repulsion, damped dispersion, charge transfer and charge flux

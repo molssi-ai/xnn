@@ -6,13 +6,15 @@ Testing
 
 .. code-block:: bash
 
-   pip install -e ".[dev,gnn]"
+   pip install -e ".[dev,gnn,ase,ffnn,vesin,cpu-kernels]"
    pytest tests/
 
 The suite is a flat ``tests/`` directory, one file per model or subsystem.
 Tests that need a reference package (``mace-torch``, ``nequip``,
 ``torchani``, ``dftd4``, OpenMM, ...) skip when it is not installed, so
-the suite runs with the core extras alone.
+the suite runs with the core extras alone. Without a CUDA device, the Triton
+kernels run under Triton's interpreter (``tests/conftest.py``). The CPU-only
+PyTorch wheel has no Triton, so install ``triton`` as well (CI uses 3.3.1).
 
 What the tests check
 ====================
@@ -37,11 +39,14 @@ What the tests check
   ``test_amoeba`` also check float32 against float64, the improper and
   multipole-frame conventions, for CHARMM the 1,4 bookkeeping in small rings
   and for HIPPO the density kernels against their closed forms.
-- **Performance** (every model with an upstream code): the xnn implementation
-  is at least as fast and, preferably, as memory-efficient as the reference
-  with the same weights and inputs, in float32 and float64, for inference and for a
-  training step with forces. The model's fidelity notebook reports the
-  comparison.
+- **Performance** (every model with an upstream code): the reference
+  implementation is at least as fast and, preferably, as memory-efficient as the
+  upstream code with the same weights and inputs, in float32 and float64, for
+  inference and for a training step with forces. It is timed on the upstream's
+  own hardware: on CPUs when the upstream runs on CPUs. A fast path agrees with
+  the reference to round-off in energies and every derivative, and is timed
+  against the upstream's GPU build where one exists, otherwise against the
+  reference. The model's fidelity notebook reports the comparison.
 - **Pipeline**: neighbor lists against ASE and the vesin backend, mixed
   batches and label masks, float64 geometry, the data and model hubs, ASE
   file I/O, the losses, the benchmark runner, the MDI engine, the fast
@@ -63,7 +68,9 @@ Conventions for new code
   where neither exists, an independent implementation of the paper's equations
   and its published numbers.
 - A model with an upstream code is also at least as fast and, preferably, as
-  memory-efficient as that code, in float32 and float64, before it is merged.
+  memory-efficient as that code, in float32 and float64, on the upstream's own
+  hardware, before it is merged. A fast path matches the reference's numbers
+  and derivatives to round-off and gets a test under Triton's interpreter.
 - Its defaults are those of the upstream code as shipped; where the paper
   differs, the paper's values are options, which the tests and notebooks pass.
   Options draw on the shared abstractions (radial bases, cutoffs, activations)

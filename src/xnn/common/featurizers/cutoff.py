@@ -118,8 +118,8 @@ class PolynomialCutoff(nn.Module):
         """
         x = r / self.cutoff
         p = self.p
-        env = (1.0
-               - ((p + 1) * (p + 2) / 2) * x ** p
-               + p * (p + 2) * x ** (p + 1)
-               - (p * (p + 1) / 2) * x ** (p + 2))
+        # 1 - (p+1)(p+2)/2 x^p + p(p+2) x^(p+1) - p(p+1)/2 x^(p+2), with one power:
+        # each power's derivative costs kernels in both force passes of training
+        tail = ((-(p * (p + 1) / 2)) * x + p * (p + 2)) * x - (p + 1) * (p + 2) / 2
+        env = 1.0 + tail * x ** p
         return env * (r < self.cutoff)

@@ -52,7 +52,8 @@ shells (``spin_multiplicity`` > 1, or an odd electron count).
 """
 from __future__ import annotations
 
-from typing import Dict, Sequence, Union
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Sequence, Union
 
 import torch
 from torch import Tensor, nn
@@ -61,46 +62,100 @@ from xnn.common.data import AtomicGraph
 from xnn.common.models import InteratomicPotential
 
 from ..common import elements as el
-from ..common.constants import BOHR, COULOMB, EV_TO_KCAL
 from ..common.parameters import ELEMENT_PARAMETERS, GAUSSIAN_PARAMETERS, PAIR_PARAMETERS, ParameterSet, read_parameters
+from . import scf as scf_module
 from .angular import L_OF, MOLECULAR, dipole_factors, pair_type
+from .core import (
+    build_integrals,
+    charges_and_dipole,
+    electron_counts,
+    energy_outputs,
+    initial_guess,
+    make_plan,
+    table_key,
+)
 from .derived import element_quantities
-from .scf import PAD_ENERGY, Layout, SCFDensity, electronic_energy, fock_matrices, lowest, run_scf
-from .twocenter import pair_integrals
+from .graphed import GraphedFunction, replay, synchronizes
+from .integrals import constants, device_constant, take0
+from .scf import (
+    CAPTURE_AFTER,
+    Layout,
+    SCFDensity,
+    SCFGraphCache,
+    _per_device,
+    frontier_gap,
+    lowest,
+    run_scf,
+)
+from .twocenter import pair_tables
 
 _ELEMENT_NAMES = ELEMENT_PARAMETERS + GAUSSIAN_PARAMETERS
 _N_GLOBALS = 61
 #: Atom pairs per block of the two-center integral evaluation.
-PAIR_CHUNK = 20000
+@dataclass
+class _Plan:
+    q: dict
+    ea: Tensor
+    n_orb: Tensor
+    k: int
+    pa: Tensor
+    pb: Tensor
+    layout: Layout
+    has: Tensor
+    valid: Tensor
+    signature: tuple = ()
+    W1: Optional[Tensor] = None
+    # CUDA graphs of the build by kind and inputs with gradients: "eval" (frozen parameters baked in, of q_ref),
+    # "train" (positions and the derived quantities as inputs), "response" (the same at detached positions);
+    # False where rejected
+    graphs: Dict[tuple, object] = field(default_factory=dict)
+    q_ref: Optional[dict] = None
+    uses: int = 0
 
 
-def _shell_of(n_orb: int):
-    return [L_OF[lab] for lab in MOLECULAR[:n_orb]]
+class _PlanCache(dict):
+    """Plans per composition; copies and pickles of a model start with an empty cache (graphs belong to one
+    process and device)."""
+
+    def __getstate__(self):
+        return {}
+
+    def __reduce__(self):
+        return (_PlanCache, ())
+
+    def __deepcopy__(self, memo):
+        return _PlanCache()
 
 
-def _feather(ints: Dict[str, Tensor], mask_a: Tensor, mask_b: Tensor, tore_a: Tensor,
-             tore_b: Tensor, r_point: float = 7.0, width: float = 0.22) -> None:
-    """Blend the two-center Coulomb integrals into point-charge values (in place).
+def _tensor_leaves(q: dict, prefix: tuple = ()):
+    """The tensors of the derived quantities ``q`` (nested dictionaries included) with their key paths."""
+    out = []
+    for key, v in q.items():
+        if isinstance(v, Tensor):
+            out.append((prefix + (key,), v))
+        elif isinstance(v, dict):
+            out.extend(_tensor_leaves(v, prefix + (key,)))
+    return out
 
-    With ``c = 1 - exp(-width (R - r_point)^2)`` below ``r_point`` (Angstrom) and
-    0 beyond, every integral becomes ``c`` times its NDDO value, and the
-    Coulomb ones (``(mu mu|la la)``, the core attractions of the diagonal
-    distributions and the core-core ``gamma``) gain ``(1 - c)`` times the
-    point-charge value ``e^2 / R``: the integrals reach the exact
-    point-charge limit at ``r_point``. Used by PM7 and PM6-ORG.
-    """
-    r = ints["r"]
-    c = torch.where(r < r_point, 1.0 - torch.exp(-width * (r - r_point) ** 2), torch.zeros_like(r))
-    point = COULOMB / r
-    one = 1.0 - c
-    eye_a = torch.diag_embed(mask_a)
-    eye_b = torch.diag_embed(mask_b)
-    ints["W"] = (c[:, None, None, None, None] * ints["W"]
-                 + (one * point)[:, None, None, None, None] * eye_a[:, :, :, None, None]
-                 * eye_b[:, None, None, :, :])
-    ints["VA"] = c[:, None, None] * ints["VA"] - (one * point * tore_b)[:, None, None] * eye_a
-    ints["VB"] = c[:, None, None] * ints["VB"] - (one * point * tore_a)[:, None, None] * eye_b
-    ints["gab"] = c * ints["gab"] + one * point
+
+def _with_leaves(q: dict, paths, values) -> dict:
+    """``q`` with the tensors at ``paths`` replaced by ``values``."""
+    out = dict(q)
+    for path, v in zip(paths, values):
+        d = out
+        for key in path[:-1]:
+            d[key] = dict(d[key])
+            d = d[key]
+        d[path[-1]] = v
+    return out
+
+
+def _q_signature(q: dict) -> tuple:
+    """The structural (non-tensor) part of the derived quantities: equal signatures share a plan."""
+    def walk(d):
+        return tuple((key, walk(v) if isinstance(v, dict) else repr(v)) for key, v in d.items()
+                     if not isinstance(v, Tensor))
+    return walk(q)
 
 
 class NDDO(InteratomicPotential):
@@ -140,6 +195,13 @@ class NDDO(InteratomicPotential):
         is kept. The default (plain aufbau and two annealing schedules)
         finds the ground state of open shells and small-gap systems where a
         single run can settle in an excited aufbau state.
+    restart_gap : float, optional
+        The runs after the first of ``scf_starts`` take place when the batch
+        is unrestricted or a structure's first solution has a HOMO-LUMO gap
+        below this (eV); default 3.0. ``float("inf")`` runs them always.
+    use_fast : bool or str, optional
+        The fast path (see :meth:`set_use_fast`): on a GPU, a batch composition evaluated before replays CUDA
+        graphs. ``"auto"`` (default) and ``True`` take it, ``False`` never.
     """
 
     #: Name of the published parameter set of the method.
@@ -147,8 +209,16 @@ class NDDO(InteratomicPotential):
     #: Method label (the MOPAC keyword).
     method = ""
     #: Blend the two-center Coulomb integrals into point charges below 7 Angstrom
-    #: (PM7, PM6-ORG; see :func:`_feather`).
+    #: (PM7, PM6-ORG; see :func:`~.core.feather`).
     feather = False
+    #: PM7's balance of the two-center integrals of transition metals (see :func:`~.core.pm7_balance`).
+    balance_integrals = False
+    #: The corrections of the method (see :func:`~.corrections.structure_corrections`) and the peptide
+    #: torsion barrier of PM3 (kcal/mol).
+    correction_kind = 0
+    peptide_barrier = 0.0
+    #: The core-core form (see :mod:`~.core`): 0 that of PM6, PM7 and PM6-ORG, 1 that of PM3.
+    core_form = 0
     #: Largest atomic displacement (Angstrom) since the previous call for which
     #: the SCF restarts from that call's density. A density carried to an
     #: unrelated geometry (another sample of a training set) can converge to an
@@ -160,7 +230,8 @@ class NDDO(InteratomicPotential):
                  response: str = "auto", max_iter: int = 300, tol_density: float = 1e-9,
                  tol_energy: float = 1e-10, corrections: bool = True,
                  reuse_density: bool = True,
-                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25))):
+                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 3.0,
+                 use_fast="auto"):
         super().__init__()
         pset = (parameters if isinstance(parameters, ParameterSet)
                 else read_parameters(parameters or self.default_parameters))
@@ -177,6 +248,10 @@ class NDDO(InteratomicPotential):
         self.last_scf = None
         self.reuse_density = bool(reuse_density)
         self.scf_starts = tuple((float(kt), int(n)) for kt, n in scf_starts)
+        self.restart_gap = float(restart_gap)
+        self.set_use_fast(use_fast)
+        self._scf_graphs = SCFGraphCache()
+        self._plans = _PlanCache()
         self._scf_key = None
         self._scf_pos = None
         self._q_cache = {}
@@ -266,9 +341,21 @@ class NDDO(InteratomicPotential):
         """Core-core repulsion of each pair (eV); ``r`` in Angstrom."""
         raise NotImplementedError
 
-    def adjust_integrals(self, ints: Dict[str, Tensor], za: Tensor, zb: Tensor, n_orb_a: Tensor,
-                         n_orb_b: Tensor) -> None:
-        """Method-specific changes of the molecular-frame pair integrals (in place)."""
+    def export_core(self) -> nn.Module:
+        """The scriptable core of :func:`~xnn.common.deploy.export_torchscript_potential` (see
+        :class:`~.export.NDDOExport`): this model's tables on its device, one molecule per call."""
+        from .export import NDDOExport
+        return NDDOExport(self)
+
+    def core_parameters(self) -> Dict[str, Tensor]:
+        """The parameter tables of the core-core terms (trainable copies where trained)."""
+        out = {name: self.pair_parameter(name) for name in ("XFAC", "ALPB")}
+        out["ALP"] = self.element_parameter("ALP")
+        for n in (1, 2, 3):
+            for j in (1, 2, 3, 4):
+                out[f"FN{n}{j}"] = self.element_parameter(f"FN{n}{j}")
+        out["PAR"] = self.global_parameters()
+        return out
 
     def corrections(self, data: AtomicGraph, pos: Tensor) -> Tensor:
         """Per-atom post-SCF and molecular-mechanics energy corrections (kcal/mol)."""
@@ -281,9 +368,10 @@ class NDDO(InteratomicPotential):
                 self.element_parameter(f"FN3{j}")[z])
 
     def _element_quantities(self, uz: Sequence[int]):
-        frozen = not (torch.is_grad_enabled() and any(p.requires_grad for p in self.parameters()))
-        key = (tuple(uz), str(self.element_table.device),
-               tuple(t._version for t in list(self.parameters()) + list(self.buffers())))
+        # only the NDDO parameters and tables enter (not those of submodules such as a dispersion term)
+        own = list(self.params.values()) + list(self.buffers(recurse=False))
+        frozen = not (torch.is_grad_enabled() and any(p.requires_grad for p in self.params.values()))
+        key = (tuple(uz), str(self.element_table.device), tuple(t._version for t in own))
         if frozen and key in self._q_cache:
             return self._q_cache[key]
         idx = torch.as_tensor(list(uz), device=self.element_table.device)
@@ -292,6 +380,93 @@ class NDDO(InteratomicPotential):
         if frozen:
             self._q_cache = {key: q}
         return q
+
+    def set_use_fast(self, use_fast) -> "NDDO":
+        """Choose the fast path: ``True``, ``False`` or ``"auto"``.
+
+        On a GPU, a batch composition (atoms, charges, spins) evaluated more than :data:`~.scf.CAPTURE_AFTER`
+        times replays CUDA graphs of its SCF iterations and of its integral build with its derivatives to second
+        order (from the parameters when they are trained), which compute what the launched kernels compute (see
+        :mod:`~xnn.sqmnn.models.graphed`). ``"auto"`` takes the fast path wherever it runs.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    def _graph_cache(self):
+        return self._scf_graphs if self.use_fast in (True, "auto") else None
+
+    def _plan(self, z: Tensor, batch: Tensor, n_struct: int, uz: Sequence[int], q):
+        """Element indices, pairs and the basis layout of a batch; on the fast path kept per composition (the
+        graphs replay on its tensors)."""
+        device = z.device
+        key = None
+        if self._graph_cache() is not None and z.is_cuda:
+            key = (tuple(z.tolist()), tuple(batch.tolist()), n_struct)
+            plan = self._plans.get(key)
+            if plan is not None and plan.signature == _q_signature(q):
+                self._plans[key] = self._plans.pop(key)           # most recent last
+                return plan
+        lookup = torch.full((el.MAX_Z + 1,), -1, dtype=torch.long, device=device)
+        lookup[torch.as_tensor(uz, device=device)] = torch.arange(len(uz), device=device)
+        ea, n_orb, k, pa, pb, layout, has, valid = make_plan(
+            z, batch, n_struct, lookup, torch.as_tensor(q["n_orb"], device=device),
+            _per_device(scf_module.GROUP_MIN_PAIRS, device))
+        plan = _Plan(q=q, ea=ea, n_orb=n_orb, k=k, pa=pa, pb=pb, layout=layout, has=has, valid=valid,
+                     signature=_q_signature(q))
+        if key is not None:
+            self._plans[key] = plan
+            while len(self._plans) > 8:
+                self._plans.pop(next(iter(self._plans)))
+        return plan
+
+    def _pair_tables(self, q: dict, layout: Layout, k: int, like: Tensor) -> Dict[str, Dict[str, Tensor]]:
+        """The tables of :func:`~.twocenter.pair_kernel` for the pair groups of a batch (cached)."""
+        general = k == 9
+        keys = {(ka, kb, general and max(ka, kb) == 9) for ka, kb, _, _, _ in layout.pair_groups()}
+        keys.add((k, k, general))
+        return {table_key(ka, kb, g): pair_tables(q, ka, kb, g, like.device, like.dtype) for ka, kb, g in keys}
+
+    def _build_graph(self, plan: "_Plan", kind: str, build, q: dict, inputs) -> Optional[GraphedFunction]:
+        """The CUDA graphs of the integral build of a composition evaluated before: ``"eval"`` with frozen
+        parameters (positions in; the derived quantities ``q`` baked in), ``"train"`` and ``"response"`` with the
+        derived quantities as inputs (``inputs`` = positions and the tensors of ``q``), whose derivatives are
+        replayed to second order; captured after :data:`~.scf.CAPTURE_AFTER` launched evaluations."""
+        # one graph per kind and per set of inputs that carry gradients
+        kind = (kind, tuple(x.requires_grad for x in inputs))
+        graph = plan.graphs.get(kind)
+        if kind[0] == "eval" and graph and plan.q_ref is not q:
+            del plan.graphs[kind]                   # baked derived quantities of other parameters
+            graph = None
+        if graph is not None:
+            return graph or None
+        if not inputs[0].is_cuda or self._graph_cache() is None or plan.uses <= CAPTURE_AFTER:
+            return None
+        paths = [path for path, _ in _tensor_leaves(q)]
+        if kind[0] == "eval":
+            def fn(positions):
+                ints, H, _, _, _ = build(positions, q)
+                return ints["W"], ints["r"], ints["gab"], H
+        else:
+            def fn(positions, *values):
+                ints, H, W1, _, _ = build(positions, _with_leaves(q, paths, values))
+                return ints["W"], ints["r"], ints["gab"], H, W1
+
+        def work():
+            with torch.enable_grad():
+                xs = [x.detach().clone().requires_grad_(x.requires_grad) for x in inputs]
+                outs = [o for o in fn(*xs) if o.requires_grad]
+                need = [x for x in xs if x.requires_grad]
+                if outs and need:
+                    torch.autograd.grad(outs, need, [torch.ones_like(o) for o in outs], allow_unused=True)
+        if synchronizes(work):
+            plan.graphs[kind] = False
+            return None
+        graph = GraphedFunction(fn, inputs)
+        plan.graphs[kind] = graph
+        if kind[0] == "eval":
+            plan.q_ref = q
+        return graph
 
     def _use_response(self) -> bool:
         if self.response == "never":
@@ -308,14 +483,15 @@ class NDDO(InteratomicPotential):
         Options in ``cfg.extra``: ``parameters`` (set name or file),
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
-        ``reuse_density``, ``scf_starts``.
+        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``use_fast``.
         """
 
         from xnn.common.config.options import model_options
 
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
-                "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts")
+                "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
+                "restart_gap", "use_fast")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
     # the calculation
@@ -334,93 +510,48 @@ class NDDO(InteratomicPotential):
 
         uz = z.unique().tolist()
         q = self._element_quantities(uz)
-        lookup = torch.full((el.MAX_Z + 1,), -1, dtype=torch.long, device=device)
-        lookup[torch.as_tensor(uz, device=device)] = torch.arange(len(uz), device=device)
-        ea = lookup[z]
-        n_orb_e = torch.as_tensor(q["n_orb"], device=device)
-        n_orb = n_orb_e[ea]
-        k = int(n_orb.max())
+        plan = self._plan(z, batch, n_struct, uz, q)
+        ea, n_orb, k, pa, pb, layout, has, valid = (plan.ea, plan.n_orb, plan.k, plan.pa, plan.pb, plan.layout,
+                                                     plan.has, plan.valid)
+        tore = take0(q["tore"], ea)
 
-        # pairs i < j of the same structure
-        same = (batch.unsqueeze(0) == batch.unsqueeze(1)).triu(diagonal=1)
-        pa, pb = same.nonzero(as_tuple=True)
+        occ_d = device_constant(("occ_d",), lambda: el.OCC_D, device)
+        shells = device_constant(("shells", k), lambda: [0, 1, 1, 1, 2, 2, 2, 2, 2][:k], device)
 
-        # basis layout
-        counts = torch.zeros(n_struct, dtype=torch.long, device=device).index_add(0, batch, n_orb)
-        n_basis = int(counts.max())
-        # atoms of a structure are contiguous (the collate convention)
-        cum = torch.cumsum(n_orb, 0) - n_orb
-        start = cum - (torch.cumsum(counts, 0) - counts)[batch]
-        orb = torch.arange(k, device=device)
-        has = orb.unsqueeze(0) < n_orb.unsqueeze(1)                          # (N, k)
-        ao = torch.where(has, start.unsqueeze(1) + orb.unsqueeze(0), torch.full_like(has, n_basis, dtype=torch.long))
-        valid = torch.arange(n_basis, device=device).unsqueeze(0) < counts.unsqueeze(1)
-        layout = Layout(n_struct, n_basis, k, batch, ao, pa, pb, valid)
+        def build(positions: Tensor, q: dict):
+            qt = {key: v for key, v in q.items() if isinstance(v, Tensor)}
+            return build_integrals(qt, self._pair_tables(q, layout, k, positions), constants(device, dtype), layout,
+                                   positions, ea, z, n_orb, k, pa, pb, has, valid, self.feather,
+                                   self.balance_integrals, occ_d, shells)
 
-        tore = q["tore"][ea]
-
-        def build(positions: Tensor):
-            vec = positions[pb] - positions[pa]
-            # pairs in chunks: the multipole intermediates scale as pairs x components
-            chunk = PAIR_CHUNK if k < 9 else PAIR_CHUNK // 16
-            parts = [pair_integrals(q, ea[pa[s:s + chunk]], ea[pb[s:s + chunk]], vec[s:s + chunk], k,
-                                    need_general=(k == 9))
-                     for s in range(0, max(int(pa.shape[0]), 1), chunk)]
-            ints = {key: torch.cat([p[key] for p in parts]) for key in parts[0]}
-            mask = has.to(dtype)
-            mA, mB = mask[pa], mask[pb]
-            ints["S"] = ints["S"] * mA[:, :, None] * mB[:, None, :]
-            ints["VA"] = ints["VA"] * mA[:, :, None] * mA[:, None, :]
-            ints["VB"] = ints["VB"] * mB[:, :, None] * mB[:, None, :]
-            ints["W"] = (ints["W"] * mA[:, :, None, None, None] * mA[:, None, :, None, None]
-                         * mB[:, None, None, :, None] * mB[:, None, None, None, :])
-            if self.feather:
-                _feather(ints, mask[pa], mask[pb], tore[pa], tore[pb])
-            self.adjust_integrals(ints, z[pa], z[pb], n_orb[pa], n_orb[pb])
-            # core Hamiltonian
-            shells = torch.as_tensor([[0, 1, 1, 1, 2, 2, 2, 2, 2][i] for i in range(k)], device=device)
-            u = torch.stack([q["uss"], q["upp"], q["udd"]], -1)[ea][:, shells] * mask
-            beta = torch.stack([q["betas"], q["betap"], q["betad"]], -1)[ea][:, shells] * mask
-            atom_blocks = torch.diag_embed(u)
-            atom_blocks = atom_blocks.index_add(0, pa, ints["VA"]).index_add(0, pb, ints["VB"])
-            pair_blocks = ints["S"] * 0.5 * (beta[pa][:, :, None] + beta[pb][:, None, :])
-            H = layout.scatter(atom_blocks, pair_blocks)
-            diag_pad = torch.where(valid, torch.zeros((), dtype=dtype, device=device),
-                                   torch.full((), PAD_ENERGY, dtype=dtype, device=device))
-            H = H + torch.diag_embed(diag_pad)
-            W1 = q["one_center"][ea][:, :k, :k, :k, :k]
-            W1 = (W1 * mask[:, :, None, None, None] * mask[:, None, :, None, None]
-                  * mask[:, None, None, :, None] * mask[:, None, None, None, :])
-            return ints, H, W1, atom_blocks, pair_blocks
-
-        ints, H, W1, _, _ = build(pos)
-        W2 = ints["W"]
-        e_core_pair = self.core_core(z[pa], z[pb], ints["r"], ints["gab"], tore[pa], tore[pb])
+        q_values = [v for _, v in _tensor_leaves(q)]
+        trained = any(v.requires_grad for v in q_values)
+        if pos.is_cuda and self._graph_cache() is not None:
+            plan.uses += 1
+        graph = (self._build_graph(plan, "train", build, q, [pos, *q_values]) if trained
+                 else self._build_graph(plan, "eval", build, q, [pos]))
+        if graph is not None and trained:
+            W2, r_pair, gab, H, W1 = replay(graph, [pos, *q_values])
+        elif graph is not None:
+            W2, r_pair, gab, H = replay(graph, [pos])
+            W1 = plan.W1
+        else:
+            ints, H, W1, _, _ = build(pos, q)
+            W2, r_pair, gab = ints["W"], ints["r"], ints["gab"]
+            plan.W1 = W1.detach()
+        if graph is not None and graph.wants_second:
+            graph.capture_second()
+        e_core_pair = self.core_core(z[pa], z[pb], r_pair, gab, take0(tore, pa), take0(tore, pb))
 
         # electrons and spin
         charge = (data.total_charge.to(dtype) if data.total_charge is not None
                   else torch.zeros(n_struct, dtype=dtype, device=device))
-        n_elec = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, batch, tore.detach()) - charge
-        n_e = torch.round(n_elec).long()
-        if data.spin_multiplicity is not None:
-            mult = torch.round(data.spin_multiplicity.to(dtype)).long()
-        else:
-            mult = 1 + (n_e % 2)
-        if bool(((n_e + mult - 1) % 2 != 0).any()):
-            raise ValueError("spin multiplicity inconsistent with the electron count")
-        n_alpha = (n_e + mult - 1) // 2
-        n_beta = (n_e - mult + 1) // 2
-        uhf = self.unrestricted or bool((mult != 1).any())
-
+        n_e, n_alpha, n_beta, uhf = electron_counts(tore, batch, n_struct, charge, data.spin_multiplicity,
+                                                    self.unrestricted)
         # initial guess: reference occupations spread over each shell
         occ_ref = torch.as_tensor([[el.OCC_S[v], el.OCC_P[v] / 3.0, el.OCC_D[v] / 5.0] for v in uz],
                                   dtype=dtype, device=device)
-        shells = torch.as_tensor([[0, 1, 1, 1, 2, 2, 2, 2, 2][i] for i in range(k)], device=device)
-        diag = occ_ref[ea][:, shells] * has.to(dtype)
-        tot = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, batch, diag.sum(-1))
-        scale = torch.where(tot > 0, n_e.to(dtype) / tot.clamp(min=1e-12), torch.zeros_like(tot))
-        diag = diag * scale[batch].unsqueeze(-1)
-        guess = layout.scatter(torch.diag_embed(diag), H.new_zeros((pa.shape[0], k, k)))
+        guess = initial_guess(occ_ref, ea, shells, has, batch, n_struct, n_e, layout, pa.shape[0], k)
 
         key = (tuple(z.tolist()), tuple(batch.tolist()), tuple(n_alpha.tolist()),
                tuple(n_beta.tolist()), uhf)
@@ -432,71 +563,44 @@ class NDDO(InteratomicPotential):
         if warm:
             result = run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter,
                              self.tol_density, self.tol_energy, smear_steps=0,
-                             spin_guess=self.last_scf.densities if uhf else None)
+                             spin_guess=self.last_scf.densities if uhf else None,
+                             graph_cache=self._graph_cache(), graph_key=key, orbitals=self.last_scf.orbitals,
+                             occupations=self.last_scf.occupations)
         else:
-            result = lowest([run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter,
-                                     self.tol_density, self.tol_energy, smearing=kt, smear_steps=steps)
-                             for kt, steps in self.scf_starts])
+            def start(kt, steps):
+                return run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter, self.tol_density,
+                               self.tol_energy, smearing=kt, smear_steps=steps, graph_cache=self._graph_cache(),
+                               graph_key=key)
+            results = [start(*self.scf_starts[0])]
+            # the other runs where the first may have settled in an excited aufbau state
+            if len(self.scf_starts) > 1 and (uhf or bool((frontier_gap(results[0]) < self.restart_gap).any())):
+                results += [start(kt, steps) for kt, steps in self.scf_starts[1:]]
+            result = lowest(results)
         self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
         if self._use_response():
             pos_fixed = pos.detach()
-            ints_t, H_t, W1_t, _, _ = build(pos_fixed)
-            P = SCFDensity.apply(H_t, W1_t, ints_t["W"], result, layout, uhf, 1e-10)
+            response = self._build_graph(plan, "response", build, q, [pos_fixed, *q_values]) if trained else None
+            if response is not None:
+                W_t, _, _, H_t, W1_t = replay(response, [pos_fixed, *q_values])
+            else:
+                ints_t, H_t, W1_t, _, _ = build(pos_fixed, q)
+                W_t = ints_t["W"]
+            P = SCFDensity.apply(H_t, W1_t, W_t, result, layout, uhf, 1e-10, self._graph_cache(), key)
         else:
             P = result.densities
-        F = fock_matrices(layout, H, W1, W2, P, uhf)
-        e_el = electronic_energy(H, F, P, uhf)
-
-        # per-atom partition of the electronic energy
-        if uhf:
-            e_mat = 0.5 * ((P[0] + P[1]) * H + (P * F).sum(0))
-        else:
-            e_mat = 0.5 * P[0] * (H + F[0])
-        e_atom = layout.gather_atom(e_mat).sum((-1, -2))
-        if pa.shape[0]:
-            e_pair = layout.gather_pair(e_mat).sum((-1, -2))
-            e_atom = e_atom.index_add(0, pa, e_pair).index_add(0, pb, e_pair)
-            e_atom = e_atom.index_add(0, pa, 0.5 * e_core_pair).index_add(0, pb, 0.5 * e_core_pair)
-        eisol = q["eisol"][ea]
         atom_heat = torch.as_tensor([el.ATOM_HEAT[v] for v in z.tolist()], dtype=dtype, device=device)
         corr = (self.corrections(data, pos) if self.use_corrections
                 else pos.new_zeros(pos.shape[0]))
-        node_kcal = (e_atom - eisol) * EV_TO_KCAL + atom_heat + corr
-        node_energy = node_kcal / EV_TO_KCAL
-        hof = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, batch, node_kcal)
-        e_core = torch.zeros(n_struct, dtype=dtype, device=device)
-        if pa.shape[0]:
-            e_core = e_core.index_add(0, batch[pa], e_core_pair)
+        out = energy_outputs(layout, H, W1, W2, P, uhf, e_core_pair, pa, pb, batch, n_struct, take0(q["eisol"], ea),
+                             atom_heat, corr)
 
         # charges and dipole moment (e Angstrom)
-        P_tot = P.sum(0) if uhf else P[0]
-        P_atom = layout.gather_atom(P_tot)
-        charges = tore - P_atom.diagonal(dim1=-2, dim2=-1).sum(-1)
-        dfac = torch.as_tensor(dipole_factors()[:, :k, :k], dtype=dtype, device=device)
-        types = [[pair_type(L_OF[a], L_OF[b]) for b in MOLECULAR[:k]] for a in MOLECULAR[:k]]
+        types = [[pair_type(L_OF[a], L_OF[b]) for b in MOLECULAR] for a in MOLECULAR]
         sp_mask = torch.as_tensor([[t == "sp" for t in row] for row in types], dtype=dtype, device=device)
         pd_mask = torch.as_tensor([[t == "pd" for t in row] for row in types], dtype=dtype, device=device)
-        d_sp, d_pd = q["dd"][ea], q["ddp"][ea, 5]
-        fac = dfac.unsqueeze(0) * (sp_mask * d_sp[:, None, None] + pd_mask * d_pd[:, None, None]).unsqueeze(1)
-        has_p = (n_orb > 1).to(dtype)
-        hybrid = -BOHR * torch.einsum("aij,acij->ac", P_atom, fac) * has_p[:, None]
         mass = torch.as_tensor([el.ATOMIC_MASS[v] for v in z.tolist()], dtype=dtype, device=device)
-        msum = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, batch, mass)
-        com = torch.zeros(n_struct, 3, dtype=dtype, device=device).index_add(
-            0, batch, mass[:, None] * pos) / msum[:, None]
-        charged = (charge.abs() > 0.5).to(dtype)
-        ref_point = com * charged[:, None]
-        dip_atom = charges[:, None] * (pos - ref_point[batch]) + hybrid
-        dipole = torch.zeros(n_struct, 3, dtype=dtype, device=device).index_add(0, batch, dip_atom)
-
-        return {
-            "node_energy": node_energy,
-            "energy": hof / EV_TO_KCAL,
-            "heat_of_formation": hof,
-            "total_energy": e_el + e_core,
-            "electronic_energy": e_el,
-            "core_core_energy": e_core,
-            "charges": charges,
-            "dipole": dipole,
-            "scf_converged": result.converged,
-        }
+        out["charges"], out["dipole"] = charges_and_dipole(
+            layout, P, uhf, tore, k, torch.as_tensor(dipole_factors(), dtype=dtype, device=device), sp_mask,
+            pd_mask, q["dd"][ea], q["ddp"][ea, 5], n_orb, mass, batch, n_struct, charge, pos)
+        out["scf_converged"] = result.converged
+        return out

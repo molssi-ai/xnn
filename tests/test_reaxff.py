@@ -179,6 +179,47 @@ def test_total_charge_constraint():
     assert abs(float(q.sum()) - 1.0) < 1e-10
 
 
+@pytest.mark.parametrize("shielded", [False, True])
+def test_vdw_inner_wall_forms_of_lammps(shielded):
+    """A library with an inner wall takes LAMMPS's form 3 (shielded Morse plus the wall) or, without the
+    shielding, form 2 (the Morse term in the bare distance plus the wall); a dimer beyond the bond cutoff by
+    hand."""
+    lib = template_library(["C"], nn=False)
+    p = lib.p
+    p.update(rcore2_C=1.8, acore2_C=12.0, ecore2_C=0.3)
+    if not shielded:
+        p["gammaw_C"] = 0.4
+    model = ReaxFF(lib, nn=False, conventions="lammps")
+    assert model.vdw_type == (3 if shielded else 2)
+    r = 4.0
+    out = model(_graph([[0, 0, 0], [r, 0, 0]], [6, 6], model.cutoff))
+    tap = float(nonbonded_taper(torch.tensor(r), model.cutoff))
+    f13 = r
+    if shielded:
+        f13 = (r ** p["vdw1"] + (1.0 / p["gammaw_C"]) ** p["vdw1"]) ** (1.0 / p["vdw1"])
+    ex = math.exp(0.5 * p["alfa_C"] * (1.0 - f13 / (2.0 * p["rvdw_C"])))
+    wall = p["ecore2_C"] * math.exp(p["acore2_C"] * (1.0 - r / p["rcore2_C"]))
+    e_vdw = tap * KCAL_TO_EV * (p["Devdw_C"] * (ex ** 2 - 2.0 * ex) + wall)
+    assert abs(float(out["e_vdw"][0]) - e_vdw) < 1e-12
+
+
+def test_the_matrix_free_charges_take_the_total_charge(monkeypatch):
+    """Above the dense size the charges come from the matrix-free solve: with a total charge (a tensor or a
+    number) they are those of the dense solve."""
+    import xnn.ffnn.models.reaxff as rx
+    model = _model(nn=False)
+    pos, z = _methanol()
+    g = _graph(pos, z, model.cutoff)
+    g.total_charge = torch.tensor([1.0])
+    dense = model(g)["charges"]
+    monkeypatch.setattr(rx, "EEM_DENSE_MAX", 2)
+    for total in (torch.tensor([1.0]), 1.0):
+        g.total_charge = total
+        q = model(g)["charges"]
+        assert abs(float(q.sum()) - 1.0) < 1e-10
+        assert torch.allclose(q, dense, rtol=1e-9, atol=1e-10)
+
+
 def test_vdw_dimer_analytic():
     """Beyond the bond cutoff only vdW + Coulomb remain (eqs 12-13)."""
     lib = template_library(["C"], nn=False)
@@ -868,3 +909,48 @@ def test_dataset_training_smoke(tmp_path):
     loss.backward()
     assert torch.isfinite(loss)
     assert model.weights["fmwi"].grad is not None
+
+
+@pytest.mark.parametrize("conventions", ["lammps", "reaxff-nn"])
+def test_matrix_free_eem_matches_the_dense_solve(conventions, monkeypatch):
+    """The conjugate-gradient EEM solve of large structures gives the dense solve's charges, energies, forces
+    and the gradients of a force loss in the EEM parameters (its derivative is the same solve again)."""
+    import xnn.ffnn.models.reaxff as rx
+    model = _model(nn=False, conventions=conventions)
+    for key in ("chi", "mu"):
+        model.params[key].requires_grad_(True)
+    pos, z = _methanol()
+    batch = collate([_graph(pos, z, model.cutoff), _graph(pos * 1.05 + 3.0, z, model.cutoff)])
+
+    def run():
+        g = batch.clone() if hasattr(batch, "clone") else batch
+        p = g.pos.detach().clone().requires_grad_(True)
+        g.pos = p
+        out = model(g)
+        (f,) = torch.autograd.grad(-out["energy"].sum(), p, create_graph=True)
+        loss = (f * f).sum()
+        grads = torch.autograd.grad(loss, [model.params["chi"], model.params["mu"]])
+        return out["energy"].detach(), out["charges"].detach(), f.detach(), grads
+
+    dense = run()
+    monkeypatch.setattr(rx, "EEM_DENSE_MAX", 0)
+    cg = run()
+    for a, b in zip(dense[:3] + tuple(dense[3]), cg[:3] + tuple(cg[3])):
+        assert torch.allclose(a, b, rtol=1e-9, atol=1e-10), float((a - b).abs().max())
+
+
+def test_lammps_input_files_of_a_reaxff_field(tmp_path):
+    """The written LAMMPS inputs of a classical field: the script reads the data file and the written ffield,
+    the model's field in LAMMPS's layout; the atomic numbers are required."""
+    from xnn.ffnn.models import write_lammps_input
+    model = ReaxFF("CHO_cho_2008", conventions="lammps")
+    pos, z = _methanol()
+    with pytest.raises(ValueError, match="atomic numbers"):
+        write_lammps_input(model, pos, np.eye(3) * 20.0, tmp_path)
+    script = write_lammps_input(model, pos, np.eye(3) * 20.0, tmp_path, "meoh", atomic_numbers=z)
+    text = script.read_text()
+    assert "meoh.ffield" in text and "read_data meoh.data" in text and "FFIELD" not in text
+    written = (tmp_path / "meoh.ffield").read_text()
+    general, atoms, _, _ = _parse_ffield(written)
+    assert [a[0][0] for a in atoms] == list(model.species) and general[0] == read_ffield("CHO_cho_2008").p["boc1"]
+    assert written == write_ffield(model.export_library())

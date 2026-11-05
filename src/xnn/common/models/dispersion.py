@@ -69,7 +69,7 @@ def switching_function(r: Tensor, cutoff: float, width: float) -> Tensor:
 
 def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: float,
                                ngw: Optional[Tensor] = None,
-                               eps_norm: float = 0.0) -> Tensor:
+                               eps_norm: float = 0.0, n_gauss: Optional[int] = None) -> Tensor:
     """Normalized Gaussian weights of the reference systems in the coordination number.
 
     D3 paper eq 16 / D4 paper eq 8: ``W_ref = sum_j^{N_ref} exp(-wf j (CN -
@@ -93,6 +93,10 @@ def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: flo
     eps_norm : float, optional
         Norm below which the fallback applies (D4 uses ``sqrt(tiny)``, D3
         exactly zero).
+    n_gauss : int or None, optional
+        The largest entry of ``ngw`` when the caller knows it (``None``: read
+        from ``ngw``, a host synchronization). A larger value gives the same
+        weights.
 
     Returns
     -------
@@ -103,17 +107,16 @@ def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: flo
     if ngw is None:
         gw = torch.exp(-wf * dcn2)
     else:
-        n_max = int(ngw.max())
+        n_max = int(ngw.max()) if n_gauss is None else int(n_gauss)
         j = torch.arange(1, n_max + 1, device=cn.device)
         gauss = torch.exp(-wf * j.to(cn.dtype)[None, None, :] * dcn2[:, :, None])
         use = j[None, None, :] <= ngw[:, :, None]
-        gw = torch.where(use, gauss, torch.zeros_like(gauss)).sum(-1)
-    gw = torch.where(valid, gw, torch.zeros_like(gw))
+        gw = torch.where(use, gauss, 0.0).sum(-1)
+    gw = torch.where(valid, gw, 0.0)
     norm = gw.sum(dim=1)
     ok = norm > eps_norm
-    weights = gw / torch.where(ok, norm, torch.ones_like(norm))[:, None]
-    neg_inf = torch.full_like(refcn, -math.inf)
-    max_cn = torch.where(valid, refcn, neg_inf).max(dim=1).values
+    weights = gw / torch.where(ok, norm, 1.0)[:, None]
+    max_cn = torch.where(valid, refcn, -math.inf).max(dim=1).values
     fallback = (valid & ((refcn - max_cn[:, None]).abs() < 1e-12)).to(cn.dtype)
     return torch.where(ok[:, None], weights, fallback)
 
@@ -750,9 +753,44 @@ class DispersionCorrection(InteratomicPotential):
         """Switch the term's fast paths on or off for one evaluation."""
         from .fast import FastPathModule, select
         if isinstance(self.term, FastPathModule):
-            from .dispersion_fast import AUTO_POLICY
-            select([self.term], self.use_fast, AUTO_POLICY, data.pos.device, data.model_dtype,
+            from .dispersion_fast import AUTO_POLICY, AUTO_POLICY_CPU_KERNELS
+            policy = AUTO_POLICY
+            kernels = getattr(self.term, "cpu_kernels_apply", None)
+            if data.pos.device.type == "cpu" and kernels is not None and kernels(int(data.atomic_numbers.shape[0])):
+                policy = AUTO_POLICY_CPU_KERNELS
+            select([self.term], self.use_fast, policy, data.pos.device, data.model_dtype,
                    int(data.edge_index.shape[1]))
+
+    @torch.jit.unused
+    def forms_forces(self, data: AtomicGraph) -> bool:
+        """Whether :meth:`forward_direct` serves this evaluation: a standalone term whose CPU kernels form
+        the forces and stress themselves (evaluation; the outputs carry no autograd graph)."""
+        if (self.model is not None or self.training or self.use_fast is False
+                or data.pos.device.type != "cpu" or not hasattr(self.term, "direct_applies")):
+            return False
+        # "auto" takes the CPU kernels at every size where they apply (AUTO_POLICY_CPU_KERNELS)
+        if not self.term.direct_applies(data, self.use_fast):
+            return False
+        if not self.term.fast_active:
+            self.term.fast_active = True
+        if data.model_dtype == torch.float32:
+            from .fast import warn_float32_once
+            warn_float32_once()
+        return True
+
+    @torch.jit.unused
+    def forward_direct(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        """:meth:`forward` with ``"forces"`` and ``"virial"`` (``dE / d(strain)``) from the term's CPU
+        kernels, no autograd (see :meth:`forms_forces`)."""
+        disp = self.term.evaluate_direct(data)
+        energy = disp.pop("energy")
+        out: Dict[str, Tensor] = {
+            "node_energy": disp.pop("node_energy"), "energy": energy,
+            "node_features": disp.pop("node_features"),
+            "energy_sr": torch.zeros_like(energy), "energy_disp": energy}
+        for key, value in disp.items():
+            out[self._RENAME.get(key, key)] = value
+        return out
 
     def inner_graph(self, data: AtomicGraph) -> AtomicGraph:
         """``data`` restricted to the edges within the wrapped model's cutoff."""

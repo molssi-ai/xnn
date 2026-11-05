@@ -930,3 +930,24 @@ def test_from_config_refit_options():
     assert model.atom_ref.weight.requires_grad
     assert model.ff.params["charge"].requires_grad
     assert abs(float(model(_graph(pos, z, 12.0))["e_ref"]) + 9.0) < 1e-12
+
+
+def test_lammps_input_notes_the_series_constants(tmp_path):
+    """The OPLS series constants V0 (set here) have no LAMMPS term: the written script states them as an
+    energy offset (their sum over the dihedrals); a model of another kind gets no LAMMPS inputs."""
+    import numpy as np
+
+    from xnn.ffnn.models import Amoeba, lammps_input, write_lammps_input
+    from xnn.ffnn.models.oplslib import KCAL_TO_EV
+    model, pos, z = _butane_model(cutoff=8.0)
+    with torch.no_grad():
+        model.ff.params["dihedral_v"][model.dihedral_type, 0] = 0.01
+    _, _, offset, _ = lammps_input(model, np.asarray(pos), np.eye(3) * 20.0)
+    v0 = float(model.ff.params["dihedral_v"][model.dihedral_type, 0].sum()) / KCAL_TO_EV
+    assert offset == pytest.approx(v0, rel=1e-12) and offset != 0.0
+    script = write_lammps_input(model, np.asarray(pos), np.eye(3) * 20.0, tmp_path, "butane")
+    assert script.read_text().split("\n")[0] == (f"# energy offset not in LAMMPS (the OPLS series constants V0): "
+                                                 f"{offset:.15g} kcal/mol")
+    water = Amoeba("amoeba-water-2003", MolecularTopology.from_bonds(["OW", "HW", "HW"], [(0, 1), (0, 2)]))
+    with pytest.raises(TypeError, match="no LAMMPS inputs"):
+        lammps_input(water, np.zeros((3, 3)), None)

@@ -23,8 +23,7 @@ Python environment or a virtual one.
    jupyter lab notebooks/
 
 Every training and MD notebook loads its data through the data hub
-(:ref:`howto-load-datasets`). The argon dataset is bundled and shipped with the
-package. Other datasets are downloaded and cached on their first use.
+(:ref:`howto-load-datasets`). The argon dataset is bundled with the repository. Other datasets are downloaded and cached on their first use.
 
 What is where?
 ==============
@@ -41,7 +40,7 @@ matching paths:
      fidelity_checks/    each model against its reference code, block by block
        common/  gnn/  dnn/  cnn/  ffnn/  hybnn/  sqmnn/  trfnn/
      parity_checks/      the fast paths against the reference implementation
-       common/dispersion/  gnn/mace/
+       common/dispersion/  gnn/mace/  gnn/schnet/  gnn/painn/
 
 For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
 ``parity_checks/gnn/mace/``. In ``examples/``:
@@ -52,8 +51,8 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
     - MACE, NequIP, Allegro and CACE offer a train/test notebook and an argon
       NPT density notebook, each compares the performance of the model against
       the reference code.
-    - MACE and AIMNet2 add their foundation-models to the experiments and
-      provide a fine-tuning notebook.
+    - MACE and AIMNet2 add their foundation models to the experiments, and
+      MACE provides a fine-tuning notebook.
     - SchNet trains on rMD17, then runs a NVE dynamics.
     - DimeNet checks its performance against the tests in its original paper and
       trains on rMD17 while comparing its results against those of SchNet.
@@ -117,9 +116,21 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
 
   .. code-block:: bash
 
-    pip install pip install git+https://github.com/BingqingCheng/cace
+    pip install git+https://github.com/BingqingCheng/cace
 
   to have the CACE reference code installed.
+
+- The ``schnet_verification`` and ``painn_verification`` notebooks need
+  ``schnetpack``. The ``gemnet_verification``, ``torchmdnet_verification``,
+  ``equiformer_verification``, ``fairchem_verification``,
+  ``spookynet_verification``, ``se3cnn_verification`` and
+  ``s2cnn_verification`` notebooks need their reference codes installed. The
+  ``dimenet_verification`` notebook needs TensorFlow. The
+  ``hdnnp_verification`` notebook runs RuNNer, named by ``XNN_RUNNER``. The
+  ``sqmnn_verification`` notebook runs MOPAC, named by ``XNN_MOPAC``.
+- The ``parity_checks`` notebooks need a CUDA GPU. The ``mace_cueq_parity``
+  notebook also needs the cuEquivariance packages (see
+  :ref:`howto-fast-paths`).
 
 - The ``ani_verification`` notebook which requires the installation of ``ani``
   extra dependency.
@@ -152,7 +163,7 @@ Most notebooks run with the ``examples`` extra. The exceptions are:
   ``tinker2lmp.py`` converter of the LAMMPS distribution; each comparison is
   skipped otherwise. The AMOEBA protein example uses RDKit.
 - The ``examples/common/d4/*`` and ``d4_verification`` notebooks use the ``d4`` extra
-  dependency. The paper examples also need the ``rdkit`` extra dependency. The
+  dependency. The paper examples also need RDKit (in the ``examples`` extra). The
   large-scale experiment notebook requires the ``vesin`` extra dependency to be
   able to calculate the neighborlists efficiently and a GPU with tens of GBs of
   memory.

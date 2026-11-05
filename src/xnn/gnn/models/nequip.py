@@ -400,18 +400,23 @@ class InteractionBlock(nn.Module):
         torch.Tensor
             Updated node features of shape ``(N, irreps_out.dim)``.
         """
-        weight = self.fc(edge_radial)
         x_in = x
         x = self.linear_1(x)
         # NequIP normalizes the messages by sqrt(<neighbours>) on the edges,
-        # before summing; since the sum is linear this equals normalizing the
-        # node result, and we keep the edge-side order to stay bit-for-bit.
-        # (The local copy refines the Optional for TorchScript.)
+        # before summing; the sum is linear, so the convolution normalizes the
+        # node sums instead (equal to round-off, one pass over the nodes
+        # rather than the edges). (The local copy refines the Optional for
+        # TorchScript.)
         n_avg: Optional[float] = self.avg_num_neighbors
         divisor: Optional[float] = None
         if n_avg is not None:
             divisor = n_avg ** 0.5
-        out = self.tp.conv(x, edge_sh, weight, edge_index, x.shape[0], divisor)
+        # on the fast path the radial network gives the weights in the kernel's
+        # column order and scale, the divisor folded in
+        w_index, w_scale = self.tp.weight_map(edge_radial, divisor)
+        weight = self.fc(edge_radial, w_index, w_scale)
+        out = self.tp.conv(x, edge_sh, weight, edge_index, x.shape[0], divisor,
+                           weights_mapped=w_scale is not None)
         out = self.linear_2(out)
         if self.use_sc:
             out = out + self.sc(x_in, node_attrs)
@@ -597,6 +602,9 @@ class NequIP(EquivariantGNN):
     ValueError
         If ``n_layers`` is negative.
     """
+
+    #: names of the auto policies in :mod:`xnn.gnn.fast` (evaluation, training)
+    fast_policies = ("NEQUIP_AUTO_POLICY", "NEQUIP_AUTO_POLICY_TRAINING")
 
     # one readout head = the two atom-wise output linears, the reference
     # energies and the per-species scale (see MultiHead)

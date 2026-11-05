@@ -16,7 +16,7 @@ notebook offers a runnable version of this page.
    from xnn.common.data import load_dataset, list_datasets
 
    # List the available datasets in the hub
-   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'lode_dimers', 'qm7', 'qm9', 'rmd17', ...]
+   list_datasets()   # ['ani1', 'ani1ccx', 'ani1x', 'ani2x', 'argon_md', 'ethanol_response', 'gmtkn55', ...]
 
    # Load a dataset by name and optional keyword arguments
    splits = load_dataset("rmd17", molecule="aspirin")                 # {"train": [...], "test": [...]}

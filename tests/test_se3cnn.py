@@ -8,7 +8,8 @@ shells, and exact equivariance of the sampled kernels, the convolution,
 the gated nonlinearity, the batch normalization and the whole potential
 under the rotations of the cube. Rotation invariance of the energy under
 arbitrary rotations is approximate (the bandlimit) and is compared with
-the conventional CNN, which has none.
+the conventional CNN, which has none. ``tests/se3cnn_fidelity.py``
+compares with the reference implementation when it is importable.
 """
 
 import numpy as np
@@ -369,3 +370,14 @@ def test_train_step():
     cfg.data.val_fraction = 0.25
     cfg.device = "cpu"
     Trainer(cfg, AtomicDataset(structs, cfg.model.cutoff)).fit()
+
+
+# the reference implementation
+
+def test_reference_fidelity():
+    pytest.importorskip("se3cnn")
+    pytest.importorskip("lie_learn")
+    from se3cnn_fidelity import compare_all
+    for dtype, tol in ((torch.float32, 1e-5), (torch.float64, 1e-11)):
+        worst = compare_all(dtype)
+        assert max(worst.values()) < tol, worst

@@ -321,3 +321,130 @@ def test_d3_reference_set_switch():
                        default.dispersion._c6ab[:87, :87])
     g = _graph()
     assert torch.allclose(default(g)["energy"], newer(g)["energy"])   # no actinides
+
+
+# fast path (the attention logits of ET and the fused continuous-filter convolution of SchNet)
+
+def _force_loss_results(model, g):
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model).train()(g)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+    return (out["energy"].detach().double(), out["forces"].detach().double(),
+            {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
+
+
+def test_fast_messages_match_the_reference():
+    """The fused attention logits and messages give the reference energies, forces and the weight
+    gradients of a force loss, in the first, middle and last layers (Triton's interpreter on a
+    CPU, the kernels on a GPU)."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = _build(n_interactions=3, n_features=24, num_heads=6).double().to(device)
+    g = _graph(n=8, total_charge=1.0).to(device)
+    blocks = list(model.layers)
+    res = {}
+    for on in (False, True):
+        # the model selects per evaluation, and no CPU qualifies: pin the selection
+        def pinned(num_edges, on=on):
+            model.__dict__["_fast_blocks"] = blocks
+            for b in blocks:
+                b.fast_active = on
+        model._select_fast = pinned
+        res[on] = _force_loss_results(model, g)
+    del model._select_fast
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= 1e-11 * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_parity_and_training(dtype):
+    """On the GPU: the fused kernels give the reference energies, forces and weight gradients of a
+    force loss."""
+    pytest.importorskip("triton")
+    model = _build(n_interactions=3, n_features=32, num_heads=8).to("cuda", dtype)
+    g = _graph(n=12, periodic=True).to("cuda")
+    g.pos, g.cell = g.pos.to(dtype), g.cell.to(dtype)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res[use_fast] = _force_loss_results(model, g)
+        assert model.layers[0].fast_active == use_fast
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.parametrize("dispersion", [False, True])
+@pytest.mark.parametrize("charge", [0.0, 1.0])
+def test_torchscript_export_matches_eager(tmp_path, dispersion, charge):
+    """The exported potential (node_features_energy_charges core, all-pairs electrostatics from the positions)
+    gives the eager energies, forces and charges, also through the LAMMPS pair-style entry point with a full
+    neighbor list."""
+    from xnn.common.deploy import export_torchscript_potential
+    model = _build(use_dispersion=dispersion).eval()
+    g = _graph(n=9, cutoff=model.cutoff)
+    if charge:
+        g.total_charge = torch.tensor([charge])
+    ref = ForceStressOutput(model).eval()(g)
+    path = export_torchscript_potential(model, model.cutoff, str(tmp_path / "bamboo.pt"), total_charge=charge)
+    scripted = torch.jit.load(path)
+    for out in (scripted(g.pos, g.atomic_numbers),
+                scripted.forward_lammps(g.pos, g.edge_index, torch.zeros((g.edge_index.shape[1], 3)),
+                                        g.atomic_numbers, torch.zeros(3, 3))):
+        energy = out["energy"] if "energy" in out else out["total_energy"]
+        assert torch.allclose(energy.sum(), ref["energy"].sum(), atol=1e-12, rtol=0)
+        assert torch.allclose(out["forces"], ref["forces"], atol=1e-12, rtol=0)
+        assert torch.allclose(out["charges"], ref["charges"], atol=1e-12, rtol=0)
+
+
+def test_fast_selection_and_captured_batches(monkeypatch):
+    """``use_fast`` is validated; ``True`` turns the fused messages on where they are supported and they
+    give the reference energies and forces (Triton's interpreter on a CPU), while a padded batch with an
+    index plan (a captured step) always takes the reference path."""
+    from xnn.hybnn.fast.bamboo import supported
+    assert not supported(torch.device("cpu"), torch.float64)
+    model = _build(n_interactions=2, n_features=16, num_heads=4).double()
+    with pytest.raises(ValueError):
+        model.set_use_fast("fast")
+    with pytest.raises(TypeError):
+        model.set_use_fast(1)
+    g = _graph(n=6, total_charge=1.0)
+    ref = ForceStressOutput(model.set_use_fast(False)).eval()(g)
+    assert not any(b.fast_active for b in model.layers)
+    if not torch.cuda.is_available():
+        if os.environ.get("TRITON_INTERPRET") != "1":
+            pytest.skip("needs a CUDA device or Triton's interpreter")
+        import xnn.hybnn.fast.bamboo as fast
+        monkeypatch.setattr(fast, "supported", lambda device, dtype: True)
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device).set_use_fast(True)
+    out = ForceStressOutput(model).eval()(_graph(n=6, total_charge=1.0).to(device))
+    assert all(b.fast_active for b in model.layers)
+    for key in ("energy", "forces"):
+        assert (out[key].detach().cpu() - ref[key].detach()).abs().max() <= 1e-12 * ref[key].abs().max()
+    planned = _graph(n=6, total_charge=1.0).to(device)
+    planned.index_plan = {}
+    out = ForceStressOutput(model).eval()(planned)
+    assert not any(b.fast_active for b in model.layers)
+    assert (out["energy"].detach().cpu() - ref["energy"].detach()).abs().max() <= 1e-12 * ref["energy"].abs().max()
+
+
+def test_scriptable_core_matches_forward():
+    """The single-structure core (node features, atomic energies and charges for a net charge) equals the
+    batched forward pass."""
+    model = _build(use_dispersion=True).eval()
+    g = _graph(n=8, total_charge=1.0)
+    ref = model(g)
+    feat, node_energy, charges = model.node_features_energy_charges(
+        g.atomic_numbers, g.edge_index, g.edge_vectors(), g.pos, torch.zeros(3, 3),
+        torch.zeros(3, dtype=torch.bool), 1.0, 1.0)
+    assert torch.allclose(feat, ref["node_features"], rtol=0, atol=1e-12)
+    assert torch.allclose(node_energy, ref["node_energy"], rtol=0, atol=1e-12)
+    assert torch.allclose(charges, ref["charges"], rtol=0, atol=1e-12)
+    assert abs(float(charges.sum()) - 1.0) < 1e-12

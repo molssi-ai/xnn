@@ -180,6 +180,9 @@ class _EMA:
         self.n_averaged += 1
 
 
+#: Steps of each kind in the trial of a captured training step against ordinary ones.
+TRIAL_STEPS = 3
+
 #: Properties scored by the error metrics (``trainer.metrics``).
 _METRIC_TARGETS = ["energy", "forces", "stress", "dipole", "polarizability", "charges",
                    "les_dipole", "les_charges"]
@@ -496,7 +499,20 @@ class Trainer:
                               shuffle=shuffle and sampler is None,
                               sampler=sampler, collate_fn=collate,
                               num_workers=cfg.data.num_workers)
-        self.train_loader = _loader(train_set, True, train_batch_sampler)
+        self._graphed = None
+        self._trial = None
+        self.graph_trial = None
+        cap = self._check_cuda_graph(train_set, train_batch_sampler, multi) if t.cuda_graph else None
+        self._graph_mode = cap is not None
+        if self._graph_mode:
+            from .graphed import PaddedCollate
+            # fixed counts: the last, smaller batch is dropped
+            self.train_loader = DataLoader(self._planned, batch_size=cfg.data.batch_size, shuffle=True,
+                                           collate_fn=PaddedCollate(self._planner, cap), drop_last=True,
+                                           num_workers=cfg.data.num_workers,
+                                           pin_memory=self.device.type == "cuda")
+        else:
+            self.train_loader = _loader(train_set, True, train_batch_sampler)
         self.val_loader = (_loader(val_set, False, val_batch_sampler)
                            if val_set is not None else None)
         self.test_loader = (_loader(test_set, False, test_batch_sampler)
@@ -508,8 +524,14 @@ class Trainer:
         name = o.optimizer.lower()
         optimizer = {"adam": torch.optim.Adam, "amsgrad": torch.optim.Adam,
                      "adamw": torch.optim.AdamW}[name]
-        self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay,
-                             amsgrad=(name == "amsgrad"))
+        if self._graph_mode:
+            # a captured step reads the learning rate from a tensor (the schedulers fill it)
+            self.opt = optimizer(self._params, lr=torch.tensor(float(o.lr), device=self.device),
+                                 weight_decay=o.weight_decay, amsgrad=(name == "amsgrad"),
+                                 capturable=True)
+        else:
+            self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay,
+                                 amsgrad=(name == "amsgrad"))
         self.sched = self._make_scheduler(o.scheduler)
         self.ema = None
         if o.ema_decay > 0:
@@ -767,7 +789,130 @@ class Trainer:
                                                               patience=10)
         return None
 
-    def _step(self, data, train: bool):
+    def _check_cuda_graph(self, train_set, train_batch_sampler, multi):
+        """The counts of a captured training step (``trainer.cuda_graph``), after checking
+        that the run allows one. Where the model's fast kernels take batches of that size
+        (a captured step runs the reference), the first steps time both (:meth:`_graphed_step`)."""
+        from ..models.fast import fast_modules
+        from .graphed import PlannedDataset, capacity, index_planner
+        if self.device.type != "cuda":
+            raise ValueError("trainer.cuda_graph needs a CUDA device")
+        if self.distributed or train_batch_sampler is not None or multi is not None:
+            raise ValueError("trainer.cuda_graph takes single-process, single-head training "
+                             "with the default batching")
+        self._planner = index_planner(self.model)
+        if self._planner is None:
+            raise ValueError("trainer.cuda_graph needs a model with an index plan "
+                             "(DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet)")
+        cfg = self.cfg
+        if len(train_set) < cfg.data.batch_size:
+            raise ValueError("trainer.cuda_graph drops the last smaller batch: the training set "
+                             "needs at least one full batch")
+        # every structure's plan built once (the batches concatenate them)
+        self._planned = PlannedDataset(train_set, self._planner)
+        cap = capacity(self._planner, self._planned, cfg.data.batch_size)
+        for m in self.model.modules():
+            if callable(getattr(m, "_select_fast", None)):
+                was = m.training
+                m.train()
+                m._select_fast(cap.edges)
+                m.train(was)
+                break
+        # ordinary steps on the fast kernels against captured ones: times of each, then the faster
+        self._trial = ([], []) if any(m.fast_active for m in fast_modules(self.model)) else None
+        return cap
+
+    def _graphed_body(self, data):
+        """The training step that :class:`~xnn.common.train.graphed.GraphedStep` captures: no
+        value read back to the host."""
+        o = self.cfg.optim
+        pred = self.model(data)
+        counts = {}
+        loss, logs = weighted_loss(
+            pred, data, o.energy_weight, o.force_weight, o.stress_weight,
+            dipole_weight=o.dipole_weight,
+            polarizability_weight=o.polarizability_weight,
+            charge_weight=o.charge_weight,
+            les_dipole_weight=o.les_dipole_weight,
+            les_charge_weight=o.les_charge_weight,
+            huber_delta=o.huber_delta,
+            huber_delta_energy=o.huber_delta_energy,
+            huber_delta_forces=o.huber_delta_forces,
+            huber_delta_stress=o.huber_delta_stress,
+            counts=counts, sync=False)
+        if self._prior:
+            prior = sum(w * (p - p0).pow(2).sum() for p, p0, w in self._prior)
+            loss = loss + prior
+            logs["prior"] = prior.detach()
+            logs["loss"] = loss.detach()
+        self.opt.zero_grad(set_to_none=True)
+        loss.backward(inputs=self._params)
+        if o.clip_grad > 0:
+            torch.nn.utils.clip_grad_norm_(self._params, o.clip_grad)
+        self.opt.step()
+        if self.ema is not None:
+            self.ema.update_parameters(self.module)
+        return {k: v.detach() for k, v in pred.items() if torch.is_tensor(v)}, logs, counts
+
+    def _graphed_step(self, data):
+        """A training step replayed as one CUDA graph (``trainer.cuda_graph``).
+
+        Where the model's fast kernels take the batches, the first steps are a trial: three
+        ordinary steps on the kernels, then the warm-up, the capture and three replays, each
+        timed; training goes on with the faster (both are the same training steps)."""
+        import statistics
+        import time
+
+        from .graphed import GraphedStep, strip_padding
+        trial = self._trial
+        if trial is not None and len(trial[0]) < TRIAL_STEPS:
+            # the real structures only: the model plans itself and may take its kernels
+            plain = strip_padding(data)
+            torch.cuda.synchronize(self.device)
+            start = time.perf_counter()
+            out = self._step(plain, True, ordinary=True)
+            torch.cuda.synchronize(self.device)
+            trial[0].append(time.perf_counter() - start)
+            return out
+        if self._graphed is None:
+            self._graphed = GraphedStep(self._graphed_body, self.device)
+        replay = self._graphed.graph is not None
+        if trial is not None and replay:
+            torch.cuda.synchronize(self.device)
+            start = time.perf_counter()
+        pred, logs, counts, static = self._graphed(data)
+        if trial is not None and replay:
+            torch.cuda.synchronize(self.device)
+            trial[1].append(time.perf_counter() - start)
+            if len(trial[1]) == TRIAL_STEPS:
+                # the first ordinary step compiles the kernels: the later ones count
+                ordinary, graphed = statistics.median(trial[0][1:]), statistics.median(trial[1])
+                self._trial = None
+                # the trial's outcome, for the logs
+                self.graph_trial = {"ordinary_s": ordinary, "captured_s": graphed,
+                                    "captured": graphed <= ordinary}
+                if ordinary < graphed:
+                    warnings.warn(f"trainer.cuda_graph: ordinary steps on the fast kernels "
+                                  f"({1e3 * ordinary:.1f} ms) are faster than captured ones "
+                                  f"({1e3 * graphed:.1f} ms) for these batches; training goes on "
+                                  "with ordinary steps", stacklevel=2)
+                    self._graph_mode = False
+                    self._graphed = None
+                    # plain batches from now on (with loader workers: from the next epoch)
+                    self.train_loader.collate_fn.padded = False
+        if self.ema is not None and replay:
+            # a replay runs the average but not its Python counter
+            self.ema.n_averaged += 1
+        logs = {k: float(v) for k, v in logs.items()}
+        counts = {k: (float(c), w) for k, (c, w) in counts.items()}
+        if self._prior:
+            counts["prior"] = (1.0, 1.0)
+        if self.tcfg.metrics:
+            self._error_metrics(pred, static, logs, counts)
+        self.global_step += 1
+        return logs, counts
+
+    def _step(self, data, train: bool, ordinary: bool = False):
         """Run one forward/loss step on a batch, optionally back-propagating.
 
         Moves the batch to the training device, runs the model forward,
@@ -786,6 +931,9 @@ class Trainer:
             pass and loss computation are performed on :attr:`eval_module`;
             note that gradients are still enabled because force predictions
             require them.
+        ordinary : bool, optional
+            Run an ordinary step even with ``trainer.cuda_graph`` (the trial
+            of :meth:`_graphed_step`). Defaults to ``False``.
 
         Returns
         -------
@@ -800,6 +948,11 @@ class Trainer:
             parameters, which the training loss includes), and the ``counts``
             of its terms that :meth:`_dataset_metrics` accumulates.
         """
+        if train and self._graph_mode and not ordinary:
+            return self._graphed_step(data)
+        if self.tcfg.cuda_graph:
+            from .graphed import strip_padding
+            data = strip_padding(data)
         data = data.to(self.device)
         o = self.cfg.optim
         # Evaluation steps run the bare module (the EMA weights when kept):
@@ -839,7 +992,12 @@ class Trainer:
                                   if k not in ("forces", "stress", "virials")
                                   and torch.is_tensor(v) and v.requires_grad)
             self.opt.zero_grad()
-            loss.backward()
+            if self.distributed:
+                loss.backward()
+            else:
+                # the trainable parameters only: the positions of a force loss need no
+                # gradient of their own (a second derivative of every geometric term)
+                loss.backward(inputs=self._params)
             if o.clip_grad > 0:
                 torch.nn.utils.clip_grad_norm_(self._params, o.clip_grad)
             self.opt.step()

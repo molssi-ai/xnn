@@ -35,7 +35,8 @@ layer-normed multi-head attention whose logits include a distance filter
     dv_i = sum_j (s^1_ij o v_j + s^2_ij o r_ij / |r_ij|) + q^3_i o U_3 v_i
 
 The sums over ``j`` include ``j = i`` (the reference neighbor list carries
-self pairs at ``d_ii = 0``), which the model adds as a per-atom term. A final
+self pairs at ``d_ii = 0``); the model appends one self pair per atom to the
+pairs of the update layers (zero distance and direction, cutoff one). A final
 layer norm and two gated equivariant blocks (``F -> F/2 -> 1``) give the
 per-atom energy, standardized by ``energy_scale`` / ``energy_shift`` and
 shifted by the per-element reference ``atom_ref``.
@@ -63,7 +64,8 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.blocks import GatedEquivariantBlock
-from xnn.common.models.ops import make_activation, scatter_sum
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import gather_rows, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 
 from .base import TransformerPotential
@@ -89,31 +91,31 @@ class _NeighborEmbedding(nn.Module):
         Feature width ``F``.
     n_rbf : int
         Number of radial basis functions.
-    cutoff : float
-        Cosine cutoff radius.
     n_elements : int
         Size of the type embedding table (indexed by ``Z``).
     """
 
-    def __init__(self, n_features: int, n_rbf: int, cutoff: float, n_elements: int):
+    def __init__(self, n_features: int, n_rbf: int, n_elements: int):
         super().__init__()
         self.embedding = nn.Embedding(n_elements, n_features)
         self.distance_proj = nn.Linear(n_rbf, n_features)
         self.combine = nn.Linear(2 * n_features, n_features)
-        self.cutoff_fn = CosineCutoff(cutoff)
         _xavier_zero_bias_(self)
 
     def forward(self, atomic_numbers: Tensor, x: Tensor, src: Tensor, dst: Tensor,
-                r: Tensor, rbf: Tensor) -> Tensor:
+                envelope: Tensor, rbf: Tensor) -> Tensor:
         """Combine the intrinsic embedding ``x`` with the filtered neighbor types."""
-        w = self.distance_proj(rbf) * self.cutoff_fn(r).unsqueeze(-1)
-        msg = w * self.embedding(atomic_numbers)[src]
+        w = self.distance_proj(rbf) * envelope.unsqueeze(-1)
+        msg = w * gather_rows(self.embedding(atomic_numbers), src)
         neighborhood = scatter_sum(msg, dst, x.shape[0])
         return self.combine(torch.cat([x, neighborhood], dim=-1))
 
 
-class _AttentionLayer(nn.Module):
+class _AttentionLayer(nn.Module, FastPathModule):
     """One update layer: the modified attention of eq 5 to 9 and the update of eq 10 and 11.
+
+    The pair sums run in fused kernels when :attr:`fast_active` is set (see
+    :meth:`EquivariantTransformer.set_use_fast`).
 
     Parameters
     ----------
@@ -127,8 +129,6 @@ class _AttentionLayer(nn.Module):
         Nonlinearity of the distance filters ``D^K`` and ``D^V``.
     attn_activation : str
         Nonlinearity of the attention logits (SiLU in the paper).
-    cutoff : float
-        Cosine cutoff radius.
     distance_influence : str
         Where the distance filters enter: ``"both"``, ``"keys"``,
         ``"values"`` or ``"none"``.
@@ -138,8 +138,7 @@ class _AttentionLayer(nn.Module):
     """
 
     def __init__(self, n_features: int, n_rbf: int, num_heads: int, activation: str,
-                 attn_activation: str, cutoff: float, distance_influence: str,
-                 vector_cutoff: bool):
+                 attn_activation: str, distance_influence: str, vector_cutoff: bool):
         super().__init__()
         self.n_features = n_features
         self.num_heads = num_heads
@@ -148,7 +147,6 @@ class _AttentionLayer(nn.Module):
         self.layernorm = nn.LayerNorm(n_features)
         self.act = make_activation(activation)
         self.attn_act = make_activation(attn_activation)
-        self.cutoff_fn = CosineCutoff(cutoff)
         self.q_proj = nn.Linear(n_features, n_features)
         self.k_proj = nn.Linear(n_features, n_features)
         self.v_proj = nn.Linear(n_features, 3 * n_features)
@@ -161,10 +159,15 @@ class _AttentionLayer(nn.Module):
         if distance_influence in ("values", "both"):
             self.dv_proj = nn.Linear(n_rbf, 3 * n_features)
         _xavier_zero_bias_(self)
+        self.fast_active = False
 
-    def forward(self, x: Tensor, vec: Tensor, src: Tensor, dst: Tensor, r: Tensor,
-                rbf: Tensor, direction: Tensor, rbf_self: Tensor
-                ) -> Tuple[Tensor, Tensor, Tensor]:
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Triton on ``device``."""
+        from xnn.trfnn.fast.et import supported
+        return supported(device, dtype)
+
+    def forward(self, x: Tensor, vec: Tensor, src: Tensor, dst: Tensor, envelope: Tensor,
+                rbf: Tensor, direction: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Compute the residuals ``dx``, ``dv`` and the attention weights.
 
         Parameters
@@ -174,23 +177,24 @@ class _AttentionLayer(nn.Module):
         vec : Tensor
             Vector features ``(N, 3, F)``.
         src, dst : Tensor
-            Neighbor ``j`` and center ``i`` of every edge, ``(E,)`` each.
-        r : Tensor
-            Edge lengths ``(E,)``.
+            Neighbor ``j`` and center ``i`` of every pair, ``(P,)`` each,
+            self pairs included.
+        envelope : Tensor
+            Cosine cutoff of the pair distances ``(P,)`` (one for a self pair).
         rbf : Tensor
-            Radial basis of the edge lengths ``(E, n_rbf)``.
+            Radial basis of the pair distances ``(P, n_rbf)``.
         direction : Tensor
-            Unit vectors ``r_ij / |r_ij|`` with ``r_ij = r_j - r_i``, ``(E, 3)``.
-        rbf_self : Tensor
-            The radial basis at zero distance, ``(1, n_rbf)`` (the
-            self-interaction term).
+            Unit vectors ``r_ij / |r_ij|`` with ``r_ij = r_j - r_i``, ``(P, 3)``
+            (zero for a self pair).
 
         Returns
         -------
         tuple of Tensor
             ``dx`` of shape ``(N, F)``, ``dv`` of shape ``(N, 3, F)`` and the
-            attention weights ``A_ij`` of shape ``(E, num_heads)``.
+            attention weights ``A_ij`` of shape ``(P, num_heads)``.
         """
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x, vec, src, dst, envelope, rbf, direction)
         n, F, H, d = x.shape[0], self.n_features, self.num_heads, self.head_dim
         x = self.layernorm(x)
         q = self.q_proj(x).reshape(n, H, d)
@@ -199,15 +203,13 @@ class _AttentionLayer(nn.Module):
         parts = torch.split(self.vec_proj(vec), F, dim=-1)
         vec1, vec2, vec3 = parts[0], parts[1], parts[2]
         vec_dot = (vec1 * vec2).sum(dim=1)                         # <U_1 v, U_2 v>
-        vec_h = vec.reshape(n, 3, H, d)
-        envelope = self.cutoff_fn(r)
 
         # eq 7 and 8: the distance-filtered dot product of queries and keys
-        logits = q[dst] * k[src]
+        logits = gather_rows(q, dst) * gather_rows(k, src)
         if self.dk_proj is not None:
             logits = logits * self.act(self.dk_proj(rbf)).reshape(-1, H, d)
-        attn = self.attn_act(logits.sum(dim=-1))                  # (E, H)
-        values = v[src]
+        attn = self.attn_act(logits.sum(dim=-1))                  # (P, H)
+        values = gather_rows(v, src)
         if self.vector_cutoff:
             values = values * envelope[:, None, None]
         else:
@@ -216,28 +218,38 @@ class _AttentionLayer(nn.Module):
             values = values * self.act(self.dv_proj(rbf)).reshape(-1, H, 3 * d)
         val = torch.split(values, d, dim=-1)                       # s^3, s^1, s^2
         msg_x = val[0] * attn.unsqueeze(-1)
-        msg_vec = vec_h[src] * val[1].unsqueeze(1) + val[2].unsqueeze(1) * direction[:, :, None, None]
+        msg_vec = (gather_rows(vec.reshape(n, 3, H, d), src) * val[1].unsqueeze(1)
+                   + val[2].unsqueeze(1) * direction[:, :, None, None])
         dx = scatter_sum(msg_x, dst, n)
         dvec = scatter_sum(msg_vec, dst, n)
-
-        # the atom's own term (j = i): zero distance, so the cutoff is one and
-        # the directional part vanishes
-        logits0 = q * k
-        if self.dk_proj is not None:
-            logits0 = logits0 * self.act(self.dk_proj(rbf_self)).reshape(1, H, d)
-        attn0 = self.attn_act(logits0.sum(dim=-1))
-        values0 = v
-        if self.dv_proj is not None:
-            values0 = values0 * self.act(self.dv_proj(rbf_self)).reshape(1, H, 3 * d)
-        val0 = torch.split(values0, d, dim=-1)
-        dx = dx + val0[0] * attn0.unsqueeze(-1)
-        dvec = dvec + vec_h * val0[1].unsqueeze(1)
 
         # eq 10 and 11
         outputs = torch.split(self.o_proj(dx.reshape(n, F)), F, dim=-1)
         o1, o2, o3 = outputs[0], outputs[1], outputs[2]
         dx_out = vec_dot * o2 + o3
         dvec_out = vec3 * o1.unsqueeze(1) + dvec.reshape(n, 3, F)
+        return dx_out, dvec_out, attn
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor, vec: Tensor, src: Tensor, dst: Tensor, envelope: Tensor,
+                      rbf: Tensor, direction: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The layer with the logits and messages of the pairs in fused kernels."""
+        from xnn.trfnn.fast.et_kernels import attention_logits, attention_messages
+        F, H = self.n_features, self.num_heads
+        x = self.layernorm(x)
+        parts = torch.split(self.vec_proj(vec), F, dim=-1)
+        vec_dot = (parts[0] * parts[1]).sum(dim=1)
+        dk = self.act(self.dk_proj(rbf)) if self.dk_proj is not None else None
+        logits = attention_logits(self.q_proj(x), self.k_proj(x), dk, src, dst, H)
+        attn = self.attn_act(logits)
+        if not self.vector_cutoff:
+            attn = attn * envelope[:, None]
+        dv = self.act(self.dv_proj(rbf)) if self.dv_proj is not None else None
+        rows = attention_messages(attn, self.v_proj(x), dv, envelope if self.vector_cutoff else None,
+                                  vec, direction, src, dst, H)
+        outputs = torch.split(self.o_proj(rows[:, 0]), F, dim=-1)
+        dx_out = vec_dot * outputs[1] + outputs[2]
+        dvec_out = parts[2] * outputs[0].unsqueeze(1) + rows[:, 1:]
         return dx_out, dvec_out, attn
 
 
@@ -345,6 +357,7 @@ class EquivariantTransformer(TransformerPotential):
         Learnable per-element energy reference, initialized to zero.
     """
 
+    fast_path = "xnn.trfnn.fast.et"
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
 
     def __init__(self, n_features: int = 128, n_interactions: int = 6, n_rbf: int = 32,
@@ -372,25 +385,46 @@ class EquivariantTransformer(TransformerPotential):
         self.vector_cutoff = vector_cutoff
         self.embedding = nn.Embedding(n_elements, n_features)
         self.rbf = make_radial_basis(radial_basis, n_rbf, cutoff, trainable_rbf)
+        self.cutoff_fn = CosineCutoff(cutoff)
         self.neighbor_embedding: Optional[_NeighborEmbedding] = None
         if neighbor_embedding:
-            self.neighbor_embedding = _NeighborEmbedding(n_features, n_rbf, cutoff, n_elements)
+            self.neighbor_embedding = _NeighborEmbedding(n_features, n_rbf, n_elements)
         self.layers = nn.ModuleList([
             _AttentionLayer(n_features, n_rbf, num_heads, activation, attn_activation,
-                            cutoff, distance_influence, vector_cutoff)
+                            distance_influence, vector_cutoff)
             for _ in range(n_interactions)])
         self.out_norm = nn.LayerNorm(n_features)
         self.readout = _EquivariantScalar(n_features, activation)
         self._init_energy_terms(n_elements, energy_scale, energy_shift, species,
                                 atomic_energies)
 
-    def _edge_terms(self, edge_vec: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Edge lengths, the unit vectors ``r_ij / |r_ij|``, their basis and the basis at zero."""
+    def _pairs(self, edge_index: Tensor, edge_vec: Tensor, n: int
+               ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """The pairs of the update layers: the edges followed by one self pair per atom.
+
+        Returns ``src``, ``dst``, the cosine cutoff, the radial basis and the unit
+        vectors ``r_ij / |r_ij|`` of every pair; a self pair has zero distance,
+        cutoff one and no direction. The first ``E`` rows are the edges.
+        """
         r = torch.linalg.norm(edge_vec, dim=-1)
         # the paper's r_ij = r_j - r_i is the negative of the xnn edge vector
         direction = -edge_vec / r.clamp(min=1e-12).unsqueeze(-1)
-        rbf_self = self.rbf(torch.zeros(1, dtype=r.dtype, device=r.device))
-        return r, direction, self.rbf(r), rbf_self
+        loops = torch.arange(n, dtype=edge_index.dtype, device=edge_index.device)
+        src = torch.cat([edge_index[0], loops])
+        dst = torch.cat([edge_index[1], loops])
+        r = torch.cat([r, r.new_zeros((n,))])
+        direction = torch.cat([direction, direction.new_zeros((n, 3))])
+        return src, dst, self.cutoff_fn(r), self.rbf(r), direction
+
+    def _embed(self, atomic_numbers: Tensor, edge_index: Tensor, envelope: Tensor,
+               rbf: Tensor) -> Tensor:
+        """The embedding layer (the neighborhood sum runs over the edges, no self pairs)."""
+        x = self.embedding(atomic_numbers)
+        if self.neighbor_embedding is not None:
+            e = edge_index.shape[1]
+            x = self.neighbor_embedding(atomic_numbers, x, edge_index[0], edge_index[1],
+                                        envelope[:e], rbf[:e])
+        return x
 
     @torch.jit.export
     def representation(self, atomic_numbers: Tensor, edge_index: Tensor,
@@ -414,14 +448,12 @@ class EquivariantTransformer(TransformerPotential):
             The layer-normed scalars ``x`` of shape ``(N, F)`` and the
             vectors ``v`` of shape ``(N, 3, F)``.
         """
-        src, dst = edge_index[0], edge_index[1]
-        r, direction, rbf, rbf_self = self._edge_terms(edge_vec)
-        x = self.embedding(atomic_numbers)
-        if self.neighbor_embedding is not None:
-            x = self.neighbor_embedding(atomic_numbers, x, src, dst, r, rbf)
+        src, dst, envelope, rbf, direction = self._pairs(edge_index, edge_vec,
+                                                         atomic_numbers.shape[0])
+        x = self._embed(atomic_numbers, edge_index, envelope, rbf)
         vec = torch.zeros((x.shape[0], 3, x.shape[1]), dtype=x.dtype, device=x.device)
         for layer in self.layers:
-            dx, dvec, _ = layer(x, vec, src, dst, r, rbf, direction, rbf_self)
+            dx, dvec, _ = layer(x, vec, src, dst, envelope, rbf, direction)
             x = x + dx
             vec = vec + dvec
         return self.out_norm(x), vec
@@ -441,17 +473,16 @@ class EquivariantTransformer(TransformerPotential):
         list of Tensor
             One ``(E, num_heads)`` tensor per layer.
         """
-        src, dst = data.edge_index[0], data.edge_index[1]
-        r, direction, rbf, rbf_self = self._edge_terms(data.edge_vectors())
-        x = self.embedding(data.atomic_numbers)
-        if self.neighbor_embedding is not None:
-            x = self.neighbor_embedding(data.atomic_numbers, x, src, dst, r, rbf)
+        e = data.edge_index.shape[1]
+        src, dst, envelope, rbf, direction = self._pairs(data.edge_index, data.edge_vectors(),
+                                                         data.atomic_numbers.shape[0])
+        x = self._embed(data.atomic_numbers, data.edge_index, envelope, rbf)
         vec = torch.zeros((x.shape[0], 3, x.shape[1]), dtype=x.dtype, device=x.device)
         weights = []
         for layer in self.layers:
-            dx, dvec, attn = layer(x, vec, src, dst, r, rbf, direction, rbf_self)
+            dx, dvec, attn = layer(x, vec, src, dst, envelope, rbf, direction)
             x, vec = x + dx, vec + dvec
-            weights.append(attn)
+            weights.append(attn[:e])
         return weights
 
     def _energy(self, x: Tensor, vec: Tensor, atomic_numbers: Tensor) -> Tensor:
@@ -503,6 +534,8 @@ class EquivariantTransformer(TransformerPotential):
             ``"node_features"`` (the layer-normed scalars, ``(N, F)``) and
             ``"node_vectors"`` (``(N, 3, F)``).
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(data.edge_index.shape[1]))
         x, vec = self.representation(data.atomic_numbers, data.edge_index,
                                      data.edge_vectors())
         node_energy = self._energy(x, vec, data.atomic_numbers)

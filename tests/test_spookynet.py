@@ -759,3 +759,253 @@ def test_fidelity_published_checkpoint():
     res = subprocess.run([sys.executable, script, "float64", path], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert float(res.stdout.strip().splitlines()[-1]) < 1e-12
+
+
+# fast path (the fused continuous-filter convolution of SchNet)
+
+def _fast_case(device="cpu", dtype=torch.float64):
+    model = _small(seed=4, n_features=12).to(device, dtype)
+    g = collate([_graph(_structure(7, seed=4), total_charge=1, spin_multiplicity=2),
+                 _graph(_structure(5, seed=5))]).to(device)
+    g.pos = g.pos.to(dtype)
+    return model, g
+
+
+def _force_loss_results(model, g):
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model).train()(g)
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+    return (out["energy"].detach().double(), out["forces"].detach().double(),
+            {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_parity_and_training(dtype):
+    """On the GPU: the compiled interaction block gives the reference energies and forces in evaluation, and
+    the fused MLP layers the reference energies, forces and weight gradients of a force loss in training."""
+    pytest.importorskip("triton")
+    from xnn.hybnn.fast.spookynet import supported
+    if not supported(torch.device("cuda"), dtype):
+        pytest.skip("torch.compile is not available here")
+    model, g = _fast_case("cuda", dtype)
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    evals = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        out = ForceStressOutput(model).eval()(g)
+        evals[use_fast] = (out["energy"].detach().double(), out["forces"].detach().double())
+        assert model.compiled_interactions.fast_active == use_fast
+        assert not model.interactions[0].resmlp_y.fast_active
+    for ref, fast in zip(evals[False], evals[True]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    _check_fused_training(model, g, tol)
+
+
+def _check_fused_training(model, g, tol):
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        res[use_fast] = _force_loss_results(model, g)
+        assert model.interactions[0].resmlp_y.fast_active == use_fast
+        assert model.interactions[0].residual_pre[0].fast_active == use_fast
+        assert not model.compiled_interactions.fast_active
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    assert res[True][2].keys() == res[False][2].keys()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name
+
+
+def _kernel_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if os.environ.get("TRITON_INTERPRET") == "1":
+        return "cpu"
+    pytest.skip("needs a CUDA device or Triton's interpreter")
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fused_mlp_derivatives(dtype):
+    """The fused residual MLPs (grouped), their gradients with respect to the input and every parameter, and
+    the second derivatives a force loss needs (of the input gradient, with respect to the input, the
+    parameters and the incoming gradient) equal the reference's: one or two residual blocks, with or without
+    an output layer and biases, rows that do not fill a program and no rows."""
+    pytest.importorskip("triton")
+    from xnn.hybnn.fast.mlp_kernels import residual_mlps
+    device = _kernel_device()
+    tol = 1e-12 if dtype == torch.float64 else 5e-5
+    gen = torch.Generator().manual_seed(0)
+
+    def rand(*shape, shift=0.0, scale=1.0):
+        return (shift + scale * torch.randn(*shape, generator=gen, dtype=dtype)).to(device).requires_grad_()
+
+    def reference(x, n_residual, output, params, per_layer):
+        def layer(h, i):
+            alpha, beta, w = params[i * per_layer:i * per_layer + 3]
+            a = alpha.unsqueeze(1) * h * torch.sigmoid(beta.unsqueeze(1) * h)
+            y = torch.bmm(a, w)
+            return y if per_layer == 3 else y + params[i * per_layer + 3].unsqueeze(1)
+        h = x.unsqueeze(0).expand(params[0].shape[0], x.shape[0], x.shape[1])
+        for r in range(n_residual):
+            h = h + layer(layer(h, 2 * r), 2 * r + 1)
+        return layer(h, 2 * n_residual) if output else h
+
+    for groups, n, f, n_residual, output, bias in [(3, 7, 12, 1, True, True), (1, 33, 5, 2, False, False),
+                                                   (2, 9, 8, 2, True, False), (1, 0, 8, 1, True, True)]:
+        x = rand(n, f)
+        n_layers = 2 * n_residual + (1 if output else 0)
+        params = []
+        for _ in range(n_layers):
+            params += [rand(groups, f, shift=1.0, scale=0.3), rand(groups, f, shift=1.7, scale=0.3),
+                       rand(groups, f, f, scale=0.3)] + ([rand(groups, f, scale=0.3)] if bias else [])
+        per_layer = 4 if bias else 3
+        v = torch.randn(groups, n, f, generator=gen, dtype=dtype).to(device)
+        inputs = [x] + params
+        results = []
+        for fast in (True, False):
+            y = (residual_mlps(x, n_residual, output, params) if fast
+                 else reference(x, n_residual, output, params, per_layer))
+            first = torch.autograd.grad((y * v).sum(), inputs, retain_graph=True, allow_unused=True)
+            (gx,) = torch.autograd.grad((y * v.sin()).sum(), x, create_graph=True)
+            second = torch.autograd.grad(gx.sin().sum() + (y * v).sum(), inputs, allow_unused=True)
+            results.append([y, *first, *second])
+        for fast, ref in zip(*results):
+            fast = torch.zeros(0) if fast is None else fast
+            ref = torch.zeros(0) if ref is None else ref
+            if ref.numel():
+                assert fast.shape == ref.shape
+                assert (fast - ref).abs().max() <= tol * ref.abs().max().clamp_min(1.0)
+
+
+def test_fused_training_interpreted(monkeypatch):
+    """The whole model trains through the fused layers (Triton's interpreter on a CPU): the energies, forces
+    and weight gradients of a force loss equal the reference's."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.hybnn.fast.spookynet as fast
+    monkeypatch.setattr(fast, "fused_supported", lambda device, dtype: True)
+    model, g = _fast_case("cpu", torch.float64)
+    _check_fused_training(model, g, 1e-11)
+
+
+def test_fast_support_needs_cuda_and_triton(monkeypatch):
+    """The compiled block needs a CUDA device; the fused MLPs a CUDA device, float32 or float64, and Triton."""
+    import sys
+
+    from xnn.hybnn.fast.spookynet import fused_supported, supported
+    assert not supported(torch.device("cpu"), torch.float64)
+    assert not fused_supported(torch.device("cpu"), torch.float64)
+    assert not fused_supported(torch.device("cuda"), torch.float16)
+    try:
+        import triton  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        assert fused_supported(torch.device("cuda"), torch.float64)
+    monkeypatch.setitem(sys.modules, "triton", None)
+    assert not fused_supported(torch.device("cuda"), torch.float64)
+
+
+def test_planner_rejects_periodic_structures_it_cannot_plan():
+    """A captured step's index plan takes no Ewald sum, and a periodic structure needs ``lr_cutoff``."""
+    from xnn.hybnn.models.spookynet import SpookyNetPlanner
+    s = _structure(5, seed=12)
+    s.update(cell=np.eye(3) * 6.0, pbc=[True] * 3)
+    g = _graph(s)
+    with pytest.raises(ValueError, match="Ewald"):
+        SpookyNetPlanner(CUTOFF, CUTOFF, True, True)(g)
+    with pytest.raises(ValueError, match="lr_cutoff"):
+        SpookyNetPlanner(CUTOFF, None, True, False)(g)
+    plan = SpookyNetPlanner(CUTOFF, CUTOFF, True, False)(g)
+    r = torch.linalg.norm(g.edge_vectors(), dim=-1)
+    assert torch.equal(plan["lr"], (r < CUTOFF).nonzero().squeeze(1))
+
+
+def _random_mlp(n_features, n_residual, bias, seed):
+    from xnn.hybnn.models.spookynet import _ResidualMLP
+    m = _ResidualMLP(n_features, n_residual, bias=bias)
+    gen = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for name, p in m.named_parameters():
+            shift = 1.0 if name.endswith((".alpha", ".beta")) else 0.0
+            p.copy_(shift + 0.4 * torch.randn(p.shape, generator=gen))
+    return m
+
+
+def test_grouped_mlps_and_their_fallbacks():
+    """Residual MLPs evaluate as one group with and without biases (the paper's equations per MLP), and MLPs
+    of different depths or with another activation are evaluated one by one, with the same results."""
+    from xnn.hybnn.models.spookynet import _groupable, _grouped_residual_mlps, _mlps
+    x = torch.randn(6, 5, generator=torch.Generator().manual_seed(1))
+    for bias in (True, False):
+        mlps = [_random_mlp(5, 2, bias, seed) for seed in range(3)]
+        assert _groupable(mlps)
+        for got, m in zip(_grouped_residual_mlps(x, mlps), mlps):
+            assert torch.allclose(got, _resmlp(m, x), rtol=0, atol=1e-12)
+    deeper = [_random_mlp(5, 1, True, 3), _random_mlp(5, 2, True, 4)]
+    other = [_random_mlp(5, 1, True, 5), _random_mlp(5, 1, True, 6)]
+    other[1].activation = torch.nn.SiLU()
+    for mlps in (deeper, other):
+        assert not _groupable(mlps)
+        for got, m in zip(_mlps(x, mlps), mlps):
+            assert torch.allclose(got, m(x), rtol=0, atol=0)
+
+
+def test_fused_training_with_lora_falls_back_interpreted(monkeypatch):
+    """With LoRA adapters on the linear layers the fused MLPs step aside: the training fast path gives the
+    reference energies, forces and adapter gradients of a force loss."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.hybnn.fast.spookynet as fast
+    from xnn.common.finetune.lora import LoRAAdapter, inject_lora
+    monkeypatch.setattr(fast, "fused_supported", lambda device, dtype: True)
+    model, g = _fast_case("cpu", torch.float64)
+    inject_lora(model, rank=2)
+    gen = torch.Generator().manual_seed(2)
+    with torch.no_grad():
+        for m in model.modules():
+            if isinstance(m, LoRAAdapter):
+                m.lora_out.copy_(0.1 * torch.randn(m.lora_out.shape, generator=gen))
+    _check_fused_training(model, g, 1e-12)
+
+
+def test_compiled_block_wiring_matches_the_reference(monkeypatch):
+    """The evaluation fast path (the interaction modules as one functional block) gives the reference
+    energies and forces; the compiler itself is replaced by the identity so the block runs on a CPU."""
+    import xnn.common.models.compiled as compiled
+    monkeypatch.setattr(compiled, "supported", lambda device, dtype: True)
+    monkeypatch.setattr(compiled, "_SHARED", {})
+    monkeypatch.setattr(torch, "compile", lambda fn, **kw: fn)
+    model, g = _fast_case("cpu", torch.float64)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        out = ForceStressOutput(model).eval()(g)
+        assert model.compiled_interactions.fast_active == use_fast
+        res[use_fast] = (out["energy"].detach(), out["forces"].detach())
+    for ref, fast in zip(res[False], res[True]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+
+
+def test_fused_mlps_have_no_second_derivatives_through_weight_gradients():
+    """Differentiating a weight gradient of the fused MLPs again raises instead of giving a wrong value."""
+    pytest.importorskip("triton")
+    from xnn.hybnn.fast.mlp_kernels import residual_mlps
+    device = _kernel_device()
+    gen = torch.Generator().manual_seed(3)
+    f = 4
+
+    def rand(*shape, shift=0.0):
+        return (shift + 0.3 * torch.randn(*shape, generator=gen)).to(device).requires_grad_()
+
+    x = rand(5, f)
+    params = []
+    for _ in range(3):
+        params += [rand(1, f, shift=1.0), rand(1, f, shift=1.7), rand(1, f, f), rand(1, f)]
+    y = residual_mlps(x, 1, True, params)
+    (gw,) = torch.autograd.grad(y.square().sum(), params[2], create_graph=True)
+    with pytest.raises(NotImplementedError, match="second derivatives"):
+        torch.autograd.grad(gw.square().sum(), x)

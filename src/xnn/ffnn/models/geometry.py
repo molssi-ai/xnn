@@ -75,13 +75,36 @@ def _image_shifts(vec: Tensor, lattice: Tensor, inv: Tensor, pbc: Optional[Tenso
     """Integer image shifts ``(M, 3)`` that minimize ``|vec + shift @ lattice|``.
 
     ``vec`` ``(M, 3)``; ``lattice`` ``(M, 3, 3)`` the periodic lattice vectors
-    per displacement (:func:`_periodic_lattice`) and ``inv`` its
-    pseudo-inverse, which maps a vector to the fractional coordinates of its
-    projection onto the periodic sublattice; ``pbc`` ``(M, 3)`` bool or
-    ``None``. The rounded image is returned for orthogonal lattices; otherwise
-    the best of its 27 neighbours. Nothing here carries gradients.
+    per displacement (:func:`_periodic_lattice`), or ``(3, 3)`` one lattice for
+    all, and ``inv`` its pseudo-inverse, which maps a vector to the fractional
+    coordinates of its projection onto the periodic sublattice; ``pbc``
+    ``(M, 3)`` (or ``(3,)``) bool or ``None``. The rounded image is returned for
+    orthogonal lattices; otherwise the best of its 27 neighbours. Nothing here
+    carries gradients.
     """
     with torch.no_grad():
+        if lattice.dim() == 2:
+            # one lattice: its 3 x 3 algebra once, not per displacement
+            shift = -torch.round(vec @ inv)
+            if pbc is not None:
+                shift = shift * pbc.to(vec.dtype)
+            gram = lattice @ lattice.T
+            diag = torch.diagonal(gram)
+            off = gram - torch.diag(diag)
+            half = 0.5 * torch.minimum(diag[:, None], diag[None, :]) * (1.0 + 1.0e-8)
+            skewed, unreduced = torch.stack([(off.abs() > ORTHOGONAL_TOL * gram.abs().amax()).any(),
+                                             (off.abs() > half).any()]).tolist()
+            if unreduced:
+                warnings.warn(UNREDUCED_CELL_MESSAGE, stacklevel=3)
+            if skewed:
+                one = torch.arange(-1, 2, device=vec.device)
+                offsets = torch.cartesian_prod(one, one, one).to(vec.dtype)          # (27, 3)
+                if pbc is not None:
+                    offsets = offsets * pbc.to(vec.dtype)
+                cand = vec[:, None, :] + (shift[:, None, :] + offsets[None]) @ lattice
+                k = (cand * cand).sum(-1).argmin(1)
+                shift = shift + offsets[k]
+            return shift
         shift = -torch.round(torch.einsum("mi,mij->mj", vec, inv))
         mask = None if pbc is None else pbc.to(vec.dtype)
         if mask is not None:
@@ -128,12 +151,10 @@ def minimum_image_vectors(vec: Tensor, cell: Tensor, pbc: Optional[Tensor] = Non
     """
     if vec.shape[0] == 0 or (pbc is not None and not bool(pbc.any())):
         return vec
-    m = vec.shape[0]
     flags = None if pbc is None else pbc.to(device=vec.device, dtype=torch.bool)
     lattice = _periodic_lattice(cell.to(vec.dtype), flags)
     inv = _lattice_inverse(lattice.detach(), flags)
-    shift = _image_shifts(vec.detach(), lattice.detach()[None].expand(m, 3, 3), inv[None].expand(m, 3, 3),
-                          None if flags is None else flags[None].expand(m, 3))
+    shift = _image_shifts(vec.detach(), lattice.detach(), inv, flags)
     return vec + shift @ cell.to(vec.dtype)
 
 
@@ -156,9 +177,11 @@ def pair_image_shifts(data: AtomicGraph, a: Tensor, b: Tensor) -> Optional[Tenso
     if data.cell is None or a.shape[0] == 0:
         return None
     vec = data.pos[b] - data.pos[a]
-    idx = data.batch[a]
     lattice = _periodic_lattice(data.cell.to(vec.dtype).detach(), data.pbc)
     inv = _lattice_inverse(lattice, data.pbc)
+    if lattice.shape[0] == 1:
+        return _image_shifts(vec.detach(), lattice[0], inv[0], None if data.pbc is None else data.pbc[0])
+    idx = data.batch[a]
     pbc = None if data.pbc is None else data.pbc[idx]
     return _image_shifts(vec.detach(), lattice[idx], inv[idx], pbc)
 
@@ -191,17 +214,73 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor, shift: Optional[Tensor
         Displacements of shape ``(M, 3)``.
     """
     # formed in the geometry's dtype, returned in the model's (see
-    # AtomicGraph.edge_vectors)
-    vec = data.pos[b] - data.pos[a]
+    # AtomicGraph.edge_vectors); index_select gathers, whose backward adds
+    # atomically, where the advanced-index gather sorts its indices and sums
+    # every atom's terms one after the other
+    vec = data.pos.index_select(0, b) - data.pos.index_select(0, a)
     if data.cell is None or vec.shape[0] == 0:
         return vec.to(data.model_dtype)
     if shift is None:
         shift = pair_image_shifts(data, a, b)
-    cells = data.cell.to(vec.dtype)[data.batch[a]]                        # (M, 3, 3)
+    cells = data.cell.to(vec.dtype).index_select(0, data.batch.index_select(0, a))     # (M, 3, 3)
     return (vec + (shift[:, :, None] * cells).sum(1)).to(data.model_dtype)
 
 
-def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
+def half_edges(data: AtomicGraph, excl_index: Tensor, n: int, module) -> tuple:
+    """The neighbor list's pairs once each, with the exclusions of a bound topology.
+
+    The directed list holds every pair in both directions; this keeps
+    ``src <= dst``, so a pair term is evaluated once and its energy split
+    between its two atoms. An atom's own periodic images (``src = dst``, a cell
+    shorter than the cutoff) keep both directions at half weight each. The
+    excluded pairs are looked up in the sorted keys of the batch's exclusions
+    (made once per batch size and device, cached on ``module``).
+
+    Parameters
+    ----------
+    data : AtomicGraph
+        The batched graph (copies of one topology of ``n`` atoms).
+    excl_index : Tensor
+        The excluded pairs ``(2, E)`` of one structure.
+    n : int
+        Atoms per structure.
+    module : torch.nn.Module
+        The model holding the cache.
+
+    Returns
+    -------
+    tuple of Tensor
+        ``src``, ``dst`` ``(P,)``, the vectors ``(P, 3)`` (differentiable in
+        the positions and the cell), their squared lengths ``(P,)``, the
+        weights ``(P,)`` (one half for an own image, one otherwise), whether
+        each pair is not excluded ``(P,)`` and the integer image shifts
+        ``(P, 3)`` (``None`` without a cell).
+    """
+    N, B = data.num_nodes, data.num_graphs
+    src, dst = data.edge_index[0], data.edge_index[1]
+    once = (src <= dst).nonzero()[:, 0]
+    src, dst = src.index_select(0, once), dst.index_select(0, once)
+    shift = None if data.cell is None else data.cell_shifts.index_select(0, once)
+    vec = pair_vectors(data, src, dst, shift)
+    r2 = (vec * vec).sum(1)
+    half = torch.where(src == dst, 0.5, 1.0).to(r2.dtype)
+    if excl_index.shape[1] > 0:
+        cache = module.__dict__.setdefault("_exclusion_keys", {})
+        ck = (B, N, str(excl_index.device))
+        if ck not in cache:
+            ex = (excl_index.unsqueeze(1) + (torch.arange(B, device=excl_index.device) * n).view(1, B, 1)
+                  ).reshape(2, -1)
+            cache[ck] = torch.sort(torch.minimum(ex[0], ex[1]) * N + torch.maximum(ex[0], ex[1])).values
+        keys = cache[ck]
+        key = src * N + dst
+        at = torch.searchsorted(keys, key).clamp_(max=keys.shape[0] - 1)
+        included = keys.index_select(0, at) != key
+    else:
+        included = torch.ones_like(r2, dtype=torch.bool)
+    return src, dst, vec, r2, half, included, shift
+
+
+def dihedral_cos(data: AtomicGraph, idx: Tensor, shifts: Optional[Tensor] = None) -> Tensor:
     """Cosine of the dihedral angle over each atom quadruple.
 
     Uses the plane-normal formula with ``phi = 0`` at *cis*. Only
@@ -216,22 +295,25 @@ def dihedral_cos(data: AtomicGraph, idx: Tensor) -> Tensor:
         The batched graph.
     idx : Tensor
         Atom indices of shape ``(4, M)``.
+    shifts : Tensor, optional
+        The image shifts ``(3, M, 3)`` of the three bond vectors (see
+        :func:`pair_vectors`), when already found.
 
     Returns
     -------
     Tensor
         ``cos phi`` of shape ``(M,)``.
     """
-    b1 = pair_vectors(data, idx[0], idx[1])
-    b2 = pair_vectors(data, idx[1], idx[2])
-    b3 = pair_vectors(data, idx[2], idx[3])
+    b1, b2, b3 = (pair_vectors(data, idx[j], idx[j + 1], None if shifts is None else shifts[j])
+                  for j in range(3))
     n1 = torch.cross(b1, b2, dim=1)
     n2 = torch.cross(b2, b3, dim=1)
     denom = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)
     return (n1 * n2).sum(1) / denom
 
 
-def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tensor, Tensor]:
+def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None,
+                     shifts: Optional[Tensor] = None) -> tuple[Tensor, Tensor]:
     """Cosine and sine of the signed dihedral angle over each atom quadruple.
 
     The same plane-normal construction as :func:`dihedral_cos` (``phi = 0``
@@ -249,6 +331,9 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tens
     vectors : callable, optional
         ``vectors(a, b)`` returns the bond vectors; :func:`pair_vectors` by
         default.
+    shifts : Tensor, optional
+        The image shifts ``(3, M, 3)`` of the three bond vectors for the
+        default ``vectors``, when already found.
 
     Returns
     -------
@@ -258,11 +343,12 @@ def dihedral_cos_sin(data: AtomicGraph, idx: Tensor, vectors=None) -> tuple[Tens
         the far bond when looking along the central bond).
     """
     if vectors is None:
-        def vectors(a, b):
-            return pair_vectors(data, a, b)
-    b1 = vectors(idx[0], idx[1])
-    b2 = vectors(idx[1], idx[2])
-    b3 = vectors(idx[2], idx[3])
+        b1, b2, b3 = (pair_vectors(data, idx[j], idx[j + 1], None if shifts is None else shifts[j])
+                      for j in range(3))
+    else:
+        b1 = vectors(idx[0], idx[1])
+        b2 = vectors(idx[1], idx[2])
+        b3 = vectors(idx[2], idx[3])
     n1 = torch.cross(b1, b2, dim=1)
     n2 = torch.cross(b2, b3, dim=1)
     norm = torch.sqrt((n1 * n1).sum(1) * (n2 * n2).sum(1) + TINY)

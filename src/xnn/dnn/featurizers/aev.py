@@ -205,6 +205,13 @@ class AEV(Featurizer):
         symmetry-function output dimensions."""
         return self.radial.output_dim + self.angular.output_dim
 
+    @torch.jit.unused
+    def fast_policies(self):
+        """The ``"auto"`` policies (evaluation, training) of :mod:`xnn.dnn.fast.aev`."""
+        from xnn.dnn.fast.aev import AUTO_POLICY, AUTO_POLICY_TRAINING
+        return AUTO_POLICY, AUTO_POLICY_TRAINING
+
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> Tensor:
         """Compute the AEV by concatenating radial and angular descriptors.
 
@@ -219,4 +226,11 @@ class AEV(Featurizer):
             Per-atom AEV of shape ``(N, output_dim)``, the concatenation of the
             radial and angular symmetry functions along the last dimension.
         """
-        return torch.cat([self.radial(data), self.angular(data)], dim=-1)
+        return self.compute(data.atomic_numbers, data.edge_index, data.edge_vectors(), data.num_nodes)
+
+    def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                num_nodes: int) -> Tensor:
+        """:meth:`forward` on tensors (TorchScript-compatible)."""
+        r = torch.linalg.norm(edge_vec, dim=-1)
+        return torch.cat([self.radial.compute(atomic_numbers, edge_index, edge_vec, num_nodes, r),
+                          self.angular.compute(atomic_numbers, edge_index, edge_vec, num_nodes, r)], dim=-1)

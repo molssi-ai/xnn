@@ -57,7 +57,10 @@ from torch.nn import functional as F
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import GaussianRBF, PolynomialCutoff
 from xnn.common.models.constants import register_constant
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.multilinear import add_optional as _add
+from xnn.common.models.multilinear import multilinear
+from xnn.common.models.ops import gather_rows, scatter_sum
 from xnn.common.models.registry import register_model
 
 from .base import TransformerPotential
@@ -128,7 +131,11 @@ def grid_resolution(lmax: int, mmax: int, resolution: Optional[int]) -> Tuple[in
 
 
 class S2Grid(nn.Module):
-    """Projection of ``(..., n, C)`` coefficients onto sphere samples ``(..., P, C)`` and back.
+    """Projection of ``(B, n, C)`` coefficients onto sphere samples ``(P, B, C)`` and back.
+
+    The samples are laid out sample-major, so that each projection is one
+    matrix product over all ``B * C`` columns (instead of ``B`` small ones)
+    and the channel-wise maps applied on the grid see a contiguous tensor.
 
     Parameters
     ----------
@@ -145,10 +152,16 @@ class S2Grid(nn.Module):
         register_constant(self, "from_grid_mat", from_mat, persistent=False)
 
     def to_grid(self, x: Tensor) -> Tensor:
-        return torch.matmul(self.to_grid_mat, x)
+        """``(B, n, C)`` coefficients to ``(P, B, C)`` samples."""
+        b, n, c = x.shape
+        y = torch.mm(self.to_grid_mat, x.transpose(0, 1).reshape(n, b * c))
+        return y.view(self.to_grid_mat.shape[0], b, c)
 
     def from_grid(self, x: Tensor) -> Tensor:
-        return torch.matmul(self.from_grid_mat.transpose(0, 1), x)
+        """``(P, B, C)`` samples to ``(B, n, C)`` coefficients (a transposed view)."""
+        p, b, c = x.shape
+        y = torch.mm(self.from_grid_mat.transpose(0, 1), x.reshape(p, b * c))
+        return y.view(self.from_grid_mat.shape[1], b, c).transpose(0, 1)
 
     def forward(self, x: Tensor) -> Tensor:
         """SiLU applied pointwise on the sphere."""
@@ -239,6 +252,19 @@ class EdgeFrames(nn.Module):
         return out
 
 
+def _select1(x: Tensor, index: Tensor) -> Tensor:
+    """``x.index_select(1, index)``; in compiled code an indexing with the same values, since the
+    compiler cannot trace the second derivative of ``index_select``."""
+    if not torch.jit.is_scripting() and _compiling():
+        return x[:, index]
+    return x.index_select(1, index)
+
+
+@torch.jit.unused
+def _compiling() -> bool:
+    return torch.compiler.is_compiling()
+
+
 class SO3Linear(nn.Module):
     """Linear map per degree of ``(N, (L + 1)^2, C_in)`` features, with a bias on degree 0.
 
@@ -292,16 +318,26 @@ class SO2Convolution(nn.Module):
         Widths of the radial function ``[n_in, hidden...]``; ``None`` for no radial weights.
     extra_m0 : int, optional
         Extra outputs of the ``m = 0`` map returned on their own (attention scalars, gates).
+    m_order_in, m_order_out : bool, optional
+        The input (output) is already in the order of :func:`m_primary_order`
+        (the rotations into and out of the edge frames produce and take it),
+        instead of the degree-major order; by default False.
     """
 
     lmax: Final[int]
     out_channels: Final[int]
     extra_m0: Final[int]
+    x_sizes: Final[List[int]]
+    w_sizes: Final[List[int]]
+    m_order_in: Final[bool]
+    m_order_out: Final[bool]
 
     def __init__(self, in_channels: int, out_channels: int, lmax: int, mmax: int,
-                 radial: Optional[List[int]] = None, extra_m0: int = 0):
+                 radial: Optional[List[int]] = None, extra_m0: int = 0, m_order_in: bool = False,
+                 m_order_out: bool = False):
         super().__init__()
         self.lmax, self.out_channels, self.extra_m0 = lmax, out_channels, extra_m0
+        self.m_order_in, self.m_order_out = m_order_in, m_order_out
         n0 = (lmax + 1) * in_channels
         self.fc_m0 = nn.Linear(n0, out_channels * (lmax + 1) + extra_m0)
         self.so2_m_conv = nn.ModuleList([
@@ -314,73 +350,347 @@ class SO2Convolution(nn.Module):
         order = m_primary_order(lmax, mmax)
         self.register_buffer("to_m", torch.tensor(order), persistent=False)
         self.register_buffer("from_m", torch.argsort(torch.tensor(order)), persistent=False)
+        # the blocks of one order (coefficients, radial weights), cut once per call
+        self.x_sizes = [lmax + 1] + [2 * (lmax - m + 1) for m in range(1, mmax + 1)]
+        self.w_sizes = [n0] + [(lmax - m + 1) * in_channels for m in range(1, mmax + 1)]
+        # (x_+m, x_-m) -> (-W_i x_-m, W_i x_+m): the imaginary outputs swapped, with signs
+        self.register_buffer("swap_sign", torch.tensor([-1.0, 1.0]).view(1, 2, 1), persistent=False)
+        # the radial weights spread over the m-ordered coefficients (one weight for +m and -m)
+        spread = list(range(n0))
+        start = n0
+        for size in self.w_sizes[1:]:
+            spread += list(range(start, start + size)) * 2
+            start += size
+        self.register_buffer("rad_expand", torch.tensor(spread if radial is not None else [], dtype=torch.long),
+                             persistent=False)
 
-    def forward(self, x: Tensor, x_edge: Tensor) -> Tuple[Tensor, Tensor]:
-        """Map edge-frame features ``(E, n, C_in)`` to ``(E, n, C_out)`` and the extra ``m = 0`` outputs."""
+    def forward(self, x: Tensor, x_edge: Tensor, radial_applied: bool = False) -> Tuple[Tensor, Tensor]:
+        """Map edge-frame features ``(E, n, C_in)`` to ``(E, n, C_out)`` and the extra ``m = 0`` outputs.
+
+        ``radial_applied``: the input already carries the radial weights (see ``rad_expand``).
+        """
         e = x.shape[0]
-        x = x.index_select(1, self.to_m)
-        w: Optional[Tensor] = None
-        if self.rad_func is not None:
-            w = self.rad_func(x_edge)
-        n0 = self.fc_m0.in_features
-        x0 = x.narrow(1, 0, self.lmax + 1).reshape(e, n0)
-        if w is not None:
-            x0 = x0 * w.narrow(1, 0, n0)
-        y0 = self.fc_m0(x0)
-        extra = y0.narrow(1, 0, self.extra_m0)
-        outs: List[Tensor] = [y0.narrow(1, self.extra_m0, y0.shape[1] - self.extra_m0)
-                              .reshape(e, self.lmax + 1, self.out_channels)]
-        start, rstart = self.lmax + 1, n0
+        if not self.m_order_in:
+            x = _select1(x, self.to_m)
+        xs = torch.split(x, self.x_sizes, dim=1)
+        ws: List[Tensor] = []
+        if self.rad_func is not None and not radial_applied:
+            ws = torch.split(self.rad_func(x_edge), self.w_sizes, dim=1)
+        x0 = xs[0].reshape(e, self.fc_m0.in_features)
+        if len(ws) > 0:
+            x0 = x0 * ws[0]
+        y0 = torch.split(self.fc_m0(x0), [self.extra_m0, self.out_channels * (self.lmax + 1)], dim=1)
+        extra = y0[0]
+        outs: List[Tensor] = [y0[1].reshape(e, self.lmax + 1, self.out_channels)]
         for k, conv in enumerate(self.so2_m_conv):
             size = self.lmax - k
-            n_in = conv.fc.in_features
-            xm = x.narrow(1, start, 2 * size).reshape(e, 2, n_in)
-            if w is not None:
-                xm = xm * w.narrow(1, rstart, n_in).unsqueeze(1)
+            xm = xs[k + 1].reshape(e, 2, conv.fc.in_features)
+            if len(ws) > 0:
+                xm = xm * ws[k + 1].unsqueeze(1)
             ym = conv.fc(xm)
-            half = ym.shape[2] // 2
-            yr, yi = ym.narrow(2, 0, half), ym.narrow(2, half, half)
-            real = yr.select(1, 0) - yi.select(1, 1)
-            imag = yr.select(1, 1) + yi.select(1, 0)
-            outs.append(torch.stack((real, imag), dim=1).reshape(e, 2 * size, self.out_channels))
-            start += 2 * size
-            rstart += n_in
-        return torch.cat(outs, dim=1).index_select(1, self.from_m), extra
+            yri = torch.split(ym, ym.shape[2] // 2, dim=2)
+            # (W_r x_+m - W_i x_-m, W_r x_-m + W_i x_+m)
+            y = yri[0] + yri[1].flip(1) * self.swap_sign
+            outs.append(y.reshape(e, 2 * size, self.out_channels))
+        out = torch.cat(outs, dim=1)
+        if not self.m_order_out:
+            out = _select1(out, self.from_m)
+        return out, extra
+
+
+def _block_products(a: Tensor, b: Tensor, orders: List[int], from_m: Tensor, to_m: Tensor) -> Tensor:
+    """``a @ b^T`` on the degree blocks of the edge rotations, ``(E, n_reduced, (L + 1)^2)``.
+
+    ``a`` has edge-frame rows (``m``-primary), ``b`` the ``(L + 1)^2`` coefficient
+    rows. Only the entries a rotation can hold (its degree blocks) are formed, one
+    product per degree; the others are zero. These are the gradients with respect
+    to the rotations, whose other entries are constant zeros.
+    """
+    a = a.index_select(1, from_m)
+    n_full = b.shape[1]
+    rows: List[Tensor] = []
+    start = 0
+    for l, mm in enumerate(orders):
+        r = 2 * mm + 1
+        block = torch.bmm(a.narrow(1, start, r), b.narrow(1, l * l, 2 * l + 1).transpose(1, 2))
+        rows.append(F.pad(block, (l * l, n_full - (l + 1) * (l + 1))))
+        start += r
+    return torch.cat(rows, dim=1).index_select(1, to_m)
+
+
+class _GatherRotate:
+    """``(rot @ [x[src] | x[dst]]) * w``, multilinear in node features, rotations and radial weights.
+
+    ``w`` (optional) holds the radial weights of the first SO(2) convolution in
+    their compact layout, one weight per degree and channel for ``m = 0`` and
+    one shared by ``+m`` and ``-m``; ``expand`` spreads them over the
+    edge-frame coefficients and ``sizes`` are the rows of every order.
+    """
+
+    def __init__(self, src: Tensor, dst: Tensor, expand: Tensor, sizes: List[int], frames: Tuple):
+        self.src, self.dst, self.expand, self.sizes = src, dst, expand, sizes
+        self.frames = frames
+
+    def _outer(self, a: Tensor, b: Tensor) -> Tensor:
+        return _block_products(a, b, *self.frames)
+
+    def _gather(self, x: Tensor) -> Tensor:
+        return torch.cat([gather_rows(x, self.src), gather_rows(x, self.dst)], dim=2)
+
+    def _scatter(self, t: Tensor, n: int) -> Tensor:
+        c = t.shape[2] // 2
+        return scatter_sum(t.narrow(2, 0, c), self.src, n) + scatter_sum(t.narrow(2, c, c), self.dst, n)
+
+    def _spread(self, w: Tensor, like: Tensor) -> Tensor:
+        return w.index_select(1, self.expand).view(like.shape)
+
+    def _compact(self, t: Tensor) -> Tensor:
+        e, c = t.shape[0], t.shape[2]
+        parts = torch.split(t, self.sizes, dim=1)
+        return torch.cat([parts[0].reshape(e, self.sizes[0] * c)]
+                         + [p.reshape(e, 2, size // 2 * c).sum(1) for p, size in zip(parts[1:], self.sizes[1:])],
+                         dim=1)
+
+    def value(self, ops: List[Tensor]) -> Tensor:
+        m = torch.bmm(ops[1], self._gather(ops[0]))
+        return m * self._spread(ops[2], m) if len(ops) > 2 else m
+
+    def adjoints(self, g: Tensor, ops: List[Tensor], needs: List[bool]) -> List[Optional[Tensor]]:
+        x, rot = ops[0], ops[1]
+        weighted = len(ops) > 2
+        gw = g * self._spread(ops[2], g) if weighted else g
+        out: List[Optional[Tensor]] = [None] * len(ops)
+        if needs[0]:
+            out[0] = self._scatter(torch.bmm(rot.transpose(1, 2), gw), x.shape[0])
+        if needs[1] or (weighted and needs[2]):
+            gx = self._gather(x)
+            if needs[1]:
+                out[1] = self._outer(gw, gx)
+            if weighted and needs[2]:
+                out[2] = self._compact(g * torch.bmm(rot, gx))
+        return out
+
+    def second(self, g: Tensor, ops: List[Tensor], cots: List[Optional[Tensor]], want_g: bool,
+               wants: List[bool]) -> Tuple[Optional[Tensor], List[Optional[Tensor]]]:
+        x, rot = ops[0], ops[1]
+        cx, crot = cots[0], cots[1]
+        weighted = len(ops) > 2
+        cw = cots[2] if weighted else None
+        g_ops: List[Optional[Tensor]] = [None] * len(ops)
+        gcx = self._gather(cx) if cx is not None else None
+        gx = self._gather(x) if crot is not None or cw is not None else None
+        # the rotated features along the cotangents of features and rotations
+        d: Optional[Tensor] = None
+        if gcx is not None:
+            d = torch.bmm(rot, gcx)
+        if crot is not None:
+            d = torch.bmm(crot, gx) if d is None else torch.baddbmm(d, crot, gx)
+        gw = g * self._spread(ops[2], g) if weighted else g
+        gc = g * self._spread(cw, g) if cw is not None else None
+        g_out: Optional[Tensor] = None
+        if want_g:
+            if d is not None:
+                g_out = d * self._spread(ops[2], d) if weighted else d
+            if cw is not None:
+                g_out = _add(g_out, torch.bmm(rot, gx) * self._spread(cw, g))
+        if wants[0] and (crot is not None or gc is not None):
+            t: Optional[Tensor] = None
+            if crot is not None:
+                t = torch.bmm(crot.transpose(1, 2), gw)
+            if gc is not None:
+                t = torch.bmm(rot.transpose(1, 2), gc) if t is None else torch.baddbmm(t, rot.transpose(1, 2), gc)
+            g_ops[0] = self._scatter(t, x.shape[0])
+        if wants[1]:
+            if gcx is not None:
+                g_ops[1] = self._outer(gw, gcx)
+            if gc is not None:
+                g_ops[1] = _add(g_ops[1], self._outer(gc, gx))
+        if weighted and wants[2] and d is not None:
+            g_ops[2] = self._compact(g * d)
+        return g_out, g_ops
+
+
+class _AttendRotateBack:
+    """Per atom, the sum over incoming edges of ``rot_inv @ (msg * attn)`` per head (trilinear)."""
+
+    def __init__(self, dst: Tensor, n: int, frames: Tuple):
+        self.dst, self.n, self.frames = dst, n, frames
+
+    def _outer(self, g: Tensor, w: Tensor) -> Tensor:
+        return _block_products(w, g, *self.frames).transpose(1, 2)
+
+    @staticmethod
+    def heads(t: Tensor, attn: Tensor) -> Tensor:
+        e, r, hv = t.shape
+        return t.reshape(e, r, attn.shape[1], hv // attn.shape[1])
+
+    @staticmethod
+    def weigh(msg: Tensor, attn: Tensor) -> Tensor:
+        return (_AttendRotateBack.heads(msg, attn) * attn[:, None, :, None]).reshape(msg.shape)
+
+    def value(self, ops: List[Tensor]) -> Tensor:
+        msg, attn, rot_inv = ops
+        return scatter_sum(torch.bmm(rot_inv, self.weigh(msg, attn)), self.dst, self.n)
+
+    def adjoints(self, g: Tensor, ops: List[Tensor], needs: List[bool]) -> List[Optional[Tensor]]:
+        msg, attn, rot_inv = ops
+        g = gather_rows(g, self.dst)
+        out: List[Optional[Tensor]] = [None, None, None]
+        if needs[0] or needs[1]:
+            t = torch.bmm(rot_inv.transpose(1, 2), g)
+            if needs[0]:
+                out[0] = self.weigh(t, attn)
+            if needs[1]:
+                out[1] = (self.heads(t, attn) * self.heads(msg, attn)).sum((1, 3))
+        if needs[2]:
+            out[2] = self._outer(g, self.weigh(msg, attn))
+        return out
+
+    def second(self, g: Tensor, ops: List[Tensor], cots: List[Optional[Tensor]], want_g: bool,
+               wants: List[bool]) -> Tuple[Optional[Tensor], List[Optional[Tensor]]]:
+        msg, attn, rot_inv = ops
+        cm, ca, cr = cots
+        g = gather_rows(g, self.dst)
+        g_out: Optional[Tensor] = None
+        g_ops: List[Optional[Tensor]] = [None, None, None]
+        # the weighed values along the cotangents of values and weights
+        w: Optional[Tensor] = None
+        if cm is not None:
+            w = self.weigh(cm, attn)
+        if ca is not None:
+            w = _add(w, self.weigh(msg, ca))
+        if w is not None:
+            if want_g:
+                g_out = torch.bmm(rot_inv, w)
+            if wants[2]:
+                g_ops[2] = self._outer(g, w)
+        if (wants[0] and ca is not None) or (wants[1] and cm is not None):
+            t = torch.bmm(rot_inv.transpose(1, 2), g)
+            if wants[0] and ca is not None:
+                g_ops[0] = self.weigh(t, ca)
+            if wants[1] and cm is not None:
+                g_ops[1] = (self.heads(t, attn) * self.heads(cm, attn)).sum((1, 3))
+        if cr is not None:
+            if want_g:
+                wm = self.weigh(msg, attn)
+                g_out = torch.bmm(cr, wm) if g_out is None else torch.baddbmm(g_out, cr, wm)
+            if wants[0] or wants[1]:
+                t = torch.bmm(cr.transpose(1, 2), g)
+                if wants[0]:
+                    g_ops[0] = _add(g_ops[0], self.weigh(t, attn))
+                if wants[1]:
+                    g_ops[1] = _add(g_ops[1], (self.heads(t, attn) * self.heads(msg, attn)).sum((1, 3)))
+        if g_out is not None:
+            g_out = scatter_sum(g_out, self.dst, self.n)
+        return g_out, g_ops
+
+
+@torch.jit.unused
+def _eager_with_frame_gradient(rot: Tensor) -> bool:
+    return torch.is_grad_enabled() and rot.requires_grad and not torch.compiler.is_compiling()
+
+
+@torch.jit.unused
+def _gather_rotate_saving_inputs(x: Tensor, src: Tensor, dst: Tensor, rot: Tensor, rad: Optional[Tensor],
+                                 expand: Tensor, sizes: List[int], orders: List[int], from_m: Tensor,
+                                 to_m: Tensor) -> Tensor:
+    block = _GatherRotate(src, dst, expand, sizes, (orders, from_m, to_m))
+    if rad is None:
+        return multilinear(block, x, rot)
+    return multilinear(block, x, rot, rad)
+
+
+@torch.jit.unused
+def _attend_rotate_back_saving_inputs(msg: Tensor, attn: Tensor, rot_inv: Tensor, dst: Tensor, n: int,
+                                      orders: List[int], from_m: Tensor, to_m: Tensor) -> Tensor:
+    return multilinear(_AttendRotateBack(dst, n, (orders, from_m, to_m)), msg, attn, rot_inv)
 
 
 class _Rotations(nn.Module):
-    """Rotation of features into the edge frames (keeping ``|m| <= mmax``) and back."""
+    """Rotation of features into the edge frames (keeping ``|m| <= mmax``) and back.
+
+    The Wigner blocks of all degrees are assembled once per forward into one
+    block-diagonal matrix per edge, so that every rotation (and its derivative
+    with respect to the frames) is a single batched product; the zero entries
+    add exact zeros. The edge-frame coefficients are in the order of
+    :func:`m_primary_order`, the order of the SO(2) convolutions.
+
+    The derivative with respect to the frames needs the rotated features. When
+    the rotations carry a gradient, the two rotations of the attention
+    therefore run as multilinear blocks that keep only their operands (node
+    features, values, attention weights and rotations) and gather or weigh
+    again in the backward, so no per-edge feature tensor is kept for the frame
+    gradient in either backward of force training. Otherwise, and under
+    TorchScript, they are the plain products.
+    """
 
     lmax: Final[int]
     orders: Final[List[int]]
-    scales: Final[List[float]]
+    rescaled: Final[bool]
 
     def __init__(self, lmax: int, mmax: int):
         super().__init__()
         self.lmax = lmax
         self.orders = _orders(lmax, mmax)
-        self.scales = [math.sqrt((2 * l + 1) / (2 * mmax + 1)) if l > mmax else 1.0
-                       for l in range(lmax + 1)]
+        self.rescaled = mmax < lmax
+        # degrees cut to |m| <= mmax keep the variance of the full degree on the way back
+        scales = [math.sqrt((2 * l + 1) / (2 * mmax + 1)) if l > mmax else 1.0
+                  for l in range(lmax + 1) for _ in range(2 * min(l, mmax) + 1)]
+        order = m_primary_order(lmax, mmax)
+        self.register_buffer("to_m", torch.tensor(order), persistent=False)
+        self.register_buffer("from_m", torch.argsort(torch.tensor(order)), persistent=False)
+        register_constant(self, "row_scales", torch.tensor([scales[i] for i in order], dtype=torch.float64),
+                          persistent=False)
 
-    def rotate(self, x: Tensor, wigner: List[Tensor]) -> Tensor:
+    def matrices(self, wigner: List[Tensor]) -> Tuple[Tensor, Tensor]:
+        """The rotations ``(E, n_reduced, (L + 1)^2)`` into the edge frames and ``(E, (L + 1)^2, n_reduced)`` back."""
+        n_full = (self.lmax + 1) * (self.lmax + 1)
+        rows: List[Tensor] = []
+        for l, d in enumerate(wigner):
+            mm = self.orders[l]
+            if mm < l:
+                d = d.narrow(1, l - mm, 2 * mm + 1)
+            rows.append(F.pad(d, (l * l, n_full - (l + 1) * (l + 1))))
+        rot = torch.cat(rows, dim=1).index_select(1, self.to_m)
+        back = rot
+        if self.rescaled:
+            back = rot * self.row_scales.unsqueeze(-1)
+        return rot, back.transpose(1, 2)
+
+    def rotate(self, x: Tensor, rot: Tensor) -> Tensor:
         """``(E, (L + 1)^2, C)`` to the edge frames, ``(E, n_reduced, C)``."""
-        parts: List[Tensor] = []
-        for l, d in enumerate(wigner):
-            mm = self.orders[l]
-            parts.append(torch.bmm(d.narrow(1, l - mm, 2 * mm + 1), x.narrow(1, l * l, 2 * l + 1)))
-        return torch.cat(parts, dim=1)
+        return torch.bmm(rot, x)
 
-    def rotate_inv(self, x: Tensor, wigner: List[Tensor]) -> Tensor:
+    def rotate_inv(self, x: Tensor, rot_inv: Tensor) -> Tensor:
         """``(E, n_reduced, C)`` from the edge frames back to ``(E, (L + 1)^2, C)``."""
-        parts: List[Tensor] = []
-        start = 0
-        for l, d in enumerate(wigner):
-            mm = self.orders[l]
-            block = torch.bmm(d.narrow(1, l - mm, 2 * mm + 1).transpose(1, 2),
-                              x.narrow(1, start, 2 * mm + 1))
-            parts.append(block * self.scales[l] if self.scales[l] != 1.0 else block)
-            start += 2 * mm + 1
-        return torch.cat(parts, dim=1)
+        return torch.bmm(rot_inv, x)
+
+    def saves_operands(self, rot: Tensor) -> bool:
+        """Whether the rotations of the attention run as the multilinear blocks (not in compiled code,
+        which differentiates the plain products itself)."""
+        return not torch.jit.is_scripting() and _eager_with_frame_gradient(rot)
+
+    def gather_rotate(self, x: Tensor, src: Tensor, dst: Tensor, rot: Tensor, rad: Optional[Tensor],
+                      rad_expand: Tensor, rad_sizes: List[int]) -> Tensor:
+        """The features of both atoms, ``[x[src] | x[dst]]`` (``(E, (L + 1)^2, 2C)``), in the edge frames.
+
+        With ``saves_operands``, the radial weights ``rad`` of the first SO(2)
+        convolution (compact, expanded by ``rad_expand`` over orders of
+        ``rad_sizes`` rows) are applied here, inside the block.
+        """
+        if self.saves_operands(rot):
+            return _gather_rotate_saving_inputs(x, src, dst, rot, rad, rad_expand, rad_sizes, self.orders,
+                                                self.from_m, self.to_m)
+        return self.rotate(torch.cat([gather_rows(x, src), gather_rows(x, dst)], dim=2), rot)
+
+    def attend_rotate_back(self, msg: Tensor, attn: Tensor, rot_inv: Tensor, dst: Tensor, n: int) -> Tensor:
+        """Values ``(E, n_reduced, H * V)`` weighed by the attention ``(E, H)``, rotated back and summed per atom."""
+        if self.saves_operands(rot_inv):
+            return _attend_rotate_back_saving_inputs(msg, attn, rot_inv, dst, n, self.orders, self.from_m, self.to_m)
+        e, r, hv = msg.shape
+        h = attn.shape[1]
+        out = self.rotate_inv((msg.reshape(e, r, h, hv // h) * attn[:, None, :, None]).reshape(e, r, hv), rot_inv)
+        return scatter_sum(out, dst, n)
 
 
 class GateActivation(nn.Module):
@@ -397,8 +707,9 @@ class GateActivation(nn.Module):
 
     def forward(self, gates: Tensor, x: Tensor) -> Tensor:
         g = torch.sigmoid(gates).reshape(gates.shape[0], self.lmax, self.channels)
-        g = g.index_select(1, self.expand_index)
-        return torch.cat([F.silu(x.narrow(1, 0, 1)), x.narrow(1, 1, x.shape[1] - 1) * g], dim=1)
+        g = _select1(g, self.expand_index)
+        parts = torch.split(x, [1, x.shape[1] - 1], dim=1)
+        return torch.cat([F.silu(parts[0]), parts[1] * g], dim=1)
 
 
 class SeparableS2Activation(nn.Module):
@@ -602,11 +913,13 @@ class SO2GraphAttention(nn.Module):
         self.rad_func: Optional[RadialMLP] = None
         if use_m_share_rad:
             self.rad_func = RadialMLP(radial + [2 * channels * (lmax + 1)])
-            degree = [l for l in range(lmax + 1) for _ in range(2 * l + 1)]
+            # one weight per degree commutes with the rotations, so it is applied in the edge frames
+            degree = [l for l, mm in enumerate(_orders(lmax, mmax)) for _ in range(2 * mm + 1)]
+            degree = [degree[i] for i in m_primary_order(lmax, mmax)]
             self.register_buffer("expand_index", torch.tensor(degree), persistent=False)
         self.rotations = _Rotations(lmax, mmax)
         self.so2_conv_1 = SO2Convolution(2 * channels, hidden_channels, lmax, mmax,
-                                         None if use_m_share_rad else radial, extra)
+                                         None if use_m_share_rad else radial, extra, m_order_in=True)
         self.alpha_norm = nn.LayerNorm(alpha_channels) if use_attn_renorm else nn.Identity()
         self.alpha_act = SmoothLeakyReLU(0.2)
         bound = 1.0 / math.sqrt(alpha_channels)
@@ -621,11 +934,12 @@ class SO2GraphAttention(nn.Module):
             self.s2_act = SeparableS2Activation(S2Grid(lmax, mmax, resolution))
         else:
             self.grid = S2Grid(lmax, mmax, resolution)
-        self.so2_conv_2 = SO2Convolution(hidden_channels, num_heads * value_channels, lmax, mmax)
+        self.so2_conv_2 = SO2Convolution(hidden_channels, num_heads * value_channels, lmax, mmax,
+                                         m_order_out=True)
         self.proj = SO3Linear(num_heads * value_channels, out_channels, lmax)
 
     def forward(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
-                wigner: List[Tensor], envelope: Optional[Tensor]) -> Tensor:
+                rot: Tensor, rot_inv: Tensor, envelope: Optional[Tensor]) -> Tensor:
         """Attend over the incoming edges of every atom.
 
         Parameters
@@ -638,8 +952,8 @@ class SO2GraphAttention(nn.Module):
             Distance basis of the edges (with the shared element embeddings, if any).
         src, dst : Tensor
             Sending (neighbor ``j``) and receiving (center ``i``) atom of every edge.
-        wigner : list of Tensor
-            The Wigner blocks of the edge frames (:class:`EdgeFrames`).
+        rot, rot_inv : Tensor
+            The rotations into the edge frames and back (``_Rotations.matrices``).
         envelope : Tensor, optional
             Smooth-cutoff weight per edge.
 
@@ -650,12 +964,15 @@ class SO2GraphAttention(nn.Module):
         """
         n, e = x.shape[0], src.shape[0]
         x_edge = self.edge_scalars(edge_rbf, atomic_numbers, src, dst)
-        msg = torch.cat([x[src], x[dst]], dim=2)
+        rad: Optional[Tensor] = None
+        if self.rotations.saves_operands(rot) and self.so2_conv_1.rad_func is not None:
+            rad = self.so2_conv_1.rad_func(x_edge)
+        msg = self.rotations.gather_rotate(x, src, dst, rot, rad, self.so2_conv_1.rad_expand,
+                                           self.so2_conv_1.x_sizes)
         if self.rad_func is not None:
-            w = self.rad_func(x_edge).reshape(e, self.lmax + 1, msg.shape[2]).index_select(1, self.expand_index)
+            w = _select1(self.rad_func(x_edge).reshape(e, self.lmax + 1, msg.shape[2]), self.expand_index)
             msg = msg * w
-        msg = self.rotations.rotate(msg, wigner)
-        msg, extra = self.so2_conv_1(msg, x_edge)
+        msg, extra = self.so2_conv_1(msg, x_edge, rad is not None)
         n_alpha = self.num_heads * self.alpha_channels
         alpha = extra.narrow(1, 0, n_alpha)
         if self.gate_act is not None:
@@ -668,10 +985,7 @@ class SO2GraphAttention(nn.Module):
         alpha = self.alpha_act(self.alpha_norm(alpha.reshape(e, self.num_heads, self.alpha_channels)))
         logits = torch.einsum("ehk,hk->eh", alpha, self.alpha_dot)
         attn = self.alpha_dropout(segment_softmax(logits, dst, n, envelope))
-        msg = msg.reshape(e, msg.shape[1], self.num_heads, self.value_channels) * attn[:, None, :, None]
-        msg = self.rotations.rotate_inv(
-            msg.reshape(e, msg.shape[1], self.num_heads * self.value_channels), wigner)
-        return self.proj(scatter_sum(msg, dst, n))
+        return self.proj(self.rotations.attend_rotate_back(msg, attn, rot_inv, dst, n))
 
 
 class FeedForwardNetwork(nn.Module):
@@ -750,8 +1064,12 @@ class _EquivariantDropout(nn.Module):
         return x * F.dropout(x.new_ones((x.shape[0], 1, x.shape[2])), self.p, True)
 
 
-class TransformerBlockV2(nn.Module):
-    """Pre-norm block: norm, SO(2) graph attention, residual; norm, feed-forward, residual."""
+class TransformerBlockV2(nn.Module, FastPathModule):
+    """Pre-norm block: norm, SO(2) graph attention, residual; norm, feed-forward, residual.
+
+    Compiled into fused kernels when :attr:`fast_active` is set (see
+    :meth:`EquiformerV2.set_use_fast`).
+    """
 
     def __init__(self, channels: int, attn_hidden_channels: int, num_heads: int,
                  attn_alpha_channels: int, attn_value_channels: int, ffn_hidden_channels: int,
@@ -771,11 +1089,32 @@ class TransformerBlockV2(nn.Module):
         self.norm_2 = make_norm(norm_type, lmax, channels)
         self.ffn = FeedForwardNetwork(channels, ffn_hidden_channels, channels, lmax, activation,
                                       use_grid_mlp, resolution)
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """torch.compile on a CUDA device."""
+        from xnn.common.models.compiled import supported
+        return supported(device, dtype)
 
     def forward(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
-                wigner: List[Tensor], envelope: Optional[Tensor], batch: Tensor,
+                rot: Tensor, rot_inv: Tensor, envelope: Optional[Tensor], batch: Tensor,
                 num_graphs: int) -> Tensor:
-        h = self.ga(self.norm_1(x), atomic_numbers, edge_rbf, src, dst, wigner, envelope)
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_fast(x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope, batch)
+        return self._reference(x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope, batch,
+                               num_graphs)
+
+    @torch.jit.unused
+    def _forward_fast(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
+                      rot: Tensor, rot_inv: Tensor, envelope: Optional[Tensor], batch: Tensor) -> Tensor:
+        from xnn.common.models.compiled import run_compiled
+        # no dropout acts on the compiled path, so the drop path ignores the graph count
+        return run_compiled(self, x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope, batch, 1)
+
+    def _reference(self, x: Tensor, atomic_numbers: Tensor, edge_rbf: Tensor, src: Tensor, dst: Tensor,
+                   rot: Tensor, rot_inv: Tensor, envelope: Optional[Tensor], batch: Tensor,
+                   num_graphs: int) -> Tensor:
+        h = self.ga(self.norm_1(x), atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope)
         x = x + self.proj_drop(self.drop_path(h, batch, num_graphs))
         h = self.ffn(self.norm_2(x))
         return x + self.proj_drop(self.drop_path(h, batch, num_graphs))
@@ -913,6 +1252,7 @@ class EquiformerV2(TransformerPotential):
         Per-species reference energies loaded into ``atom_ref``.
     """
 
+    fast_path = "xnn.trfnn.fast.equiformer_v2"
     head_modules = ("energy_block", "energy_scale", "energy_shift", "atom_ref")
     exact_float64 = True
     smooth: Final[bool]
@@ -961,6 +1301,7 @@ class EquiformerV2(TransformerPotential):
             radial[0] += 2 * edge_channels
         self.sphere_embedding = nn.Embedding(n_elements, n_features)
         self.frames = EdgeFrames(l_max)
+        self.rotations = _Rotations(l_max, m_max)
         self.edge_degree_embedding = EdgeDegreeEmbedding(n_features, l_max, m_max, radial, n_elements,
                                                          block_elements, avg_degree)
         self.blocks = nn.ModuleList([
@@ -990,6 +1331,7 @@ class EquiformerV2(TransformerPotential):
         vec = -edge_vec
         r = torch.linalg.norm(vec, dim=-1)
         wigner = self.frames(vec)
+        rot, rot_inv = self.rotations.matrices(wigner)
         edge_rbf = self.shared_edge_scalars(self.distance_expansion(r), atomic_numbers, src, dst)
         envelope: Optional[Tensor] = None
         if self.smooth:
@@ -998,12 +1340,12 @@ class EquiformerV2(TransformerPotential):
         x = torch.cat([x0, x0.new_zeros((n, (self.lmax + 1) * (self.lmax + 1) - 1, self.n_features))], dim=1)
         x = x + self.edge_degree_embedding(atomic_numbers, edge_rbf, src, dst, wigner, n, envelope)
         for block in self.blocks:
-            x = block(x, atomic_numbers, edge_rbf, src, dst, wigner, envelope, batch, num_graphs)
+            x = block(x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope, batch, num_graphs)
         x = self.norm(x)
         y = self.energy_block(x)[:, 0, 0] / self.avg_num_nodes
         forces = x.new_zeros((0, 3))
         if self.force_block is not None:
-            out = self.force_block(x, atomic_numbers, edge_rbf, src, dst, wigner, envelope)
+            out = self.force_block(x, atomic_numbers, edge_rbf, src, dst, rot, rot_inv, envelope)
             forces = out[:, 1:4, 0] @ self.frames.basis
         return x, y, forces
 
@@ -1065,6 +1407,8 @@ class EquiformerV2(TransformerPotential):
             ``"node_features"`` (the degree-0 channels of the final features)
             and, with ``direct_forces``, ``"forces"`` ``(N, 3)``.
         """
+        if not torch.jit.is_scripting():
+            self._select_fast(int(data.edge_index.shape[1]))
         x, y, forces = self._evaluate(data.atomic_numbers, data.edge_index, data.edge_vectors(),
                                       data.batch, data.num_graphs)
         node_energy = self._energy(y, data.atomic_numbers)

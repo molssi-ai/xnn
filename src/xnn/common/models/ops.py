@@ -226,6 +226,109 @@ class Square(nn.Module):
         return x * x
 
 
+#: From this many elements a training activation (:class:`SiLU`, :class:`GELU`)
+#: keeps its fused derivative under autograd; below it torch's own function,
+#: whose fewer Python calls win where the step is bound by launches.
+FUSED_SLOPE_MIN_ELEMENTS = 1 << 20
+
+
+class SiLU(nn.SiLU):
+    """:class:`torch.nn.SiLU` whose derivative stays the fused kernel under autograd.
+
+    Differentiated with a graph (the forces of a force loss), torch writes
+    the derivative of ``silu`` as six recorded operations, each differentiated
+    again for the parameter gradients. Here the derivative is the one
+    ``silu_backward`` kernel torch uses without a graph, and its own
+    derivative the closed form ``silu''(x) = s (1 - s) (2 + x (1 - 2 s))``
+    with ``s = sigmoid(x)``. In training on inputs of at least
+    :data:`FUSED_SLOPE_MIN_ELEMENTS` (a force loss differentiates the
+    derivative); otherwise, and under TorchScript, the values and derivatives
+    are those of :func:`torch.nn.functional.silu`, the same numbers.
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        if not torch.jit.is_scripting():
+            # compiled code differentiates the plain function itself
+            if (self.training and x.requires_grad and torch.is_grad_enabled()
+                    and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS and not torch.compiler.is_compiling()):
+                return _SiLU.apply(x)
+        return torch.nn.functional.silu(x)
+
+
+class _SiLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)
+        return torch.nn.functional.silu(x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (x,) = ctx.saved_tensors
+        return _SiLUSlope.apply(grad, x)
+
+
+class _SiLUSlope(torch.autograd.Function):
+    """``g silu'(x)`` by the fused kernel, differentiable again."""
+
+    @staticmethod
+    def forward(ctx, g: Tensor, x: Tensor) -> Tensor:
+        ctx.save_for_backward(g, x)
+        return torch.ops.aten.silu_backward(g, x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        g, x = ctx.saved_tensors
+        s = torch.sigmoid(x)
+        # s (1 - s) (2 + x (1 - 2 s)) as s - s^2 times (x + 2) - 2 x s
+        curvature = torch.addcmul(s, s, s, value=-1.0) * torch.addcmul(x + 2.0, x, s, value=-2.0)
+        return _SiLUSlope.apply(grad, x), grad * g * curvature
+
+
+class GELU(nn.GELU):
+    """:class:`torch.nn.GELU` (exact form) whose derivative stays the fused kernel under autograd.
+
+    As :class:`SiLU`: the derivative is the one ``gelu_backward`` kernel, its
+    own derivative the closed form ``gelu''(x) = phi(x) (2 - x^2)`` with the
+    standard normal density ``phi``, under the same conditions. The ``"tanh"``
+    approximation and TorchScript use :func:`torch.nn.functional.gelu`.
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        if not torch.jit.is_scripting():
+            if (self.approximate == "none" and self.training and x.requires_grad
+                    and torch.is_grad_enabled() and x.numel() >= FUSED_SLOPE_MIN_ELEMENTS
+                    and not torch.compiler.is_compiling()):
+                return _GELU.apply(x)
+        return torch.nn.functional.gelu(x, approximate=self.approximate)
+
+
+class _GELU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)
+        return torch.nn.functional.gelu(x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (x,) = ctx.saved_tensors
+        return _GELUSlope.apply(grad, x)
+
+
+class _GELUSlope(torch.autograd.Function):
+    """``g gelu'(x)`` by the fused kernel, differentiable again."""
+
+    @staticmethod
+    def forward(ctx, g: Tensor, x: Tensor) -> Tensor:
+        ctx.save_for_backward(g, x)
+        return torch.ops.aten.gelu_backward(g, x)
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        g, x = ctx.saved_tensors
+        density = torch.exp(-0.5 * x * x) * (1.0 / math.sqrt(2.0 * math.pi))
+        return _GELUSlope.apply(grad, x), grad * g * density * (2.0 - x * x)
+
+
 def make_activation(activation) -> nn.Module:
     """Return a fresh activation module from a name or a module instance.
 
@@ -256,7 +359,7 @@ def make_activation(activation) -> nn.Module:
     if isinstance(activation, nn.Module):
         return activation
     factories = {
-        "silu": nn.SiLU,
+        "silu": SiLU,
         "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
         "gaussian": GaussianActivation,
         "tanh": nn.Tanh,
@@ -275,12 +378,31 @@ def make_activation(activation) -> nn.Module:
     return factories[key]()
 
 
+def small_gather_elements() -> int:
+    """Element count below which :func:`gather_rows` and :func:`scatter_sum` use ``index_select`` and
+    ``index_add_`` on CUDA as well.
+
+    The kernels cost the same there, and the expanded index of ``gather`` / ``scatter_add_`` adds host-side
+    view operations, which bound small systems. A function, not a module constant: TorchScript cannot read
+    module globals.
+    """
+    return 1 << 21
+
+
+def _compiling() -> bool:
+    """Whether ``torch.compile`` is tracing (``False`` under TorchScript)."""
+    if not torch.jit.is_scripting():
+        return bool(torch.compiler.is_compiling())
+    return False
+
+
 def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     """Sum rows of ``src`` into ``dim_size`` buckets given by ``index`` (dim 0).
 
-    This is the canonical edge -> node aggregation for message passing,
-    implemented with :meth:`torch.Tensor.index_add`. For each row ``e`` it
-    accumulates ``out[index[e]] += src[e]``.
+    This is the canonical edge -> node aggregation for message passing. For
+    each row ``e`` it accumulates ``out[index[e]] += src[e]``, with
+    :meth:`torch.Tensor.scatter_add` on CUDA (the faster kernel there) and
+    :meth:`torch.Tensor.index_add` elsewhere. The values are the same.
 
     Parameters
     ----------
@@ -305,20 +427,33 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     Written to stay compatible with :func:`torch.jit.script` so scriptable model
     cores (e.g. SchNet's ``node_energy``) can call it.
     """
+    if dim_size == 1:
+        # one bucket: a reduction, not every row's atomic add into the same addresses
+        return src.sum(0, keepdim=True)
     shape = [dim_size] + list(src.shape[1:])
+    # in place on the fresh buffer: the out-of-place forms copy it first (one more kernel)
     out = torch.zeros(shape, dtype=src.dtype, device=src.device)
-    return out.index_add(0, index, src)
+    if src.is_cuda and _compiling():
+        # traced code takes the out-of-place scatter at every size: the compiled second derivatives of the
+        # small-size forms trip an internal assert of the compiler (torch 2.5)
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        return out.scatter_add(0, index.reshape(view).expand(src.shape), src)
+    if src.is_cuda and src.numel() >= small_gather_elements():
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        return out.scatter_add_(0, index.reshape(view).expand(src.shape), src)
+    return out.index_add_(0, index, src)
 
 
 def gather_rows(src: Tensor, index: Tensor) -> Tensor:
-    """Rows ``src[index]`` (dim 0), with the faster backward of the device.
+    """Rows ``src[index]`` (dim 0), with the faster kernels of the device.
 
     The node -> edge gather of message passing, the counterpart of
-    :func:`scatter_sum`. On CUDA it indexes (``src[index]``), whose backward
-    sorts the indices and accumulates without atomics, and whose second
-    derivative keeps less memory; elsewhere it uses
-    :func:`torch.index_select`, whose backward (an ``index_add``) is the faster
-    one on CPUs. The values are the same.
+    :func:`scatter_sum`. On CUDA, from :func:`small_gather_elements` output
+    elements, it is a :meth:`torch.Tensor.gather` over an expanded index, faster
+    than indexing in both directions (its backward is the scatter of
+    :func:`scatter_sum`); below that and on CPUs it uses
+    :func:`torch.index_select`, whose backward is an ``index_add``. The values
+    are the same.
 
     Parameters
     ----------
@@ -337,8 +472,12 @@ def gather_rows(src: Tensor, index: Tensor) -> Tensor:
     -----
     Compatible with :func:`torch.jit.script`.
     """
-    if src.is_cuda:
-        return src[index]
+    if src.is_cuda and (_compiling() or index.shape[0] * (src.numel() // max(src.shape[0], 1))
+                        >= small_gather_elements()):
+        # traced code takes the gather at every size (see scatter_sum)
+        view = [index.shape[0]] + [1] * (src.dim() - 1)
+        shape = [index.shape[0]] + list(src.shape[1:])
+        return src.gather(0, index.reshape(view).expand(shape))
     return src.index_select(0, index)
 
 
@@ -364,8 +503,23 @@ def structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     torch.Tensor
         Float64 totals of shape ``(dim_size,)``.
     """
+    if dim_size == 1:
+        # one structure: a reduction, not every atom's atomic add into one address
+        return src.to(torch.float64).sum(0, keepdim=True)
     out = torch.zeros(dim_size, dtype=torch.float64, device=src.device)
     return out.index_add(0, index, src.to(torch.float64))
+
+
+def structure_sums(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
+    """:func:`structure_sum` of several per-atom rows at once: ``src`` ``(T, N)``
+    to float64 totals ``(T, dim_size)`` in one scatter (one cast, one zero
+    fill and one index add for every row instead of three launches per row).
+    """
+    if dim_size == 1:
+        # one structure: a reduction, not every atom's atomic adds into the same few addresses
+        return src.to(torch.float64).sum(1, keepdim=True)
+    out = torch.zeros(int(src.shape[0]), dim_size, dtype=torch.float64, device=src.device)
+    return out.index_add(1, index, src.to(torch.float64))
 
 
 #: Standard atomic weights (u) by atomic number, Z = 0 to 99 (the ASE table),
@@ -445,7 +599,12 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
     order = torch.argsort(dst, stable=True)          # (E,) edge ids, centre-grouped
     counts = torch.bincount(dst, minlength=num_nodes)  # (num_nodes,) edges per centre
     n_pairs = counts * (counts - 1) // 2               # pairs per centre
-    total = int(n_pairs.sum())
+    if counts.numel() == 0:
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        return empty, empty, empty
+    # the pair count and the largest centre in one device-to-host copy
+    sizes = torch.stack([n_pairs.sum(), counts.max()]).cpu()
+    total, m = int(sizes[0]), int(sizes[1])
     if total == 0:
         empty = torch.empty(0, dtype=torch.long, device=device)
         return empty, empty, empty
@@ -458,7 +617,6 @@ def build_triplets(edge_index: Tensor, num_nodes: int) -> tuple[Tensor, Tensor, 
 
     # Local pair (a, b) with 0 <= a < b < cnt, laid out from a shared template
     # sized to the largest centre, then masked down to each centre's count.
-    m = int(counts.max())
     tri = torch.tril_indices(m, m, -1, device=device)  # (2, m*(m-1)/2): b > a
     # position of each emitted pair within its centre's pair-list
     pair_pos = torch.arange(total, device=device) - (

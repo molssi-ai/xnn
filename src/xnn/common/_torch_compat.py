@@ -20,7 +20,7 @@ def allow_e3nn_constants() -> None:
         Unsupported global: GLOBAL slice was not an allowed global by default
 
     which takes down ``import xnn`` with it. e3nn 0.4.4 is not a free choice
-    -- mace-torch 0.3.16 pins it -- so the fix belongs here.
+    -- mace-torch 0.3.17 pins it -- so the fix belongs here.
 
     Allow-list just ``slice``, which is all that file needs. The blunter
     alternative, setting ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1``, would turn

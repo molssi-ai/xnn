@@ -13,7 +13,7 @@ energy shift, in the same spirit as MACE/NequIP ``atomic_energies``).
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor, nn
@@ -21,7 +21,7 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
 from xnn.common.models.base import InteratomicPotential
-from xnn.common.models.ops import make_activation
+from xnn.common.models.ops import gather_rows, make_activation
 
 
 class _ElementNetworks(nn.Module):
@@ -73,6 +73,12 @@ class _ElementNetworks(nn.Module):
         self.input_dims = {z: int(input_dim[z]) if isinstance(input_dim, dict) else int(input_dim)
                            for z in self.species}
         self.extra_inputs = int(extra_inputs)
+        self._z_of_name = {str(z): int(z) for z in self.species}
+        # position of every element in ``species`` by atomic number (``len(species)``: no network)
+        code = torch.full((max(self.species) + 1,), len(self.species), dtype=torch.long)
+        for k, z in enumerate(self.species):
+            code[z] = k
+        self.register_buffer("_code_of_z", code, persistent=False)
         self.nets = nn.ModuleDict()
         for z in self.species:
             widths = list(hidden[z] if isinstance(hidden, dict) else hidden)
@@ -111,16 +117,38 @@ class _ElementNetworks(nn.Module):
         Tensor
             Per-atom output, shape ``(N,)``.
         """
-        out = torch.zeros(desc.shape[0], device=desc.device, dtype=desc.dtype)
-        for z in self.species:
-            mask = atomic_numbers == z
-            if mask.any():
-                x = desc[mask][:, :self.input_dims[z]]
-                if self.extra_inputs:
-                    x = torch.cat([x, extra[mask].reshape(-1, self.extra_inputs).to(x.dtype)], dim=-1)
-                out = out.clone()
-                out[mask] = self.nets[str(z)](x).squeeze(-1)
-        return out
+        n_species = len(self.species)
+        code = self._code_of_z[atomic_numbers.clamp(max=self._code_of_z.shape[0] - 1)]
+        code = torch.where(atomic_numbers < self._code_of_z.shape[0], code, torch.full_like(code, n_species))
+        # the atoms sorted by element: one gather, a contiguous block per network, one scatter
+        # back, and a single device-to-host copy (the block sizes)
+        order = torch.argsort(code, stable=True)
+        counts = torch.bincount(code, minlength=n_species + 1).cpu()
+        x_all = gather_rows(desc, order)
+        e_all = gather_rows(extra.reshape(desc.shape[0], -1), order) if (
+            self.extra_inputs > 0 and extra is not None) else None
+        # contiguous blocks by split (its backward is one concatenation)
+        sizes: List[int] = counts.tolist()
+        blocks = x_all.split(sizes)
+        e_blocks = e_all.split(sizes) if e_all is not None else None
+        pieces: List[Tensor] = []
+        k = 0
+        # over the networks by item (TorchScript takes no computed module keys)
+        for name, net in self.nets.items():
+            if sizes[k] > 0:
+                x = blocks[k]
+                width = self.input_dims[self._z_of_name[name]]
+                if width < x.shape[1]:
+                    x = x[:, :width]
+                if e_blocks is not None:
+                    x = torch.cat([x, e_blocks[k].to(x.dtype)], dim=-1)
+                pieces.append(net(x).squeeze(-1))
+            k += 1
+        rest = sizes[n_species]
+        if rest > 0:
+            pieces.append(desc.new_zeros(rest))
+        values = torch.cat(pieces) if len(pieces) > 0 else desc.new_zeros(0)
+        return desc.new_zeros(desc.shape[0]).scatter(0, order, values)
 
 
 class DescriptorPotential(InteratomicPotential):
@@ -198,7 +226,67 @@ class DescriptorPotential(InteratomicPotential):
             for z, e in zip(self.species, ae.tolist()):
                 sae[z] = e
         self.register_buffer("_self_energies_by_z", sae)
+        # the fused featurizer kernels where it has them (see set_use_fast)
+        self.use_fast = "auto"
 
+    @torch.jit.unused
+    def set_use_fast(self, use_fast) -> "DescriptorPotential":
+        """Choose the implementation of the featurizer.
+
+        Parameters
+        ----------
+        use_fast : bool or str
+            ``"auto"`` (the default): the fused GPU kernels of the featurizer
+            (the AEV of :mod:`xnn.dnn.fast.aev`) where they are available and
+            faster for the input (a CUDA device, Triton, a graph above the size
+            crossover measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            twice differentiable, so force training takes them as well. The
+            HDNNP symmetry functions have GPU kernels and, in evaluation, a
+            compiled CPU path and optional C++ kernels (:mod:`xnn.dnn.fast.acsf`).
+
+        Returns
+        -------
+        DescriptorPotential
+            ``self``.
+        """
+        from xnn.common.models.fast import resolve_use_fast
+        self.use_fast = resolve_use_fast(use_fast)
+        return self
+
+    @torch.jit.unused
+    def _select_fast(self, num_edges: int) -> None:
+        """Switch the fused featurizer kernels on or off for one evaluation."""
+        from xnn.common.models.fast import fast_modules, select
+        blocks = self.__dict__.get("_fast_blocks")
+        if blocks is None:
+            blocks = fast_modules(self)
+            self.__dict__["_fast_blocks"] = blocks
+        if not blocks:
+            return
+        policies = self.featurizer.fast_policies()
+        like = self._self_energies_by_z
+        policy = policies[1] if self.training else policies[0]
+        dtype = next(self.element_nets.parameters()).dtype
+        select(blocks, self.use_fast, policy, like.device, dtype, num_edges)
+
+    @torch.jit.export
+    def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
+                             edge_vec: Tensor) -> Tuple[Tensor, Tensor]:
+        """Tensor core (TorchScript-compatible): the descriptor ``(N, D)`` and the per-atom
+        energies ``(N,)`` including the self energies, from atomic numbers ``(N,)``, edges
+        ``(2, E)`` and edge vectors ``(E, 3)``. The featurizer must offer ``compute``."""
+        desc = self.featurizer.compute(atomic_numbers, edge_index, edge_vec, atomic_numbers.shape[0])
+        node_energy = self.element_nets(desc, atomic_numbers)
+        return desc, node_energy + self._self_energies_by_z[atomic_numbers]
+
+    @torch.jit.export
+    def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor) -> Tensor:
+        """Per-atom energies ``(N,)`` (the deploy entry point, :meth:`node_features_energy`)."""
+        return self.node_features_energy(atomic_numbers, edge_index, edge_vec)[1]
+
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph):
         """Compute per-atom and total energies for a batch of structures.
 
@@ -214,6 +302,7 @@ class DescriptorPotential(InteratomicPotential):
             self-energy shift, shape ``(N,)``), ``"energy"`` (per-structure total
             from ``aggregate_energy``) and ``"node_features"`` (the descriptor).
         """
+        self._select_fast(int(data.edge_index.shape[1]))
         desc = self.featurizer(data)
         node_energy = self.element_nets(desc, data.atomic_numbers)
         node_energy = node_energy + self._self_energies_by_z[data.atomic_numbers]

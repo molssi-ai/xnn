@@ -163,10 +163,18 @@ Read `docs/developer_guide/extending.rst` first. A new model needs:
    `configs/model/<name>.yaml`;
 2. its fidelity reference, reproduced to float64 and float32 round-off whatever the implementation
    method: the upstream code under transplanted weights, the reference program, or, where neither
-   exists, the paper's equations and published numbers;
-   with an upstream code, the xnn model must also be at least as fast and, preferably, as
-   memory-efficient as that code with the same weights, in float32 and float64, for inference and a training step;
-   its defaults are the upstream code's as shipped, with the paper's values as options that can be set by the user where they differ;
+   exists, the paper's equations and published numbers.
+   Every model has a **reference implementation** (`use_fast=False`): the eager composition of its
+   equations, which runs on any device, has second derivatives and is the oracle of the tests. Its
+   priorities, in order: *precision*, to round-off in float32 and float64; *compute efficiency*, at least that of the
+   upstream code when the upstream is a comparable implementation; and *memory usage*, preferably similar to the
+   upstream's or better. A model may add a **fast implementation**  (`use_fast=True`; `"auto"`, the
+   default, takes it on a GPU in evaluation mode): fused kernels or better algorithms that compute
+   the same numbers to round-off with first derivatives, faster and lighter than the reference, and
+   at least as fast as a hand-optimized upstream code where one exists. Approximations that change
+   the results (reduced tolerances, lower precision, extrapolation) are explicit options with a
+   stated tolerance against the reference, never part of `use_fast`. Fast paths can also allow users to benefit from additional algorithmic, software and hardware optimizations, such as mixed precision, by changing different options without changing the model's equations.
+   The defaults are the upstream code's as shipped, with the paper's values as options that can be set by the user where they differ;
 3. the tests listed under [Tests](#tests), including the fidelity test against the reference;
 4. its row in the model tables of `README.md` and the documentation;
 5. if it is user-facing, a short example under `notebooks/examples/<family>/<model>/`, and its fidelity check under `notebooks/fidelity_checks/<family>/<model>/`, with the speed and memory comparison against the upstream code.
@@ -190,7 +198,10 @@ Every new model gets at least:
 - script-versus-eager parity if the model exports to TorchScript;
 - fidelity to the reference to round-off: the upstream code under transplanted weights (guarded
   by an import check), the reference program, or an independent implementation of the paper's
-  equations where neither exists.
+  equations where neither exists;
+- for a model with a fast implementation, its agreement with the reference implementation:
+  energies, forces, stress and every intermediate it returns, to round-off in float64 and within
+  the float32 reference's own deviation in float32 (GPU tests skip without CUDA).
 
 Every bug fix gets a test that fails before the fix and passes after it.
 

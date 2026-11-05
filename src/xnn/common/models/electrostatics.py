@@ -42,7 +42,7 @@ import torch
 from torch import Tensor
 
 from .dispersion import BOHR, HARTREE
-from .ops import cell_volume, scatter_sum
+from .ops import cell_volume, gather_rows, scatter_sum
 from .pme import pme_mesh, pme_reciprocal
 
 #: Coulomb constant ``k_e e^2`` in eV Angstrom (one hartree times one bohr).
@@ -74,7 +74,7 @@ def all_pairs(batch: Tensor) -> Tuple[Tensor, Tensor]:
 
 
 def coulomb_direct(charges: Tensor, pos: Tensor, batch: Tensor,
-                   k_e: float = COULOMB_CONSTANT) -> Tensor:
+                   k_e: float = COULOMB_CONSTANT, num_graphs: int = 0) -> Tensor:
     """Per-atom share of the all-pairs Coulomb energy of molecular structures.
 
     ``E_i = (k_e / 2) sum_{j != i} q_i q_j / r_ij`` over the atoms of the same
@@ -93,15 +93,28 @@ def coulomb_direct(charges: Tensor, pos: Tensor, batch: Tensor,
     k_e : float, optional
         The Coulomb constant (an argument so the function compiles under
         TorchScript), by default :data:`COULOMB_CONSTANT`.
+    num_graphs : int, optional
+        Number of structures, when the caller knows it: one structure sums
+        its pair matrix directly (no host synchronization for the pair list),
+        by default 0 (unknown).
 
     Returns
     -------
     Tensor
         Per-atom energies ``(N,)`` in eV, float64.
     """
+    if num_graphs == 1:
+        n = charges.shape[0]
+        eye = torch.eye(n, dtype=charges.dtype, device=charges.device)
+        # the diagonal displaced by a unit vector: a finite distance, no term
+        diff = (pos.unsqueeze(1) - pos.unsqueeze(0)).to(charges.dtype) \
+            + torch.nn.functional.pad(eye.unsqueeze(-1), (0, 2))
+        r = torch.linalg.norm(diff, dim=-1)
+        pair = (0.5 * k_e) * (charges.unsqueeze(1) * charges.unsqueeze(0)) * (1.0 - eye) / r
+        return pair.to(torch.float64).sum(1)
     row, col = all_pairs(batch)
-    r = torch.linalg.norm((pos[row] - pos[col]).to(charges.dtype), dim=-1)
-    pair = 0.5 * k_e * charges[row] * charges[col] / r
+    r = torch.linalg.norm((gather_rows(pos, row) - gather_rows(pos, col)).to(charges.dtype), dim=-1)
+    pair = 0.5 * k_e * gather_rows(charges, row) * gather_rows(charges, col) / r
     return scatter_sum(pair.to(torch.float64), row, charges.shape[0])
 
 

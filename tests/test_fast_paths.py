@@ -171,6 +171,32 @@ def test_conv_matches_gather_tp_scatter():
     assert torch.allclose(tp.conv(x, y, w, edge_index, 6, 2.0), expected / 2.0, atol=1e-13)
 
 
+@pytest.mark.skipif(GPU, reason="the fused kernel builds where CUDA and cuEquivariance are present")
+@pytest.mark.parametrize("mapped", [False, True])
+def test_conv_without_kernel_falls_back_to_reference(monkeypatch, mapped):
+    """Switched on where its kernel cannot build, the fused message pass maps no weights, warns,
+    switches itself off and gives the gathered reference sums (the message divisor applied)."""
+    monkeypatch.delenv("XNN_FAST_STRICT", raising=False)
+    irreps_in, irreps_sh = o3.Irreps("4x0e+4x1o"), o3.Irreps.spherical_harmonics(2)
+    mid, ins = tp_out_irreps_with_instructions(irreps_in, irreps_sh, o3.Irreps("4x0e+4x1o"))
+    tp = ConvTensorProduct(irreps_in, irreps_sh, mid, ins, shared_weights=False, internal_weights=False)
+    torch.manual_seed(2)
+    x = torch.randn(6, irreps_in.dim)
+    edge_index = torch.tensor([[0, 1, 2, 3, 4, 5, 0], [1, 2, 3, 4, 5, 0, 3]])
+    y = torch.randn(7, irreps_sh.dim)
+    w = torch.randn(7, tp.weight_numel)
+    expected = torch.zeros(6, mid.dim).index_add_(0, edge_index[1], tp(x[edge_index[0]], y, w))
+    tp.fast_active = True
+    assert tp.weight_map(w, 2.0) == (None, None)
+    with pytest.warns(RuntimeWarning, match="reference implementation"):
+        if mapped:
+            out = tp.conv(x, y, w, edge_index, 6, weights_mapped=True)
+        else:
+            out = tp.conv(x, y, w, edge_index, 6, 2.0)
+    assert not tp.fast_active and not tp.fast_eligible
+    assert torch.allclose(out, expected if mapped else expected / 2.0, rtol=0, atol=1e-13)
+
+
 def _einsum_contraction(c, x, y):
     """The defining nested einsum of one MACE contraction (the previous implementation)."""
     axes = "mnopqrstuvwx"
@@ -257,3 +283,63 @@ def test_gpu_training_gradients():
     for n, g0 in grads[False].items():
         err = (grads[True][n] - g0).abs().max() / g0.abs().max().clamp(min=1e-30)
         assert float(err) < 1e-10, n
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_compile_twice_differentiable():
+    """A compiled function with its compiled first and second derivatives (finite differences)."""
+    from xnn.common.models.fast import compile_twice_differentiable
+
+    def fn(a, b, c):
+        n = (a * a).sum(dim=1, keepdim=True) + 1.0
+        return a * b / n, (b * c).sum(dim=1) + c.pow(3).sum(dim=1)
+
+    compiled = compile_twice_differentiable(fn, 3)
+    gen = torch.Generator().manual_seed(0)
+    args = [torch.randn(5, 4, dtype=torch.float64, generator=gen).cuda().requires_grad_(True)
+            for _ in range(3)]
+    for got, ref in zip(compiled(*args), fn(*args)):
+        assert torch.allclose(got, ref, rtol=0, atol=1e-14)
+    assert torch.autograd.gradcheck(compiled, args)
+    assert torch.autograd.gradgradcheck(compiled, args)
+
+
+def test_gnn_models_name_their_auto_policies():
+    """Every equivariant GNN reads one policy per mode from xnn.gnn.fast; NequIP has its own."""
+    import xnn.gnn.fast as fast
+    from xnn.common.models.fast import AutoPolicy
+    from xnn.gnn.models.base import EquivariantGNN
+    from xnn.gnn.models.nequip import NequIP
+
+    default = ("AUTO_POLICY", "AUTO_POLICY_TRAINING")
+    assert getattr(EquivariantGNN, "fast_policies", default) == default
+    for name in default + NequIP.fast_policies:
+        assert isinstance(getattr(fast, name), AutoPolicy)
+    assert NequIP.fast_policies != default
+
+
+def test_auto_policy_upper_bounds(monkeypatch):
+    """A fast path that wins only on small inputs is taken below the upper bound of its GPU (or the default)."""
+    from xnn.common.models.fast import AutoPolicy
+    policy = AutoPolicy(max_edges={"A100": 1000}, max_edges_float64={"A100": 500}, default_max_edges=2000)
+    cuda = torch.device("cuda")
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "NVIDIA A100-SXM4-80GB")
+    assert policy.upper_bound(cuda, torch.float32) == 1000 and policy.upper_bound(cuda, torch.float64) == 500
+    assert policy.decide(cuda, torch.float32, 999) and not policy.decide(cuda, torch.float32, 1000)
+    assert not policy.decide(cuda, torch.float64, 500)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "Some Future GPU")
+    assert policy.upper_bound(cuda, torch.float32) == 2000 and policy.upper_bound(cuda, torch.float64) is None
+    assert policy.decide(cuda, torch.float64, 10**9)
+
+
+def test_separate_shapes(monkeypatch):
+    """Inside the context dynamic sizes get symbols of their own; without the compiler's config it does nothing."""
+    import sys
+
+    import torch.fx.experimental._config as fx_config
+    with fast.separate_shapes():
+        assert fx_config.use_duck_shape is False
+    assert fx_config.use_duck_shape is True
+    monkeypatch.setitem(sys.modules, "torch.fx.experimental._config", None)
+    with fast.separate_shapes():
+        assert fx_config.use_duck_shape is True

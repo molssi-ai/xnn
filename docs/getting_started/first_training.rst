@@ -65,8 +65,7 @@ Model-specific options should go into ``cfg.model.extra`` entry in the configura
    cfg.output_dir = "runs/my_first_run"
 
 The same settings can come from a YAML file (:ref:`configuration`) or the
-pre-made templates bundled with the xnn package and shipped in the ``configs/``
-directory.
+templates in the repository's ``configs/`` directory.
 
 3. Train
 ========

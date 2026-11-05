@@ -8,3 +8,4 @@ response: auto            # exact SCF response in the parameter gradients: auto 
 max_iter: 300             # SCF iteration limit
 tol_density: 1.0e-9       # SCF convergence: largest density change
 tol_energy: 1.0e-10       # SCF convergence: energy change (eV)
+restart_gap: 3.0          # the extra SCF starts of a cold start run when a first solution's HOMO-LUMO gap is below this (eV)

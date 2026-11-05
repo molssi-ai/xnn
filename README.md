@@ -149,7 +149,7 @@ the MolSSI Driver Interface.
 
 Each model is checked against its reference code or paper
 (`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP,
-MACE, Allegro and AIMNet2 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
+MACE, Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP, BAMBOO, PM3, PM6, PM6-ORG and PM7 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
 ## Examples and tests
@@ -177,7 +177,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.23.0},
+  version = {0.24.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

@@ -220,10 +220,23 @@ def _exact_U(irreps_in: str, irrep_out: str, nu: int) -> Tensor:
 
 
 # Symmetric contraction (MACE Eq. 10-11): the learned product basis
-# free einsum labels for the correlation axes of the U tensors; anything is
-# fine as long as none collides with the reserved labels b (batch), c (channel),
-# e (element), i (coupling dim), k (path) used in the contraction equations
-_EINSUM_AXES = "mnopqrstuvwx"
+@functools.lru_cache(maxsize=None)
+def _capability(index: int) -> Tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _product_sum_contraction(t: Tensor) -> bool:
+    """Whether :class:`_Contraction` contracts the features as a product and a sum.
+
+    Float32 on CUDA devices of compute capability 8.0 and newer, where the
+    backward of the small batched products takes cuBLAS's slow small-matrix
+    kernels; elsewhere (float64, older GPUs, the CPU) the products are the
+    faster form.
+    """
+    if t.dtype != torch.float32 or not t.is_cuda:
+        return False
+    index = t.device.index if t.device.index is not None else torch.cuda.current_device()
+    return _capability(index) >= (8, 0)
 
 
 class _Contraction(nn.Module):
@@ -236,10 +249,21 @@ class _Contraction(nn.Module):
     per-element learnable weight over the coupling paths. The ``forward``
     contracts these in a Horner-style nested evaluation.
 
-    Every weighting is evaluated as one matrix product: the element's weights
-    are selected first (a product with the one-hot attributes), and for the
-    highest order the outer product of those per-atom weights with the features
-    meets ``U`` over its path and last coupling axis together. The axis
+    Every weighting is evaluated as matrix products in the cheaper of two
+    orders, chosen per correlation order in ``__init__``. With fewer elements
+    than coupling paths, each element's weights are contracted into ``U``
+    first (a product independent of the atoms), and for the highest order the
+    outer product of the attributes with the features meets it over the
+    element and last coupling axes, one product per channel. Otherwise the
+    element's weights are selected first (a product with the attributes), and
+    for the highest order the outer product of those per-atom weights with the
+    features meets ``U`` over its path and last coupling axis together. The
+    evaluation runs channel-major, so both are plain or channel-batched
+    matrix products. Each power of the features is contracted away over the
+    coupling axis as small matrix products, and in float32 on GPUs of compute
+    capability 8.0 and newer as a product and a sum, whose backward (forces
+    always take it) avoids cuBLAS's slow single-precision kernels for small
+    matrices there. The axis
     permutations are precomputed in ``__init__`` and the ``U`` buffers are
     accessed statically (empty non-persistent placeholders fill the unused
     orders up to 4) so ``forward`` is ``torch.jit.script``-compatible for
@@ -282,9 +306,8 @@ class _Contraction(nn.Module):
     """
 
     correlation: int
+    by_element: List[bool]
     perm_main: List[int]
-    perms_weighting: List[List[int]]
-    eqs_contract: List[str]
 
     def __init__(self, irreps_in: o3.Irreps, irrep_out: o3.Irreps, correlation: int,
                  num_elements: int):
@@ -315,22 +338,19 @@ class _Contraction(nn.Module):
             self.weights.append(
                 nn.Parameter(torch.randn(num_elements, n_paths, self.num_features) / n_paths)
             )
-        # precompute the axis permutations and einsum equations (TorchScript
-        # cannot build them). U_nu has the axes (m, i_1, ..., i_nu, k):
-        # non-scalar outputs carry the spatial m axis, scalar outputs have it
-        # squeezed away. The highest order puts (k, i_nu) first, so its path and
+        # the cost of an order scales with the elements when their weights are
+        # contracted into U first, and with the paths when each atom's weights
+        # are selected first
+        self.by_element = [num_elements < self._U(nu).size(-1)
+                           for nu in range(1, correlation + 1)]
+        # precompute the axis permutation (TorchScript cannot build it). U_nu
+        # has the axes (m, i_1, ..., i_nu, k): non-scalar outputs carry the
+        # spatial m axis, scalar outputs have it squeezed away. The highest order puts (k, i_nu) first, so its path and
         # last coupling axes contract in one matrix product; the lower orders
-        # put k first.
+        # use U as a transposed (k, ...) view.
         m_axis = 1 if self.lmax_out > 0 else 0
         rank = correlation + m_axis + 1
         self.perm_main = [rank - 1, rank - 2] + list(range(rank - 2))
-        self.perms_weighting = []
-        self.eqs_contract = []
-        for order in range(1, correlation):
-            rank_w = order + m_axis + 1
-            self.perms_weighting.append([rank_w - 1] + list(range(rank_w - 1)))
-            axes_f = _EINSUM_AXES[: order + m_axis - 1]
-            self.eqs_contract.append(f"bc{axes_f}i,bci->bc{axes_f}")
 
     def exact_constants(self) -> bool:
         """Rebuild the float64 ``U`` bases exactly from the irreps.
@@ -396,28 +416,68 @@ class _Contraction(nn.Module):
         bases = [self.U_matrix_1, self.U_matrix_2, self.U_matrix_3, self.U_matrix_4]
         corr = self.correlation
         n_atoms, n_feat, dim = x.shape[0], x.shape[1], x.shape[2]
+        n_el = y.shape[1]
+        # channel-major (c, B, ...) throughout, so the highest order is one
+        # product per channel and the final transpose touches only the output
+        xt = x.transpose(0, 1).contiguous()
         # Horner evaluation: start at the highest order and repeatedly fold in
         # the next-lower weighted basis before contracting one power of x away.
-        # Highest order: the element's weights (B, c, k), their outer product with
-        # x (B, c, k, i), then one product with U over (k, i)
         U = bases[corr - 1]
         n_paths = U.shape[-1]
-        w_atom = torch.matmul(y, path_weights[corr - 1].transpose(1, 2).reshape(y.shape[1], -1))
-        outer = w_atom.reshape(n_atoms, n_feat, n_paths, 1) * x.unsqueeze(2)
         lead: List[int] = list(U.shape[:-2])
-        acc = torch.matmul(outer.reshape(n_atoms * n_feat, n_paths * dim),
-                           U.permute(self.perm_main).reshape(n_paths * dim, -1))
-        acc = acc.reshape([n_atoms, n_feat] + lead)
+        if self.by_element[corr - 1]:
+            # each element's weights into U: (c e, k) @ (k, (..., i)) with U as a
+            # transposed view (its weight gradient then takes U as stored), the
+            # small result reordered to (c, (e, i), ...); then the outer product
+            # of the attributes with x (c, B, e, i) meets it over (e, i)
+            uw = torch.mm(path_weights[corr - 1].permute(2, 0, 1).reshape(n_feat * n_el, n_paths),
+                          U.reshape(-1, n_paths).t())
+            uw = uw.reshape(n_feat, n_el, -1, dim).transpose(2, 3).reshape(n_feat, n_el * dim, -1)
+            outer = y.reshape(1, n_atoms, n_el, 1) * xt.unsqueeze(2)
+            acc = torch.bmm(outer.reshape(n_feat, n_atoms, n_el * dim), uw)
+        else:
+            # each atom's weights (B, k, c), their outer product with x
+            # (c, B, k, i), then one product with U over (k, i)
+            u_main = U.permute(self.perm_main).reshape(n_paths * dim, -1)  # ((k, i), ...)
+            w_atom = torch.matmul(y, path_weights[corr - 1].reshape(n_el, -1))
+            outer = w_atom.reshape(n_atoms, n_paths, n_feat).permute(2, 0, 1).unsqueeze(3) * xt.unsqueeze(2)
+            acc = torch.matmul(outer.reshape(n_feat * n_atoms, n_paths * dim), u_main)
+        acc = acc.reshape([n_feat, n_atoms] + lead)
         for order in range(corr - 1, 0, -1):
             U = bases[order - 1]
             n_paths = U.shape[-1]
-            w_atom = torch.matmul(y, path_weights[order - 1].transpose(1, 2).reshape(y.shape[1], -1))
-            weighted = torch.matmul(w_atom.reshape(n_atoms * n_feat, n_paths),
-                                    U.permute(self.perms_weighting[order - 1]).reshape(n_paths, -1))
             lead_w: List[int] = list(U.shape[:-1])
-            weighted = weighted.reshape([n_atoms, n_feat] + lead_w)
-            acc = torch.einsum(self.eqs_contract[order - 1], weighted + acc, x)
-        return acc.reshape(n_atoms, -1)
+            # a transposed view, not a copy: cuBLAS takes it as a transposed
+            # operand, whose kernels are the faster ones for these short paths
+            u_w = U.reshape(-1, n_paths).t()  # (k, ...)
+            w = path_weights[order - 1]
+            if self.by_element[order - 1]:
+                # (e, c, k) @ (k, ...), then the attributes select per atom
+                uw = torch.matmul(w.transpose(1, 2), u_w).reshape(n_el, -1)
+                weighted = torch.matmul(y, uw)
+            else:
+                w_atom = torch.matmul(y, w.reshape(n_el, -1)).reshape(n_atoms, n_paths, n_feat)
+                # one explicit (B c, k) matrix: matmul would batch the strided
+                # operand over atoms instead
+                weighted = torch.mm(w_atom.transpose(1, 2).reshape(n_atoms * n_feat, n_paths), u_w)
+            weighted = weighted.reshape([n_atoms, n_feat] + lead_w).transpose(0, 1)
+            # acc first: the sum takes its channel-major layout. Then one power
+            # of x away over the coupling axis, as (rows, i) @ (i, 1) products per
+            # channel and atom; in float32 on GPUs of compute capability 8.0 and
+            # newer as a product and a sum, where the backward of those products
+            # (forces always take it) runs cuBLAS's slow small-matrix kernels
+            acc = acc + weighted
+            product_sum = False
+            if not torch.jit.is_scripting():
+                product_sum = _product_sum_contraction(acc)
+            if product_sum:
+                x_view = [n_feat, n_atoms] + [1] * (acc.dim() - 3) + [dim]
+                acc = (acc * xt.reshape(x_view)).sum(-1)
+            else:
+                lead_f: List[int] = list(acc.shape[:-1])
+                acc = torch.matmul(acc.reshape(n_feat * n_atoms, -1, dim),
+                                   xt.reshape(n_feat * n_atoms, dim, 1)).reshape(lead_f)
+        return acc.reshape(n_feat, n_atoms, -1).transpose(0, 1).reshape(n_atoms, -1)
 
 
 class SymmetricContraction(nn.Module, FastPathModule):
@@ -727,8 +787,11 @@ class RealAgnosticInteractionBlock(_InteractionBase):
         """
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
-        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
+        # per-edge TP weights; on the fast path in the kernel's column order
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                   weights_mapped=w_scale is not None)
         pooled = self.linear(pooled) / self.avg_num_neighbors
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -778,8 +841,11 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
         # product basis to add downstream
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
-        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
+        # per-edge TP weights; on the fast path in the kernel's column order
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                   weights_mapped=w_scale is not None)
         pooled = self.linear(pooled) / self.avg_num_neighbors
         return self.reshape(pooled), residual
 
@@ -826,10 +892,13 @@ class RealAgnosticDensityInteractionBlock(RealAgnosticInteractionBlock):
         """
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
-        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        # per-edge TP weights; on the fast path in the kernel's column order
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                   weights_mapped=w_scale is not None)
         pooled = self.linear(pooled) / (density + 1.0)
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -876,10 +945,13 @@ class RealAgnosticDensityResidualInteractionBlock(RealAgnosticResidualInteractio
         n_atoms = node_feats.shape[0]
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
-        radial_w = self.conv_tp_weights(edge_feats)  # per-edge TP weights
+        # per-edge TP weights; on the fast path in the kernel's column order
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms)
+        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                   weights_mapped=w_scale is not None)
         pooled = self.linear(pooled) / (density + 1.0)
         return self.reshape(pooled), residual
 

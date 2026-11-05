@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import math
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -459,3 +460,70 @@ def test_fidelity_vs_reference_float64():
 
 def test_fidelity_vs_reference_float32():
     assert _fidelity("float32") < 2e-4
+
+
+# the compiled blocks (fast path)
+
+def _fast_v1_run(model, batch, use_fast, train):
+    """Energies, forces, stress and (in training mode) the weight gradients of a force loss."""
+    model.set_use_fast(use_fast).train(train)
+    model.zero_grad(set_to_none=True)
+    out = ForceStressOutput(model, compute_stress=True).train(train)(batch)
+    from xnn.common.models.fast import fast_modules
+    assert all(m.fast_active == use_fast for m in fast_modules(model))
+    res = {k: out[k].detach().double() for k in ("energy", "forces", "stress")}
+    if train:
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum() + out["stress"].pow(2).sum()).backward()
+        res.update({name: p.grad.detach().double().clone() for name, p in model.named_parameters()
+                    if p.grad is not None})
+    return res
+
+
+def test_fast_path_falls_back_off_gpu():
+    """Off a GPU "auto" and True keep the reference layers."""
+    model = _small()
+    for use_fast in ("auto", True):
+        model.set_use_fast(use_fast)(_graph())
+        from xnn.common.models.fast import fast_modules
+        assert fast_modules(model) and not any(m.fast_active for m in fast_modules(model))
+
+
+def test_compiled_block_wiring_matches_the_reference(monkeypatch):
+    """The evaluation fast path (each block as one functional graph) gives the reference energies,
+    forces and stress; the compiler itself is replaced by the identity so the blocks run on a CPU."""
+    import xnn.common.models.compiled as compiled
+    monkeypatch.setattr(compiled, "supported", lambda device, dtype: True)
+    monkeypatch.setattr(compiled, "_SHARED", {})
+    monkeypatch.setattr(torch, "compile", lambda fn, **kw: fn)
+    model = _small()
+    ref = _fast_v1_run(model, _graph(n=5, seed=2, periodic=True), False, False)
+    fast = _fast_v1_run(model, _graph(n=5, seed=2, periodic=True), True, False)
+    for key, value in ref.items():
+        assert (fast[key] - value).abs().max() <= 1e-12 * value.abs().max().clamp_min(1.0), key
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("options", [{}, {"attention": "dot_product", "nonlinear_message": False},
+                                     {"smooth_cutoff": True}])
+@pytest.mark.parametrize("train", [False, True])
+def test_fast_path_parity(dtype, options, train):
+    """The compiled blocks give the reference energies, forces, stress and force-loss gradients."""
+    if sys.version_info >= (3, 13):
+        pytest.skip("torch.compile needs Python < 3.13")
+    model = _small(**options).to("cuda", dtype)
+
+    def batch():
+        # a fresh batch per run: the force wrapper attaches its displacement to the batch
+        out = collate([_graph(n=7, seed=1, periodic=True), _graph(n=5, seed=2)]).to("cuda")
+        out.pos = out.pos.to(dtype)
+        out.cell = out.cell.to(dtype)
+        return out
+
+    ref = _fast_v1_run(model, batch(), False, train)
+    fast = _fast_v1_run(model, batch(), True, train)
+    assert ref.keys() == fast.keys()
+    tol = (1e-11 if train else 1e-12) if dtype == torch.float64 else (1e-4 if train else 1e-5)
+    for key, value in ref.items():
+        err = (fast[key] - value).abs().max() / value.abs().max().clamp_min(1e-30)
+        assert err < tol, (key, float(err))

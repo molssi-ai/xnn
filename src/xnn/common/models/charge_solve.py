@@ -32,6 +32,7 @@ import torch
 from torch import Tensor
 
 from .eeq import lu_solve_implicit
+from .electrostatics import reciprocal_lattice
 from .ops import cell_volume
 
 _SYMBOLS = ("X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si",
@@ -169,6 +170,14 @@ def coulomb_matrix(ewald, pos: Tensor, cell: Optional[Tensor] = None) -> Tensor:
     return ewald.coulomb_matrix(pos, cell)
 
 
+def _gaussian_kernel(r: Tensor, iw: Tensor, alpha: float) -> Tensor:
+    """``erf(r iw) / r`` (``iw = 0``: the bare ``1 / r``), minus ``erf(alpha r) / r`` for ``alpha > 0``."""
+    screen = torch.where(iw > 0, torch.special.erf(r * iw), torch.ones_like(r))
+    if alpha > 0:
+        screen = screen - torch.special.erf(alpha * r)
+    return screen / r
+
+
 def gaussian_coulomb_matrix(pos: Tensor, sigma: Tensor, cell: Optional[Tensor] = None,
                             accuracy: float = 1e-10, background: bool = True) -> Tensor:
     """``A`` with ``E = 1/2 q^T A q`` the Coulomb energy of Gaussian charges, one structure.
@@ -222,21 +231,13 @@ def gaussian_coulomb_matrix(pos: Tensor, sigma: Tensor, cell: Optional[Tensor] =
         sigma > 0, sigma, torch.ones_like(sigma))), torch.zeros_like(sigma))
     eye = torch.eye(n, dtype=torch.bool, device=pos.device)
 
-    def kernel(r: Tensor, iw: Tensor, alpha: float) -> Tensor:
-        # erf(r iw) / r with iw = 0 meaning the bare 1 / r, minus erf(alpha r) / r
-        screen = torch.where(iw > 0, torch.special.erf(r * iw), torch.ones_like(r))
-        if alpha > 0:
-            screen = screen - torch.special.erf(alpha * r)
-        return screen / r
-
     if cell is None:
         d = pos[:, None, :] - pos[None, :, :]
         r2 = (d * d).sum(-1)
         r = torch.sqrt(torch.where(eye, torch.ones_like(r2), r2))
-        off = torch.where(eye, torch.zeros_like(r), kernel(r, inv_width, 0.0))
+        off = torch.where(eye, torch.zeros_like(r), _gaussian_kernel(r, inv_width, 0.0))
         return off + torch.diag(self_term)
 
-    from .electrostatics import reciprocal_lattice
     volume = cell_volume(cell)
     root = math.sqrt(-math.log(accuracy))
     # balance of the real-space and reciprocal work for N atoms in volume V
@@ -250,17 +251,21 @@ def gaussian_coulomb_matrix(pos: Tensor, sigma: Tensor, cell: Optional[Tensor] =
     d = pos[None, :, :] - pos[:, None, :]                       # r_j - r_i
     frac_shift = torch.round(d.detach() @ inv_cell.detach())
     d = d - frac_shift @ cell
+    cd = cell.detach()
     spacing = volume.detach() / torch.linalg.norm(torch.linalg.cross(
-        cell.detach()[[1, 2, 0]], cell.detach()[[2, 0, 1]]), dim=1)
-    bounds = [int(math.ceil(r_cut / float(s))) + 1 for s in spacing]
-    ranges = [torch.arange(-b, b + 1, device=pos.device) for b in bounds]
-    shifts = torch.cartesian_prod(*ranges).to(pos.dtype) @ cell  # (T, 3)
+        torch.stack([cd[1], cd[2], cd[0]]), torch.stack([cd[2], cd[0], cd[1]])), dim=1)
+    b0 = int(math.ceil(r_cut / float(spacing[0]))) + 1
+    b1 = int(math.ceil(r_cut / float(spacing[1]))) + 1
+    b2 = int(math.ceil(r_cut / float(spacing[2]))) + 1
+    shifts = torch.cartesian_prod(torch.arange(-b0, b0 + 1, device=pos.device),
+                                  torch.arange(-b1, b1 + 1, device=pos.device),
+                                  torch.arange(-b2, b2 + 1, device=pos.device)).to(pos.dtype) @ cell  # (T, 3)
     vec = d[:, :, None, :] + shifts[None, None, :, :]            # (N, N, T, 3)
     rr2 = (vec * vec).sum(-1)
     own = rr2.detach() < 1e-20                                   # an atom with itself
     keep = ~own & (rr2.detach() <= r_cut * r_cut)
     rr = torch.sqrt(torch.where(keep, rr2, torch.ones_like(rr2)))
-    real = torch.where(keep, kernel(rr, inv_width[:, :, None].expand_as(rr), alpha),
+    real = torch.where(keep, _gaussian_kernel(rr, inv_width[:, :, None].expand_as(rr), alpha),
                        torch.zeros_like(rr)).sum(-1)
 
     _, kvec, k2 = reciprocal_lattice(cell, k_cut)
@@ -314,9 +319,13 @@ def solve_charges(chi: Tensor, hardness: Tensor, gamma: Tensor, target: Tensor,
     zero = torch.zeros((m, m), dtype=chi.dtype, device=chi.device)
     full = torch.cat([torch.cat([full, rows.t()], dim=1), torch.cat([rows, zero], dim=1)], dim=0)
     rhs = torch.cat([-chi, target.to(chi.dtype).reshape(m)]).unsqueeze(1)
-    lu, pivots = torch.linalg.lu_factor(full.detach())
-    # one float64-residual refinement round in float32 (the plain factor in float64)
-    sol = lu_solve_implicit(lu, pivots, full, rhs, 1 if chi.dtype == torch.float32 else 0)
+    if torch.jit.is_scripting():
+        # deployment: the plain solve (its first derivatives are exact)
+        sol = torch.linalg.solve(full, rhs)
+    else:
+        lu, pivots = torch.linalg.lu_factor(full.detach())
+        # one float64-residual refinement round in float32 (the plain factor in float64)
+        sol = lu_solve_implicit(lu, pivots, full, rhs, 1 if chi.dtype == torch.float32 else 0)
     # the augmented system carries -mu in its last unknowns
     return sol[:n, 0], -sol[n:, 0]
 

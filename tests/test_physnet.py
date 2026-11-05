@@ -253,3 +253,121 @@ def test_d3_reference_set_switch():
     assert float(newer._d3_c6ab[92, 8, 0, 0, 0]) != float(default._d3_c6ab[92, 8, 0, 0, 0])
     g = _graph()
     assert torch.allclose(default(g)["energy"], newer(g)["energy"])   # no actinides
+
+
+@pytest.mark.parametrize("extra", [{}, {"lr_cutoff": 5.0, "s6": 0.5, "s8": 0.2130, "a1": 0.0, "a2": 6.0519}])
+def test_scripted_potential_and_lammps_export(extra, tmp_path):
+    """The TorchScript potential (charged) and the LAMMPS export equal the eager model."""
+    from xnn.common.deploy import TorchScriptPotential, export_to_lammps
+    model = _build(**extra).eval()
+    rng = np.random.default_rng(5)
+    pos = rng.uniform(0.0, 4.0, (9, 3))
+    z = [8, 1, 1, 6, 7, 1, 6, 8, 1]
+    s = {"pos": pos, "atomic_numbers": z, "total_charge": -1.0}
+    eager = ForceStressOutput(model)(structure_to_graph(s, model.cutoff))
+    wrapper = TorchScriptPotential(model, model.cutoff, total_charge=-1.0).eval()
+    assert wrapper.has_charges
+    out = torch.jit.script(wrapper)(torch.tensor(pos), torch.tensor(z), None, torch.tensor([False] * 3))
+    assert abs(float(out["energy"]) - float(eager["energy"])) < 1e-10
+    assert torch.allclose(out["forces"], eager["forces"], atol=1e-10)
+    assert torch.allclose(out["charges"], eager["charges"], atol=1e-12)
+
+    neutral = ForceStressOutput(model)(structure_to_graph({"pos": pos, "atomic_numbers": z}, model.cutoff))
+    path = str(tmp_path / "physnet_lammps.pt")
+    export_to_lammps(model, model.cutoff, path)
+    g = structure_to_graph({"pos": pos, "atomic_numbers": z}, model.cutoff)
+    pair = torch.jit.load(path)(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, torch.eye(3) * 30.0)
+    assert abs(float(pair["total_energy"]) - float(neutral["energy"])) < 1e-10
+    assert torch.allclose(pair["forces"], neutral["forces"].detach(), atol=1e-10)
+
+    # the exported entry points in Python give what the scripted model gives on the same edges
+    scripted = torch.jit.script(model)
+    vec, empty = g.edge_vectors().detach(), torch.zeros(0, dtype=torch.float64)
+    args = (g.atomic_numbers, g.edge_index, vec, empty, empty, empty.to(torch.bool), -1.0, 1.0)
+    with torch.no_grad():
+        for a, b in zip(model.node_features_energy_charges(*args), scripted.node_features_energy_charges(*args)):
+            assert torch.allclose(a, b, rtol=0, atol=1e-12)
+        local = model.node_features_energy(g.atomic_numbers, g.edge_index, vec)
+        assert torch.allclose(model.node_energy(g.atomic_numbers, g.edge_index, vec), local[1], rtol=0, atol=0)
+        assert torch.allclose(local[1], scripted.node_energy(g.atomic_numbers, g.edge_index, vec), rtol=0, atol=1e-12)
+
+
+# fast path (the fused continuous-filter convolution of SchNet)                 #
+
+def _build_width(n_features):
+    from xnn.dnn.models.physnet import PhysNet
+    torch.manual_seed(0)
+    model = PhysNet(cutoff=6.0, n_features=n_features, n_rbf=16, num_blocks=3)
+    with torch.no_grad():
+        for ob in model.output_blocks:
+            ob.dense.weight.normal_(0, 0.1)
+        for ib in model.interaction_blocks:
+            ib.interaction.k2f.weight.normal_(0, 0.1)
+    return model
+
+
+def test_fast_path_support_and_choice(monkeypatch):
+    """The fused messages need a power-of-two feature width from 16 to 512 on a device Triton
+    supports; ``set_use_fast`` records the choice and returns the model."""
+    import xnn.dnn.fast.physnet as fast_physnet
+    monkeypatch.setattr(fast_physnet, "supported", lambda device, dtype: True)
+    widths = {16: True, 24: False, 512: True, 1024: False, 8: False}
+    for n, expected in widths.items():
+        block = _build_width(n).interaction_blocks[0].interaction
+        assert block.fast_supported(torch.device("cuda"), torch.float32) == expected, n
+    model = _build_width(16)
+    for choice, stored in ((True, True), (False, False), ("auto", "auto")):
+        assert model.set_use_fast(choice) is model
+        assert model.use_fast == stored
+
+
+def test_fast_messages_match_the_reference():
+    """The fused message sums give the reference energies, forces and the weight gradients of
+    a force loss (Triton's interpreter on a CPU, the kernels on a GPU)."""
+    pytest.importorskip("triton")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = _build_width(16).double().to(device)
+    g = _graph(n=8).to(device)
+    blocks = [ib.interaction for ib in model.interaction_blocks]
+    res = {}
+    for on in (False, True):
+        # the model selects per evaluation, and no CPU qualifies: pin the selection
+        def pinned(num_edges, on=on):
+            for b in blocks:
+                b.fast_active = on
+        model._select_fast = pinned
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(g)
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[on] = (out["energy"].detach(), out["forces"].detach(),
+                   {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None})
+    del model._select_fast
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= 1e-11 * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fast_path_parity_and_training(dtype):
+    """On the GPU: the fused message sums give the reference energies, forces and weight
+    gradients of a force loss."""
+    pytest.importorskip("triton")
+    model = _build_width(32).to("cuda", dtype)
+    g = _graph(n=12, periodic=True).to("cuda")
+    g.pos, g.cell = g.pos.to(dtype), g.cell.to(dtype)
+    res = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        model.zero_grad(set_to_none=True)
+        out = ForceStressOutput(model).train()(g)
+        assert model.interaction_blocks[0].interaction.fast_active == use_fast
+        (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+        res[use_fast] = (out["energy"].detach().double(), out["forces"].detach().double(),
+                         {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    for ref, fast in zip(res[False][:2], res[True][:2]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    for name, gr in res[False][2].items():
+        assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name

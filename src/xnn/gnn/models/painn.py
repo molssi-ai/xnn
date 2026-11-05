@@ -106,6 +106,11 @@ from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import ATOMIC_MASSES, center_of_mass, gather_rows, init_linears_, scatter_sum
 from xnn.common.models.registry import register_model
 
+#: Edge count from which a PaiNN in evaluation mode recomputes the filters of each block in the
+#: backward pass instead of keeping them (``recompute="auto"``, see
+#: :func:`~xnn.gnn.models.set_recompute_radial`).
+RECOMPUTE_MIN_EDGES = 1_000_000
+
 _MAX_Z = 100
 
 
@@ -176,7 +181,7 @@ class _Message(nn.Module, FastPathModule):
         tuple of Tensor
             ``ds`` of shape ``(N, F)`` and ``dv`` of shape ``(N, 3, F)``.
         """
-        if self.fast_active and not self.training and not torch.jit.is_scripting():
+        if self.fast_active and not torch.jit.is_scripting():
             return self._forward_fast(s, v, W, direction, edge_index)
         src, dst = edge_index[0], edge_index[1]
         n = s.shape[0]
@@ -451,9 +456,20 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
         Learnable per-element energy reference, initialized to zero.
     dipole_head, polarizability_head : torch.nn.Module or None
         The tensorial heads, when requested.
+    recompute : str
+        ``"auto"`` (default): in evaluation mode from :data:`RECOMPUTE_MIN_EDGES`
+        edges, each block keeps only its inputs for the backward pass and
+        evaluates its filters and the block again there (the same values), so
+        the filters of all blocks, ``(E, T parts F)``, are never stored;
+        ``"on"``: whenever a gradient is needed; ``"off"``: never. Set with
+        :func:`~xnn.gnn.models.set_recompute_radial`. Filters wrapped by an
+        adapter (LoRA) are always kept.
     """
 
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
+    recompute: str
+    #: recomputes its filters on request (see set_recompute_radial)
+    radial_recompute = True
 
     def __init__(self, n_features: int = 128, n_interactions: int = 3,
                  n_rbf: int = 20, cutoff: float = 5.0,
@@ -483,6 +499,7 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
         self.rbf = make_radial_basis(radial_basis, n_rbf, cutoff, trainable_rbf,
                                      prefactor=1.0 if radial_basis == "bessel" else None)
         self.cutoff_fn = CosineCutoff(cutoff)
+        self.recompute = "auto"
         # the filters of every block from one dense layer (one block's width when shared)
         self.filter_width = (1 + int(vector_features)
                              + int(vector_features and vector_propagation)) * n_features
@@ -530,12 +547,13 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
         use_fast : bool or str
             ``"auto"`` (the default): the fused GPU kernels of
             :mod:`xnn.gnn.fast.painn` where they are available and faster for
-            the input (a CUDA device, Triton, a graph above the measured size
-            threshold); ``True``: wherever they are available; ``False``:
-            always the reference implementation. Evaluations in training mode
-            always use the reference, which is twice differentiable. In float32
-            the kernels agree with the reference to about 1e-6 relative, in
-            float64 to about 1e-14.
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            twice differentiable, so force training takes them as well. In
+            float32 the kernels agree with the reference to about 1e-6
+            relative, in float64 to about 1e-14.
 
         Returns
         -------
@@ -550,17 +568,14 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
     def _select_fast(self, num_edges: int) -> None:
         """Switch the fused message blocks on or off for one evaluation."""
         from xnn.common.models.fast import fast_modules, select
-        from xnn.gnn.fast.painn import AUTO_POLICY
+        from xnn.gnn.fast.painn import AUTO_POLICY, AUTO_POLICY_TRAINING
         blocks = self.__dict__.get("_fast_blocks")
         if blocks is None:
             blocks = fast_modules(self)
             self.__dict__["_fast_blocks"] = blocks
-        if self.training:
-            for block in blocks:
-                block.fast_active = False
-            return
         like = self.embedding.weight
-        select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:
@@ -625,6 +640,8 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
         r = torch.linalg.norm(edge_vec, dim=-1)
         # the paper's r_ij = r_j - r_i is the negative of the xnn edge vector
         direction = -edge_vec / r.clamp(min=1e-12).unsqueeze(-1)
+        if not torch.jit.is_scripting() and self._recomputes(r):
+            return self._representation_recomputed(atomic_numbers, edge_index, r, direction)
         # the filters of all blocks in one product, times the cutoff
         W = self.filters(self.rbf(r)) * self.cutoff_fn(r).unsqueeze(-1)
         filters = torch.split(W, self.filter_width, dim=-1)
@@ -632,6 +649,39 @@ class PaiNN(ExactFloat64Constants, InteratomicPotential):
         v = torch.zeros((s.shape[0], 3, s.shape[1]), dtype=s.dtype, device=s.device)
         for k, block in enumerate(self.interactions):
             s, v = block(s, v, filters[k % len(filters)], direction, edge_index)
+        return s, v
+
+    @torch.jit.unused
+    def _recomputes(self, r: Tensor) -> bool:
+        if (self.recompute == "off" or not torch.is_grad_enabled()
+                or type(self.filters) is not nn.Linear):
+            return False
+        if not (r.requires_grad or self.filters.weight.requires_grad):
+            return False
+        if self.recompute == "on":
+            return True
+        return not self.training and r.shape[0] >= RECOMPUTE_MIN_EDGES
+
+    @torch.jit.unused
+    def _representation_recomputed(self, atomic_numbers: Tensor, edge_index: Tensor, r: Tensor,
+                                   direction: Tensor) -> Tuple[Tensor, Tensor]:
+        """:meth:`representation` with every block, its filters included, under a checkpoint."""
+        from torch.utils.checkpoint import checkpoint
+        rbf = self.rbf(r)
+        cut = self.cutoff_fn(r).unsqueeze(-1)
+        width = self.filter_width
+        n_sets = self.filters.out_features // width
+        s = self.embedding(atomic_numbers)
+        v = torch.zeros((s.shape[0], 3, s.shape[1]), dtype=s.dtype, device=s.device)
+
+        def run(block, k, s, v, rbf, cut, direction):
+            rows = slice(k * width, (k + 1) * width)
+            bias = None if self.filters.bias is None else self.filters.bias[rows]
+            W = nn.functional.linear(rbf, self.filters.weight[rows], bias) * cut
+            return block(s, v, W, direction, edge_index)
+
+        for k, block in enumerate(self.interactions):
+            s, v = checkpoint(run, block, k % n_sets, s, v, rbf, cut, direction, use_reentrant=False)
         return s, v
 
     @torch.jit.export

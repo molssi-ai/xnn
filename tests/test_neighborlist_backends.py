@@ -135,3 +135,42 @@ def test_positions_that_are_not_finite_raise_on_the_gpu():
     pos = torch.tensor([[0.0, 0.0, 0.0], [float("nan"), 0.0, 0.0]], dtype=torch.float64, device="cuda")
     with pytest.raises(ValueError, match="not finite"):
         _vesin_neighbor_list(pos, 2.0, None, None, False)
+
+
+def half_set(i, k, shifts):
+    return {(int(a), int(b), *(int(v) for v in s)) for a, b, s in zip(i.cpu(), k.cpu(), shifts.cpu())}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("offset", [0.0, -3.7])
+def test_the_grid_search_finds_the_unique_pairs(dtype, offset):
+    """The grid search of an orthorhombic cell finds each pair of the reference list once, sorted by its first atom,
+    for positions inside the cell or not."""
+    from xnn.common.data.neighborlist import cell_grid, unique_pairs
+    pos, cell = water_like(n=300)
+    cell = cell * torch.tensor([1.0, 1.25, 1.5], dtype=torch.float64)[:, None]
+    pos = pos * torch.tensor([1.0, 1.25, 1.5], dtype=torch.float64) + offset * torch.diag(cell)
+    pbc = torch.ones(3, dtype=torch.bool)
+    edges, shifts = reference(pos, 3.5, cell, pbc)
+    keep = edges[0] < edges[1]
+    want = half_set(edges[0][keep], edges[1][keep], shifts[keep])
+    gpu = (pos.to(dtype).cuda(), cell.to(dtype).cuda(), pbc.cuda())
+    assert cell_grid(gpu[0], 3.5, gpu[1], gpu[2])[1] == (3, 4, 5)
+    i, k, s = unique_pairs(gpu[0], 3.5, gpu[1], gpu[2])
+    assert half_set(i, k, s) == want and len(want) == i.shape[0]
+    assert bool((i[1:] >= i[:-1]).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_cells_the_grid_cannot_search_go_to_vesin():
+    """A skewed cell or one with room for fewer than three cells per axis is not searched on the grid."""
+    from xnn.common.data.neighborlist import cell_grid
+    pos, cell = water_like()
+    pbc = torch.ones(3, dtype=torch.bool, device="cuda")
+    skewed = cell.clone()
+    skewed[1, 0] = 2.0
+    assert cell_grid(pos.cuda(), 3.0, cell.cuda(), pbc) is not None
+    assert cell_grid(pos.cuda(), 3.0, skewed.cuda(), pbc) is None
+    assert cell_grid(pos.cuda(), 4.5, cell.cuda(), pbc) is None
+    assert cell_grid(pos, 3.0, cell, pbc.cpu()) is None

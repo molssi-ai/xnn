@@ -18,15 +18,17 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
+import torch
 from torch import Tensor, nn
 
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import make_activation
 from xnn.common.models.registry import register_model
 
 from .base import VoxelPotential, default_fields, default_strides, field_dim, global_average_pool, low_pass_filter
 
 
-class Conv3dBlock(nn.Module):
+class Conv3dBlock(nn.Module, FastPathModule):
     """One block of the conventional CNN: convolution, low-pass stride,
     normalization, activation.
 
@@ -64,10 +66,17 @@ class Conv3dBlock(nn.Module):
                               stride=1 if self.smooth_stride else self.stride)
         self.norm = nn.BatchNorm3d(out_channels) if normalization == "batch" else None
         self.act = make_activation(activation) if activation is not None else None
+        # the fast path: the convolution with cuDNN's algorithm search
+        self.fast_active = False
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        from xnn.cnn.fast import supported
+        return supported(device, dtype)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply the block to ``(B, C_in, X, Y, Z)`` fields."""
-        x = self.conv(x)
+        fast = self.fast_active and not torch.jit.is_scripting()
+        x = self._conv_fast(x) if fast else self.conv(x)
         if self.smooth_stride:
             x = low_pass_filter(x, self.stride, self.stride)
         if self.norm is not None:
@@ -75,6 +84,13 @@ class Conv3dBlock(nn.Module):
         if self.act is not None:
             x = self.act(x)
         return x
+
+    @torch.jit.unused
+    def _conv_fast(self, x: Tensor) -> Tensor:
+        from xnn.cnn.fast import conv3d
+        c = self.conv
+        return conv3d(x, c.weight, c.bias, stride=c.stride[0], padding=c.padding[0], dilation=c.dilation[0],
+                      groups=c.groups)
 
 
 @register_model("cnn3d")

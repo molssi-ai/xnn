@@ -8,12 +8,14 @@ default Ewald coefficient, 48^3 meshes and Tinker's default 16^3 ones, induced d
 converged to 1e-10 Debye).
 """
 import copy
+import itertools
 import math
 
 import numpy as np
 import pytest
 import torch
 
+from xnn.common import cpu_kernels
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, MDIEngine
 from xnn.common.deploy.step_graph import StepGraph
@@ -573,18 +575,37 @@ def test_second_derivatives_through_the_iterative_solve(cls):
         assert float(row[other, ax2]) == pytest.approx((fp - fm) / (2 * h), rel=1e-4, abs=1e-3)
 
 
-def test_use_fast_validates_and_keeps_the_reference_on_the_cpu():
-    """use_fast is validated, reached by set_use_fast, and inactive on the CPU."""
+def test_use_fast_validates_and_takes_the_cpu_kernels_only_when_asked():
+    """use_fast is validated, defaults to "auto", and is reached by set_use_fast. On the CPU "auto" keeps the
+    reference and ``True`` takes the kernels as C++ loops (the compiled blocks of the GPU path stay off)."""
     from xnn.common.models.fast import set_use_fast
     with pytest.raises(ValueError):
         _box(Amoeba, use_fast="always")
-    ref, fast = _box(Amoeba), _box(Amoeba)
+    auto = _box(Amoeba).eval()
+    assert auto.use_fast == "auto"
+    one = torch.ones(3, dtype=torch.float64)
+    assert not auto._fused_active(one) and not auto._kernels_active(one)
+    ref, fast = _box(Amoeba, use_fast=False), _box(Amoeba)
     set_use_fast(ForceStressOutput(fast), True)
     assert fast.use_fast is True and ref.use_fast is False
     fast.eval()
-    assert not fast._fused_active(torch.ones(3, dtype=torch.float64))
+    assert not fast._fused_active(one)
+    assert fast._kernels_active(one) == cpu_kernels.available()
     e_ref = float(ref.eval()(_graph(BOX))["energy"])
-    assert float(fast(_graph(BOX))["energy"]) == e_ref
+    assert float(auto(_graph(BOX))["energy"]) == e_ref
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_cpu_kernels_match_the_reference(cls):
+    """On a CPU, ``use_fast=True`` runs the pair, mutual-field, solver and mesh kernels as C++ loops: energies,
+    forces and stress agree with the reference."""
+    g = _graph(BOX)
+    ref = ForceStressOutput(_box(cls, use_fast=False), compute_stress=True).eval()
+    fast = ForceStressOutput(_box(cls, use_fast=True), compute_stress=True).eval()
+    want, got = ref(g), fast(g)
+    for key in ("energy", "forces", "stress"):
+        assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
@@ -599,6 +620,128 @@ def test_fused_pair_arithmetic_matches_the_reference_on_the_gpu(cls):
         got = fast(g)
         for key in ("energy", "forces", "stress"):
             assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
+
+
+_KERNEL_DEVICES = [
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")),
+    pytest.param("cpu", marks=pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ "
+                                                                                     "compiler"))]
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_second_derivatives_through_the_kernels_match_the_reference(cls, device):
+    """A force loss differentiated through the pair kernels (their generated tangent kernels) gives the
+    reference's gradient with respect to the positions: the kernels are differentiable twice."""
+    pos = BOX[:24] - BOX[:24].mean(0)
+    weights = torch.tensor(np.random.default_rng(8).normal(size=(24, 3)), device=device)
+    results = []
+    for use_fast in (False, True):
+        lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12).to(device).eval()
+        g = _graph(pos, cell=None, cutoff=30.0).to(device)
+        g.pos.requires_grad_(True)
+        energy = model(g)["energy"].sum()
+        forces = -torch.autograd.grad(energy, g.pos, create_graph=True)[0]
+        second = torch.autograd.grad((forces * weights).sum(), g.pos)[0]
+        results.append((forces.detach(), second))
+    for a, b in zip(*results):
+        assert torch.allclose(a, b, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_parameter_gradients_through_the_kernels_match_the_reference(device, cls):
+    """The force field's parameters get the reference's gradients through the pair kernels (the generated
+    adjoint of the forward kernel for the per-atom table)."""
+    pos = BOX[:24] - BOX[:24].mean(0)
+    grads = []
+    for use_fast in (False, True):
+        lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, trainable="all")
+        model = model.to(device).eval()
+        model(_graph(pos, cell=None, cutoff=30.0).to(device))["energy"].sum().backward()
+        grads.append({k: v.grad.clone() for k, v in model.ff.params.items() if v.grad is not None})
+    assert grads[0].keys() == grads[1].keys() and grads[0]
+    for key in grads[0]:
+        assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-9, atol=1e-10), key
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_force_loss_parameter_gradients_through_the_kernels_match_the_reference(device, cls):
+    """A force loss gives the parameters the reference's gradients through the kernels: the tangents of the
+    generated parameter adjoints (the mixed second derivatives)."""
+    if device == "cpu" and cls is Hippo:
+        pytest.skip("the HIPPO tangent kernels take a minute to build as C++ loops")
+    pos = BOX[:24] - BOX[:24].mean(0)
+    weights = torch.tensor(np.random.default_rng(9).normal(size=(24, 3)), device=device)
+    grads = []
+    for use_fast in (False, True):
+        lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, trainable="all")
+        model = model.to(device).eval()
+        g = _graph(pos, cell=None, cutoff=30.0).to(device)
+        g.pos.requires_grad_(True)
+        forces = -torch.autograd.grad(model(g)["energy"].sum(), g.pos, create_graph=True)[0]
+        (forces * weights).sum().backward()
+        grads.append({k: v.grad.clone() for k, v in model.ff.params.items() if v.grad is not None})
+    assert grads[0].keys() == grads[1].keys() and grads[0]
+    for key in grads[0]:
+        assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-8, atol=1e-10), key
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+def test_auto_takes_the_kernels_in_both_modes():
+    """``use_fast="auto"`` follows the measured crossovers of evaluation and of training on a GPU."""
+    from xnn.ffnn.models import amoeba
+    model = _box(Hippo).to("cuda")
+    R = torch.ones(3, dtype=torch.float64, device="cuda")
+    for mode, policy in ((model.eval(), amoeba.FAST_POLICY), (model.train(), amoeba.TRAINING_POLICY)):
+        assert mode._fused_active(R) == policy.decide(R.device, R.dtype, 3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_training_through_the_kernels_matches_the_reference(cls, periodic):
+    """In training mode ``use_fast=True`` takes the pair kernels (the mesh and the solver's products stay
+    eager): an energy and force loss gives the parameters the reference's gradients."""
+    cell = CELL if periodic else None
+    pos = BOX if periodic else BOX[:24] - BOX[:24].mean(0)
+    weights = torch.tensor(np.random.default_rng(10).normal(size=pos.shape), device="cuda")
+    grads = []
+    for use_fast in (False, True):
+        if periodic:
+            model = _box(cls, use_fast=use_fast, polar_eps=1e-11, trainable="all")
+        else:
+            lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+            model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, trainable="all")
+        model = model.to("cuda").train()
+        g = _graph(pos, cell=cell, cutoff=6.3 if periodic else 30.0).to("cuda")
+        g.pos.requires_grad_(True)
+        energy = model(g)["energy"].sum()
+        forces = -torch.autograd.grad(energy, g.pos, create_graph=True)[0]
+        (energy + (forces * weights).sum()).backward()
+        grads.append({k: v.grad.clone() for k, v in model.ff.params.items() if v.grad is not None})
+    assert grads[0].keys() == grads[1].keys() and grads[0]
+    for key in grads[0]:
+        assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-8, atol=1e-9), key
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("periodic", [True, False])
+def test_the_paired_solve_matches_the_separate_solves(device, periodic):
+    """On the kernels AMOEBA solves the dipoles of the polar field together with those of the direct field, and
+    its backward pass takes the adjoint from them without a solve; energy and forces stay the reference's."""
+    cell = CELL if periodic else None
+    g = _graph(BOX, cell=cell).to(device)
+    ref = ForceStressOutput(_box(Amoeba, solver="iterative")).to(device).eval()
+    fast = ForceStressOutput(_box(Amoeba, solver="iterative", use_fast=True)).to(device).eval()
+    want, got = ref(g), fast(g)
+    assert fast.model.solver_stats["adjoint"] == 0
+    for key in ("energy", "forces"):
+        assert torch.allclose(got[key], want[key], rtol=1e-10, atol=1e-10), key
 
 
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
@@ -625,6 +768,84 @@ def test_forward_on_a_plan_matches_the_plain_forward(cls, periodic):
             assert torch.allclose(a, b, rtol=1e-10, atol=1e-8)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+@pytest.mark.parametrize("far", [0.0, 0.4, 0.6])
+def test_the_plan_checks_kernel_matches_the_tests(far):
+    """One kernel gives a plan's rebuild tests (outdated, due), its convergence and needed iterations, and
+    keeps the positions, as the separate tests do."""
+    from xnn.ffnn.models import amoeba_kernels as km
+    gen = torch.Generator(device="cuda").manual_seed(6)
+    reference = 10 * torch.rand(300, 3, dtype=torch.float64, device="cuda", generator=gen)
+    pos = reference + 0.01 * torch.randn(300, 3, dtype=torch.float64, device="cuda", generator=gen)
+    pos[7, 1] += far
+    last = pos - 0.02 * torch.randn(300, 3, dtype=torch.float64, device="cuda", generator=gen)
+    converged = torch.tensor(far < 0.5, device="cuda")
+    needed = torch.tensor([5.0, 0.0], dtype=torch.float64, device="cuda")
+    skin = 1.0
+    moved = ((pos - reference) ** 2).sum(-1)
+    stride = ((pos - last) ** 2).sum(-1).sqrt()
+    want = [float(moved.max() > (0.5 * skin) ** 2), float((moved.sqrt() + 3 * stride).max() > 0.5 * skin),
+            float(converged), 5.0, 0.0]
+    kept = last.clone()
+    out = km.plan_checks(pos, reference, kept, converged, needed, skin, 2)
+    assert out.tolist() == want and torch.equal(kept, pos)
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+def test_the_pair_vectors_backward_on_rows_matches_the_atomic_adds(device):
+    """The gradient of the pair vectors summed over each atom's compressed row equals the atomic adds,
+    with a padded list (a count below its length) and a pair of an atom with its own image."""
+    from xnn.ffnn.models import amoeba_kernels as km
+    gen = torch.Generator(device=device).manual_seed(5)
+    N, M = 50, 700
+    i = torch.sort(torch.randint(0, N, (M,), device=device, generator=gen)).values
+    k = torch.randint(0, N, (M,), device=device, generator=gen)
+    k[3] = i[3]
+    pos = torch.randn(N, 3, dtype=torch.float64, device=device, generator=gen).requires_grad_(True)
+    count = torch.tensor([650], dtype=torch.int32, device=device)
+    g = torch.randn(M, 3, device=device, generator=gen)
+    rows = km.pair_rows(i, k, N, count, sorted_i=True)
+    grads = []
+    for r in (None, rows):
+        vec = km.PairDifference.apply(pos, i, k, count, None, None, torch.float32, r)
+        grads.append(torch.autograd.grad(vec, pos, g)[0])
+    assert torch.allclose(grads[0], grads[1], rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_the_kernels_on_a_plan_visit_the_pairs_within_the_cutoff(device, cls, periodic):
+    """On a padded plan with a skin the pair kernels visit the pairs within the cutoff only, in order, and the
+    energy, forces and dipoles stay those of the plain evaluation."""
+    if device == "cpu" and cls is Hippo and not periodic:
+        pytest.skip("the HIPPO cluster kernels take a quarter minute to build as C++ loops")
+    from xnn.ffnn.models import amoeba_kernels as km
+    sel, n = km.select_pairs(torch.tensor([False, True, True, False, True, False], device=device))
+    assert int(n) == 3 and sel[:3].tolist() == [1, 2, 4] and sel.shape[0] == 7
+    gen = torch.Generator(device=device).manual_seed(3)
+    r = 4.0 * torch.randn(1000, 3, device=device, generator=gen)
+    valid = (torch.rand(1000, device=device, generator=gen) > 0.1).double()
+    R, sel2, n2 = km.select_pairs_within(r, torch.full((1,), 36.0, device=device), valid)
+    want, wn = km.select_pairs(((r * r).sum(1) < 36.0) & (valid > 0))
+    assert int(n2) == int(wn) and torch.equal(sel2[:-1], want[:-1]) and n2.dtype == torch.int32
+    assert torch.allclose(R, torch.sqrt((r * r).sum(1) + 1e-12))
+    model = _box(cls, use_fast=True).to(device).eval()
+    cell = CELL if periodic else None
+    g = _graph(BOX, cell=cell, cutoff=7.3).to(device)
+    plan = model.plan_step(g, skin=1.0, capacity=64 * (int(g.edge_index.shape[1]) // 64 + 4))
+    moved = BOX + np.random.default_rng(4).normal(scale=0.02, size=BOX.shape)
+    results = []
+    for p in (None, plan):
+        g = _graph(moved if p is None else BOX, cell=cell).to(device)
+        g.pos = torch.tensor(moved, dtype=g.pos.dtype, device=device).requires_grad_(True)
+        out = model(g, p)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+    for a, b in zip(*results):
+        assert torch.allclose(a, b, rtol=1e-10, atol=1e-8)
+
+
 @pytest.mark.parametrize("cls", [Amoeba, Hippo])
 def test_a_solve_of_fixed_length_matches_the_tested_solve(cls):
     """Solves of fixed length on a plan give the tested solve's results and report their convergence."""
@@ -640,19 +861,102 @@ def test_a_solve_of_fixed_length_matches_the_tested_solve(cls):
         out = model(g, plan)
         forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
         results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+        if fixed is None:
+            counts = [model.solver_stats[phase] for phase in ("forward", "adjoint")]
     assert bool(plan.converged)
+    # the fixed solves report the tested solves' counts (zero for the adjoint shortcut)
+    assert plan.needed.tolist() == counts
     for a, b in zip(*results):
         assert torch.equal(a, b)
     plan.solve_iterations = {"forward": 1, "adjoint": 1}
     with torch.no_grad():
         model(g, plan)
     assert not bool(plan.converged)
+    assert float(plan.needed[0]) == 2.0
 
 
-def _walk(cls, device, steps, **kw):
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the induction kernels run on a GPU")
+def test_a_long_solve_of_fixed_length_on_the_kernels_matches_the_tested_solve():
+    """On the kernels, the iterations of a fixed-length solve after convergence change nothing."""
+    model = _box(Hippo, use_fast=True, polar_eps=1e-6).to("cuda").eval()
+    g = _graph(BOX).to("cuda")
+    plan = model.plan_step(g)
+    results = []
+    for fixed in (None, {"forward": 60, "adjoint": 60}):
+        model._adjoints.clear()
+        plan.solve_iterations = fixed
+        g.pos = g.pos.detach().requires_grad_(True)
+        out = model(g, plan)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), forces, out["induced_dipoles"].detach()))
+        if fixed is None:
+            counts = [model.solver_stats[phase] for phase in ("forward", "adjoint")]
+    assert bool(plan.converged) and plan.needed.tolist() == counts and counts[0] < 30
+    for a, b in zip(*results):
+        assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("periodic", [True, False])
+def test_a_refresh_from_the_half_list_finds_the_plans_pairs(periodic):
+    """Refreshing a plan from the half neighbor list gives the pairs, shifts and scales of a new plan."""
+    model = _box(Hippo).eval()
+    cell = CELL if periodic else None
+    g = _graph(BOX, cell=cell, cutoff=6.8)
+    plan = model.plan_step(g, skin=0.5, capacity=int(g.edge_index.shape[1]))
+    moved = BOX + np.random.default_rng(2).normal(scale=0.05, size=BOX.shape)
+    want = model.plan_step(_graph(moved, cell=cell, cutoff=6.8), skin=0.5, capacity=plan.capacity)
+    g.pos = torch.tensor(moved, dtype=g.pos.dtype)
+    assert model.refresh_pairs(g, plan, 6.8)
+
+    def table(p):
+        i, k, shift = p.pairs
+        M = int(p.count)
+        rows = {}
+        for e in range(M):
+            key = (int(i[e]), int(k[e]), () if shift is None else tuple(int(round(float(x))) for x in shift[e]))
+            rows[key] = tuple(float(x) for x in p.scales[e])
+        return rows
+
+    assert int(plan.count) == int(want.count)
+    assert table(plan) == table(want)
+    assert torch.equal(plan.reference, want.reference)
+
+
+def test_the_rows_of_sorted_pairs_match_the_general_rows():
+    """Rows of pairs sorted by their first atom, from a sort of the second atoms only, are the rows of the
+    stable sort of both directions, with the padding apart (a count on the host or on the device)."""
+    from xnn.ffnn.models import amoeba_kernels as km
+    g = torch.Generator().manual_seed(11)
+    N, M = 40, 300
+    i = torch.sort(torch.randint(0, N - 1, (M,), generator=g)).values
+    k = i + 1 + torch.randint(0, 5, (M,), generator=g).clamp_max(N - 1 - i)
+    for valid in (None, 250, torch.tensor([250])):
+        want = km.pair_rows(i, k, N, valid if not torch.is_tensor(valid) else int(valid))
+        got = km.pair_rows(i, k, N, valid, sorted_i=True)
+        for a, b in zip(got, want):
+            assert torch.equal(a, b)
+
+
+def test_the_rows_of_a_padded_pair_list_keep_the_padding_apart():
+    """The padding of a plan's pairs goes to the extra row, so no atom's row walks it."""
+    from xnn.ffnn.models import amoeba_kernels as km
+    i = torch.tensor([0, 0, 1, 2, 0, 0, 0])
+    k = torch.tensor([1, 2, 3, 3, 1, 1, 1])
+    ptr, pair, other = km.pair_rows(i, k, 4, valid=4)
+    assert ptr.tolist() == [0, 2, 4, 6, 8, 14]
+    for a in range(4):
+        entries = pair[ptr[a]:ptr[a + 1]].tolist()
+        assert all(e < 4 for e in entries)
+        assert sorted(other[ptr[a]:ptr[a + 1]].tolist()) == sorted(
+            [int(k[e]) if int(i[e]) == a else int(i[e]) for e in entries])
+    assert sorted(pair[ptr[4]:].tolist()) == [4, 4, 5, 5, 6, 6]
+
+
+def _walk(cls, device, steps, cutoff=6.3, **kw):
     """Plain steps and steps on a plan along a random walk of the box."""
-    ref, model = (ForceStressOutput(_box(cls, **kw).to(device), compute_stress=True).eval() for _ in range(2))
-    stepper = StepGraph(model, 6.3, skin=0.3, warmup=3)
+    ref, model = (ForceStressOutput(_box(cls, cutoff=cutoff, **kw).to(device), compute_stress=True).eval()
+                  for _ in range(2))
+    stepper = StepGraph(model, cutoff, skin=0.3, warmup=3)
     rng = np.random.default_rng(5)
     pos = BOX.copy()
     for _ in range(steps):
@@ -660,7 +964,7 @@ def _walk(cls, device, steps, **kw):
         s = {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(Z, device=device),
              "cell": torch.tensor(CELL, device=device), "pbc": torch.ones(3, dtype=torch.bool, device=device)}
         got = stepper(s)
-        want = ref(structure_to_graph(s, 6.3, device=device))
+        want = ref(structure_to_graph(s, cutoff, device=device))
         for key in ("energy", "forces", "stress"):
             assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
     assert stepper.rebuilds >= 1 and stepper.full_rebuilds == 0 and stepper.plan.solve_iterations
@@ -676,6 +980,54 @@ def test_steps_on_a_plan_follow_the_plain_steps(cls):
 def test_steps_on_a_plan_follow_the_plain_steps_with_exchange_polarization():
     """Steps on a plan follow the plain steps with exchange polarization."""
     _walk(Hippo, "cpu", 4, library=_exchpol_library())
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_steps_on_a_plan_follow_the_plain_steps_on_the_cpu_kernels(cls):
+    """On the CPU kernels, steps on a plan follow the plain steps of the reference."""
+    _walk(cls, "cpu", 6, use_fast=True)
+
+
+def test_steps_on_a_plan_shorten_their_solves():
+    """The fixed lengths follow what the solves needed: a length set too long is lowered, the steps unchanged."""
+    ref, model = (ForceStressOutput(_box(Hippo, predictor="aspc", polar_eps=1e-5), compute_stress=True).eval()
+                  for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, shorten=3)
+    velocity = np.random.default_rng(5).normal(scale=0.004, size=BOX.shape)
+    lengths = []
+    for step in range(8):
+        pos = BOX + step * velocity
+        s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(Z), "cell": torch.tensor(CELL),
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-8), key
+        if stepper.plan.solve_iterations is not None:
+            lengths.append(dict(stepper.plan.solve_iterations))
+            if len(lengths) == 1:
+                stepper.plan.solve_iterations = {"forward": 40, "adjoint": 40}
+    # the adjoint shortcut needs no iterations; the lowered forward length holds what the solves needed
+    assert lengths[0]["adjoint"] == 1
+    assert lengths[-1]["forward"] < 40 and lengths[-1]["adjoint"] == 1
+    assert 1 <= float(stepper.plan.needed[0]) <= lengths[-1]["forward"]
+    assert stepper.needed == []
+
+
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_an_atom_wrapped_into_another_image_changes_nothing(cls):
+    """Moving an atom by a lattice vector, apart from the rest of its molecule, keeps the energy and the forces
+    (the reduced van der Waals sites of its hydrogens included)."""
+    model = ForceStressOutput(_box(cls), compute_forces=True).eval()
+    outs = []
+    for wrap in (0.0, L):
+        pos = BOX.copy()
+        pos[0, 0] += wrap
+        s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(Z), "cell": torch.tensor(CELL),
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        outs.append(model(structure_to_graph(s, 6.3)))
+    for key in ("energy", "forces"):
+        assert torch.allclose(outs[0][key], outs[1][key], rtol=1e-9, atol=1e-9), key
 
 
 def test_steps_on_a_plan_follow_an_atom_wrapped_into_the_cell():
@@ -699,6 +1051,18 @@ def test_steps_replayed_as_a_cuda_graph_follow_the_plain_steps(cls):
     """Steps replayed as a CUDA graph follow the plain steps on the GPU."""
     stepper = _walk(cls, "cuda", 10, use_fast=True)
     assert stepper.recordings >= 1 and stepper.replays >= 1
+    # a rebuild flagged by a replayed step is staged behind the next replay
+    assert stepper.overlapped >= 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_steps_replayed_with_the_grid_search_follow_the_plain_steps():
+    """With room for three cells of the list's cutoff per axis, the replayed steps find their pairs by the grid
+    search, all of it behind the replay, and still follow the plain steps."""
+    short = {key: 3.2 for key in ("ewald_cutoff", "vdw_cutoff", "repulsion_cutoff", "chgtrn_cutoff",
+                                  "dispersion_cutoff")}
+    stepper = _walk(Hippo, "cuda", 10, cutoff=3.5, use_fast=True, taper=2.9, **short)
+    assert stepper.gridded and stepper.overlapped >= 1 and stepper.replays >= 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
@@ -734,3 +1098,109 @@ def test_the_engine_replays_steps_by_default_only_on_a_gpu():
         MDIEngine(model, 6.3, step_graph="yes")
     if torch.cuda.is_available():
         assert MDIEngine(model, 6.3, device="cuda").steps is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
+def test_mixed_precision_evaluates_the_ladders_in_the_working_precision():
+    """``mixed_precision=True`` stays close to the float32 reference and changes nothing in float64."""
+    g = _graph(BOX).to("cuda")
+    ref = ForceStressOutput(_box(Hippo), compute_stress=True).to("cuda").eval()
+    want = ref(g)
+    out = {}
+    for dtype in (torch.float64, torch.float32):
+        g.compute_dtype = dtype
+        for mixed in (False, True):
+            model = ForceStressOutput(_box(Hippo, use_fast=True, mixed_precision=mixed), compute_stress=True)
+            model = model.to(device="cuda", dtype=dtype).eval()
+            out[dtype, mixed] = {k: v.double() for k, v in model(g).items() if k in ("energy", "forces", "stress")}
+    # the energy is the small sum of large terms: its tolerance scales with the terms
+    terms = sum(float(want[k].abs()) for k in ("e_multipole", "e_repulsion", "e_dispersion", "e_chgtrn", "e_polar"))
+    for key, tol in (("energy", 1e-5), ("forces", 1e-4), ("stress", 1e-4)):
+        scale = terms if key == "energy" else float(want[key].abs().max())
+        assert torch.allclose(out[torch.float64, True][key], out[torch.float64, False][key], rtol=0, atol=1e-10 * scale)
+        assert torch.allclose(out[torch.float32, True][key], want[key], rtol=0, atol=tol * scale), key
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+@pytest.mark.parametrize("variant", ["no-polarization", "exchange-polarization"])
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+def test_cpu_kernels_without_polarization_and_with_exchange_polarization(cls, variant):
+    """On the CPU kernels a model without induction (no polarization energy) and one with exchange
+    polarization give the reference's energies and forces on a cluster of eight waters."""
+    lib = copy.deepcopy(builtin_amoeba("amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"))
+    kw = {"polarization": "none"} if variant == "no-polarization" else {}
+    if variant == "exchange-polarization":
+        lib.exchpol = copy.deepcopy(EXCHPOL)
+    pos = BOX[:24] - BOX[:24].mean(0)
+    results = []
+    for use_fast in (False, True):
+        model = cls(lib, _topology(8), cutoff=30.0, use_fast=use_fast, polar_eps=1e-12, **kw).eval()
+        g = _graph(pos, cell=None, cutoff=30.0)
+        g.pos.requires_grad_(True)
+        out = model(g)
+        forces = -torch.autograd.grad(out["energy"].sum(), g.pos)[0]
+        results.append((out["energy"].detach(), out["e_polar"].detach(), forces))
+    assert (float(results[0][1].abs().max()) == 0.0) == (variant == "no-polarization")
+    for a, b in zip(*results):
+        assert torch.allclose(a, b, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.skipif(not cpu_kernels.available(), reason="the CPU kernels need a C++ compiler")
+def test_cpu_kernels_refuse_term_cutoffs_beyond_the_list_and_warn_on_unconverged_solves():
+    """On the kernels a term cutoff beyond the neighbor cutoff is refused, and a solve stopped by its
+    iteration limit warns."""
+    g = _graph(BOX[:24], cell=None)
+    for model in (Amoeba("amoeba-water-2003", _topology(8), cutoff=6.3, vdw_cutoff=7.0, use_fast=True),
+                  Hippo("hippo-water-2021", _topology(8), cutoff=6.3, repulsion_cutoff=7.0, use_fast=True)):
+        with pytest.raises(ValueError, match="exceeds the neighbor cutoff"):
+            model.eval()(g)
+    model = Hippo("hippo-water-2021", _topology(8), cutoff=6.3, use_fast=True, max_iter=2, polar_eps=1e-12,
+                  solver="iterative").eval()
+    with pytest.warns(UserWarning, match="did not converge"):
+        model(g)
+
+
+def test_a_plan_tests_its_list_without_the_kernel():
+    """A plan's tests on the CPU (the kernel serves CUDA graphs only), with contiguous and non-contiguous
+    positions: outdated, due within the coming steps, the solves' convergence and needed iterations, as their
+    definitions give them, and the positions kept; a refresh whose pairs exceed the plan's capacity is
+    refused; the predictors rewind."""
+    model = _box(Amoeba, predictor="aspc").eval()
+    g = _graph(BOX, cutoff=7.3)
+    plan = model.plan_step(g, skin=1.0, capacity=int(g.edge_index.shape[1]))
+    plan.converged, plan.needed = torch.tensor(True), torch.tensor([5.0, 0.0], dtype=torch.float64)
+    rng = np.random.default_rng(6)
+    for far, contiguous in itertools.product((0.0, 0.4, 0.6), (False, True)):
+        pos = plan.reference + torch.tensor(rng.normal(scale=0.01, size=BOX.shape))
+        pos[7, 1] += far
+        last = torch.empty(len(BOX), 3, dtype=torch.float64) if contiguous else torch.empty(
+            3, len(BOX), dtype=torch.float64).T
+        last.copy_(pos - torch.tensor(rng.normal(scale=0.02, size=BOX.shape)))
+        moved = ((pos - plan.reference) ** 2).sum(-1)
+        stride = ((pos - last) ** 2).sum(-1).sqrt()
+        want = [float(moved.max() > 0.25), float((moved.sqrt() + 3 * stride).max() > 0.5), 1.0, 5.0, 0.0]
+        assert plan.checks(pos, last, steps=2).tolist() == want and torch.equal(last, pos)
+    g.pos = g.pos + 0.01
+    assert not model.refresh_pairs(g, plan, 11.0)
+    model(_graph(BOX))
+    assert len(model.predictor._sets) == 1
+    model.rewind_predictors()
+    assert len(model.predictor._sets) == 0
+
+
+def test_where_the_pair_kernels_run(monkeypatch):
+    """The pair kernels take float32 or float64 on a CUDA device or the CPU, there with a C++ compiler, and
+    need Triton; the GPU kernels are available with a GPU."""
+    import sys
+
+    from xnn.ffnn.models import amoeba
+    from xnn.ffnn.models import amoeba_kernels as km
+    cpu, cuda = torch.device("cpu"), torch.device("cuda")
+    assert km.available() == torch.cuda.is_available()
+    assert not amoeba._kernels_supported(cpu, torch.float16) and not amoeba._kernels_supported(
+        torch.device("meta"), torch.float64)
+    assert amoeba._kernels_supported(cuda, torch.float32)
+    monkeypatch.setattr(amoeba.cpu_kernels, "available", lambda: False)
+    assert not amoeba._kernels_supported(cpu, torch.float64)
+    monkeypatch.setitem(sys.modules, "triton", None)
+    assert not amoeba._kernels_supported(cuda, torch.float64)

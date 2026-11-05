@@ -469,8 +469,8 @@ class EwaldSummation(nn.Module, FastPathModule):
         # finite and differentiable without any masking
         screen = torch.special.erf(dist / (self.sigma * math.sqrt(2.0)))
         pair_kernel = screen / (dist + 1e-6)
-        coupling = q[:, None, :] * q[None, :, :]        # (n, n, n_channels)
-        energy = (coupling * pair_kernel[:, :, None]).sum() / (4.0 * math.pi)
+        # sum_ij K_ij q_i . q_j as one product: no (n, n, n_channels) coupling tensor
+        energy = (q * (pair_kernel @ q)).sum() / (4.0 * math.pi)
         if not self.remove_self_interaction:
             energy = energy + self._self_energy(q)
         return energy

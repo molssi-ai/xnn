@@ -22,10 +22,36 @@ from .conv import ConvTensorProduct
 #: thresholds sit between the two. In float64 the reference is slower and the
 #: kernels win earlier; on an L40S (weak float64) always.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"A100": 50_000, "H200": 60_000, "H100": 60_000, "L40S": 30_000},
-    min_edges_float64={"A100": 25_000, "H200": 30_000, "H100": 30_000, "L40S": 0},
+    min_edges={"A100": 50_000, "H200": 60_000, "H100": 60_000, "L40S": 30_000,
+               "T4": 6_000, "V100": 30_000, "A30": 20_000},
+    min_edges_float64={"A100": 25_000, "H200": 30_000, "H100": 30_000, "L40S": 0,
+                       "T4": 2_000, "V100": 12_000, "A30": 8_000},
     default_min_edges=50_000,
     default_min_edges_float64=25_000,
 )
 
-__all__ = ["AUTO_POLICY", "ConvTensorProduct", "available"]
+#: The same for MACE in training mode (a step with a force loss): the kernels
+#: pay off earlier than in evaluation, as the backward of a training step
+#: repeats the work the fixed cost is spread over (float32 A100: slower at 20k
+#: edges for the lightest model, faster for the medium one; float64 faster
+#: from about 10k).
+AUTO_POLICY_TRAINING = AutoPolicy(
+    min_edges={"A100": 30_000, "T4": 5_000, "V100": 20_000, "A30": 8_000},
+    min_edges_float64={"A100": 15_000, "T4": 1_000, "V100": 6_000, "A30": 6_000},
+    default_min_edges=50_000,
+    default_min_edges_float64=25_000,
+)
+
+#: NequIP's convolution in evaluation and training: on an A100, A30, V100 and T4 the
+#: kernels were faster than the reference from a single small molecule on, in
+#: both precisions and both modes.
+NEQUIP_AUTO_POLICY = AutoPolicy(
+    min_edges={"A100": 0, "A30": 0, "V100": 0, "T4": 0},
+    min_edges_float64={"A100": 0, "A30": 0, "V100": 0, "T4": 0},
+    default_min_edges=50_000,
+    default_min_edges_float64=25_000,
+)
+NEQUIP_AUTO_POLICY_TRAINING = NEQUIP_AUTO_POLICY
+
+__all__ = ["AUTO_POLICY", "AUTO_POLICY_TRAINING", "NEQUIP_AUTO_POLICY", "NEQUIP_AUTO_POLICY_TRAINING",
+           "ConvTensorProduct", "available"]

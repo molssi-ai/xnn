@@ -28,7 +28,7 @@ Inspect the model registry
    # List all registered and cached models
    list_models()
 
-   # ['mace-off23-large', 'mace-off23-medium', 'mace-off23-small']
+   # ['aimnet2-b973c-2025-d3-0', ..., 'mace-off23-large', 'mace-off23-medium', 'mace-off23-small']
    list_models(tag="organic")
 
    # Source, license, citation, cutoff, elements, heads
@@ -76,7 +76,7 @@ Here are some additional options for customizing the load behavior:
    from_pretrained(name, device="cuda")           # Move it
    from_pretrained(name, compute_stress=True)     # Add the stress head
    from_pretrained(name, dispersion="d4")         # Add D3 / D4 to a plain model
-   from_pretrained(name, use_fast=True)           # Fused GPU kernels
+   from_pretrained(name, use_fast=True)           # Fast paths wherever available (default "auto")
 
 The :func:`~xnn.common.models.hub.load_pretrained` function behaves similar to
 ``from_pretrained()`` but returns a

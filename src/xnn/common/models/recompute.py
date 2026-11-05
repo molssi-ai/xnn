@@ -53,6 +53,9 @@ def _block_grads(fn, grad_fn, needs, g, live, create_graph):
         full = grad_fn(g, *live)
         return [full[i] for i, need in enumerate(needs) if need], wrt
     y = fn(*live)
+    if not y.requires_grad:
+        # the block does not depend on its inputs here (no triangle left, say): zero gradients
+        return [None] * len(wrt), wrt
     grads = torch.autograd.grad(y, wrt, g, create_graph=create_graph, allow_unused=True)
     return list(grads), wrt
 

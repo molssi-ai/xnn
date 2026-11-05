@@ -112,14 +112,14 @@ class _CFConv(nn.Module, FastPathModule):
         if output_activation:
             layers.append(ShiftedSoftplus())
         self.filter_net = nn.Sequential(*layers)
+        self.n_filters = n_filters
         self.fast_active = False
 
     def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
-        """Triton on ``device``, a power-of-two feature width and plain dense layers."""
+        """Triton on ``device`` and a power-of-two filter width."""
         from xnn.gnn.fast.schnet import supported
-        n = self.filter_net[2].out_features
-        plain = all(type(self.filter_net[k]) is nn.Linear for k in (0, 2))
-        return plain and 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
+        n = self.n_filters
+        return 16 <= n <= 512 and n & (n - 1) == 0 and supported(device, dtype)
 
     def forward(self, x: Tensor, edge_index: Tensor, rbf: Tensor,
                 envelope: Optional[Tensor]) -> Tensor:
@@ -143,7 +143,7 @@ class _CFConv(nn.Module, FastPathModule):
             Convolved per-atom features ``sum_j x_j o W(r_ij)``, shape
             ``(N, F)``.
         """
-        if self.fast_active and not self.training and not torch.jit.is_scripting():
+        if self.fast_active and not torch.jit.is_scripting():
             return self._forward_fast(x, edge_index, rbf, envelope)
         src, dst = edge_index[0], edge_index[1]
         W = self.filter_net(rbf)                                # (E, n_filters)
@@ -155,9 +155,9 @@ class _CFConv(nn.Module, FastPathModule):
     def _forward_fast(self, x: Tensor, edge_index: Tensor, rbf: Tensor,
                       envelope: Optional[Tensor]) -> Tensor:
         from xnn.gnn.fast.schnet_kernels import cfconv
-        first, second = self.filter_net[0], self.filter_net[2]
-        return cfconv(x, rbf, envelope, first.weight, first.bias, second.weight, second.bias,
-                      edge_index, activated=len(self.filter_net) == 4)
+        # the dense layers as modules, so that adapters wrapping them (LoRA) take part
+        z = self.filter_net[2](self.filter_net[1](self.filter_net[0](rbf)))
+        return cfconv(x, z, envelope, edge_index, activated=len(self.filter_net) == 4)
 
 
 class _Interaction(nn.Module):
@@ -392,12 +392,13 @@ class SchNet(ExactFloat64Constants, InteratomicPotential):
         use_fast : bool or str
             ``"auto"`` (the default): the fused GPU kernels of
             :mod:`xnn.gnn.fast.schnet` where they are available and faster for
-            the input (a CUDA device, Triton, a graph above the measured size
-            threshold); ``True``: wherever they are available; ``False``:
-            always the reference implementation. Evaluations in training mode
-            always use the reference, which is twice differentiable and
-            differentiates the weights. In float32 the kernels agree with the
-            reference to about 1e-6 relative, in float64 to about 1e-14.
+            the input (a CUDA device, Triton, a graph above the size crossover
+            measured for evaluation, ``AUTO_POLICY``, or for training,
+            ``AUTO_POLICY_TRAINING``); ``True``: wherever they are available;
+            ``False``: always the reference implementation. The kernels are
+            twice differentiable and reach the weights, so force training takes
+            them as well. In float32 the kernels agree with the reference to
+            about 1e-6 relative, in float64 to about 1e-14.
 
         Returns
         -------
@@ -412,17 +413,14 @@ class SchNet(ExactFloat64Constants, InteratomicPotential):
     def _select_fast(self, num_edges: int) -> None:
         """Switch the fused convolutions on or off for one evaluation."""
         from xnn.common.models.fast import fast_modules, select
-        from xnn.gnn.fast.schnet import AUTO_POLICY
+        from xnn.gnn.fast.schnet import AUTO_POLICY, AUTO_POLICY_TRAINING
         blocks = self.__dict__.get("_fast_blocks")
         if blocks is None:
             blocks = fast_modules(self)
             self.__dict__["_fast_blocks"] = blocks
-        if self.training:
-            for block in blocks:
-                block.fast_active = False
-            return
         like = self.embedding.weight
-        select(blocks, self.use_fast, AUTO_POLICY, like.device, like.dtype, num_edges)
+        policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
+        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.ignore
     def set_energy_scale_shift(self, scale: float, shift: float) -> None:

@@ -40,7 +40,8 @@ jobs:
         run: pip install "triton==3.3.1"
 
       - name: Install xnn and test dependencies
-        run: pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4" pytest-cov
+        # cpu-kernels: ninja, which builds the C++ CPU kernels of the HDNNP tests
+        run: pip install -e ".[ase,gnn,ffnn,vesin,cpu-kernels,dev]" "e3nn==0.4.4" pytest-cov
 
       - name: Fetch the MOPAC parameter files of the sqmnn methods
         # xnn does not ship the published PM3/PM6/PM6-ORG/PM7 values; they are
@@ -57,8 +58,21 @@ jobs:
         # junit.xml (legacy family, the schema Codecov Test Analytics reads)
         # feeds the per-test insights: flaky tests, slowest tests, failure rates
         run: >
-          pytest -q -rfEs --cov=xnn --cov-report=xml --cov-report=term-missing:skip-covered
+          pytest -q -rfEs --cov=xnn --cov-report=
           --junitxml=junit.xml -o junit_family=legacy
+
+      - name: Run the compiled CPU paths again without the compiler
+        if: ${{ !cancelled() }}
+        env:
+          XNN_OFFLINE: "1"
+          TORCHDYNAMO_DISABLE: "1"
+        # the functions torch.compile runs are read by the compiler, not run line
+        # by line, so coverage misses them; this pass runs them as plain Python
+        # (the run above checks the compiled code) and adds to the same report
+        run: >
+          pytest -q -rfEs --cov=xnn --cov-append --cov-report=xml
+          --cov-report=term-missing:skip-covered
+          tests/test_dispersion_fast.py tests/test_hdnnp.py tests/test_compiled_blocks.py
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}

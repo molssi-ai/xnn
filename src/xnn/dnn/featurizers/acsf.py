@@ -50,10 +50,8 @@ avg``; ``"center_scale"`` ``(G - avg) / (max - min)``; ``"range"`` ``s_min +
 (s_max - s_min) (G - min) / (max - min)``. A function with ``max == min`` is
 not divided.
 """
-from __future__ import annotations
-
 import math
-from typing import Iterable, Optional, Sequence, Union
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -61,7 +59,8 @@ from torch import Tensor
 from xnn.common.data import AtomicGraph
 from xnn.common.data.elements import atomic_number
 from xnn.common.featurizers import Featurizer
-from xnn.common.models.ops import build_triplets
+from xnn.common.models.fast import FastPathModule
+from xnn.common.models.ops import build_triplets, gather_rows
 
 #: cutoff function kinds and their RuNNer keywords
 CUTOFF_KINDS = ("cosine", "tanh", "tanh_approx", "polynomial", "hard")
@@ -116,8 +115,21 @@ def cutoff_function(r: Tensor, kind: str, r_cut: float, r_inner: float = 0.0,
         y = 1.0 - x
         val = (y * (27.0 + y * y) / (27.0 + 9.0 * y * y)) ** 3
     else:
-        raise ValueError(f"unknown cutoff kind {kind!r}; choose one of {CUTOFF_KINDS}")
+        raise ValueError("unknown cutoff kind " + kind + "; choose one of cosine, tanh, tanh_approx, "
+                         "polynomial, hard")
     return torch.where(inside, val, torch.zeros_like(r))
+
+
+def _acos_margin(dtype: torch.dtype) -> float:
+    """The distance from +-1 at which ``acos`` arguments are clamped: the machine epsilon of
+    ``dtype``, at least 1e-15."""
+    if dtype == torch.float64:
+        return 1e-15
+    if dtype == torch.float32:
+        return 1.1920928955078125e-07
+    if dtype == torch.bfloat16:
+        return 0.0078125
+    return 0.0009765625
 
 
 def _normalize_cutoff(spec) -> dict:
@@ -158,7 +170,7 @@ def _normalize_function(spec, n_cutoffs: int) -> list[dict]:
     return [row]
 
 
-class AtomCenteredSymmetryFunctions(Featurizer):
+class AtomCenteredSymmetryFunctions(FastPathModule, Featurizer):
     """Behler atom-centered symmetry functions, a separate list per element.
 
     Parameters
@@ -194,6 +206,9 @@ class AtomCenteredSymmetryFunctions(Featurizer):
         Scaling statistics ``(n_species, output_dim)``.
     """
 
+    # the specs as Python dicts (eager only; the typed copies serve TorchScript)
+    __jit_ignored_attributes__ = ["cutoffs", "functions"]
+
     def __init__(self, species: Sequence[Union[int, str]], cutoffs: Sequence[dict],
                  functions: Sequence[dict], mode: str = "none",
                  scale_range: Sequence[float] = (0.0, 1.0)):
@@ -204,6 +219,11 @@ class AtomCenteredSymmetryFunctions(Featurizer):
         self.cutoffs = [_normalize_cutoff(c) for c in cutoffs]
         if not self.cutoffs:
             raise ValueError("at least one cutoff function is needed")
+        # the cutoff specs as typed lists (TorchScript)
+        self._cut_kind: List[str] = [c["kind"] for c in self.cutoffs]
+        self._cut_r: List[float] = [c["r_cut"] for c in self.cutoffs]
+        self._cut_inner: List[float] = [c["r_inner"] for c in self.cutoffs]
+        self._cut_exponent: List[int] = [c["exponent"] for c in self.cutoffs]
         rows = [r for f in functions for r in _normalize_function(f, len(self.cutoffs))]
         for r in rows:
             if r["element"] not in self.species or any(z not in self.species for z in r["neighbors"]):
@@ -242,6 +262,66 @@ class AtomCenteredSymmetryFunctions(Featurizer):
         self.register_buffer("_rad_lookup", self._lookup(rad, sp_index, 1), persistent=False)
         self.register_buffer("_ang_lookup", self._lookup(ang, sp_index, 2), persistent=False)
         self._ang_cutoff = max((self.cutoffs[rows[i]["cutoff"]]["r_cut"] for i in ang), default=0.0)
+        # the parameter columns as separate tables (one gather per used column), 2^(1 - zeta)
+        # precomputed, and the function types present (the others are not evaluated)
+        for k, name in enumerate(names):
+            column = table[:, k]
+            if name in ("type", "cutoff", "column"):
+                column = column.long()
+            self.register_buffer(f"_p_{name}", column.clone(), persistent=False)
+        self.register_buffer("_p_pref", torch.pow(2.0, 1.0 - table[:, 6]), persistent=False)
+        types = {r["type"] for r in rows}
+        self._has_type1, self._has_type2 = 1 in types, 2 in types
+        self._has_type3, self._has_type8, self._has_type9 = 3 in types, 8 in types, 9 in types
+        self._single_cutoff = len(self.cutoffs) == 1
+        # the Triton kernels of xnn.dnn.fast.acsf_kernels: types 1, 2, 3 and 9, up to two cosine / tanh cutoffs
+        self._kernel_ok = (types <= {1, 2, 3, 9} and len(self.cutoffs) <= 2
+                           and all(c["kind"] in ("cosine", "tanh") for c in self.cutoffs))
+        self.fast_active = False
+        self._factor_tables(rows, n_sp)
+
+    def _factor_tables(self, rows: list, n_sp: int) -> None:
+        """Tables of the factorized angular functions (types 3 and 9).
+
+        Each is a product of an angular factor ``2^(1-zeta) (1 + lambda cos)^zeta`` and a radial factor
+        (``exp(-eta (r_ij^2 + r_ik^2 [+ r_jk^2]))`` times the cutoffs), so both are evaluated once per
+        distinct parameter set and every function reads its two factors by index. Per bucket
+        ``(centre, neighbour, neighbour)`` and lookup slot: the angular factor, the radial factor and the
+        output column.
+        """
+        lookup = self._ang_lookup.reshape(n_sp ** 3, self._ang_lookup.shape[-1])
+        fac = [i for i, r in enumerate(rows) if r["type"] in (3, 9)]
+        a_keys = sorted({(float(rows[i]["lambda"]), float(rows[i]["zeta"])) for i in fac})
+        r_keys = sorted({(int(rows[i]["type"]), float(rows[i]["eta"]), int(rows[i]["cutoff"])) for i in fac})
+        a_index = {k: j for j, k in enumerate(a_keys)}
+        r_index = {k: j for j, k in enumerate(r_keys)}
+        # an empty slot reads the angular factor's extra zero column and adds to column 0
+        ia = torch.full_like(lookup, len(a_keys))
+        ir = torch.zeros_like(lookup)
+        col = torch.zeros_like(lookup)
+        for b in range(lookup.shape[0]):
+            for k in range(lookup.shape[1]):
+                i = int(lookup[b, k])
+                if i >= 0 and rows[i]["type"] in (3, 9):
+                    r = rows[i]
+                    ia[b, k] = a_index[(float(r["lambda"]), float(r["zeta"]))]
+                    ir[b, k] = r_index[(int(r["type"]), float(r["eta"]), int(r["cutoff"]))]
+                    col[b, k] = r["column"]
+        self._n_factor_a, self._n_factor_r = len(a_keys), len(r_keys)
+        f64 = torch.float64
+        self.register_buffer("_a_lambda", torch.tensor([k[0] for k in a_keys], dtype=f64), persistent=False)
+        self.register_buffer("_a_zeta", torch.tensor([k[1] for k in a_keys], dtype=f64), persistent=False)
+        self.register_buffer("_a_pref", torch.pow(2.0, 1.0 - torch.tensor([k[1] for k in a_keys], dtype=f64)),
+                             persistent=False)
+        self.register_buffer("_r_type3", torch.tensor([k[0] == 3 for k in r_keys], dtype=torch.bool),
+                             persistent=False)
+        self.register_buffer("_r_eta", torch.tensor([k[1] for k in r_keys], dtype=f64), persistent=False)
+        self.register_buffer("_r_cutoff", torch.tensor([k[2] for k in r_keys], dtype=torch.long),
+                             persistent=False)
+        self.register_buffer("_ang_ia", ia, persistent=False)
+        self.register_buffer("_ang_ir", ir, persistent=False)
+        self.register_buffer("_ang_col", col, persistent=False)
+        self._n_sp = n_sp
 
         self.register_buffer("stat_min", torch.zeros(n_sp, self._dim))
         self.register_buffer("stat_max", torch.ones(n_sp, self._dim))
@@ -273,80 +353,276 @@ class AtomCenteredSymmetryFunctions(Featurizer):
 
     def _cutoff_values(self, r: Tensor) -> Tensor:
         """Every declared cutoff function at ``r``, stacked on a new last axis."""
-        return torch.stack([cutoff_function(r, c["kind"], c["r_cut"], c["r_inner"], c["exponent"])
-                            for c in self.cutoffs], dim=-1)
+        values: List[Tensor] = []
+        for i in range(len(self._cut_kind)):
+            values.append(cutoff_function(r, self._cut_kind[i], self._cut_r[i], self._cut_inner[i],
+                                          self._cut_exponent[i]))
+        return torch.stack(values, dim=-1)
 
+    @torch.jit.ignore
     def raw(self, data: AtomicGraph) -> Tensor:
         """The unscaled descriptor ``(N, output_dim)`` (zero beyond each element's features)."""
-        vec = data.edge_vectors()
+        return self.compute_raw(data.atomic_numbers, data.edge_index, data.edge_vectors(), data.num_nodes)
+
+    def compute_raw(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                    n: int) -> Tensor:
+        """:meth:`raw` on tensors: atomic numbers ``(N,)``, edges ``(2, E)``, edge vectors
+        ``(E, 3)`` and the atom count (TorchScript-compatible)."""
+        vec = edge_vec
         dtype = vec.dtype
-        n = data.num_nodes
         out = torch.zeros(n * max(self._dim, 1), dtype=dtype, device=vec.device)
         if self._dim == 0:
             return out.reshape(n, 0)
-        params = self._params.to(dtype)
-        sp = self._z2i[data.atomic_numbers]
-        src, dst = data.edge_index[0], data.edge_index[1]
+        sp = self._z2i[atomic_numbers]
+        src, dst = edge_index[0], edge_index[1]
         r = torch.linalg.norm(vec, dim=-1)
-
+        fast = False
+        if not torch.jit.is_scripting():
+            if self.fast_active and vec.is_cuda and self._kernel_ok:
+                return self._raw_kernels(vec, r, sp, edge_index, n)
+            # the compiled blocks and the CPU kernels are differentiable once: a training step keeps
+            # the reference
+            fast = self.fast_active and not (self.training and torch.is_grad_enabled())
+            if fast and not vec.is_cuda and self._cpu_kernels_ok():
+                return self._raw_cpu(vec, sp, edge_index, n)
         if self._rad_lookup.shape[-1] > 0:
-            rows = self._rad_lookup[sp[dst], sp[src]]                      # (E, K)
-            ok = rows >= 0
-            rows = rows.clamp(min=0)
-            p = params[rows]                                               # (E, K, 9)
-            fc = self._cutoff_values(r)                                    # (E, C)
-            f = torch.gather(fc, 1, p[..., 1].long())                      # (E, K)
-            gauss = torch.exp(-p[..., 3] * (r[:, None] - p[..., 4]) ** 2) * f
-            power = torch.pow(f, p[..., 8])
-            val = torch.where(p[..., 0] == 1.0, power, gauss)
-            val = torch.where(ok, val, torch.zeros_like(val))
-            index = dst[:, None] * self._dim + p[..., 2].long()
-            out = out.index_add(0, index[ok], val[ok])
-
+            if fast:
+                out = out + self._radial_fast(r, sp, src, dst, n)
+            else:
+                out = out + self._radial(r, sp, src, dst, n)
         if self._ang_lookup.shape[-1] > 0:
             near = r < self._ang_cutoff
             eidx = near.nonzero().squeeze(-1)
-            e1, e2, center = build_triplets(data.edge_index[:, eidx], n)
+            e1, e2, center = build_triplets(edge_index[:, eidx], n)
             if center.numel() > 0:
                 e1, e2 = eidx[e1], eidx[e2]
-                rows = self._ang_lookup[sp[center], sp[src[e1]], sp[src[e2]]]  # (T, K)
-                ok = rows >= 0
-                rows = rows.clamp(min=0)
-                p = params[rows]
-                v1, v2 = vec[e1], vec[e2]
-                r1, r2 = r[e1], r[e2]
-                r3 = torch.linalg.norm(v1 - v2, dim=-1)
-                cos = (v1 * v2).sum(-1) / (r1 * r2)
-                cut = p[..., 1].long()
-                f1 = torch.gather(self._cutoff_values(r1), 1, cut)
-                f2 = torch.gather(self._cutoff_values(r2), 1, cut)
-                f3 = torch.gather(self._cutoff_values(r3), 1, cut)
-                eta, lam, zeta = p[..., 3], p[..., 5], p[..., 6]
-                base = (1.0 + lam * cos[:, None]).clamp(min=0.0)
-                ang = torch.pow(2.0, 1.0 - zeta) * torch.pow(base, zeta)
-                rsq = (r1 * r1 + r2 * r2)[:, None]
-                g3 = ang * torch.exp(-eta * (rsq + (r3 * r3)[:, None])) * f1 * f2 * f3
-                g9 = ang * torch.exp(-eta * rsq) * f1 * f2
-                t = p[..., 0]
-                # Only type 8 needs acos: an unused endpoint derivative can
-                # still leak NaNs through where's zero gradient in float32.
-                angle = (t == 8.0) & ok
-                margin = max(1e-15, torch.finfo(dtype).eps)
-                theta = torch.rad2deg(torch.acos(
-                    cos[:, None].expand_as(t)[angle].clamp(-1.0 + margin, 1.0 - margin)))
-                ts, eta8 = p[..., 7][angle], eta[angle]
-                gt = (torch.exp(-eta8 * (theta - ts) ** 2)
-                      + torch.exp(-eta8 * (theta - (360.0 - ts)) ** 2)
-                      + torch.exp(-eta8 * (theta + ts) ** 2)
-                      + torch.exp(-eta8 * (theta - (360.0 + ts)) ** 2))
-                g8 = torch.zeros_like(g3).masked_scatter(angle, gt * f1[angle] * f2[angle] * f3[angle])
-                val = torch.where(t == 3.0, g3, torch.where(t == 9.0, g9, g8))
-                val = torch.where(ok, val, torch.zeros_like(val))
-                index = center[:, None] * self._dim + p[..., 2].long()
-                out = out.index_add(0, index[ok], val[ok])
+                if fast:
+                    out = out + self._angular_fast(vec, r, sp, src, e1, e2, center, n)
+                else:
+                    out = out + self._angular(vec, r, sp, src, e1, e2, center, n)
         return out.reshape(n, self._dim)
 
-    def scaling(self) -> tuple[Tensor, Tensor]:
+    def _radial(self, r: Tensor, sp: Tensor, src: Tensor, dst: Tensor, n: int) -> Tensor:
+        """The radial functions (types 1 and 2) of every edge summed onto the centers ``(n D,)``."""
+        dtype = r.dtype
+        rows = self._rad_lookup[sp[dst], sp[src]]                      # (E, K)
+        ok = rows >= 0
+        rows = rows.clamp(min=0)
+        fc = self._cutoff_values(r)                                    # (E, C)
+        f = fc if self._single_cutoff else torch.gather(fc, 1, self._p_cutoff[rows])
+        if self._has_type2:
+            val = (torch.exp(-self._p_eta.to(dtype)[rows] * (r.unsqueeze(-1) - self._p_rs.to(dtype)[rows]) ** 2)
+                   * f)
+            if self._has_type1:
+                val = torch.where(self._p_type[rows] == 1, torch.pow(f, self._p_power.to(dtype)[rows]), val)
+        else:
+            val = torch.pow(f, self._p_power.to(dtype)[rows])
+        # a padded lookup entry adds an exact zero to column 0 of its atom
+        val = torch.where(ok, val, torch.zeros_like(val))
+        index = dst.unsqueeze(-1) * self._dim + self._p_column[rows]
+        return torch.zeros(n * self._dim, dtype=dtype, device=r.device).index_add(0, index.reshape(-1),
+                                                                                 val.reshape(-1))
+
+    def _angular(self, vec: Tensor, r: Tensor, sp: Tensor, src: Tensor, e1: Tensor, e2: Tensor,
+                 center: Tensor, n: int) -> Tensor:
+        """The angular functions (types 3, 8 and 9) of the triplets ``(e1, e2)`` of edges sharing
+        ``center``, summed onto the centers ``(n D,)``."""
+        dtype = vec.dtype
+        out = torch.zeros(n * self._dim, dtype=dtype, device=vec.device)
+        v1, v2 = gather_rows(vec, e1), gather_rows(vec, e2)
+        r1, r2 = gather_rows(r, e1), gather_rows(r, e2)
+        r3 = torch.linalg.norm(v1 - v2, dim=-1)
+        cos = (v1 * v2).sum(-1) / (r1 * r2)
+        # the cutoff products of every declared cutoff
+        f12_all = self._cutoff_values(r1) * self._cutoff_values(r2)          # (T, C)
+        f123_all = f12_all * self._cutoff_values(r3)
+        rsq = r1 * r1 + r2 * r2
+        if self._n_factor_a > 0:
+            # types 3 and 9: each distinct factor once per triplet, then one gather per function
+            s_c, s_1, s_2 = sp[center].clamp(min=0), sp[src[e1]].clamp(min=0), sp[src[e2]].clamp(min=0)
+            bucket = (s_c * self._n_sp + s_1) * self._n_sp + s_2
+            base = (1.0 + self._a_lambda.to(dtype) * cos.unsqueeze(-1)).clamp(min=0.0)
+            a_fac = self._a_pref.to(dtype) * torch.pow(base, self._a_zeta.to(dtype))  # (T, nA)
+            a_fac = torch.cat([a_fac, torch.zeros_like(cos).unsqueeze(-1)], dim=-1)
+            third = (r3 * r3).unsqueeze(-1) * self._r_type3.to(dtype)
+            if self._single_cutoff:
+                # one cutoff: a broadcast, no column selection (whose backward, an indirect store, keeps
+                # the compiled block from vectorizing)
+                f_sel = torch.where(self._r_type3, f123_all, f12_all)
+            else:
+                cut = self._r_cutoff
+                f_sel = torch.where(self._r_type3, f123_all.index_select(1, cut), f12_all.index_select(1, cut))
+            r_fac = torch.exp(-self._r_eta.to(dtype) * (rsq.unsqueeze(-1) + third)) * f_sel  # (T, nR)
+            val = (torch.gather(a_fac, 1, self._ang_ia.index_select(0, bucket))
+                   * torch.gather(r_fac, 1, self._ang_ir.index_select(0, bucket)))
+            index = center.unsqueeze(-1) * self._dim + self._ang_col.index_select(0, bucket)
+            out = out.index_add(0, index.reshape(-1), val.reshape(-1))
+        if self._has_type8:
+            rows = self._ang_lookup[sp[center], sp[src[e1]], sp[src[e2]]]  # (T, K)
+            ok = rows >= 0
+            rows = rows.clamp(min=0)
+            angle = (self._p_type[rows] == 8) & ok
+            f123 = f123_all if self._single_cutoff else torch.gather(f123_all, 1, self._p_cutoff[rows])
+            eta = self._p_eta.to(dtype)[rows]
+            ts = self._p_theta_s.to(dtype)[rows]
+            # acos with its argument kept off the endpoints everywhere: its derivative stays
+            # finite, so the other functions' entries add exact zeros, also to the gradient
+            margin = _acos_margin(dtype)
+            theta = torch.rad2deg(torch.acos(cos.clamp(-1.0 + margin, 1.0 - margin))).unsqueeze(-1)
+            gt = (torch.exp(-eta * (theta - ts) ** 2)
+                  + torch.exp(-eta * (theta - (360.0 - ts)) ** 2)
+                  + torch.exp(-eta * (theta + ts) ** 2)
+                  + torch.exp(-eta * (theta - (360.0 + ts)) ** 2))
+            g8 = torch.where(angle, gt * f123, torch.zeros_like(gt))
+            index = center.unsqueeze(-1) * self._dim + self._p_column[rows]
+            out = out.index_add(0, index.reshape(-1), g8.reshape(-1))
+        return out
+
+    @torch.jit.unused
+    def _cpu_kernels_ok(self) -> bool:
+        """Whether the C++ kernels of :mod:`xnn.dnn.fast.acsf_cpu` build and cover the function set."""
+        from xnn.dnn.fast import acsf_cpu
+        return self._kernel_ok and acsf_cpu.available()
+
+    @torch.jit.unused
+    def _raw_cpu(self, vec: Tensor, sp: Tensor, edge_index: Tensor, n: int) -> Tensor:
+        """:meth:`compute_raw` on the C++ / OpenMP kernels of :mod:`xnn.dnn.fast.acsf_cpu` (evaluation)."""
+        from xnn.dnn.fast import acsf_cpu
+        from xnn.dnn.fast.acsf_tables import tables
+        key = (vec.dtype, "cpu")
+        cached = self.__dict__.get("_cpu_tables")
+        if cached is None or cached[0] != key:
+            rad, ang = tables(self.functions, self.species, self.cutoffs, self._dim, vec.dtype, "cpu")
+            self.__dict__["_cpu_tables"] = (key, acsf_cpu._Tables(
+                rad if self._rad_lookup.shape[-1] > 0 else None,
+                ang if self._ang_lookup.shape[-1] > 0 else None, len(self.species)))
+        return acsf_cpu.symmetry_functions(vec, edge_index, sp, n, self.__dict__["_cpu_tables"][1], self._dim,
+                                           self._ang_cutoff)
+
+    @torch.jit.unused
+    def _raw_kernels(self, vec: Tensor, r: Tensor, sp: Tensor, edge_index: Tensor, n: int) -> Tensor:
+        """:meth:`compute_raw` on the Triton kernels of :mod:`xnn.dnn.fast.acsf_kernels` (differentiable
+        twice: evaluation and training): the edges and triplets as in the reference, sorted into segments
+        of one center and neighbor species (species pair), the functions and their sums fused."""
+        from xnn.dnn.fast import acsf_kernels as k
+        key = (vec.dtype, vec.device)
+        cached = self.__dict__.get("_kernel_tables")
+        if cached is None or cached[0] != key:
+            self.__dict__["_kernel_tables"] = (key,) + k.tables(self.functions, self.species, self.cutoffs,
+                                                                self._dim, vec.dtype, vec.device)
+        _, rad, ang = self.__dict__["_kernel_tables"]
+        n_sp = len(self.species)
+        src, dst = edge_index[0], edge_index[1]
+        sp32 = sp.to(torch.int32)
+        out = vec.new_zeros(n, self._dim)
+        if self._rad_lookup.shape[-1] > 0:
+            s_nb = sp[src]
+            order, ptr = k.segments(dst, s_nb, n, n_sp)
+            row = (sp[dst] * n_sp + s_nb).index_select(0, order).to(torch.int32)
+            out = out + k.RadialFunction.apply(r.index_select(0, order), row, dst.index_select(0, order), ptr,
+                                               sp32, n, rad)
+        if self._ang_lookup.shape[-1] > 0:
+            eidx = (r < self._ang_cutoff).nonzero().squeeze(-1)
+            e1, e2, center = build_triplets(edge_index[:, eidx], n)
+            if center.numel() > 0:
+                e1, e2 = eidx[e1], eidx[e2]
+                pair = k.pair_index(sp[src[e1]], sp[src[e2]], n_sp)
+                order, ptr = k.segments(center, pair, n, ang.q)
+                e1, e2, center, pair = (t.index_select(0, order) for t in (e1, e2, center, pair))
+                v1, v2 = gather_rows(vec, e1), gather_rows(vec, e2)
+                r1, r2 = gather_rows(r, e1), gather_rows(r, e2)
+                r3 = torch.linalg.norm(v1 - v2, dim=-1)
+                cos = (v1 * v2).sum(-1) / (r1 * r2)
+                row = (sp[center] * ang.q + pair).to(torch.int32)
+                out = out + k.AngularFunction.apply(r1.contiguous(), r2.contiguous(), r3.contiguous(),
+                                                    cos.contiguous(), row, center, ptr, sp32, n, ang)
+        return out
+
+    @torch.jit.unused
+    def _compiled(self, name: str, scalar: bool):
+        """:meth:`_radial` or :meth:`_angular` compiled for CPUs (``torch.compile``, dynamic sizes)."""
+        cache = self.__dict__.setdefault("_compiled_blocks", {})
+        key = (name, scalar)
+        if key not in cache:
+            cache[key] = torch.compile(getattr(self, "_" + name), dynamic=True)
+        return cache[key]
+
+    @torch.jit.unused
+    def _run_compiled(self, name: str, *args):
+        """The block compiled with vectorized loops, else with scalar loops (a construct inductor
+        cannot vectorize), else the reference block (the choice is made once per block). With several
+        cutoffs the angular block starts with scalar loops: the backward of its cutoff-column selection
+        is an indirect store, which inductor does not vectorize; with one cutoff there is no selection."""
+        import contextlib
+
+        from torch._inductor import config as inductor_config
+        modes = self.__dict__.setdefault("_compiled_modes", {})
+        known = modes.get(name)
+        inputs = [a for a in args if isinstance(a, Tensor) and a.requires_grad]
+        order = (["scalar", "vector", "eager"] if name == "angular" and not self._single_cutoff
+                 else ["vector", "scalar", "eager"])
+        for mode in [known] if known is not None else order:
+            if mode == "eager":
+                modes[name] = mode
+                return getattr(self, "_" + name)(*args)
+            setting = (inductor_config.patch({"cpp.simdlen": 1}) if mode == "scalar"
+                       else contextlib.nullcontext())
+            try:
+                with setting:
+                    block = self._compiled(name, mode == "scalar")
+                    if known is None and inputs:
+                        # the backward compiles at its first use: probed here on copies, so that
+                        # its failure also moves on to the next mode
+                        probe = [a.detach().requires_grad_(True) if isinstance(a, Tensor) and a.requires_grad
+                                 else a for a in args]
+                        leaves = [a for a in probe if isinstance(a, Tensor) and a.requires_grad]
+                        torch.autograd.grad(block(*probe).sum(), leaves, allow_unused=True)
+                    out = block(*args)
+            except Exception:  # noqa: BLE001  (a compiler failure: the next mode)
+                if known is not None:
+                    raise
+                continue
+            if inputs or known is not None:
+                modes[name] = mode
+            return out
+        raise RuntimeError("unreachable")
+
+    @torch.jit.unused
+    def _radial_fast(self, r: Tensor, sp: Tensor, src: Tensor, dst: Tensor, n: int) -> Tensor:
+        """:meth:`_radial`, compiled."""
+        return self._run_compiled("radial", r, sp, src, dst, n)
+
+    @torch.jit.unused
+    def _angular_fast(self, vec: Tensor, r: Tensor, sp: Tensor, src: Tensor, e1: Tensor, e2: Tensor,
+                      center: Tensor, n: int) -> Tensor:
+        """:meth:`_angular`, compiled."""
+        return self._run_compiled("angular", vec, r, sp, src, e1, e2, center, n)
+
+    @torch.jit.unused
+    def fast_policies(self):
+        """The ``"auto"`` policies (evaluation, training) of :mod:`xnn.dnn.fast.acsf`; on a CPU, the
+        C++ kernels' where they build and cover the function set."""
+        from xnn.dnn.fast.acsf import AUTO_POLICY, AUTO_POLICY_CPU, AUTO_POLICY_TRAINING
+        if self._params.device.type == "cpu" and self._cpu_kernels_ok():
+            return AUTO_POLICY_CPU, AUTO_POLICY_TRAINING
+        return AUTO_POLICY, AUTO_POLICY_TRAINING
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """CPUs where the C++ kernels build or ``torch.compile`` produces code, and CUDA devices with
+        Triton (:mod:`xnn.dnn.fast.acsf`)."""
+        if dtype not in (torch.float32, torch.float64):
+            return False
+        if device.type == "cuda":
+            from xnn.common.models.dispersion_fast._triton import supported
+            return supported(device, dtype)
+        if device.type != "cpu":
+            return False
+        if self._cpu_kernels_ok():
+            return True
+        from xnn.dnn.fast.acsf import available
+        return available()
+
+    def scaling(self) -> Tuple[Tensor, Tensor]:
         """The ``(shift, factor)`` of ``G' = (G - shift) * factor``, each ``(n_species, output_dim)``."""
         span = self.stat_max - self.stat_min
         flat = span == 0
@@ -364,6 +640,7 @@ class AtomCenteredSymmetryFunctions(Featurizer):
         factor = (smax - smin) * inv
         return self.stat_min - smin / factor, factor
 
+    @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> Tensor:
         """The scaled descriptor ``(N, output_dim)``; columns beyond an element's features are zero.
 
@@ -377,10 +654,18 @@ class AtomCenteredSymmetryFunctions(Featurizer):
         Tensor
             Per-atom descriptors.
         """
-        g = self.raw(data)
+        return self.compute(data.atomic_numbers, data.edge_index, data.edge_vectors(), data.num_nodes)
+
+    def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
+                num_nodes: int) -> Tensor:
+        """:meth:`forward` on tensors (TorchScript-compatible)."""
+        return self.scale(self.compute_raw(atomic_numbers, edge_index, edge_vec, num_nodes), atomic_numbers)
+
+    def scale(self, g: Tensor, atomic_numbers: Tensor) -> Tensor:
+        """The scaled descriptor from the unscaled one ``g`` ``(N, output_dim)``."""
         if self.mode == "none":
             return g
-        sp = self._z2i[data.atomic_numbers].clamp(min=0)
+        sp = self._z2i[atomic_numbers].clamp(min=0)
         shift, factor = self.scaling()
         scaled = (g - shift.to(g.dtype)[sp]) * factor.to(g.dtype)[sp]
         return torch.where(self._valid[sp], scaled, torch.zeros_like(scaled))

@@ -6,7 +6,7 @@ Configuration
 
 All configuration details funnels into one dataclass tree
 (:mod:`xnn.common.config.schema`). A :class:`~xnn.common.config.schema.Config`
-class object with ``model``, ``data`` and ``optim`` sections exposes the
+class object with ``model``, ``data``, ``optim`` and ``trainer`` sections exposes the
 complete schema with its defaults, in Python. The same schema is also available
 in YAML format, and can be overridden from YAML files, command line arguments,
 or Hydra / OmegaConf dictionaries. The following example shows a typical
@@ -45,7 +45,7 @@ training configuration in YAML format, with the default values for each section.
      replay_path: null          # Replay structures and their head
      replay_head: pt_head
      replay_samples: null       # Random subsample size
-     replay_filter: subset      # None / subset / exact / superset (elements vs the training set)
+     replay_filter: subset      # none / subset / exact / superset (elements vs the training set)
      replay_pseudolabel: false  # Re-label the replay set with the pretrained model
 
    optim:
@@ -85,6 +85,7 @@ training configuration in YAML format, with the default values for each section.
      early_stopping_min_delta: 0.0
      early_stopping_threshold: null
      progress_bar: false
+     cuda_graph: false          # Replay each training step as one CUDA graph (DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet)
 
    device: auto                 # auto / cpu / cuda / cuda:0
    seed: 1234

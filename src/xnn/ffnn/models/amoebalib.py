@@ -1069,9 +1069,12 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
             a, b = _split_key(k)
             out.append(f"bond {classes[a]:10d} {classes[b]:4d} {'':>9} {v['k']:14.8f} {v['r0']:14.8f}")
         out.append("")
+    # the plain and the in-plane angles in one section, as Tinker's files have them (a second section of the
+    # same title replaces the first in LAMMPS's converter)
+    if lib.angle_types or lib.angle_inplane_types:
+        out += [*_banner("Angle Bending Parameters")]
     for kw, table in (("angle", lib.angle_types), ("anglep", lib.angle_inplane_types)):
         if table:
-            out += [*_banner("Angle Bending Parameters")]
             for k, v in table.items():
                 a, b, c = _split_key(k)
                 thetas = " ".join(f"{t:14.8f}" for t in v["theta0"])

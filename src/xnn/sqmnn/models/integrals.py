@@ -14,11 +14,9 @@
 Lengths are in bohr inside this module and energies in eV; every function
 is differentiable with respect to positions and parameters.
 """
-from __future__ import annotations
-
 import math
 from functools import lru_cache
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -119,35 +117,60 @@ _SERIES_LIMIT = 6.0
 _SERIES_TERMS = 80
 
 
-def _b_integrals(t: Tensor, n: int, order: Optional[Tensor] = None) -> Tensor:
+def _b_integrals(t: Tensor, n: int, order: Optional[Tensor], c: Dict[str, Tensor]) -> Tensor:
     """``B_k(t) = int_-1^1 eta^k exp(-t eta) deta`` for ``k < n``; shape ``(..., n)``.
 
     Upward recursion for ``|t| >= 6`` and the power series below, where the
     recursion loses digits. ``order`` (optional, per element) truncates the
     series after the term ``t^order``, the approximation of the reference
-    program (:func:`series_order`).
+    program (:func:`series_order`). ``c``: :func:`constants`.
     """
-    full = _SERIES_TERMS - 1
-    if order is None:
-        order = torch.full(t.shape, full, dtype=torch.long, device=t.device)
-    small = (t.abs() < _SERIES_LIMIT) | (order < full)
-    ts = torch.where(small, torch.full_like(t, _SERIES_LIMIT), t)
+    shape = t.shape
+    t = t.reshape(-1)
+    full = 79                                                            # _SERIES_TERMS - 1
+    o_all = torch.full(t.shape, full, dtype=torch.long, device=t.device) if order is None else order.reshape(-1)
+    small = (t.abs() < 6.0) | (o_all < full)                             # _SERIES_LIMIT
+    ts = torch.where(small, torch.full_like(t, 6.0), t)
     ep, em = torch.exp(ts), torch.exp(-ts)
-    rec = [(ep - em) / ts]
+    rec_terms = [(ep - em) / ts]
     for k in range(1, n):
-        rec.append((k * rec[-1] + (-1) ** k * ep - em) / ts)
-    rec = torch.stack(rec, dim=-1)
-    tz = torch.where(small, t, torch.zeros_like(t))
-    k = torch.arange(_SERIES_TERMS, dtype=t.dtype, device=t.device)
-    # (-t)^k / k! as a running product (no 0^0 in the derivative)
-    step = (-tz).unsqueeze(-1) / k[1:].clamp(min=1.0)
-    terms = torch.cat([torch.ones_like(tz).unsqueeze(-1), torch.cumprod(step, dim=-1)], -1)
-    terms = torch.where(k.long() <= order.unsqueeze(-1), terms, torch.zeros_like(terms))
+        sign = 1.0 if k % 2 == 0 else -1.0
+        rec_terms.append((k * rec_terms[-1] + sign * ep - em) / ts)
+    rec = torch.stack(rec_terms, dim=-1)
+    out_shape = list(shape) + [n]
+    if t.is_cuda:
+        # on a GPU every element with all terms (no host synchronization, fixed shapes), selected below
+        idx = torch.zeros(0, dtype=torch.long, device=t.device)
+        tz, o = torch.where(small, t, torch.zeros_like(t)), o_all
+        k = torch.arange(80, dtype=t.dtype, device=t.device)
+        # (-t)^k / k!: 1, -t, then integer powers from k = 2 (first and second derivatives finite at t = 0;
+        # the backward of a running product reads back whether it has zeros, which a CUDA graph cannot)
+        mt = -tz.unsqueeze(-1)
+        terms = torch.cat([torch.ones_like(mt), mt, mt.pow(k[2:]) * c["inverse_factorial"]], -1)
+    else:
+        if not bool(small.any()):
+            return rec.reshape(out_shape)
+        # the series only where it is used, up to the highest term any of them keeps
+        idx = small.nonzero().squeeze(-1)
+        tz, o = t[idx], o_all[idx]
+        k = torch.arange(min(80, int(o.max()) + 1), dtype=t.dtype, device=t.device)
+        # (-t)^k / k! as a running product of nonzero factors (zeros would take PyTorch's slow path); the rows of
+        # t = 0 (homonuclear pairs) take their exact terms 1, -t, 0, ..., which keeps the derivative of the -t
+        # term
+        zero = (tz == 0).unsqueeze(-1)
+        run = torch.cumprod(-torch.where(zero, torch.ones_like(tz.unsqueeze(-1)), tz.unsqueeze(-1)) / k[1:],
+                            dim=-1)
+        exact = torch.cat([-tz.unsqueeze(-1), torch.zeros_like(run[..., 1:])], -1)
+        terms = torch.cat([torch.ones_like(tz).unsqueeze(-1), torch.where(zero, exact, run)], -1)
+    terms = torch.where(k.long() <= o.unsqueeze(-1), terms, torch.zeros_like(terms))
     j = torch.arange(n, device=t.device)
     jk = j.unsqueeze(-1) + k.long()                                      # (n, K)
-    weight = torch.where(jk % 2 == 0, 2.0 / (jk + 1).to(t.dtype), torch.zeros((), dtype=t.dtype))
-    series = terms.unsqueeze(-2).mul(weight).sum(-1)                     # (..., n)
-    return torch.where(small.unsqueeze(-1), series, rec)
+    weight = torch.where(jk % 2 == 0, 2.0 / (jk + 1).to(t.dtype), 0.0)
+    series = terms.unsqueeze(-2).mul(weight).sum(-1)                     # (M, n)
+    if t.is_cuda:
+        return torch.where(small.unsqueeze(-1), series, rec).reshape(out_shape)
+    where: List[Optional[Tensor]] = [idx]
+    return rec.index_put(where, series).reshape(out_shape)
 
 
 def series_order(t: Tensor, scheme: Tensor) -> Tensor:
@@ -163,7 +186,7 @@ def series_order(t: Tensor, scheme: Tensor) -> Tensor:
     methods' numbers; :data:`_SERIES_TERMS` - 1 means the exact value.
     """
     a = t.detach().abs()
-    full = _SERIES_TERMS - 1
+    full = 79                                                            # _SERIES_TERMS - 1
     general = scheme == 0
     o = torch.full(t.shape, full, dtype=torch.long, device=t.device)
     o = torch.where((a > 2.0) & (a <= 3.0) & general, 15, o)
@@ -207,10 +230,42 @@ def overlap_local(na: int, la: int, za: Tensor, nb: int, lb: int, zb: Tensor, r:
     t = half * (za - zb)
     a = _a_integrals(p, c.shape[0])
     order = None if scheme is None else series_order(t, scheme)
-    b = _b_integrals(t, c.shape[1], order)
+    b = _b_integrals(t, c.shape[1], order, constants(r.device, r.dtype))
     cc = torch.as_tensor(c, dtype=r.dtype, device=r.device)
-    s = torch.einsum("...i,ij,...j->...", a, cc, b)
+    s = (torch.matmul(a, cc) * b).sum(-1)
     return const * _sto_norm(na, za) * _sto_norm(nb, zb) * half ** (na + nb + 1) * s
+
+
+_SQRT_FACTORIAL_2N = [math.sqrt(math.factorial(2 * n)) for n in range(10)]
+
+
+def overlap_local_batched(polys: Tensor, const: Tensor, na: Tensor, nb: Tensor, za: Tensor, zb: Tensor, r: Tensor,
+                          scheme: Optional[Tensor], c: Dict[str, Tensor]) -> Tensor:
+    """:func:`overlap_local` of many orbital pairs at once, each with its own quantum numbers.
+
+    Parameters
+    ----------
+    polys : Tensor
+        Coefficients of :func:`_overlap_poly` of every element ``(M, D, D)``,
+        zero-padded to the largest degree ``D``.
+    const : Tensor
+        Their constants ``(M,)``.
+    na, nb : Tensor
+        Principal quantum numbers ``(M,)`` (integers).
+    za, zb, r, scheme : Tensor
+        As in :func:`overlap_local`, ``(M,)``.
+    c : dict
+        :func:`constants`.
+    """
+    D = polys.shape[-1]
+    half = 0.5 * r
+    a = _a_integrals(half * (za + zb), D)
+    t = half * (za - zb)
+    b = _b_integrals(t, D, None if scheme is None else series_order(t, scheme), c)
+    s = (torch.matmul(a.unsqueeze(-2), polys).squeeze(-2) * b).sum(-1)
+    fact = c["sqrt_factorial_2n"]
+    norm = ((2.0 * za) ** (na + 0.5) / fact[na]) * ((2.0 * zb) ** (nb + 0.5) / fact[nb])
+    return const * norm * half ** (na + nb + 1) * s
 
 
 def slater_condon(k: int, na: int, za: Tensor, nb: int, zb: Tensor, nc: int, zc: Tensor,
@@ -223,7 +278,10 @@ def slater_condon(k: int, na: int, za: Tensor, nb: int, zb: Tensor, nc: int, zc:
     p, q = na + nb, nc + nd
     alpha, beta = za + zb, zc + zd
     s = alpha + beta
-    f = math.factorial
+
+    def f(n: int) -> float:
+        # as a float: a Python integer operand of a tensor goes through int64, which 21! and above overflow
+        return float(math.factorial(n))
     inner = f(p - k - 1) / alpha ** (p - k)
     for i in range(q + k + 1):
         inner = inner - beta ** i / f(i) * f(p - k - 1 + i) / s ** (p - k + i)
@@ -279,19 +337,91 @@ def config_tensors(names, dtype, device) -> Tuple[Tensor, Tensor]:
             torch.as_tensor(u, dtype=dtype, device=device))
 
 
-def config_interaction(qa: Tensor, ua: Tensor, da: Tensor, qb: Tensor, ub: Tensor, db: Tensor,
-                       r: Tensor, rho: Tensor) -> Tensor:
+_DEVICE_CONSTANTS: Dict[tuple, Tensor] = {}
+
+
+def device_constant(key: tuple, make, device, dtype=None) -> Tensor:
+    """The array ``make()`` (NumPy or nested lists) as a tensor on ``device``, created once per ``key``: the
+    fixed tables of the integrals, so that an evaluation copies nothing from the host (and can be captured in a
+    CUDA graph)."""
+    k = (key, str(device), dtype)
+    t = _DEVICE_CONSTANTS.get(k)
+    if t is None:
+        t = torch.as_tensor(make(), dtype=dtype, device=device)
+        _DEVICE_CONSTANTS[k] = t
+    return t
+
+
+def take0(x: Tensor, index: Tensor) -> Tensor:
+    """``x[index]``: by ``index_select`` on a GPU (its backward adds atomically; that of indexing sorts the
+    indices, which takes long where many rows gather few, as the pairs gather the per-element quantities), by
+    indexing on a CPU."""
+    if x.is_cuda:
+        return x.index_select(0, index)
+    return x[index]
+
+
+def take1(x: Tensor, index: Tensor) -> Tensor:
+    """``x[:, index]``: by ``index_select`` on a GPU (its backward adds atomically, that of indexing sorts the
+    indices), by indexing on a CPU (there several times faster than ``index_select`` off the first dimension)."""
+    if x.is_cuda:
+        return x.index_select(1, index)
+    return x[:, index]
+
+
+def constants(device: torch.device, dtype: torch.dtype) -> Dict[str, Tensor]:
+    """The fixed tables the integral kernels read, on ``device``: inverse factorials of the series, square roots
+    of ``(2n)!``, the quadratic forms of the d harmonics and the local d order (created once per device and
+    type; an exported model keeps them as attributes)."""
+    key = (str(device), dtype)
+    out = _CONSTANTS.get(key)
+    if out is None:
+        out = {
+            "inverse_factorial": device_constant(("inverse_factorial",), lambda: [
+                1.0 / math.factorial(i) for i in range(2, _SERIES_TERMS)], device, dtype),
+            "sqrt_factorial_2n": device_constant(("sqrt_factorial_2n",), lambda: _SQRT_FACTORIAL_2N, device, dtype),
+            "d_forms": device_constant(("d_forms",), _d_form_table, device, dtype),
+            "local_d": device_constant(("local_d",), lambda: _LOCAL_D_IN_MOLECULAR, device),
+        }
+        _CONSTANTS[key] = out
+    return out
+
+
+_CONSTANTS: Dict[tuple, Dict[str, Tensor]] = {}
+
+
+@lru_cache(maxsize=None)
+def _config_pairs(names_a: Tuple[str, ...], names_b: Tuple[str, ...]):
+    """The charge pairs ``(s, i, j)`` of nonzero product of the configuration pairs ``(names_a[s], names_b[s])``:
+    the unit positions on each side ``(M, 3)``, the slot of each pair and the matrix ``(M, S)`` summing the pairs
+    (with their charge products) into the slots."""
+    ua, ub, slot, prod = [], [], [], []
+    for s, (na, nb) in enumerate(zip(names_a, names_b)):
+        for qa, pa in CONFIGS[na]:
+            for qb, pb in CONFIGS[nb]:
+                if qa * qb != 0.0:
+                    ua.append(pa)
+                    ub.append(pb)
+                    slot.append(s)
+                    prod.append(qa * qb)
+    per_slot = np.zeros((len(slot), len(names_a)))
+    per_slot[np.arange(len(slot)), slot] = prod
+    return (np.asarray(ua, dtype=np.float64).reshape(-1, 3), np.asarray(ub, dtype=np.float64).reshape(-1, 3),
+            np.asarray(slot, dtype=np.int64), per_slot)
+
+
+def config_interaction(names_a, da: Tensor, names_b, db: Tensor, r: Tensor, rho: Tensor) -> Tensor:
     """Klopman-Ohno interaction of point-charge configurations on two centers, eV.
 
     Configuration ``a`` sits at the origin, ``b`` at ``(0, 0, r)``.
 
     Parameters
     ----------
-    qa, ua : Tensor
-        Charges ``(S, n)`` and unit positions ``(S, n, 3)`` of the ``a`` side.
+    names_a : sequence of str
+        The configurations of the ``a`` side, one per slot ``(S,)`` (keys of :data:`CONFIGS`).
     da : Tensor
         Charge separations ``(P, S)`` (bohr).
-    qb, ub, db : Tensor
+    names_b, db : optional
         The same for the ``b`` side.
     r : Tensor
         Separations ``(P,)`` (bohr).
@@ -303,19 +433,30 @@ def config_interaction(qa: Tensor, ua: Tensor, da: Tensor, qb: Tensor, ub: Tenso
     Tensor
         ``(P, S)`` interaction energies.
     """
-    pa = ua.unsqueeze(0) * da[..., None, None]                     # (P, S, n, 3)
-    pb = ub.unsqueeze(0) * db[..., None, None]
-    pb = pb + torch.stack([torch.zeros_like(r), torch.zeros_like(r), r], -1)[:, None, None, :]
-    diff = pb.unsqueeze(2) - pa.unsqueeze(3)                       # (P, S, na, nb, 3)
-    d2 = diff.pow(2).sum(-1) + rho.pow(2)[..., None, None]
-    qq = qa.unsqueeze(-1) * qb.unsqueeze(-2)                       # (S, na, nb)
-    return HARTREE * (qq / torch.sqrt(d2)).sum((-1, -2))
+    # only the charge pairs (s, i, j) of nonzero product, summed per slot s
+    key = ("config_pairs", tuple(names_a), tuple(names_b))
+    tables = _config_pairs(tuple(names_a), tuple(names_b))
+    ua, ub, s, per_slot = (device_constant(key + (n,), (lambda t=t: t), r.device, None if n == 2 else r.dtype)
+                           for n, t in enumerate(tables))
+    return config_kernel(ua, ub, s, per_slot, da, db, r, rho)
+
+
+def config_kernel(ua: Tensor, ub: Tensor, s: Tensor, per_slot: Tensor, da: Tensor, db: Tensor, r: Tensor,
+                  rho: Tensor) -> Tensor:
+    """:func:`config_interaction` from the tables of its charge pairs (unit positions ``ua``, ``ub`` ``(M, 3)``,
+    slots ``s`` ``(M,)``, the summing matrix ``per_slot`` ``(M, S)``)."""
+    pa = ua * take1(da, s).unsqueeze(-1)                            # (P, M, 3)
+    pb = ub * take1(db, s).unsqueeze(-1)
+    diff = pb - pa
+    dz = diff[..., 2] + r[:, None]
+    rs = take1(rho, s)
+    d2 = diff[..., 0] * diff[..., 0] + diff[..., 1] * diff[..., 1] + dz * dz + rs * rs
+    return 27.211386245988 * torch.matmul(torch.rsqrt(d2), per_slot)                  # HARTREE
 
 
 # rotation from the diatomic frame to the molecular frame
 
-def _d_forms(dtype, device) -> Tensor:
-    """Quadratic forms of the real d harmonics, ``(5, 3, 3)``, molecular order."""
+def _d_form_table() -> np.ndarray:
     c20 = math.sqrt(5.0 / (16.0 * math.pi))
     c21 = math.sqrt(15.0 / (4.0 * math.pi))
     c22 = math.sqrt(15.0 / (16.0 * math.pi))
@@ -325,14 +466,14 @@ def _d_forms(dtype, device) -> Tensor:
     m[2] = c20 * np.diag([-1.0, -1.0, 2.0])                        # z2
     m[3][1, 2] = m[3][2, 1] = 0.5 * c21                            # yz
     m[4][0, 1] = m[4][1, 0] = 0.5 * c21                            # xy
-    return torch.as_tensor(m, dtype=dtype, device=device)
+    return m
 
 
 # local d order (z2, xz, yz, x2-y2, xy) as indices into the molecular d order
 _LOCAL_D_IN_MOLECULAR = [2, 1, 3, 0, 4]
 
 
-def local_frames(vec: Tensor, n_orb: int) -> Tensor:
+def local_frames(vec: Tensor, n_orb: int, c: Dict[str, Tensor]) -> Tensor:
     """Orbital rotation matrices from the diatomic frame of each pair.
 
     The diatomic ``z`` axis is the unit vector ``vec / |vec|`` (from atom A to
@@ -347,6 +488,8 @@ def local_frames(vec: Tensor, n_orb: int) -> Tensor:
         Bond vectors ``(P, 3)``.
     n_orb : int
         Orbitals per atom (1, 4 or 9).
+    c : dict
+        :func:`constants`.
 
     Returns
     -------
@@ -359,19 +502,19 @@ def local_frames(vec: Tensor, n_orb: int) -> Tensor:
     T[:, 0, 0] = 1.0
     if n_orb == 1:
         return T
-    ez = vec / vec.norm(dim=-1, keepdim=True)
-    near_z = (ez[:, 2].abs() > math.cos(math.radians(25.0))).to(vec.dtype).detach()
+    ez = vec / vec.norm(p=2, dim=-1, keepdim=True)
+    near_z = (ez[:, 2].abs() > 0.9063077870366499).to(vec.dtype).detach()          # cos(25 degrees)
     ref = torch.stack([near_z, torch.zeros_like(near_z), 1.0 - near_z], dim=-1)
     ex = ref - (ref * ez).sum(-1, keepdim=True) * ez
-    ex = ex / ex.norm(dim=-1, keepdim=True)
+    ex = ex / ex.norm(p=2, dim=-1, keepdim=True)
     ey = torch.cross(ez, ex, dim=-1)
     E = torch.stack([ex, ey, ez], dim=1)                     # rows: local x, y, z axes
     T[:, 1:4, 1:4] = torch.stack([ez, ex, ey], dim=1)        # local order pz, px, py
     if n_orb == 9:
-        M = _d_forms(vec.dtype, vec.device)                  # (5, 3, 3)
+        M = c["d_forms"]                                     # (5, 3, 3)
         # local form k expressed in molecular coordinates: E^T M_k E
-        Mloc = M[_LOCAL_D_IN_MOLECULAR]
-        rot = torch.einsum("pai,kab,pbj->pkij", E, Mloc, E)  # (P, 5, 3, 3)
+        Mloc = M.index_select(0, c["local_d"])
+        rot = torch.matmul(E.transpose(-1, -2).unsqueeze(1), torch.matmul(Mloc, E.unsqueeze(1)))  # (P, 5, 3, 3)
         T[:, 4:, 4:] = torch.einsum("pkij,mij->pkm", rot, M) * (8.0 * math.pi / 15.0)
     return T
 

@@ -71,7 +71,7 @@ def _masked(w: Optional[Tensor], mask: Optional[Tensor], like: Tensor,
     return m if w is None else w * m
 
 
-def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
+def _mean(err: Tensor, w: Optional[Tensor], sync: bool = True) -> Tensor:
     """Mean of ``err``, weighted by ``w`` broadcast over the trailing axes.
 
     Parameters
@@ -82,6 +82,9 @@ def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
     w : Tensor or None
         Non-negative weights of shape ``(len(err),)``. ``None`` gives the plain
         mean, which is what uniform weights reduce to exactly.
+    sync : bool, optional
+        ``False``: a zero weight sum gives 0 instead of 0 / 0 (see
+        :func:`weighted_loss`).
 
     Returns
     -------
@@ -92,10 +95,14 @@ def _mean(err: Tensor, w: Optional[Tensor]) -> Tensor:
         return err.mean()
     shape = (-1,) + (1,) * (err.dim() - 1)
     per_element = err.numel() / err.shape[0]          # 1 for energy, 3 for forces
-    return (w.reshape(shape) * err).sum() / (w.sum() * per_element)
+    total = w.sum()
+    if not sync:
+        # a term without labelled structures is 0, not 0 / 0 (the host cannot check)
+        total = total.clamp_min(torch.finfo(err.dtype).tiny)
+    return (w.reshape(shape) * err).sum() / (total * per_element)
 
 
-def _count(err: Tensor, w: Optional[Tensor]) -> float:
+def _count(err: Tensor, w: Optional[Tensor], sync: bool = True):
     """The weight :func:`_mean` divides by, in units of its first axis.
 
     Parameters
@@ -112,7 +119,9 @@ def _count(err: Tensor, w: Optional[Tensor]) -> float:
         over several batches is the sum of ``mean * count`` over the sum of
         ``count``.
     """
-    return float(err.shape[0]) if w is None else float(w.sum().detach())
+    if w is None:
+        return float(err.shape[0])
+    return float(w.sum().detach()) if sync else w.sum().detach()
 
 
 def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
@@ -121,7 +130,7 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
            dipole_weight: float = 0.0, polarizability_weight: float = 0.0,
            d_t: float = 0.0, charge_weight: float = 0.0,
            counts: Optional[dict] = None, les_dipole_weight: float = 0.0,
-           les_charge_weight: float = 0.0) -> tuple[Tensor, dict[str, float]]:
+           les_charge_weight: float = 0.0, sync: bool = True) -> tuple[Tensor, dict[str, float]]:
     """The weighted energy, force, stress, dipole, polarizability and charge
     terms over the structures weighted by ``w``.
 
@@ -135,6 +144,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
         over its own structures.
     counts : dict or None, optional
         Filled, when given, as described in :func:`weighted_loss`.
+    sync : bool, optional
+        As in :func:`weighted_loss`.
 
     Returns
     -------
@@ -144,18 +155,24 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
     logs: dict[str, float] = {}
     loss = pred["energy"].new_zeros(())
 
+    def present(w_t: Optional[Tensor]) -> bool:
+        return w_t is None or not sync or bool(w_t.any())
+
+    def value(t: Tensor):
+        return float(t.detach()) if sync else t.detach()
+
     if data.energy is not None and energy_weight > 0:
         w_e = _masked(w, getattr(data, "energy_mask", None), pred["energy"],
                       getattr(data, "energy_weight", None))
-        if w_e is None or bool(w_e.any()):
+        if present(w_e):
             # per-atom energy error -> size-extensive, well-scaled across structures
             n = data.n_atoms.to(pred["energy"].dtype)
             err = _residual_sq((pred["energy"] - data.energy) / n, d_e)
-            e_loss = _mean(err, w_e)
+            e_loss = _mean(err, w_e, sync)
             loss = loss + energy_weight * e_loss
-            logs["energy_mse"] = float(e_loss.detach())
+            logs["energy_mse"] = value(e_loss)
             if counts is not None:
-                counts["energy_mse"] = (_count(err, w_e), energy_weight)
+                counts["energy_mse"] = (_count(err, w_e, sync), energy_weight)
 
     if data.forces is not None and force_weight > 0 and "forces" in pred:
         w_f = _masked(w, getattr(data, "forces_mask", None), pred["forces"],
@@ -167,24 +184,24 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
         if a is not None:
             a = a.to(pred["forces"].dtype)
             w_atom = a if w_atom is None else w_atom * a
-        if w_atom is None or bool(w_atom.any()):
+        if present(w_atom):
             err = _residual_sq(pred["forces"] - data.forces, d_f)
-            f_loss = _mean(err, w_atom)
+            f_loss = _mean(err, w_atom, sync)
             loss = loss + force_weight * f_loss
-            logs["force_mse"] = float(f_loss.detach())
+            logs["force_mse"] = value(f_loss)
             if counts is not None:
-                counts["force_mse"] = (_count(err, w_atom), force_weight)
+                counts["force_mse"] = (_count(err, w_atom, sync), force_weight)
 
     if data.stress is not None and stress_weight > 0 and "stress" in pred:
         w_s = _masked(w, getattr(data, "stress_mask", None), pred["stress"],
                       getattr(data, "stress_weight", None))
-        if w_s is None or bool(w_s.any()):
+        if present(w_s):
             err = _residual_sq(pred["stress"] - data.stress, d_s)
-            s_loss = _mean(err, w_s)
+            s_loss = _mean(err, w_s, sync)
             loss = loss + stress_weight * s_loss
-            logs["stress_mse"] = float(s_loss.detach())
+            logs["stress_mse"] = value(s_loss)
             if counts is not None:
-                counts["stress_mse"] = (_count(err, w_s), stress_weight)
+                counts["stress_mse"] = (_count(err, w_s, sync), stress_weight)
 
     # the tensorial labels of molecules (PaiNN, PhysNet, AIMNet2 dipoles, the
     # LES latent dipole): per-structure means over the 3 (dipole) or 9
@@ -196,13 +213,13 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
         if target is None or weight <= 0 or key not in pred:
             continue
         w_t = _masked(w, getattr(data, label + "_mask", None), pred[key])
-        if w_t is None or bool(w_t.any()):
+        if present(w_t):
             err = _residual_sq(pred[key] - target, d_t)
-            t_loss = _mean(err, w_t)
+            t_loss = _mean(err, w_t, sync)
             loss = loss + weight * t_loss
-            logs[key + "_mse"] = float(t_loss.detach())
+            logs[key + "_mse"] = value(t_loss)
             if counts is not None:
-                counts[key + "_mse"] = (_count(err, w_t), weight)
+                counts[key + "_mse"] = (_count(err, w_t, sync), weight)
 
     # per-atom partial charges (the charge networks of the 3G / 4G HDNNPs, the
     # LES latent charges), averaged over the atoms of the labelled structures
@@ -212,14 +229,14 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
         if data.charges is None or weight <= 0 or key not in pred:
             continue
         w_q = _masked(w, getattr(data, "charges_mask", None), pred[key])
-        if w_q is None or bool(w_q.any()):
+        if present(w_q):
             w_atom = None if w_q is None else w_q[data.batch]
             err = _residual_sq(pred[key] - data.charges, d_t)
-            q_loss = _mean(err, w_atom)
+            q_loss = _mean(err, w_atom, sync)
             loss = loss + weight * q_loss
-            logs[name] = float(q_loss.detach())
+            logs[name] = value(q_loss)
             if counts is not None:
-                counts[name] = (_count(err, w_atom), weight)
+                counts[name] = (_count(err, w_atom, sync), weight)
     return loss, logs
 
 
@@ -238,6 +255,7 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   head_weights: Optional[Mapping[int, Sequence[float]]] = None,
                   head_names: Optional[Sequence[str]] = None,
                   counts: Optional[dict] = None,
+                  sync: bool = True,
                   ) -> tuple[Tensor, dict[str, float]]:
     """Compute a weighted sum of energy, force and stress loss terms.
 
@@ -370,6 +388,13 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         When given, filled with ``{key: (count, term_weight)}`` for every term
         key of ``logs`` (see *Dataset-level metrics* above). Defaults to
         ``None``.
+    sync : bool, optional
+        ``True`` (the default): terms without a labelled structure are left
+        out and ``logs`` and ``counts`` hold Python numbers. ``False``: no
+        value is read back to the host, so the loss can run inside a captured
+        CUDA graph. Every term whose labels the batch carries is included (one
+        whose structures are all masked out is exactly 0) and ``logs`` and
+        ``counts`` hold 0-dimensional tensors. Single-head batches only.
 
     Returns
     -------
@@ -388,6 +413,15 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     d_f = huber_delta if huber_delta_forces is None else huber_delta_forces
     d_s = huber_delta if huber_delta_stress is None else huber_delta_stress
     weights = (energy_weight, force_weight, stress_weight)
+
+    if not sync:
+        if data.head is not None:
+            raise ValueError("weighted_loss(sync=False) takes single-head batches only")
+        loss, logs = _terms(pred, data, data.weight, energy_weight, force_weight, stress_weight,
+                            d_e, d_f, d_s, dipole_weight, polarizability_weight, huber_delta,
+                            charge_weight, counts, les_dipole_weight, les_charge_weight, sync=False)
+        logs["loss"] = loss.detach()
+        return loss, logs
 
     heads = [] if data.head is None else [int(h) for h in torch.unique(data.head).tolist()]
     def _name(h):

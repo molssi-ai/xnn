@@ -26,9 +26,10 @@ says so when a fast path first runs in float32.
 """
 from __future__ import annotations
 
+import contextlib
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import torch
 from torch import nn
@@ -114,12 +115,27 @@ class AutoPolicy:
         earlier).
     default_min_edges, default_min_edges_float64 : int
         The thresholds of a GPU in neither table.
+    max_edges, max_edges_float64 : dict of str to int
+        Upper bounds, for fast paths that win only on small inputs (compiled
+        blocks, which save kernel launches): the fast path is taken below them.
+        A GPU in neither table has none unless the defaults set one.
+    default_max_edges, default_max_edges_float64 : int, optional
+        The upper bounds of a GPU in neither table (``None``: no bound).
+    cpu_min_edges, cpu_min_edges_float64 : int, optional
+        The thresholds on a CPU, for fast paths that have a CPU implementation
+        (``None``, the default: never on a CPU).
     """
 
     min_edges: Dict[str, int] = field(default_factory=dict)
     min_edges_float64: Dict[str, int] = field(default_factory=dict)
     default_min_edges: int = 0
     default_min_edges_float64: int = 0
+    max_edges: Dict[str, int] = field(default_factory=dict)
+    max_edges_float64: Dict[str, int] = field(default_factory=dict)
+    default_max_edges: Optional[int] = None
+    default_max_edges_float64: Optional[int] = None
+    cpu_min_edges: Optional[int] = None
+    cpu_min_edges_float64: Optional[int] = None
 
     def threshold(self, device: torch.device, dtype: torch.dtype = torch.float32) -> int:
         """The minimum edge count for ``device`` and ``dtype``."""
@@ -133,7 +149,23 @@ class AutoPolicy:
 
     def decide(self, device: torch.device, dtype: torch.dtype, num_edges: int) -> bool:
         """Whether a graph with ``num_edges`` edges takes the fast path."""
-        return device.type == "cuda" and num_edges >= self.threshold(device, dtype)
+        if device.type == "cpu":
+            t = self.cpu_min_edges_float64 if dtype == torch.float64 else self.cpu_min_edges
+            return t is not None and num_edges >= t
+        if device.type != "cuda" or num_edges < self.threshold(device, dtype):
+            return False
+        bound = self.upper_bound(device, dtype)
+        return bound is None or num_edges < bound
+
+    def upper_bound(self, device: torch.device, dtype: torch.dtype = torch.float32) -> Optional[int]:
+        """The edge count from which the fast path is no longer taken (``None``: no bound)."""
+        f64 = dtype == torch.float64
+        table = self.max_edges_float64 if f64 else self.max_edges
+        name = torch.cuda.get_device_name(device).lower()
+        for key, value in table.items():
+            if key.lower() in name:
+                return int(value)
+        return self.default_max_edges_float64 if f64 else self.default_max_edges
 
 
 def select(modules: List[FastPathModule], use_fast: UseFast, policy: Optional[AutoPolicy],
@@ -199,3 +231,117 @@ def iter_fast_capable(model: nn.Module, device: torch.device,
     for m in fast_modules(model):
         if m.fast_supported(device, dtype):
             yield m
+
+
+def separate_shapes():
+    """A context in which :func:`torch.compile` gives every dynamic size its own symbol.
+
+    By default sizes that are equal when a graph is traced share one symbol ("duck
+    shaping"); an edge count that happens to equal a feature width then ties the
+    two, and tracing the second derivatives of such a graph can crash the process
+    (torch 2.5). The compiled functions here are called inside this context, so
+    their graphs are traced without it.
+    """
+    try:
+        import torch.fx.experimental._config as fx_config
+        return fx_config.patch(use_duck_shape=False)
+    except (ImportError, AttributeError):
+        return contextlib.nullcontext()
+
+
+def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
+                                 n_constants: int = 0) -> Callable[..., Any]:
+    """``fn`` compiled by :func:`torch.compile` and differentiable twice.
+
+    Compiled code has a first derivative but no second, which a force loss
+    needs. Here ``fn`` runs inside an autograd function whose backward is the
+    compiled vector-Jacobian product of ``fn`` (:func:`torch.func.vjp`), itself
+    an autograd function whose backward is the compiled vector-Jacobian product
+    of that. Each order is a few fused kernels, as in evaluation mode. Third
+    derivatives are not supported.
+
+    Parameters
+    ----------
+    fn : callable
+        A function of ``n_inputs`` tensors returning a tensor or a tuple of
+        tensors, written in differentiable torch operations.
+    n_inputs : int
+        The number of its tensor arguments that are differentiated.
+    n_constants : int, optional
+        The number of further arguments, after the inputs, that are not
+        differentiated (index tensors, sizes). Default 0.
+
+    Returns
+    -------
+    callable
+        ``fn`` with the same arguments and outputs.
+    """
+    from torch.func import vjp
+
+    m = n_inputs + n_constants
+
+    def as_tuple(*xs):
+        out = fn(*xs)
+        return tuple(out) if isinstance(out, (tuple, list)) else (out,)
+
+    def first(*args):
+        # inputs, constants, then one incoming gradient per output
+        consts = args[n_inputs:m]
+        _, pull = vjp(lambda *xs: as_tuple(*xs, *consts), *args[:n_inputs])
+        return pull(tuple(args[m:]))
+
+    def second(*args):
+        # the arguments of first (inputs, constants, incoming gradients), then one cotangent per input
+        k = len(args) - n_inputs
+        consts = args[n_inputs:m]
+
+        def first_of(*xs):
+            return first(*xs[:n_inputs], *consts, *xs[n_inputs:])
+
+        _, pull = vjp(first_of, *args[:n_inputs], *args[m:k])
+        out = pull(tuple(args[k:]))
+        return out[:n_inputs], out[n_inputs:]
+
+    # torch.compile keeps a few compiled versions per code object; the closures of every call
+    # here share theirs, so each wrapped function gets its own copies (named after it)
+    name = getattr(fn, "__name__", "fn")
+    for f, kind in ((as_tuple, "forward"), (first, "vjp"), (second, "vjp_vjp")):
+        f.__code__ = f.__code__.replace(co_name=f"{name}_{kind}")
+    forward = torch.compile(as_tuple, dynamic=True)
+    first_c = torch.compile(first, dynamic=True)
+    second_c = torch.compile(second, dynamic=True)
+
+    class Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *args):
+            ctx.save_for_backward(*args[:n_inputs], *args[m:])
+            ctx.consts = args[n_inputs:m]
+            with separate_shapes():
+                return tuple(first_c(*args))
+
+        @staticmethod
+        @torch.autograd.function.once_differentiable
+        def backward(ctx, *cotangents):
+            saved = ctx.saved_tensors
+            with separate_shapes():
+                g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:], *cotangents)
+            return (*g_inputs, *([None] * n_constants), *g_grads)
+
+    class Stage(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *xs):
+            ctx.save_for_backward(*xs[:n_inputs])
+            ctx.consts = xs[n_inputs:]
+            with separate_shapes():
+                return forward(*xs)
+
+        @staticmethod
+        def backward(ctx, *grads):
+            g = Grad.apply(*ctx.saved_tensors, *ctx.consts, *grads)
+            return (*g, *([None] * n_constants))
+
+    def apply(*xs):
+        out = Stage.apply(*xs)
+        return out[0] if len(out) == 1 else out
+
+    return apply
