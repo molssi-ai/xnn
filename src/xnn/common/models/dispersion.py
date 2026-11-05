@@ -69,7 +69,7 @@ def switching_function(r: Tensor, cutoff: float, width: float) -> Tensor:
 
 def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: float,
                                ngw: Optional[Tensor] = None,
-                               eps_norm: float = 0.0) -> Tensor:
+                               eps_norm: float = 0.0, n_gauss: Optional[int] = None) -> Tensor:
     """Normalized Gaussian weights of the reference systems in the coordination number.
 
     D3 paper eq 16 / D4 paper eq 8: ``W_ref = sum_j^{N_ref} exp(-wf j (CN -
@@ -93,6 +93,10 @@ def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: flo
     eps_norm : float, optional
         Norm below which the fallback applies (D4 uses ``sqrt(tiny)``, D3
         exactly zero).
+    n_gauss : int or None, optional
+        The largest entry of ``ngw`` when the caller knows it (``None``: read
+        from ``ngw``, a host synchronization). A larger value gives the same
+        weights.
 
     Returns
     -------
@@ -103,7 +107,7 @@ def gaussian_reference_weights(cn: Tensor, refcn: Tensor, valid: Tensor, wf: flo
     if ngw is None:
         gw = torch.exp(-wf * dcn2)
     else:
-        n_max = int(ngw.max())
+        n_max = int(ngw.max()) if n_gauss is None else int(n_gauss)
         j = torch.arange(1, n_max + 1, device=cn.device)
         gauss = torch.exp(-wf * j.to(cn.dtype)[None, None, :] * dcn2[:, :, None])
         use = j[None, None, :] <= ngw[:, :, None]
@@ -758,16 +762,17 @@ class DispersionCorrection(InteratomicPotential):
                    int(data.edge_index.shape[1]))
 
     @torch.jit.unused
-    def direct_forces(self, data: AtomicGraph) -> bool:
+    def forms_forces(self, data: AtomicGraph) -> bool:
         """Whether :meth:`forward_direct` serves this evaluation: a standalone term whose CPU kernels form
-        the forces and stress themselves (evaluation, no gradient asked of the positions)."""
-        if (self.model is not None or self.training or data.pos.requires_grad or self.use_fast is False
-                or data.pos.device.type != "cpu" or not hasattr(self.term, "evaluate_direct")):
+        the forces and stress themselves (evaluation; the outputs carry no autograd graph)."""
+        if (self.model is not None or self.training or self.use_fast is False
+                or data.pos.device.type != "cpu" or not hasattr(self.term, "direct_applies")):
             return False
         # "auto" takes the CPU kernels at every size where they apply (AUTO_POLICY_CPU_KERNELS)
-        if not self.term.cpu_kernels_apply(int(data.atomic_numbers.shape[0])):
+        if not self.term.direct_applies(data, self.use_fast):
             return False
-        self.term.fast_active = True
+        if not self.term.fast_active:
+            self.term.fast_active = True
         if data.model_dtype == torch.float32:
             from .fast import warn_float32_once
             warn_float32_once()
@@ -776,7 +781,7 @@ class DispersionCorrection(InteratomicPotential):
     @torch.jit.unused
     def forward_direct(self, data: AtomicGraph) -> Dict[str, Tensor]:
         """:meth:`forward` with ``"forces"`` and ``"virial"`` (``dE / d(strain)``) from the term's CPU
-        kernels, no autograd (see :meth:`direct_forces`)."""
+        kernels, no autograd (see :meth:`forms_forces`)."""
         disp = self.term.evaluate_direct(data)
         energy = disp.pop("energy")
         out: Dict[str, Tensor] = {

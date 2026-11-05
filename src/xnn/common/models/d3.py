@@ -88,6 +88,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from . import cpu_extension
 from .dispersion import (
     BOHR,
     HARTREE,
@@ -249,6 +250,18 @@ def _d3_cpu():
         from .dispersion_fast import cpu
         _D3_CPU = cpu
     return _D3_CPU
+
+
+_D3_DIRECT = None
+
+
+def _d3_direct():
+    """:mod:`~xnn.common.models.dispersion_fast.d3_direct`, imported once."""
+    global _D3_DIRECT
+    if _D3_DIRECT is None:
+        from .dispersion_fast import d3_direct
+        _D3_DIRECT = d3_direct
+    return _D3_DIRECT
 
 
 def _scatter_add(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
@@ -733,6 +746,8 @@ class DFTD3(nn.Module, FastPathModule):
         """Whether the C++ kernels of :mod:`~xnn.common.models.dispersion_fast.cpu` evaluate
         this term on a CPU: they build, no parameter is trained and, with a three-body term, the
         structure fits their dense C6 arrays."""
+        if not cpu_extension.enabled():
+            return False
         cpu = _d3_cpu()
         if any(p is not None and p.requires_grad for p in self._parameters.values()):
             return False
@@ -755,17 +770,48 @@ class DFTD3(nn.Module, FastPathModule):
         }
 
     @torch.jit.unused
+    def direct_applies(self, data, use_fast) -> bool:
+        """Whether :meth:`evaluate_direct` serves ``data`` on a CPU for the setting ``use_fast``: the
+        optional C++ kernels where they are on and apply (:meth:`cpu_kernels_apply`), else the PyTorch
+        path of :mod:`~xnn.common.models.dispersion_fast.d3_direct` (no trained parameter; molecules of
+        its dense path at every size, else with a three-body term compiled tiles and at most
+        ``MAX_DENSE_ATOMS`` atoms, and for ``"auto"`` the edge count from which they pay off)."""
+        n = int(data.atomic_numbers.shape[0])
+        if self.cpu_kernels_apply(n):
+            return True
+        if any(p is not None and p.requires_grad for p in self._parameters.values()):
+            return False
+        direct = _d3_direct()
+        if float(self.s9) == 0.0 or direct.dense_applies(data, direct.DENSE_ATOMS):
+            return True
+        from .dispersion_fast import AUTO_POLICY
+        from .dispersion_fast.atm_cpu import available
+        from .dispersion_fast.cpu import MAX_DENSE_ATOMS
+        if n > MAX_DENSE_ATOMS or not available():
+            return False
+        return use_fast is True or AUTO_POLICY.decide(data.pos.device, data.model_dtype,
+                                                       int(data.edge_index.shape[1]))
+
+    @torch.jit.unused
     def evaluate_direct(self, data) -> Dict[str, Tensor]:
-        """:meth:`forward` on the C++ kernels with the forces ``"forces"`` and the strain derivative
+        """:meth:`forward` on a CPU (the optional C++ kernels or the PyTorch path of
+        :mod:`~xnn.common.models.dispersion_fast.d3_direct`) with the forces ``"forces"`` and the strain derivative
         ``"virial"`` (``dE / d(strain)``, ``(B, 3, 3)``) formed by the kernels, no autograd (evaluation)."""
-        node, energies, features, forces, virial = _d3_cpu().d3_direct(self, data)
+        if self.cpu_kernels_apply(int(data.atomic_numbers.shape[0])):
+            node, energies, features, forces, virial = _d3_cpu().d3_direct(self, data)
+        else:
+            out = _d3_direct().d3_direct(self, data)
+            if isinstance(out, dict):
+                return out
+            node, energies, features, forces, virial = out
+        energy, energy_2body, energy_3body = energies.unbind(1)
         return {
             "node_energy": node,
-            "energy": energies[:, 0],
-            "energy_2body": energies[:, 1],
-            "energy_3body": energies[:, 2],
+            "energy": energy,
+            "energy_2body": energy_2body,
+            "energy_3body": energy_3body,
             "coordination_numbers": features[:, 0],
-            "c6_matrix": torch.zeros((0, 0), dtype=node.dtype, device=node.device),
+            "c6_matrix": node.new_zeros((0, 0)),
             "node_features": features,
             "forces": forces,
             "virial": virial,
