@@ -609,6 +609,9 @@ def split_wrappers(model: nn.Module, total_charge: float = 0.0):
             core = core.model
         else:
             break
+    if hasattr(core, "export_core"):
+        # a model whose own forward is not scriptable supplies a scriptable core (the semiempirical methods)
+        core = core.export_core()
     return core, long_range, dispersion, float(getattr(core, "cutoff", 0.0))
 
 
