@@ -21,6 +21,8 @@ from ..data.neighborlist import cell_grid, half_list, unique_pairs
 
 # the phases of the fixed-length solves, in the order of a plan's ``needed`` counts
 PHASES = ("forward", "adjoint")
+# the term subsets of a step (multiple time steps): the valence terms, the rest, or both
+TERMS = ("all", "valence", "nonbonded")
 
 
 def plan_core(model: nn.Module) -> Optional[nn.Module]:
@@ -75,6 +77,16 @@ class StepGraph:
     rebuild test also counts how far the cell has moved the periodic images.
     The mesh and the Ewald coefficients stay those the plan was made with.
 
+    For multiple time step integrators (RESPA) a step evaluates a subset of
+    the terms: ``terms="valence"`` the bonded terms of an inner step,
+    ``terms="nonbonded"`` the rest (pairs, meshes, induction) of an outer
+    step, which add up to the whole step. Both run on the one plan. The
+    outer steps make every decision above (pair list, solve lengths,
+    dipole predictor). An inner step decides nothing and reads nothing from
+    the device: it replays its own recorded graph from its second call on,
+    and its bonded vectors follow atoms wrapped back into the cell since the
+    pair list was built. The first call of a run is an outer step.
+
     Parameters
     ----------
     model : torch.nn.Module
@@ -123,12 +135,19 @@ class StepGraph:
         self.full_rebuilds = 0
         self.recordings = 0
         self.replays = 0
+        self.valence_replays = 0
         self.reset()
 
     def reset(self) -> None:
         """Forget the plan and the recorded graph (a new system)."""
         self.plan = None
         self.graph = None
+        # the term subset of the recorded step that makes the decisions ("all" or "nonbonded"), and the
+        # recorded valence step of an inner time step with its outputs and the evaluations before it
+        self.terms = "all"
+        self.valence_graph = None
+        self.valence_outputs: Optional[dict] = None
+        self.valence_steps = 0
         self.pos: Optional[Tensor] = None
         self.cell: Optional[Tensor] = None
         self.cuda_graph = None
@@ -144,6 +163,9 @@ class StepGraph:
         # the pairs are found by the grid search, all of it on the second stream
         self.gridded = False
         self._cell_key = None
+        # the caller's cell tensor of the last step with its version, held so that the same tensor, unchanged,
+        # skips the comparison with the buffer (a read of the device)
+        self._seen_cell: Optional[tuple] = None
         self._grid_cache: Optional[tuple] = None
         # the cell the pair list was built in, and the bound on the image shifts of its pairs (per axis)
         # once the cell has changed since then (constant-pressure dynamics), else None
@@ -160,7 +182,7 @@ class StepGraph:
         self.needed: list = []
         self.settled = 0
 
-    def __call__(self, struct: dict) -> dict:
+    def __call__(self, struct: dict, terms: str = "all") -> dict:
         """Evaluate one step.
 
         Parameters
@@ -168,24 +190,47 @@ class StepGraph:
         struct : dict
             The structure, as for :func:`~xnn.common.data.structure_to_graph`,
             with its tensors on the model's device.
+        terms : str, optional
+            The terms evaluated: ``"all"`` (default), ``"valence"`` (an
+            inner step of a multiple time step integrator) or
+            ``"nonbonded"`` (an outer step).
 
         Returns
         -------
         dict of str to Tensor
-            ``energy``, ``forces`` and, when the model computes it, ``stress``.
+            ``energy``, ``forces`` and, when the model computes it, ``stress``
+            of the terms evaluated.
+
+        Raises
+        ------
+        ValueError
+            If ``terms`` is none of these, or an inner step comes before an
+            outer step of the structure.
         """
+        if terms not in TERMS:
+            raise ValueError(f"terms must be one of {TERMS} (got {terms!r})")
         pos, cell = struct["pos"], struct.get("cell")
         # the caller's cell as given: while it stays the same tensor, unchanged, the grid of the
         # staged pair search is not decided again (that reads the cell on the host)
         self._cell_key = None if cell is None else (id(cell), getattr(cell, "_version", None))
         if self.plan is None or pos.shape != self.pos.shape or (cell is None) != (self.cell is None):
+            if terms == "valence":
+                raise ValueError("an inner (valence) step needs an outer step of the structure first")
             self.reset()
+            self.terms = terms
             self._new_plan(struct)
         else:
             with torch.no_grad():
                 self.pos.copy_(pos)
                 if cell is not None:
-                    self._new_cell(cell.reshape(self.cell.shape))
+                    seen = self._seen_cell
+                    if seen is None or seen[0] is not cell or seen[1] != self._cell_key[1] or seen[1] is None:
+                        self._new_cell(cell.reshape(self.cell.shape))
+                        self._seen_cell = (cell, self._cell_key[1])
+            if terms == "valence":
+                return self._valence()
+            if terms != self.terms:
+                self.terms, self.cuda_graph = terms, None
             if self.cuda_graph is not None:
                 out = self._replay(struct)
                 if out is not None:
@@ -223,6 +268,7 @@ class StepGraph:
         self.graph, self.pos, self.cell = graph, graph.pos, graph.cell
         self.gridded = cell_grid(self.pos, self.cutoff + self.skin, *self._box()) is not None
         self.cuda_graph = None
+        self.valence_graph, self.valence_steps = None, 0
         self._listed()
 
     def _listed(self) -> None:
@@ -378,11 +424,37 @@ class StepGraph:
             return True
         return self._refresh(struct)
 
-    def _run(self) -> dict:
+    def _run(self, terms: Optional[str] = None) -> dict:
         graph = self.graph
         graph.pos, graph.cell = self.pos, self.cell
+        self.plan.terms = self.terms if terms is None else terms
         out = self.model(graph, self.plan)
         return {key: out[key].detach() for key in ("energy", "forces", "stress") if key in out}
+
+    def _valence(self) -> dict:
+        """An inner step: the valence terms on the plan of the last outer step, replayed from the second
+        evaluation on (the first runs the compiled blocks once eagerly)."""
+        if self.valence_graph is not None:
+            self.valence_graph.replay()
+            self.valence_replays += 1
+            return {key: value.clone() for key, value in self.valence_outputs.items()}
+        if self.capture and self.pos.is_cuda and self.stream is None:
+            self.stream = torch.cuda.Stream(self.pos.device)
+        if self.stream is None:
+            out = self._run("valence")
+        else:
+            self.stream.wait_stream(torch.cuda.current_stream(self.pos.device))
+            with torch.cuda.stream(self.stream):
+                out = self._run("valence")
+            torch.cuda.current_stream(self.pos.device).wait_stream(self.stream)
+        self.valence_steps += 1
+        if self.stream is not None and self.valence_steps >= 2:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
+                outputs = self._run("valence")
+            self.valence_graph, self.valence_outputs = graph, outputs
+            self.recordings += 1
+        return out
 
     def _replay(self, struct: dict) -> Optional[dict]:
         rebuild, self.pending = self.pending, False
