@@ -58,8 +58,21 @@ jobs:
         # junit.xml (legacy family, the schema Codecov Test Analytics reads)
         # feeds the per-test insights: flaky tests, slowest tests, failure rates
         run: >
-          pytest -q -rfEs --cov=xnn --cov-report=xml --cov-report=term-missing:skip-covered
+          pytest -q -rfEs --cov=xnn --cov-report=
           --junitxml=junit.xml -o junit_family=legacy
+
+      - name: Run the compiled CPU paths again without the compiler
+        if: ${{ !cancelled() }}
+        env:
+          XNN_OFFLINE: "1"
+          TORCHDYNAMO_DISABLE: "1"
+        # the functions torch.compile runs are read by the compiler, not run line
+        # by line, so coverage misses them; this pass runs them as plain Python
+        # (the run above checks the compiled code) and adds to the same report
+        run: >
+          pytest -q -rfEs --cov=xnn --cov-append --cov-report=xml
+          --cov-report=term-missing:skip-covered
+          tests/test_dispersion_fast.py tests/test_hdnnp.py tests/test_compiled_blocks.py
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}
