@@ -198,40 +198,10 @@ def _tile_gradient_packed(v, r, q, src, z, s6_mat, q_mat, dc6m, dc6n, r0_table, 
     return e_c, side_a.reshape(side_a.shape[0], -1), side_b.reshape(side_b.shape[0], -1)
 
 
-def _pair_gradient(v, r, src, z, s6_mat, dc6m, dc6n, r0_table, center, pj, pk, live, s9, alp3: float, cut2: float,
-                   cutoff: float, width: float):
-    """Repeated-atom pairs as :func:`_pair_energy`, with the gradient (a third of the triangle per visit): the
-    energy ``(P,)``, the edge-vector gradients of the two edges ``(P, 3)``, the triangle energy share for the
-    C6 of the center's sides and the coordination-number derivatives through the third side's C6."""
-    vj, vk = v[pj], v[pk]
-    d = vj - vk
-    w = (d * d).sum(-1)
-    keep = live & (w <= cut2) & (w > EPS)
-    w = torch.where(keep, w, torch.ones_like(w))
-    aj, ak = src[pj], src[pk]
-    zc, zj, zk = z[center], z[aj], z[ak]
-    r0 = r0_table[zc, zj] * r0_table[zc, zk] * r0_table[zj, zk]
-    sjk = s6_mat[aj, ak]
-    c6jk = sjk * sjk
-    x, y = (vj * vj).sum(-1), (vk * vk).sum(-1)
-    ip1 = torch.rsqrt(x * y * w)
-    e, ex, ey, ew = _atm_slopes(x, y, w, s9 * s6_mat[center, aj] * s6_mat[center, ak] * sjk,
-                                6.0 * (r0 * ip1) ** alp3, ip1, alp3)
-    if width > 0.0:
-        e, ex, ey, ew = _switched(e, ex, ey, ew, r[pj], r[pk], torch.sqrt(w), cutoff, width)
-    zero = torch.zeros_like(e)
-    e, ex, ey, ew = (torch.where(keep, t, zero) / 3.0 for t in (e, ex, ey, ew))
-    g_j = 2.0 * (ex[:, None] * vj + ew[:, None] * d)
-    g_k = 2.0 * (ey[:, None] * vk - ew[:, None] * d)
-    bk = 0.5 * e / c6jk
-    return e, g_j, g_k, bk * dc6m[aj, ak], bk * dc6n[aj, ak]
-
-
-
 def _repeated_slopes(vj, vk, aj, ak, c, rj, rk, z, s6_mat, dc6m, dc6n, r0_table, keep, s9, alp3: float,
                      cut2: float, cutoff: float, width: float):
-    """:func:`_pair_gradient` on blocks of pairs (any broadcast shape): a third of the triangle energy, the
-    gradients of the two edges and their coordination-number derivatives."""
+    """Repeated-atom pairs as :func:`_pair_energy`, with the gradient, on blocks of pairs (any broadcast shape): a
+    third of the triangle energy, the gradients of the two edges and their coordination-number derivatives."""
     d = vj - vk
     w = (d * d).sum(-1)
     keep = keep & (w <= cut2) & (w > EPS)
@@ -295,7 +265,7 @@ def _group_gradient(v, r, src, z, s6_mat, dc6m, dc6n, r0_table, center, g0, size
 @functools.lru_cache(maxsize=None)
 def _compiled(name: str) -> Callable:
     fn = {"tiles": _tile_energy, "pairs": _pair_energy, "tiles_grad": _tile_gradient_packed,
-          "pairs_grad": _pair_gradient, "self_grad": _self_gradient, "group_grad": _group_gradient}[name]
+          "self_grad": _self_gradient, "group_grad": _group_gradient}[name]
     compiled = torch.compile(fn, dynamic=False)
 
     def call(*args):
