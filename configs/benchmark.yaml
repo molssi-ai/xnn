@@ -56,7 +56,7 @@ custom_metrics: []
 # The dataset to score on. Reuses the standard data section; the benchmark set
 # is resolved from test_path, falling back to val_path then train_path.
 data:
-  test_path: /D3/sina/xnn/datasets/argon_md/argon_test.xyz
+  test_path: datasets/argon_md/argon_test.xyz
   batch_size: 16
   num_workers: 0
   energy_key: REF_energy
