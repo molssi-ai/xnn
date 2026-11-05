@@ -120,7 +120,8 @@ def run_compiled(block: torch.nn.Module, *args):
     """``block._reference(*args)`` on the compiled path (the reference where dropout acts).
 
     Python values among ``args`` (sizes, ``None``) are compiled in as constants. Blocks of one
-    structure share one compiled function (their weights are its inputs).
+    structure share one compiled function (their weights are its inputs). A block whose class sets
+    ``static_shapes = True`` is compiled for the sizes it meets instead of symbolic ones.
     """
     structure, params, buffers, stochastic = _state(block)
     if stochastic:
@@ -131,8 +132,9 @@ def run_compiled(block: torch.nn.Module, *args):
     fn = _SHARED.get(key)
     if fn is None:
         raw, n_diff, n_const = _functional(block, len(args), list(kinds), list(values))
-        fn = _SHARED[key] = (compile_twice_differentiable(raw, n_diff, n_const) if block.training
-                             else torch.compile(raw, dynamic=True))
+        dynamic = not getattr(block, "static_shapes", False)
+        fn = _SHARED[key] = (compile_twice_differentiable(raw, n_diff, n_const, dynamic=dynamic) if block.training
+                             else torch.compile(raw, dynamic=dynamic))
     # contiguous inputs: a transposed view as an input of the twice-differentiated graph trips
     # the compiler (symbolic strides)
     diff = [a.contiguous() for a in args if _kind(a) == "d"]

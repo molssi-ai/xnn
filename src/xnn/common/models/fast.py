@@ -250,7 +250,7 @@ def separate_shapes():
 
 
 def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
-                                 n_constants: int = 0) -> Callable[..., Any]:
+                                 n_constants: int = 0, dynamic: bool = True) -> Callable[..., Any]:
     """``fn`` compiled by :func:`torch.compile` and differentiable twice.
 
     Compiled code has a first derivative but no second, which a force loss
@@ -270,6 +270,9 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
     n_constants : int, optional
         The number of further arguments, after the inputs, that are not
         differentiated (index tensors, sizes). Default 0.
+    dynamic : bool, optional
+        Compile with symbolic sizes (default) or for the sizes of the first
+        call (recompiled when they change).
 
     Returns
     -------
@@ -307,9 +310,9 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
     name = getattr(fn, "__name__", "fn")
     for f, kind in ((as_tuple, "forward"), (first, "vjp"), (second, "vjp_vjp")):
         f.__code__ = f.__code__.replace(co_name=f"{name}_{kind}")
-    forward = torch.compile(as_tuple, dynamic=True)
-    first_c = torch.compile(first, dynamic=True)
-    second_c = torch.compile(second, dynamic=True)
+    forward = torch.compile(as_tuple, dynamic=dynamic)
+    first_c = torch.compile(first, dynamic=dynamic)
+    second_c = torch.compile(second, dynamic=dynamic)
 
     class Grad(torch.autograd.Function):
         @staticmethod
