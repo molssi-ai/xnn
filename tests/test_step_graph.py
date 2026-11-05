@@ -81,7 +81,7 @@ def test_steps_follow_a_changing_cell(cls, stress, device):
             rebuilds = stepper.rebuilds
         s = {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(Z, device=device),
              "cell": torch.tensor(cell, device=device), "pbc": torch.ones(3, dtype=torch.bool, device=device)}
-        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3, device=device))
         for key in ("energy", "forces", "stress") if stress else ("energy", "forces"):
             assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, step)
     assert stepper.rebuilds > rebuilds
