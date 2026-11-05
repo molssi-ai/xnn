@@ -1,7 +1,7 @@
 """Importing xnn must work on PyTorch >= 2.6.
 
 PyTorch 2.6 flipped the default of ``torch.load`` to ``weights_only=True``.
-e3nn 0.4.4 -- pinned by mace-torch 0.3.16, so not a free choice -- loads its
+e3nn 0.4.4 -- pinned by mace-torch 0.3.17, so not a free choice -- loads its
 Wigner constants at import time without passing the argument, and that file
 contains a ``slice``. Unfixed, ``import xnn`` dies with an UnpicklingError.
 """

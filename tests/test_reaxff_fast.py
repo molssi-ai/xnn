@@ -9,10 +9,9 @@ import numpy as np
 import pytest
 import torch
 
+from xnn.common import cpu_kernels
 from xnn.common.data import structure_to_graph
 from xnn.ffnn.models import ReaxFF, template_library
-
-from xnn.common import cpu_kernels
 
 DEVICES = [pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no GPU")),
            pytest.param("cpu", marks=pytest.mark.skipif(not cpu_kernels.available(), reason="no C++ compiler"))]
