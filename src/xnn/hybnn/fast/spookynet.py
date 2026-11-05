@@ -31,8 +31,9 @@ AUTO_POLICY = AutoPolicy(min_edges_float64={"T4": NEVER}, max_edges={"T4": NEVER
 #: Edge counts above which ``use_fast="auto"`` takes the fused MLPs in an ordinary training step (a force
 #: loss, second derivatives included), per GPU model and precision. Ordinary steps on small systems are
 #: bound by the host, where the fused MLPs' Python orchestration costs as much as the launches it saves.
-AUTO_POLICY_TRAINING = AutoPolicy(min_edges={"A30": 30_000, "T4": 30_000, "V100": 70_000},
-                                  min_edges_float64={"A100": 50_000, "A30": 16_000, "V100": 30_000},
+AUTO_POLICY_TRAINING = AutoPolicy(min_edges={"A30": 30_000, "T4": 30_000, "V100": 70_000, "H200": 150_000},
+                                  min_edges_float64={"A100": 50_000, "A30": 16_000, "V100": 30_000,
+                                                     "H200": 50_000},
                                   default_min_edges=NEVER, default_min_edges_float64=NEVER)
 
 #: The same for a captured training step (a padded batch with an index plan, replayed as a CUDA graph),
