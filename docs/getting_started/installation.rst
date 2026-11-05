@@ -4,7 +4,7 @@
 Installation
 ************
 
-xnn needs Python 3.10 or later. The core package depends on ``torch`` (2.0 or
+xnn needs Python 3.11 or later. The core package depends on ``torch`` (2.0 or
 newer), ``numpy``, ``pyyaml`` and ``tqdm``. Everything else can be added based
 on your need as an extra optional dependency.
 
@@ -18,7 +18,7 @@ use the ``xnn`` label:
 .. code-block:: bash
 
    pip install xnns                  # core
-   pip install "xnns[gnn,ase]"       # + e3nn (NequIP / MACE / Allegro) and ASE
+   pip install "xnns[gnn,ase]"       # + e3nn (the equivariant models) and ASE
 
 From source
 ===========
@@ -39,7 +39,7 @@ xnn gives you the ability to install only what you need:
 
 .. code-block:: bash
 
-   pip install "xnns[gnn]"          # e3nn: NequIP, MACE, Allegro
+   pip install "xnns[gnn]"          # e3nn: NequIP, MACE, Allegro, CACE, AIMNet2, Equiformer, EquiformerV2
    pip install "xnns[ase]"          # ASE calculator, reading structure files
    pip install "xnns[vesin]"        # cell-list neighbor lists for large systems
    pip install "xnns[cpu-kernels]"  # ninja, for the optional C++ CPU kernels (D3, D4, HDNNP)
@@ -51,7 +51,7 @@ xnn gives you the ability to install only what you need:
    pip install "xnns[dev]"          # pytest
    pip install "xnns[docs]"         # Sphinx and the docs theme
    pip install "xnns[examples]"     # everything the example notebooks need
-   pip install "xnns[all]"          # gnn, ase, vesin, hydra, tensorboard, dev and examples
+   pip install "xnns[all]"          # gnn, ase, vesin, cpu-kernels, hydra, tensorboard, dev and most of examples
 
 The fidelity notebooks and tests compare against reference packages, which have
 their own extra optional dependencies: ``ani`` (torchani), ``d3``
@@ -59,9 +59,12 @@ their own extra optional dependencies: ``ani`` (torchani), ``d3``
 pins ``mace-torch`` and ``nequip``, which pin ``e3nn==0.4.4``. xnn runs on that
 version.
 
-The fused GPU kernels (:ref:`howto-fast-paths`) are not considered extra
-optional dependencies. They need a CUDA 12.6 or newer PyTorch build and are
-installed manually by the user:
+Most fast paths (:ref:`howto-fast-paths`) run Triton kernels, which ship with
+CUDA builds of PyTorch, or ``torch.compile`` (Python 3.11 or 3.12). On CPUs,
+the kernels of the force fields and of AMOEBA and HIPPO also need a C++
+compiler with OpenMP and the ``triton`` package. Only the MACE and NequIP
+kernels need extra packages. They are not extra optional dependencies of xnn.
+They need a CUDA 12.6 or newer PyTorch build and are installed manually:
 
 .. code-block:: bash
 
@@ -90,9 +93,12 @@ prints the xnn version and the list of available models.
 
    print(xnn.__version__)
    print(available_models())
-   # ['aimnet2', 'allegro', 'amber', 'amoeba', 'ani', 'bamboo', 'cace', 'charmm', 'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding',
-   #  'hdnnp', 'mace', 'nequip', 'opls', 'physnet', 'reaxff', 'schnet', 'se3cnn']
+   # ['aimnet2', 'allegro', 'amber', 'amoeba', 'ani', 'bamboo', 'cace', 'charmm', 'cnn3d', 'd3', 'd4',
+   #  'dimenet', 'dimenet++', 'dreiding', 'equiformer', 'equiformer_v2', 'et', 'gemnet', 'hdnnp', 'hippo',
+   #  'mace', 'nequip', 'nnp1g', 'opls', 'painn', 'physnet', 'pm3', 'pm6', 'pm6_org', 'pm7', 'reaxff',
+   #  's2cnn', 'schnet', 'se3cnn', 'spookynet', 'tensornet']
 
-The e3nn-based models (NequIP, MACE, Allegro, the SE(3) steerable CNN) only
-appear when the ``gnn`` extra is installed. The test suite runs with ``pytest
+NequIP, MACE, Allegro, CACE, AIMNet2, Equiformer and EquiformerV2 only appear
+when the ``gnn`` extra is installed. The SE(3) steerable CNN needs it to build
+a model. The test suite runs with ``pytest
 tests/`` (``dev`` extra).

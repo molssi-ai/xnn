@@ -19,12 +19,14 @@ bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
 and the interaction modules of SpookyNet (compiled with ``torch.compile``), the
+residual MLPs of SpookyNet in training, the
 3D convolutions of the SE(3) steerable CNN and the 3D CNN (on cuDNN's
 channels-last kernels), the Fourier transforms and spectral products of the
 spherical CNN, the atomic environment vectors of ANI, the message sums of
 PhysNet, the symmetry functions of HDNNP, the attention messages of BAMBOO,
 every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
-solve of ReaxFF and ReaxFF-nn, the three-body term of D3 and D4 and the
+solve of ReaxFF and ReaxFF-nn, the pair terms, fields, induction solve and
+mesh sums of AMOEBA and HIPPO, the three-body term of D3 and D4 and the
 large-system EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA
 builds of PyTorch), and the reciprocal sum of the LES long-range term (for
 which, we use plain PyTorch). On a CPU, the three-body term of D3 and D4 and the
@@ -41,7 +43,7 @@ pip:
 
    pip install cuequivariance==0.6.1 cuequivariance-torch==0.6.1 cuequivariance-ops-torch-cu12==0.6.1
 
-The three packages must come from one xnn release. Without them, or on a CPU,
+The three packages must come from one cuEquivariance release. Without them, or on a CPU,
 MACE and NequIP fall back to their reference implementation.
 
 Choose the implementation
@@ -108,8 +110,9 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.dnn.fast.physnet.AUTO_POLICY_TRAINING`
 - HDNNP: :data:`xnn.dnn.fast.acsf.AUTO_POLICY`,
   :data:`xnn.dnn.fast.acsf.AUTO_POLICY_TRAINING`
-- SpookyNet: :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY`,
-  :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY_TRAINING`
+- SpookyNet: :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY` (maximum edge
+  counts), :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY_TRAINING` and, for
+  captured steps, :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY_CAPTURED`
 - BAMBOO: :data:`xnn.hybnn.fast.bamboo.AUTO_POLICY`,
   :data:`xnn.hybnn.fast.bamboo.AUTO_POLICY_TRAINING`
 - LES: :data:`xnn.common.models.les.AUTO_POLICY`
@@ -121,11 +124,13 @@ for training on small systems on an A30 or an L40S. The ANI kernels are faster
 at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
 float64 throughput is low. The PhysNet kernels win on large systems, from about
-20k to 300k edges depending on the GPU, and the BAMBOO kernels from about 5k to
+20k to 300k edges depending on the GPU (at every size in float64 on a T4), and the BAMBOO kernels from about 5k to
 60k. The HDNNP kernels are faster at every size, for evaluation and training,
-except in float64 on an L40S. ``"auto"`` takes the
-compiled blocks of SpookyNet for float64 evaluation of large systems, from about
-50k edges on an A100. The thresholds may change in any release as we rerun our benchmarks, so report the xnn version with results
+except in float64 on an L40S or a T4. ``"auto"`` takes the
+compiled block of SpookyNet for evaluations below about 30k edges (on a T4, at
+every size in float32 and never in float64). It trains SpookyNet on its fused
+MLPs in captured steps, and in ordinary steps from 16k to 70k edges depending
+on the GPU and precision. The thresholds may change in any release as we rerun our benchmarks, so report the xnn version with results
 obtained with ``"auto"``.
 
 .. _howto-fast-paths-cpu:
@@ -140,17 +145,22 @@ loops. So, the code needs a C++ compiler on the machine:
 
    model.set_use_fast(True)     # the compiled path on a CPU, where torch.compile works
 
-- **First call.** The first evaluation compiles, which takes 10 to 20 seconds.
-  Later calls of any system size reuse the compiled code. ``"auto"`` takes the
-  D3 / D4 path above 5000 edges (about 75 atoms), where that pays off. HDNNP runs
-  it only with ``use_fast=True``.
+- **First call.** The first evaluation compiles, which takes 10 to 60 seconds.
+  Later calls of any system size reuse the compiled code.
+- **Choice.** A standalone D3 or D4 term computes a molecule of up to 2048
+  atoms, or a batch of molecules of up to 256 atoms, over all atom pairs and
+  triangles in one compiled call. ``"auto"`` takes that at every size. For cells
+  and larger systems, ``"auto"`` takes the compiled path above 5000 edges (about
+  75 atoms). A 2G HDNNP takes its direct path (below) at every size.
 - **Threads.** The compiled code keeps the OpenMP thread count of the process that
   compiled it. Give runs with different thread counts their own
-  ``TORCHINDUCTOR_CACHE_DIR``.
+  ``TORCHINDUCTOR_CACHE_DIR``. With exactly as many threads as allotted cores,
+  the compiled code's OpenMP threads can stall against PyTorch's own. Allot a
+  few more cores than threads, or set ``OMP_WAIT_POLICY=PASSIVE``.
 - **Evaluation only.** Covers the energies, forces and stress. A training step
-  runs the reference path. A standalone D3 or D4 term (no wrapped model) forms
-  its forces and stress from written-out derivatives instead of an autograd
-  pass (D4 for molecules); its outputs then carry no autograd graph.
+  runs the reference path. A standalone D3 or D4 term (no wrapped model), and a
+  2G HDNNP, form their forces and stress from written-out derivatives instead
+  of an autograd pass. Their outputs then carry no autograd graph.
 - **Fallback.** Where ``torch.compile`` cannot produce CPU code, the reference
   path runs.
 
@@ -193,9 +203,10 @@ What to expect from fast implementations
   does. It is ten to thirty percent faster per MD step, depending on the GPU.
   The energies stay at the float32 round-off, the forces lose up to one digit.
   ``use_fast`` alone never changes the numbers.
-- **Training.** The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet,
-  DimeNet, Allegro and CACE fast paths are twice differentiable. So, the force training runs through them, LoRA
-  adapters included. The three-body kernels of D3 and D4 are twice
+- **Training.** Every fast path with a Fast-Path (Training) mark in
+  :ref:`model-support` is twice differentiable, so force training runs
+  through it. The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet,
+  DimeNet, Allegro and CACE fast paths also take LoRA adapters. The three-body kernels of D3 and D4 are twice
   differentiable on a GPU, stress included, so force training runs through
   them. With trainable damping parameters (``s9``, ``a1``, ``a2``), the
   reference three-body term runs. The kernels of the
@@ -219,7 +230,9 @@ What to expect from fast implementations
   TorchScript does.
 - **Compilation.** The TensorNet fast path compiles its atom-wise steps with
   ``torch.compile`` on the first evaluation in each precision (seconds to a
-  minute). Later evaluations of any system size reuse them.
+  minute). Later evaluations of any system size reuse them. SpookyNet's
+  compiled block takes about a minute the first time. The compiled blocks of
+  Equiformer and EquiformerV2 also compile on their first evaluation.
 
 Captured training steps
 =======================
@@ -236,8 +249,8 @@ batch:
 The data loader pads every batch to fixed counts with one inert structure
 and builds the model's index work on the CPU: the triplets of DimeNet, the
 quadruplets of GemNet, and the local edges and long-range pairs of SpookyNet.
-The step runs the reference implementation. SpookyNet steps are 3 to 5 times
-faster this way on small and medium systems. They do not support the Ewald
+The step runs the reference implementation (SpookyNet's runs its fused MLPs).
+SpookyNet steps are 3 to 5 times faster this way on small and medium systems. They do not support the Ewald
 sum. The results equal those of ordinary
 steps up to round-off. Where ``use_fast`` takes the fused kernels for the
 padded batch size, the first steps time ordinary steps on the kernels against
@@ -261,9 +274,33 @@ Each structure is padded to fixed atom and edge counts with one inert
 structure, with 5 % headroom. A structure that outgrows the counts is recorded
 again. The replay runs the reference implementation, so the results equal
 those of ordinary evaluations up to round-off. SpookyNet's replay also uses
-its compiled blocks where ``"auto"`` takes them.
+its compiled block where ``"auto"`` takes it.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any
 evaluation of a graph.
+
+Semiempirical methods
+=====================
+PM3, PM6, PM6-ORG and PM7 have no separate kernels. On a GPU the model replays
+CUDA graphs of its own launches instead. From the third evaluation of a batch
+composition (the same atoms, charges and spins), it replays the SCF iterations
+and the integral build with its derivatives:
+
+.. code-block:: python
+
+   from xnn.sqmnn.models import PM7
+
+   model = PM7().to("cuda").eval()      # use_fast="auto": graphs from the third evaluation
+   model.set_use_fast(False)            # always launched
+
+The eigenvalue problem runs between the replays. The results equal those of
+launched evaluations up to round-off. Gradients taken with ``create_graph``
+(Hessians, force training) and their gradients replay graphs of their own,
+recorded at the next evaluation after the first such gradient. With trainable
+parameters the build is replayed from the parameters and the density response
+from graphs of its iterations, so a force-loss training step runs on the graphs
+too. Each recording takes a few tenths of a second. A
+composition that only recurs after many others, as in a training set cycled
+through in epochs, is never recorded.
 
 Molecular dynamics with classical force fields
 ==============================================

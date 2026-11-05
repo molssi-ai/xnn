@@ -30,7 +30,7 @@ and dipole for models that can predict them:
 The net charge and spin multiplicity can come from ``atoms.info`` entries in an
 ASE ``*.xyz`` file. See the :ref:`howto-ase` guide for more information. On a
 GPU, ``cuda_graph=True`` replays each evaluation as one CUDA graph for
-DimeNet, GemNet and PhysNet, which is faster for small structures (see
+DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, which is faster for small structures (see
 :ref:`howto-fast-paths`).
 
 TorchScript
@@ -58,7 +58,9 @@ the engine's own neighbor list instead, as the ``pair_nequip`` /
   work but ``torch.inference_mode()`` will not.
 - The net charge and spin multiplicity are fixed at export time
   (by setting ``--total-charge`` and ``--spin-multiplicity`` flags).
-- A long-range (LES) model needs the whole atomistic system on one rank, so
+- A model with long-range terms (LES, D4, SpookyNet, or the charges of
+  AIMNet2, BAMBOO, PhysNet and HDNNP 3G / 4G) needs the whole atomistic system
+  on one rank, so
   drive it through ``forward``, ``fix external`` or the MDI engine rather than a
   domain-decomposed pair style.
 
@@ -110,4 +112,8 @@ Which model deploys how
 =======================
 - **ASE and MDI**: every model is supported, with or without a D3 / D4 term.
 - **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2,
-  SpookyNet, NequIP, MACE, Allegro, CACE, AIMNet2, ANI, PhysNet and HDNNP, with or without a D3 / D4 term.
+  SpookyNet, BAMBOO, NequIP, MACE, Allegro, CACE, AIMNet2, ANI, PhysNet and
+  HDNNP, with or without a D3 / D4 term.
+- **LAMMPS inputs**: OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and
+  HIPPO, through :func:`~xnn.ffnn.models.write_lammps_input` (see
+  :ref:`howto-lammps`).

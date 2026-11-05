@@ -57,5 +57,6 @@ Things to keep in mind
   carries the charge solve from one step to the next.
 - Classical force fields need their customary timesteps: about 0.1 fs for
   ReaxFF, 0.5 to 1 fs for OPLS, DREIDING, AMBER and CHARMM with explicit hydrogens.
-- Models that predict charges (AIMNet2, PhysNet, BAMBOO, ReaxFF, OPLS,
-  DREIDING, AMBER, CHARMM) expose them as ``atoms.calc.results["charges"]``.
+- Models that predict charges (AIMNet2, PhysNet, BAMBOO, SpookyNet, HDNNP
+  3G / 4G, PM3 / PM6 / PM6-ORG / PM7, ReaxFF, OPLS, DREIDING, AMBER, CHARMM,
+  AMOEBA, HIPPO) expose them as ``atoms.calc.results["charges"]``.

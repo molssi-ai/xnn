@@ -22,9 +22,9 @@ from a config, or constructed directly with the same keys:
    out = model(graph)               # energy, node_energy, forces, stress
 
 Pre-trained models can be fetched with ``from_pretrained()`` from the model hub
-(see :ref:`howto-pretrained-models` for more details). NequIP, MACE, Allegro and
-the SE(3) steerable CNN require the ``gnn`` extra dependencies installed
-(alongside e3nn).
+(see :ref:`howto-pretrained-models` for more details). NequIP, MACE, Allegro, CACE,
+AIMNet2, Equiformer, EquiformerV2 and the SE(3) steerable CNN require the
+``gnn`` extra dependencies installed (alongside e3nn).
 
 
 MACE
@@ -108,8 +108,8 @@ CACE
 <https://github.com/BingqingCheng/cace>`_) is the Cartesian atomic cluster
 expansion of `Cheng, npj Comput. Mater. 10, 157 (2024)
 <https://doi.org/10.1038/s41524-024-01332-4>`_. It builds
-body-ordered invariants from Cartesian monomials, with optional message passing
-(it does not required e3nn).
+body-ordered invariants from Cartesian monomials, with optional message
+passing.
 
 .. code-block:: yaml
 
@@ -693,13 +693,16 @@ correction of later CHARMM sets is not implemented, so ``charmm22`` is the
 
 Classical force fields on GPUs and in LAMMPS
 ============================================
-On a GPU, OPLS, AMBER, CHARMM and DREIDING evaluate every term on fused
-kernels (``use_fast="auto"``), in evaluation and in training. The numbers
-are those of the eager terms to round-off. For MD,
-:class:`~xnn.ffnn.models.ClassicalStepper` keeps a neighbor list with a skin
-and replays each step as a CUDA graph (:ref:`howto-fast-paths`).
+On a GPU, OPLS, AMBER, CHARMM, DREIDING, ReaxFF and ReaxFF-nn evaluate their
+terms on fused kernels (``use_fast="auto"``), in evaluation and in training.
+A stress loss trains on the eager terms. The numbers are those of the eager
+terms to round-off. For MD, :class:`~xnn.ffnn.models.ClassicalStepper` and
+:class:`~xnn.ffnn.models.ReaxFFStepper` keep a neighbor list with a skin. On a
+GPU they replay each step as a CUDA graph. On a CPU they run the kernels as
+C++ loops (:ref:`howto-fast-paths`).
 :func:`~xnn.ffnn.models.write_lammps_input` writes the inputs that evaluate
-a model, ReaxFF included, with LAMMPS's own styles (:ref:`howto-lammps`).
+a model with LAMMPS's own styles, ReaxFF, AMOEBA and HIPPO included
+(:ref:`howto-lammps`).
 
 AMOEBA and HIPPO
 ================
@@ -793,7 +796,10 @@ from the last steps, which saves a fifth to a third of the iterations. Every
 backward solve starts from the previous one.
 
 ``use_fast=True`` runs the pair terms, the fields, the induction solve and
-the mesh sums on fused GPU kernels, in evaluation and in training. In training
+the mesh sums on fused GPU kernels, in evaluation and in training. On a CPU,
+the same kernels run as C++ loops (see :ref:`howto-fast-paths-cpu`). The
+default ``"auto"`` takes them on a GPU at every size and on a CPU from about
+50 000 atom pairs. In training
 the pair kernels give the second derivatives of a force loss and the parameter
 gradients; the mesh and the solver's products run eagerly there. The first
 evaluations pay for the compilation. The kernels give the numbers of the reference implementation to
@@ -809,7 +815,7 @@ lose up to one digit. It has no effect on a float64 model or on AMOEBA.
 
 .. code-block:: python
 
-   model = Hippo.from_tinker_xyz("system.xyz", lib, use_fast=True, mixed_precision=True)
+   model, structure = Hippo.from_tinker_xyz("system.xyz", lib, use_fast=True, mixed_precision=True)
    model = model.to("cuda", torch.float32)
 
 ``plan_step(data, skin, capacity)`` records the decisions of one evaluation,

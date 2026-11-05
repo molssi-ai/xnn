@@ -17,7 +17,7 @@ keywords: The core group which is general to all models, and the model-specific
 group which is defined in the ``model.extra`` field. 
 
 Below, we create a new config file ``my_train.yaml`` for training a MACE model
-on argon data (bundled in ``data/argon_train.xyz`` in xnn).
+on argon data (``datasets/argon_md/`` in the repository).
 
 .. code-block:: yaml
 
@@ -27,16 +27,18 @@ on argon data (bundled in ``data/argon_train.xyz`` in xnn).
      name: mace
      cutoff: 4.0
      species: [18]
-     num_channels: 32
-     num_interactions: 2
+     n_features: 32
+     n_interactions: 2
      max_ell: 3
      correlation: 3
      avg_num_neighbors: 20.0
 
    data:
-     train_path: data/argon_train.xyz
-     val_path: data/argon_val.xyz
-     test_path: data/argon_test.xyz    # Optional; evaluated once after training
+     train_path: datasets/argon_md/argon_train.xyz
+     test_path: datasets/argon_md/argon_test.xyz    # Optional; evaluated once after training
+     energy_key: REF_energy
+     forces_key: REF_forces
+     stress_key: REF_stress
      batch_size: 8
 
    optim:

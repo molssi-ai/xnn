@@ -4,7 +4,9 @@
 Export to LAMMPS and TorchScript
 **********************************
 
-SchNet, DimeNet, GemNet, NequIP, MACE and Allegro export to a self-contained
+SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, NequIP, MACE, Allegro,
+CACE, AIMNet2, ANI, PhysNet, HDNNP, ET, Equiformer, EquiformerV2, BAMBOO and
+SpookyNet export to a self-contained
 TorchScript file that needs nothing but ``libtorch`` or ``torch.jit.load``: no
 xnn, no Python model code, no config. The scripted models match their eager
 variants to about 1e-15.
@@ -56,6 +58,30 @@ function, which implements the pair-style interface of the ``pair_nequip`` /
 neighbor list. One structure is processed per call with no batch dimension.
 Using ``torch.no_grad()`` is fine but using ``torch.inference_mode()`` is not
 (because forces are computed with autograd).
+
+Semiempirical methods
+=====================
+PM3, PM6, PM6-ORG and PM7 export the same way, from the Python API:
+
+.. code-block:: python
+
+   from xnn.common.deploy import export_torchscript_potential
+   from xnn.sqmnn.models import PM7
+
+   export_torchscript_potential(PM7(), cutoff=6.0, path="pm7.pt", total_charge=0.0, spin_multiplicity=1.0)
+
+The file holds the tables of every element of the parameter set and runs the
+SCF of the reference implementation, with its corrections. It evaluates one
+molecule per call and uses every atom pair, so the whole molecule must be on
+one rank. Periodic cells are refused. The neighbor list and the cutoff are not
+used by the energy. Each call starts its SCF from the previous density when the
+atoms are the same and have moved by less than 0.3 Angstrom, as in a
+molecular dynamics run. The energy is the heat of formation in eV, and the
+charges are the Mulliken charges.
+
+The graph executor's optimizations take several seconds on the first calls
+and do not make later calls faster. In Python, call the model inside
+``torch.jit.optimized_execution(False)`` to skip them.
 
 Classical force fields
 ======================

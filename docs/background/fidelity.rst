@@ -10,6 +10,13 @@ original models when accessible (``tests/``, ``notebooks/fidelity_checks/``). Th
 reference packages are used only as external oracles and references for
 validating our implementation.
 
+The standard also asks each reference implementation to be at least as fast
+as its upstream code, for evaluation and a training step, on the upstream's
+own hardware: on the same CPU cores when the upstream runs on CPUs. The fast
+paths (:ref:`howto-fast-paths`) are separate implementations that give the
+reference's numbers and derivatives to round-off. :ref:`model-support` rates
+every model against this standard.
+
 .. note::
 
    **xnn does not ship any pre-trained models or third-party weights.**
@@ -123,8 +130,9 @@ Numerical agreement under identical weights involves:
   round-off, the correlations match their direct evaluation for point
   filters, and the layers are exactly equivariant on bandlimited signals.
 - **BAMBOO** (`bytedance/bamboo <https://github.com/bytedance/bamboo>`_):
-  about 1e-15 layer by layer. xnn returns the conservative force, equal to
-  upstream's ``forces + qeq_force``.
+  about 1e-15 layer by layer. xnn's forces are the exact gradient of the
+  energy. The forces the upstream reports differ from that gradient by about
+  one part in 10^10.
 - **LES** (``cace.modules.EwaldPotential``): ``LatentEwald(CACE)`` reproduces
   CACE-LR to float32 round-off and each kernel to about 1e-16 in float64.
 - **D4 and D3** (`dftd4 <https://github.com/dftd4/dftd4>`_,

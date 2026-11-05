@@ -15,17 +15,19 @@ xnn is organized by model family, with everything shared in ``common``:
        config/        Config schema, YAML / argparse / Hydra loaders, key translation
        models/        InteratomicPotential, registry, ForceStressOutput, les, d3, d4,
                       blocks (gated equivariant block), hub/ (from_pretrained),
-                      dispersion_fast/ (Triton kernels)
+                      fast (use_fast, AutoPolicy), compiled (torch.compile blocks),
+                      dispersion_fast/ (GPU and CPU kernels)
        finetune/      LoRA, multi-head replay, freezing, reference energies
-       train/         Trainer, losses
+       train/         Trainer, losses, callbacks, loggers, captured CUDA-graph steps
        benchmark/     scoring pre-trained models
        deploy/        ASE calculator, TorchScript export, MDI engine
        cli/           the xnn command
+       cpu_kernels.py Triton kernels as C++ / OpenMP loops on CPUs
      gnn/
        featurizers/   spherical harmonics, Cartesian monomials, Bessel, spherical Bessel, polynomial cutoff
        models/        schnet, dimenet, gemnet, painn, tensornet, nequip, mace, allegro, cace,
                       aimnet2 (+ foundation loaders)
-       fast/          cuEquivariance fast paths
+       fast/          Triton kernels; cuEquivariance for MACE and NequIP
      cnn/
        featurizers/   voxel grids and spherical signals of the atomic environment
        models/        steerable (SE(3) CNN), cnn3d, spherical (S^2 / SO(3) correlations)
@@ -36,12 +38,14 @@ xnn is organized by model family, with everything shared in ``common``:
      ffnn/
        common/        .frc force-field reader, SMARTS atom typing
        data/          the shipped .frc files
-       models/        reaxff, opls, dreiding, amber, charmm, topology
+       models/        reaxff, opls, dreiding, amber, charmm, amoeba (AMOEBA, HIPPO),
+                      topology, MD steppers, fused kernels
      sqmnn/
        common/        MOPAC EXTERNAL reader/writer, published values (downloaded), element data
        models/        nddo (SCF, integrals), pm3, pm6, pm6-org, pm7
      trfnn/
-       models/        et (the TorchMD-Net equivariant transformer)
+       models/        et (the TorchMD-Net equivariant transformer), equiformer, equiformer_v2
+       fast/          fused attention kernels, compiled transformer blocks
        attention.py   edge multi-head attention
      hybnn/
        featurizers/   exponential Bernstein radial basis
@@ -60,8 +64,10 @@ Four ideas hold it together.
    that models compose and you can inspect on their own.
 3. **Physics in wrappers.** :class:`~xnn.common.models.outputs.ForceStressOutput`
    differentiates any model's energy for forces and stress; models never
-   implement them. Long-range electrostatics (LES), dispersion (D3, D4) and
-   the fast paths wrap any model the same way.
+   implement them. Long-range electrostatics (LES) and dispersion (D3, D4)
+   wrap any model the same way. Fast paths sit inside a model next to its
+   reference code, on the same parameters, and ``use_fast`` chooses between
+   them.
 4. **One config, one registry.** ``@register_model`` plus ``from_config``
    expose a model to the YAML, argparse and Hydra frontends, which all fill
    one :class:`~xnn.common.config.schema.Config`. Datasets and pre-trained

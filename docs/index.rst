@@ -24,9 +24,11 @@ xnn offers several benefits out-of-the-box:
 
 - **Faithful implementations.** Each model reproduces its reference code or
   paper to float32 and float64 round-off errors, verified block by block
-  (:ref:`fidelity`).
+  (:ref:`fidelity`). :ref:`model-support` rates their speed against the
+  upstream codes.
 - **Classical force fields and semiempirical methods, modernized.** ReaxFF,
-  OPLS, DREIDING, AMBER, CHARMM and PM3 / PM6 / PM7 use the same PyTorch
+  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO and PM3 / PM6 / PM6-ORG / PM7
+  use the same PyTorch
   interface as the MLIPs, so they train (reparameterize), evaluate and deploy
   the same way, on CPU or GPU.
 - **One pipeline.** Shared data object, config schema, trainer and
@@ -39,8 +41,9 @@ xnn offers several benefits out-of-the-box:
   and the ``xnn`` command.
 - **Physics add-ons for any model.** Latent Ewald long-range electrostatics and
   D3 / D4 dispersion can be added to any short-range model.
-- **Fast paths.** Fused GPU kernels for the expensive blocks, switched on
-  per run without changing the model.
+- **Fast paths.** Fused GPU kernels, compiled blocks, CUDA graphs and CPU
+  kernels give the reference's numbers and derivatives faster.
+  ``use_fast="auto"`` takes them where they win, for evaluation and training.
 
 
 .. grid:: 1 1 2 2
@@ -163,8 +166,11 @@ Models at a glance
 Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every model trains,
 evaluates and runs under ASE deployment interface. SchNet, DimeNet, GemNet,
-PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP, MACE, Allegro, CACE, AIMNet2, ANI, PhysNet and HDNNP also export
-to TorchScript for LAMMPS, and any checkpoint can also serve as an MDI engine (:ref:`deployment`).
+PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
+Allegro, CACE, AIMNet2, ANI, PhysNet and HDNNP also export to TorchScript for
+LAMMPS. OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and HIPPO
+deploy as LAMMPS inputs. Any checkpoint can also serve as an MDI engine
+(:ref:`deployment`).
 
 xnn is developed by Mohammad Mostafanejad at `The Molecular Sciences Software
 Institute (MolSSI) <https://molssi.org>`_. Visit the `GitHub repository
