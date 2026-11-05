@@ -779,43 +779,112 @@ def _force_loss_results(model, g):
             {n: p.grad.double().clone() for n, p in model.named_parameters() if p.grad is not None})
 
 
-def test_fast_sums_match_the_reference():
-    """The fused local sums (s, and p and d over 3 and 5 feature blocks: widths that are not powers
-    of two) give the reference energies, forces and the weight gradients of a force loss (Triton's
-    interpreter on a CPU, the kernels on a GPU)."""
-    pytest.importorskip("triton")
-    model, g = _fast_case("cuda" if torch.cuda.is_available() else "cpu")
-    blocks = [m.local_interaction for m in model.interactions]
-    res = {}
-    for on in (False, True):
-        # the model selects per evaluation, and no CPU qualifies: pin the selection
-        def pinned(num_edges, on=on):
-            model.__dict__["_fast_blocks"] = blocks
-            for b in blocks:
-                b.fast_active = on
-        model._select_fast = pinned
-        res[on] = _force_loss_results(model, g)
-    del model._select_fast
-    for ref, fast in zip(res[False][:2], res[True][:2]):
-        assert (fast - ref).abs().max() <= 1e-12 * ref.abs().max()
-    for name, gr in res[False][2].items():
-        assert (res[True][2][name] - gr).abs().max() <= 1e-11 * gr.abs().max().clamp_min(1e-30), name
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_fast_path_parity_and_training(dtype):
-    """On the GPU: the fused local sums give the reference energies, forces and weight gradients
-    of a force loss."""
+    """On the GPU: the compiled interaction block gives the reference energies and forces in evaluation, and
+    the fused MLP layers the reference energies, forces and weight gradients of a force loss in training."""
     pytest.importorskip("triton")
+    from xnn.hybnn.fast.spookynet import supported
+    if not supported(torch.device("cuda"), dtype):
+        pytest.skip("torch.compile is not available here")
     model, g = _fast_case("cuda", dtype)
+    tol = 1e-11 if dtype == torch.float64 else 1e-4
+    evals = {}
+    for use_fast in (False, True):
+        model.set_use_fast(use_fast)
+        out = ForceStressOutput(model).eval()(g)
+        evals[use_fast] = (out["energy"].detach().double(), out["forces"].detach().double())
+        assert model.compiled_interactions.fast_active == use_fast
+        assert not model.interactions[0].resmlp_y.fast_active
+    for ref, fast in zip(evals[False], evals[True]):
+        assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    _check_fused_training(model, g, tol)
+
+
+def _check_fused_training(model, g, tol):
     res = {}
     for use_fast in (False, True):
         model.set_use_fast(use_fast)
         res[use_fast] = _force_loss_results(model, g)
-        assert model.interactions[0].local_interaction.fast_active == use_fast
-    tol = 1e-11 if dtype == torch.float64 else 1e-4
+        assert model.interactions[0].resmlp_y.fast_active == use_fast
+        assert model.interactions[0].residual_pre[0].fast_active == use_fast
+        assert not model.compiled_interactions.fast_active
     for ref, fast in zip(res[False][:2], res[True][:2]):
         assert (fast - ref).abs().max() <= tol * ref.abs().max()
+    assert res[True][2].keys() == res[False][2].keys()
     for name, gr in res[False][2].items():
         assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name
+
+
+def _kernel_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if os.environ.get("TRITON_INTERPRET") == "1":
+        return "cpu"
+    pytest.skip("needs a CUDA device or Triton's interpreter")
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fused_mlp_derivatives(dtype):
+    """The fused residual MLPs (grouped), their gradients with respect to the input and every parameter, and
+    the second derivatives a force loss needs (of the input gradient, with respect to the input, the
+    parameters and the incoming gradient) equal the reference's: one or two residual blocks, with or without
+    an output layer and biases, rows that do not fill a program and no rows."""
+    pytest.importorskip("triton")
+    from xnn.hybnn.fast.mlp_kernels import residual_mlps
+    device = _kernel_device()
+    tol = 1e-12 if dtype == torch.float64 else 5e-5
+    gen = torch.Generator().manual_seed(0)
+
+    def rand(*shape, shift=0.0, scale=1.0):
+        return (shift + scale * torch.randn(*shape, generator=gen, dtype=dtype)).to(device).requires_grad_()
+
+    def reference(x, n_residual, output, params, per_layer):
+        def layer(h, i):
+            alpha, beta, w = params[i * per_layer:i * per_layer + 3]
+            a = alpha.unsqueeze(1) * h * torch.sigmoid(beta.unsqueeze(1) * h)
+            y = torch.bmm(a, w)
+            return y if per_layer == 3 else y + params[i * per_layer + 3].unsqueeze(1)
+        h = x.unsqueeze(0).expand(params[0].shape[0], x.shape[0], x.shape[1])
+        for r in range(n_residual):
+            h = h + layer(layer(h, 2 * r), 2 * r + 1)
+        return layer(h, 2 * n_residual) if output else h
+
+    for groups, n, f, n_residual, output, bias in [(3, 7, 12, 1, True, True), (1, 33, 5, 2, False, False),
+                                                   (2, 9, 8, 2, True, False), (1, 0, 8, 1, True, True)]:
+        x = rand(n, f)
+        n_layers = 2 * n_residual + (1 if output else 0)
+        params = []
+        for _ in range(n_layers):
+            params += [rand(groups, f, shift=1.0, scale=0.3), rand(groups, f, shift=1.7, scale=0.3),
+                       rand(groups, f, f, scale=0.3)] + ([rand(groups, f, scale=0.3)] if bias else [])
+        per_layer = 4 if bias else 3
+        v = torch.randn(groups, n, f, generator=gen, dtype=dtype).to(device)
+        inputs = [x] + params
+        results = []
+        for fast in (True, False):
+            y = (residual_mlps(x, n_residual, output, params) if fast
+                 else reference(x, n_residual, output, params, per_layer))
+            first = torch.autograd.grad((y * v).sum(), inputs, retain_graph=True, allow_unused=True)
+            (gx,) = torch.autograd.grad((y * v.sin()).sum(), x, create_graph=True)
+            second = torch.autograd.grad(gx.sin().sum() + (y * v).sum(), inputs, allow_unused=True)
+            results.append([y, *first, *second])
+        for fast, ref in zip(*results):
+            fast = torch.zeros(0) if fast is None else fast
+            ref = torch.zeros(0) if ref is None else ref
+            if ref.numel():
+                assert fast.shape == ref.shape
+                assert (fast - ref).abs().max() <= tol * ref.abs().max().clamp_min(1.0)
+
+
+def test_fused_training_interpreted(monkeypatch):
+    """The whole model trains through the fused layers (Triton's interpreter on a CPU): the energies, forces
+    and weight gradients of a force loss equal the reference's."""
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    import xnn.hybnn.fast.spookynet as fast
+    monkeypatch.setattr(fast, "fused_supported", lambda device, dtype: True)
+    model, g = _fast_case("cpu", torch.float64)
+    _check_fused_training(model, g, 1e-11)

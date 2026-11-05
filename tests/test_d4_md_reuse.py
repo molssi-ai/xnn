@@ -51,6 +51,8 @@ def _water_box(n_side=3, a=3.104, seed=0):
 
 
 def _run(model, pos, z, cell, grad=True):
+    # the reference three-body path, whose blocks the cache holds (a CPU's "auto" takes the C++ kernels)
+    model.set_use_fast(False)
     s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(z),
          "cell": torch.tensor(cell), "pbc": torch.tensor([True, True, True])}
     g = structure_to_graph(s, model.cutoff)

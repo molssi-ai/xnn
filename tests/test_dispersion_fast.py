@@ -276,8 +276,12 @@ def test_cpu_three_body_matches_the_reference(method, system, width):
         assert _rel(out[key], ref[key]) < 1e-12, key
 
 
-def _d3_kernels():
+@pytest.fixture
+def cpu_kernels(monkeypatch):
+    """The optional C++ CPU kernels, turned on for the test (skipped where they do not build)."""
+    from xnn.common.models import cpu_extension
     from xnn.common.models.dispersion_fast import cpu
+    monkeypatch.setattr(cpu_extension, "_ENABLED", True)
     if not cpu.available():
         pytest.skip("the C++ kernels do not build here")
 
@@ -288,10 +292,9 @@ _DAMPINGS = {"bj": {}, "zero": {}, "mzero": {"bet": 0.1}, "op": {"bet": 6.0}}
 @pytest.mark.parametrize("damping", list(_DAMPINGS))
 @pytest.mark.parametrize("system", ["small_cell", "cluster"])
 @pytest.mark.parametrize("s9", [0.0, 1.0])
-def test_d3_cpu_kernels_match_the_reference(damping, system, s9):
+def test_d3_cpu_kernels_match_the_reference(damping, system, s9, cpu_kernels):
     """D3 on the C++ kernels gives the reference's energies (total, per atom, two- and three-body), forces,
     stress, coordination numbers and features for every damping, with and without the three-body term."""
-    _d3_kernels()
     model = _model("d3", device="cpu", damping=damping, s9=s9, **_DAMPINGS[damping])
     g = _graph(model, system, device="cpu")
     ref, out = _pair(model, g)
@@ -303,10 +306,9 @@ def test_d3_cpu_kernels_match_the_reference(damping, system, s9):
 
 
 @pytest.mark.parametrize("system", ["small_cell", "cluster"])
-def test_d3_cpu_kernels_weighted_gradients(system):
+def test_d3_cpu_kernels_weighted_gradients(system, cpu_kernels):
     """Gradients other than those of summed energies (the three-body energy alone, weighted atomic energies,
     the coordination numbers, the homoatomic C6) evaluate again with their weights: the reference's."""
-    _d3_kernels()
     model = _model("d3", device="cpu")
     g = _graph(model, system, device="cpu")
     grads = {}
@@ -325,10 +327,9 @@ def test_d3_cpu_kernels_weighted_gradients(system):
         assert _rel(a, b) < 1e-12
 
 
-def test_d3_cpu_kernels_float32_is_at_least_as_accurate():
+def test_d3_cpu_kernels_float32_is_at_least_as_accurate(cpu_kernels):
     """float32 inputs run in float64 inside the kernels: closer to the float64 result than the float32
     reference (whose periodic three-body sums cancel to a few digits)."""
-    _d3_kernels()
     model = _model("d3", device="cpu")
     exact = model(copy.copy(_graph(model, "small_cell", device="cpu")))
     model32 = _model("d3", dtype=torch.float32, device="cpu")
@@ -338,10 +339,9 @@ def test_d3_cpu_kernels_float32_is_at_least_as_accurate():
         assert err_out < 1e-5 and err_out <= max(_rel(ref[key].double(), exact[key]), 1e-7), key
 
 
-def test_d3_cpu_kernels_step_aside():
+def test_d3_cpu_kernels_step_aside(cpu_kernels):
     """Trained parameters and training steps keep the reference (the kernels' gradient is differentiable
     once); elements without reference data raise as the reference does."""
-    _d3_kernels()
     model = _model("d3", device="cpu", trainable=True)
     fast.set_use_fast(model, True)
     assert not model.model.term.cpu_kernels_apply(10)
@@ -359,17 +359,18 @@ def test_d3_cpu_kernels_step_aside():
 
 @pytest.mark.parametrize("system", ["small_cell", "cell", "cluster"])
 @pytest.mark.parametrize("s9", [0.0, 1.0])
-def test_d4_cpu_kernels_match_the_reference(system, s9):
-    """D4's two- and three-body terms on the C++ kernels give the reference's energies, forces and stress,
-    and the gradients of other weightings (the three-body energy alone, weighted atomic energies)."""
-    _d3_kernels()
+def test_d4_cpu_kernels_match_the_reference(system, s9, cpu_kernels):
+    """D4's two- and three-body terms on the C++ kernels give the reference's energies, forces and stress
+    (a standalone cell takes the PyTorch direct path, whose LU-factored EEQ solve differs from the reference's
+    solve by a few 1e-13), and the gradients of other weightings (the three-body energy alone, weighted atomic
+    energies)."""
     model = _model("d4", device="cpu", s9=s9)
     g = _graph(model, system, device="cpu")
     ref, out = _pair(model, g)
     assert model.model.term.fast_active
     keys = ["energy", "node_energy", "energy_2body", "energy_3body", "forces"] + ["stress"] * (system != "cluster")
     for key in keys:
-        assert _rel(out[key], ref[key]) < 1e-12, key
+        assert _rel(out[key], ref[key]) < 1e-11, key
     grads = {}
     for mode in (False, True):
         fast.set_use_fast(model, mode)
@@ -382,6 +383,176 @@ def test_d4_cpu_kernels_match_the_reference(system, s9):
         grads[mode] = [torch.autograd.grad(loss, vec, retain_graph=True)[0] for loss in losses]
     for a, b in zip(grads[True], grads[False]):
         assert _rel(a, b) < 1e-12
+
+
+@pytest.mark.parametrize("method", ["d3", "d4"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_cpu_kernels_form_forces_and_stress_directly(method, dtype, monkeypatch, cpu_kernels):
+    """A standalone term on the C++ kernels in evaluation forms its forces and stress without autograd through
+    the evaluation (molecules, a charged one included, and a cell; D4's Ewald matrix of the cell is
+    differentiated over that matrix alone); the results equal the float64 reference to rounding (float32 inputs
+    run in float64 inside the kernels)."""
+    from xnn.common.data import collate
+    from xnn.common.models.dispersion_fast import cpu
+    calls = []
+    name = f"{method}_direct"
+    original = getattr(cpu, name)
+    monkeypatch.setattr(cpu, name, lambda *a: calls.append(1) or original(*a))
+    model = _model(method, device="cpu")
+    model32 = _model(method, dtype=dtype, device="cpu")
+    systems = [_water(2, False, seed=1), _water(2, False, seed=2), _water(3, True)]
+    graphs = {}
+    for dt, m in ((torch.float64, model), (dtype, model32)):
+        structures = [{k: (torch.tensor(v, dtype=dt) if k in ("pos", "cell") else v) for k, v in s.items()}
+                      for s in systems]
+        g = collate([structure_to_graph(s, m.model.cutoff) for s in structures])
+        if method == "d4":
+            g.total_charge = torch.tensor([0.0, 1.0, 0.0], dtype=dt)
+        graphs[dt] = g
+    fast.set_use_fast(model, False)
+    ref = model(copy.copy(graphs[torch.float64]))
+    fast.set_use_fast(model32, True)
+    out = model32(copy.copy(graphs[dtype]))
+    assert calls and "virial" not in out and set(out) == set(ref)
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    keys = ["energy", "node_energy", "energy_2body", "energy_3body", "forces", "node_features"]
+    keys += ["stress"] + ["eeq_charges", "dynamic_polarizabilities"] * (method == "d4")
+    for key in keys:
+        assert _rel(out[key].double(), ref[key]) < tol, key
+
+
+@pytest.mark.parametrize("damping", list(_DAMPINGS))
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+def test_d3_pytorch_direct_path_matches_the_reference(damping, s9, monkeypatch):
+    """With the C++ kernels off, a standalone D3 term forms its forces and stress in PyTorch without an
+    autograd pass (dispersion_fast.d3_direct; with a three-body term on the compiled tiles of atm_cpu with
+    their analytic gradient): the reference's energies, forces, stress and features for every damping, on
+    molecules, a small cell with repeated-atom triangles and a molecule-plus-cell batch."""
+    from xnn.common.data import collate
+    from xnn.common.models.dispersion_fast import d3_direct
+    if s9 != 0.0 and not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    calls = []
+    original = d3_direct.d3_direct
+    monkeypatch.setattr(d3_direct, "d3_direct", lambda *a: calls.append(1) or original(*a))
+    model = _model("d3", device="cpu", damping=damping, s9=s9, **_DAMPINGS[damping])
+    graphs = [_graph(model, "cluster", device="cpu"), _graph(model, "small_cell", device="cpu")]
+    small = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(2, True).items()}
+    molecule = {k: (torch.tensor(v) if k == "pos" else v) for k, v in _water(2, False, seed=5).items()}
+    graphs.append(collate([structure_to_graph(molecule, model.model.cutoff),
+                           structure_to_graph(small, model.model.cutoff)]))
+    for g in graphs:
+        ref, out = _pair(model, g)
+        keys = ["energy", "node_energy", "energy_2body", "energy_3body", "forces", "node_features"]
+        keys += ["stress"] * (g.cell is not None)
+        for key in keys:
+            assert _rel(out[key], ref[key]) < 1e-12, key
+    assert len(calls) == len(graphs)
+
+
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+@pytest.mark.parametrize("tail", [False, True])
+def test_d4_pytorch_direct_path_matches_the_reference(s9, tail, monkeypatch):
+    """With the C++ kernels off, a standalone D4 term forms its forces and stress in PyTorch without an
+    autograd pass through the evaluation (dispersion_fast.d4_direct: the EEQ adjoint, polarizability slopes,
+    compiled three-body tiles with their gradient; for cells the Ewald matrix's derivative): the reference's
+    energies, forces, stress, charges and polarizabilities, for a cluster, a small cell and a batch of a
+    charged molecule with a cell, with and without the tail correction."""
+    from xnn.common.data import collate
+    from xnn.common.models.dispersion_fast import d4_direct
+    if s9 != 0.0 and not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    calls = []
+    original = d4_direct.d4_direct
+    monkeypatch.setattr(d4_direct, "d4_direct", lambda *a: calls.append(1) or original(*a))
+    model = _model("d4", device="cpu", s9=s9, tail_correction=tail)
+    molecule = {k: (torch.tensor(v) if k == "pos" else v) for k, v in _water(2, False, seed=1).items()}
+    cell = {k: (torch.tensor(v) if k in ("pos", "cell") else v) for k, v in _water(2, True).items()}
+    batch = collate([structure_to_graph(molecule, model.model.cutoff), structure_to_graph(cell, model.model.cutoff)])
+    batch.total_charge = torch.tensor([1.0, 0.0])
+    graphs = [_graph(model, "cluster", device="cpu"), _graph(model, "small_cell", device="cpu"), batch]
+    for g in graphs:
+        ref, out = _pair(model, g)
+        keys = ["energy", "node_energy", "energy_2body", "energy_3body", "energy_tail", "forces", "eeq_charges",
+                "dynamic_polarizabilities", "node_features"] + ["stress"] * (g.cell is not None)
+        for key in keys:
+            assert _rel(out[key], ref[key]) < 1e-10, key
+    assert len(calls) == len(graphs)
+
+
+@pytest.mark.parametrize("solver", ["lu", "cg"])
+def test_d4_pytorch_direct_path_large_eeq_regime(solver, monkeypatch):
+    """The direct path in the large EEQ regime (matrix-free system, its adjoint solve, the derivative of its
+    differentiable application in the positions, the EEQ-range edges and the cell) gives the reference's
+    energies, forces, stress and charges, for a cluster and a cell."""
+    from xnn.common.models.dispersion_fast import d4_direct
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    calls = []
+    original = d4_direct.d4_direct
+    monkeypatch.setattr(d4_direct, "d4_direct", lambda *a: calls.append(1) or original(*a))
+    model = _model("d4", device="cpu", regime="large", cutoff_eeq=11.0, eeq_solver=solver)
+    tol = 1e-12 if solver == "lu" else 1e-10
+    for system in ("cluster", "cell"):
+        g = _graph(model, system, device="cpu")
+        ref, out = _pair(model, g)
+        for key in ["energy", "node_energy", "energy_3body", "forces", "eeq_charges"] + ["stress"] * (system == "cell"):
+            assert _rel(out[key], ref[key]) < tol, key
+    assert len(calls) == 2
+
+
+def _molecule_batch(model, charge=None):
+    from xnn.common.data import collate
+    first = {k: (torch.tensor(v) if k == "pos" else v) for k, v in _water(2, False, seed=5).items()}
+    second = {k: (torch.tensor(v) if k == "pos" else v) for k, v in _water(1, False, seed=7).items()}
+    batch = collate([structure_to_graph(first, model.model.cutoff), structure_to_graph(second, model.model.cutoff)])
+    if charge is not None:
+        batch.total_charge = torch.tensor(charge)
+    return batch
+
+
+@pytest.mark.parametrize("damping", list(_DAMPINGS))
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+def test_d3_dense_path_matches_the_reference(damping, s9, monkeypatch):
+    """Molecules up to DENSE_ATOMS take the dense path (every pair and triangle in one compiled call, the pairs
+    outside the graph's cutoffs left out): the reference's energies, forces, stress and features for every
+    damping, on a cluster and a batch of two molecules."""
+    from xnn.common.models.dispersion_fast import d3_direct
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    calls = []
+    original = d3_direct.d3_dense
+    monkeypatch.setattr(d3_direct, "d3_dense", lambda *a: calls.append(1) or original(*a))
+    monkeypatch.setattr(d3_direct, "DENSE_ATOMS", 1000)
+    model = _model("d3", device="cpu", damping=damping, s9=s9, **_DAMPINGS[damping])
+    graphs = [_graph(model, "cluster", device="cpu"), _molecule_batch(model)]
+    for g in graphs:
+        ref, out = _pair(model, g)
+        for key in ["energy", "node_energy", "energy_2body", "energy_3body", "forces", "node_features"]:
+            assert _rel(out[key], ref[key]) < 1e-12, key
+    assert len(calls) == len(graphs)
+
+
+@pytest.mark.parametrize("s9", [0.0, 1.0])
+def test_d4_dense_path_matches_the_reference(s9, monkeypatch):
+    """Molecules up to DENSE_ATOMS take the dense path (one EEQ system for the batch with a charge constraint per
+    molecule, its adjoint, every pair and triangle in one compiled call): the reference's energies, forces,
+    charges and polarizabilities, on a cluster and a batch of a charged and a neutral molecule."""
+    from xnn.common.models.dispersion_fast import d4_direct
+    if not _cpu_compiles():
+        pytest.skip("torch.compile produces no CPU code here")
+    calls = []
+    original = d4_direct.d4_dense
+    monkeypatch.setattr(d4_direct, "d4_dense", lambda *a: calls.append(1) or original(*a))
+    monkeypatch.setattr(d4_direct, "DENSE_ATOMS", 1000)
+    model = _model("d4", device="cpu", s9=s9)
+    graphs = [_graph(model, "cluster", device="cpu"), _molecule_batch(model, [1.0, 0.0])]
+    for g in graphs:
+        ref, out = _pair(model, g)
+        for key in ["energy", "node_energy", "energy_2body", "energy_3body", "forces", "eeq_charges",
+                    "dynamic_polarizabilities", "node_features"]:
+            assert _rel(out[key], ref[key]) < 1e-10, key
+    assert len(calls) == len(graphs)
 
 
 def test_set_use_fast_reaches_the_dispersion_wrapper():

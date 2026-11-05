@@ -377,3 +377,26 @@ def test_fast_path_parity_and_training(dtype):
         assert (fast - ref).abs().max() <= tol * ref.abs().max()
     for name, gr in res[False][2].items():
         assert (res[True][2][name] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), name
+
+
+@pytest.mark.parametrize("dispersion", [False, True])
+@pytest.mark.parametrize("charge", [0.0, 1.0])
+def test_torchscript_export_matches_eager(tmp_path, dispersion, charge):
+    """The exported potential (node_features_energy_charges core, all-pairs electrostatics from the positions)
+    gives the eager energies, forces and charges, also through the LAMMPS pair-style entry point with a full
+    neighbor list."""
+    from xnn.common.deploy import export_torchscript_potential
+    model = _build(use_dispersion=dispersion).eval()
+    g = _graph(n=9, cutoff=model.cutoff)
+    if charge:
+        g.total_charge = torch.tensor([charge])
+    ref = ForceStressOutput(model).eval()(g)
+    path = export_torchscript_potential(model, model.cutoff, str(tmp_path / "bamboo.pt"), total_charge=charge)
+    scripted = torch.jit.load(path)
+    for out in (scripted(g.pos, g.atomic_numbers),
+                scripted.forward_lammps(g.pos, g.edge_index, torch.zeros((g.edge_index.shape[1], 3)),
+                                        g.atomic_numbers, torch.zeros(3, 3))):
+        energy = out["energy"] if "energy" in out else out["total_energy"]
+        assert torch.allclose(energy.sum(), ref["energy"].sum(), atol=1e-12, rtol=0)
+        assert torch.allclose(out["forces"], ref["forces"], atol=1e-12, rtol=0)
+        assert torch.allclose(out["charges"], ref["charges"], atol=1e-12, rtol=0)

@@ -13,6 +13,7 @@ from xnn.common.train.losses import weighted_loss
 from xnn.dnn.models.physnet import PhysNet
 from xnn.gnn.models.dimenet import DimeNet, DimeNetPP
 from xnn.gnn.models.gemnet import GemNet
+from xnn.hybnn.models.spookynet import SpookyNet
 
 
 @pytest.fixture(autouse=True)
@@ -40,10 +41,15 @@ GEMNET = dict(n_features=12, n_edge_features=10, n_interactions=2, n_rbf=3, n_sp
               n_rbf_features=4, n_cbf_features=4, n_sbf_features=5, n_bilinear_triplet=7,
               n_bilinear_quadruplet=6, n_atom_residual=1)
 
-MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q", "physnet"]
+MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q", "physnet", "spookynet", "spookynet-lr"]
 
 #: PhysNet sizes (small)
 PHYSNET = dict(cutoff=5.0, n_features=16, n_rbf=8, num_blocks=2)
+
+#: SpookyNet sizes (small): long-range terms over all pairs, or over the edges within lr_cutoff
+#: (with a shorter local cutoff, so that the plan selects the local edges)
+SPOOKYNET = dict(n_features=12, n_interactions=2, n_rbf=6, cutoff=5.0, seed=0)
+SPOOKYNET_LR = dict(SPOOKYNET, cutoff=2.0, lr_cutoff=5.0)
 
 
 def _small(name="dimenet"):
@@ -58,6 +64,12 @@ def _small(name="dimenet"):
         return model
     if name.startswith("gemnet"):
         return GemNet(quadruplets=name == "gemnet-q", **GEMNET)
+    if name.startswith("spookynet"):
+        model = SpookyNet(**(SPOOKYNET_LR if name == "spookynet-lr" else SPOOKYNET))
+        with torch.no_grad():          # the zero-initialized layers randomized (all terms contribute)
+            for prm in model.parameters():
+                prm.add_(0.05 * torch.randn_like(prm))
+        return model
     common = dict(n_features=16, n_interactions=2, n_rbf=4, n_spherical=3, cutoff=5.0, n_output_layers=2)
     if name == "dimenet++":
         return DimeNetPP(n_triplet_features=8, n_basis_features=4, n_output_features=12, **common)
@@ -75,7 +87,9 @@ def test_padded_batch_is_inert(name):
     # the batch plan concatenated from the structures' own plans
     padded = PaddedCollate(planner, cap)([planned[i] for i in range(3)])
     assert padded.num_nodes == cap.atoms and padded.edge_index.shape[1] == cap.edges
-    if name != "physnet":
+    if name.startswith("spookynet"):
+        assert padded.index_plan["local"].shape[0] == cap.plan["local"]
+    elif name != "physnet":
         triplets = padded.index_plan["t_out" if name.startswith("gemnet") else "kj"]
         assert triplets.shape[0] == cap.plan["triplets"]
     plain = collate(graphs[:3])
@@ -111,6 +125,11 @@ def _cfg(tmp_path, cuda_graph, model="dimenet"):
     if model == "physnet":
         spec = {"name": "physnet", "cutoff": PHYSNET["cutoff"], "n_features": PHYSNET["n_features"],
                 "n_interactions": PHYSNET["num_blocks"], "n_rbf": PHYSNET["n_rbf"]}
+    elif model.startswith("spookynet"):
+        sizes = SPOOKYNET_LR if model == "spookynet-lr" else SPOOKYNET
+        spec = {"name": "spookynet", "cutoff": sizes["cutoff"], "n_features": sizes["n_features"],
+                "n_interactions": sizes["n_interactions"], "n_rbf": sizes["n_rbf"],
+                "extra": {k: sizes[k] for k in ("seed", "lr_cutoff") if k in sizes}}
     elif model.startswith("gemnet"):
         extra = {k: v for k, v in GEMNET.items()
                  if k not in ("n_features", "n_interactions", "n_rbf", "cutoff")}
@@ -145,9 +164,11 @@ def test_captured_steps_match_ordinary_steps(tmp_path, model):
         if cuda_graph:
             assert trainer._graphed is not None and trainer._graphed.graph is not None
         weights[cuda_graph] = {n: p.detach().clone() for n, p in trainer.module.named_parameters()}
+    # SpookyNet's sums add in no fixed order (atomic adds): two ordinary runs differ by about 1e-8
+    tol = 1e-7 if model.startswith("spookynet") else 1e-10
     for name, p in weights[False].items():
         err = (weights[True][name] - p).abs().max() / p.abs().max().clamp_min(1e-30)
-        assert err < 1e-10, (name, float(err))
+        assert err < tol, (name, float(err))
 
 
 def test_cuda_graph_needs_an_index_plan(tmp_path):

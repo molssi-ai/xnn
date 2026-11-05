@@ -41,7 +41,7 @@ def _model(name):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet"])
+@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_replays_equal_ordinary_evaluations(name, dtype):
     """Energies and forces (charges and dipoles of PhysNet) along a sequence of inputs (the steps of a

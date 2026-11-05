@@ -642,6 +642,41 @@ def test_compiled_symmetry_functions_match_the_reference(device, generation, per
     assert torch.isfinite(gf).all()
 
 
+@pytest.mark.parametrize("periodic", [False, True])
+def test_direct_forces_match_the_reference(periodic, monkeypatch):
+    """On a CPU a 2G model without type-8 functions forms its forces and stress from the written-out
+    gradient of the symmetry functions (xnn.dnn.fast.acsf_direct; every other type and cutoff kind, a
+    scaling mode): the reference's energies, forces, stress and descriptor; type 8 keeps the autograd path."""
+    from xnn.dnn.fast import acsf_direct
+    from xnn.dnn.fast.acsf import available
+    if not available():
+        pytest.skip("torch.compile produces no CPU code here")
+    torch.manual_seed(0)
+    s = _cell() if periodic else _molecule()
+    species = (11, 17) if periodic else (1, 6, 8)
+    full = _acsf(species, mode="center_scale")
+    acsf = AtomCenteredSymmetryFunctions(list(species), full.cutoffs,
+                                         [f for f in full.functions if f["type"] != 8], mode="center_scale")
+    acsf.fit_scaling([structure_to_graph(s, acsf.cutoff)])
+    model = HDNNP(list(species), acsf, generation=2, hidden=(8, 6),
+                  activation=["tanh", "softplus", "linear"]).double().eval()
+    calls = []
+    original = acsf_direct.forward_direct
+    monkeypatch.setattr(acsf_direct, "forward_direct", lambda *a: calls.append(1) or original(*a))
+    g = _graph(s, model)
+    wrapped = ForceStressOutput(model, compute_stress=periodic).eval()
+    model.set_use_fast(False)
+    ref = wrapped(g)
+    model.set_use_fast(True)
+    out = wrapped(g)
+    assert calls == [1]
+    for key in ("energy", "node_energy", "forces", "node_features") + (("stress",) if periodic else ()):
+        want = ref[key].detach()
+        assert (out[key] - want).abs().max() <= 1e-12 * want.abs().max(), key
+    typed8 = HDNNP(list(species), full, generation=2, hidden=(8, 6)).double().eval()
+    assert not typed8.forms_forces(g)
+
+
 @pytest.mark.parametrize("generation,extra", [
     (2, {}), (3, {}), (3, {"screening": {"kind": "cosine", "r_cut": 2.5}}),
     (4, {}), (4, {"hardness": "network"})])
@@ -748,10 +783,12 @@ def test_kernel_fast_path_parity_and_training(dtype):
         assert (res[True][2][k] - gr).abs().max() <= tol * gr.abs().max().clamp_min(1e-30), k
 
 
-def test_cpu_kernels_match_the_reference():
-    """The C++ / OpenMP symmetry functions (xnn.dnn.fast.acsf_cpu) give the reference's values and their
-    gradient with respect to the edge vectors, for a molecule and a cell (where a C++ compiler is available)."""
+def test_cpu_kernels_match_the_reference(monkeypatch):
+    """The optional C++ / OpenMP symmetry functions (xnn.dnn.fast.acsf_cpu) give the reference's values and
+    their gradient with respect to the edge vectors, for a molecule and a cell (where they build)."""
+    from xnn.common.models import cpu_extension
     from xnn.dnn.fast import acsf_cpu
+    monkeypatch.setattr(cpu_extension, "_ENABLED", True)
     if not acsf_cpu.available():
         pytest.skip("the C++ kernels do not build here")
     acsf = _kernel_acsf().double()
