@@ -104,3 +104,39 @@ def test_the_unique_pairs_of_a_slab(monkeypatch):
     assert _as_set(i, k, s) == _reference(monkeypatch, pos, 3.0, cell, pbc) and i.shape[0] == len(set(zip(
         i.tolist(), k.tolist(), map(tuple, s.tolist()))))
     assert bool((i[1:] >= i[:-1]).all())
+
+
+@pytest.mark.parametrize("cutoff", [5.0, 7.0])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_the_search_of_a_cell_too_small_for_a_grid(monkeypatch, cutoff, dtype):
+    """On a GPU, a cell with no room for a grid but every edge over the cutoff is searched without one: the
+    reference pairs, a pair in two images where the cell is under twice the cutoff, sorted by the first
+    atom; into buffers of a fixed capacity with their number on the device. Other cells are not searched so."""
+    if not torch.cuda.is_available():
+        pytest.skip("searches on a GPU")
+    pytest.importorskip("triton")
+    from xnn.common.data.grid_pairs import grid_pairs
+    pos, cell = _box(n=200)
+    pbc = torch.ones(3, dtype=torch.bool)
+    want = _reference(monkeypatch, pos, cutoff, cell, pbc)
+    gpu = pos.to("cuda", dtype)
+    edges = nl.small_cell(gpu, cutoff, cell.to("cuda", dtype), pbc.cuda())
+    assert edges is not None and torch.equal(edges.cpu(), torch.diagonal(cell).to(dtype))
+    i, k, s = grid_pairs(gpu, cutoff, edges, None)
+    assert _as_set(i.cpu(), k.cpu(), s.cpu()) == want and i.shape[0] == len(want)
+    assert bool((i[1:] >= i[:-1]).all())
+    if cutoff > 6.0:
+        assert len({(a, b) for a, b, *_ in want}) < len(want)
+    M = i.shape[0]
+    i2, k2, s2, total = grid_pairs(gpu, cutoff, edges, None, capacity=M + 5)
+    assert int(total) == M and torch.equal(i2[:M], i) and torch.equal(k2[:M], k) and torch.equal(s2[:M], s)
+    assert bool((i2[M:] == i[0]).all() and (k2[M:] == k[0]).all())
+    _, _, _, total = grid_pairs(gpu, cutoff, edges, None, capacity=M - 5)
+    assert int(total) == M
+    assert nl.small_cell(gpu, 12.0, cell.to("cuda", dtype), pbc.cuda()) is None
+    assert nl.small_cell(pos, cutoff, cell, pbc) is None
+    big = torch.diag(torch.tensor([40.0, 40.0, 40.0], dtype=dtype, device="cuda"))
+    assert nl.small_cell(gpu, cutoff, big, pbc.cuda()) is None
+    skewed = cell.to("cuda", dtype)
+    skewed[1, 0] = 1.0
+    assert nl.small_cell(gpu, cutoff, skewed, pbc.cuda()) is None
