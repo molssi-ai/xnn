@@ -221,7 +221,7 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
    * - ByteFF
      - |O|
-     - |N|
+     - |O|
      - |O|
      - |Y|
      - |Y|
@@ -312,15 +312,22 @@ Notes on individual models:
   one product, which needs about a third more memory than the upstream.
 - **ByteFF and ByteFF-Pol.** A model serves one system at a time: bind it with
   ``model.bind(...)`` before an ASE calculator evaluates it, or with the
-  ``structure`` option of the checkpoint's config for the MDI engine. ByteFF-Pol is for
-  molecules and clusters, without a cell. The upstream is
-  ByteDance-Seed/byteff2 1.1.0 (commit ``663451d``); the reference is faster
-  than it on its CPU and on an A100. ByteFF's fast path runs its terms on the
-  classical force-field kernels. ``"auto"`` takes them with a neighbor-list
-  cutoff and keeps molecule batches with every pair on the reference.
-  ByteFF-Pol's fast path compiles its energy terms. It compiles after 1000
-  evaluations of one system under ``"auto"``, at once with ``use_fast=True``. Its
-  float64 evaluation runs uncompiled, because the compiler fails on it.
+  ``structure`` option of the checkpoint's config for the MDI engine. The
+  upstream is ByteDance-Seed/byteff2 1.1.0 (commit ``663451d``). For molecules
+  and clusters, the reference is faster than it on its CPU and on an A100. In
+  periodic cells, ByteFF-Pol reproduces byteff2's OpenMM setup, whose AMOEBA
+  scale factors byteff2 patches. There the reference is faster than OpenMM's CPU
+  platform.
+- **ByteFF and ByteFF-Pol fast paths.** With a neighbor-list cutoff, ByteFF runs
+  its terms on the classical force-field kernels. Without one, ByteFF and
+  ByteFF-Pol compile their energy terms, after 1000 evaluations of one system
+  under ``"auto"`` or at once with ``use_fast=True``. In cells, ByteFF-Pol
+  solves its dipoles on the AMOEBA kernels, and molecular dynamics runs on step
+  plans replayed as CUDA graphs (:class:`~xnn.common.deploy.StepGraph`), with
+  fused pair kernels. On an A100 a float32 step with the ASPC dipole predictor
+  and late checks (``StepGraph(..., late_checks=True)``) takes 0.89 to 1.01
+  times as long as in byteff2's OpenMM CUDA setup. Without them, it takes up to
+  1.07 times as long.
 - **BAMBOO.** The upstream is release 202404 (commit ``386ac0f``). Its forces
   are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.
@@ -359,10 +366,11 @@ Notes on individual models:
   eager terms. A stress loss trains on the eager terms. An MD step of a
   classical field with :class:`~xnn.ffnn.models.ReaxFFStepper` is faster than
   with the GPU build of LAMMPS, list rebuilds included.
-- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
+- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING, ByteFF and classical
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
-  These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
+  These styles evaluate the model to round-off. ByteFF writes the parameters
+  of the system it is bound to. ReaxFF-nn and ByteFF-Pol have no LAMMPS route.
 - **PM3, PM6, PM6-ORG and PM7.** All four match MOPAC to its printed precision.
   MOPAC runs only on CPUs. On the same cores and at the same SCF convergence
   (MOPAC's ``PRECISE``), PM3 and PM6 are faster than MOPAC at every size.

@@ -114,6 +114,6 @@ Which model deploys how
 - **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2,
   SpookyNet, BAMBOO, NequIP, MACE, Allegro, CACE, AIMNet2, ANI, PhysNet and
   HDNNP, with or without a D3 / D4 term, and PM3 / PM6 / PM6-ORG / PM7.
-- **LAMMPS inputs**: OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and
-  HIPPO, through :func:`~xnn.ffnn.models.write_lammps_input` (see
+- **LAMMPS inputs**: OPLS, AMBER, CHARMM, DREIDING, ByteFF, classical ReaxFF, AMOEBA
+  and HIPPO, through :func:`~xnn.ffnn.models.write_lammps_input` (see
   :ref:`howto-lammps`).

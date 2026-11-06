@@ -570,18 +570,35 @@ charge transfer terms.
    pol = ByteFFPol.from_foundation()                 # ByteFF-Pol-25
    pol.bind(["CCOC(=O)OC", "[Li+]"])                 # a cluster
 
+   box = ByteFFPol.from_foundation(cutoff=10.0)      # periodic cells (Ewald sums)
+   box.bind(["COC(=O)OC"] * 60 + ["[Li+]", "FS(=O)(=O)[N-]S(=O)(=O)F"] * 5)
+
 - A model is bound to one system. Every structure it evaluates is a
   conformation of that system, in the atom order of the bound molecules.
 - The parameters are predicted once per distinct molecule and reused until the
   weights change.
-- Every pair of atoms interacts by default. ByteFF also takes a cutoff
-  (``all_pairs: false``) for periodic cells. ByteFF-Pol is for molecules and
-  clusters.
+- Every pair of atoms interacts by default. Both models also take a cutoff
+  (``all_pairs: false``) for periodic cells. ByteFF truncates or switches its
+  pairs there. ByteFF-Pol truncates its short-range terms, adds their long-range
+  correction and sums the charges and induced dipoles by particle mesh Ewald, as
+  byteff2's OpenMM setup does. A cell must be at least twice the cutoff wide.
+- For molecular dynamics in a cell, :class:`~xnn.common.deploy.StepGraph`
+  evaluates ByteFF-Pol on a step plan (:meth:`~xnn.hybnn.models.ByteFFPol.plan_step`):
+  a Verlet pair list, fixed solve lengths and, on a GPU, one replayed CUDA
+  graph per step. ``predictor: aspc`` starts each dipole solve from the last
+  steps' dipoles. Install the ``vesin`` extra: it finds the next pair list
+  while a step runs. ``StepGraph(..., late_checks=True)`` keeps the GPU busy
+  between steps (see the step plans of AMOEBA and HIPPO below).
 - With a cutoff on a GPU, ByteFF evaluates its terms with the fused kernels of
   the classical force fields (``use_fast``), for inference and training alike.
-- On a GPU, ByteFF-Pol compiles its energy terms (``use_fast``). Compiling
-  takes tens of seconds per system and batch size, so ``"auto"`` waits for
-  1000 evaluations. Pass ``use_fast=True`` for molecular dynamics and training.
+- Without a cutoff, ByteFF and ByteFF-Pol compile their energy terms on a GPU
+  (``use_fast``). Compiling takes tens of seconds per system and batch size,
+  so ``"auto"`` waits for 1000 evaluations. Pass ``use_fast=True`` for
+  molecular dynamics and training.
+- For molecules and clusters on a GPU,
+  :class:`~xnn.common.deploy.GraphedEvaluation` (or
+  ``XNNCalculator(..., cuda_graph=True)``) replays an evaluation as one CUDA
+  graph: five to eight times faster for small systems, with the same results.
 - The released networks are licensed for non-commercial use only (CC BY-NC
   4.0). They download on first use, and xnn states their terms when they load.
 
@@ -871,6 +888,12 @@ Verlet pair list built with ``cutoff + skin``, and ``plan.outdated(pos)``
 tells when to rebuild it. The MDI engine turns the predictor on, sets
 ``use_fast="auto"``, runs the steps on a plan on a GPU and replays each step
 as one CUDA graph (``--step-graph``).
+
+``StepGraph(..., late_checks=True)`` reads each step's status (pair list,
+solve convergence) during the next step, so the GPU does not wait for the
+host. A step that needed a new pair list or longer solves has then already
+returned its results. It is counted in ``late_failures`` with a warning, and
+the next step rebuilds or solves longer. The option is off by default.
 
 .. code-block:: python
 
