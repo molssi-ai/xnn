@@ -161,21 +161,23 @@ def _tail_sums(P: dict, counts: Tensor, cutoff: float, prefactor: float, wall: f
 def _fft_size(n: int) -> int:
     """The smallest size of at least ``n`` whose prime factors are at most 7 (OpenMM's GPU platforms round
     their meshes so)."""
-    while True:
-        m = n
-        for f in (2, 3, 5, 7):
+    size = n
+    smooth = False
+    while not smooth:
+        m = size
+        for f in [2, 3, 5, 7]:
             while m % f == 0:
-                m //= f
-        if m == 1:
-            return n
-        n += 1
+                m = m // f
+        smooth = m == 1
+        if not smooth:
+            size += 1
+    return size
 
 
-@fusable
-def _pol_local(vec: Tensor, sizes: tuple, bond_k: Tensor, bond_x0: Tensor, angle_k: Tensor, angle_x0: Tensor,
+def _pol_local_terms(vec: Tensor, sizes: List[int], bond_k: Tensor, bond_x0: Tensor, angle_k: Tensor, angle_x0: Tensor,
                torsion_k: Tensor, sign: Tensor, improper: Tensor, vdw_scale: Tensor, eps: Tensor, lam: Tensor,
                r0: Tensor, c6: Tensor, b0: Tensor, b1: Tensor, a1: Tensor, t_owner: Tensor, p0: Tensor, p1: Tensor,
-               N: int, prefactor: float, wall: float, damping: float) -> Tensor:
+                     N: int, prefactor: float, wall: float, damping: float) -> Tensor:
     """The bonded terms and the fixed 1,4 / 1,5 pairs of periodic ByteFF-Pol from their vectors ``vec`` (bonds,
     the two arms of the angles, the three bonds of the torsions, the pairs, in ``sizes`` blocks), as per-atom
     energies ``(N, 6)``: bond, angle, torsion, improper, repulsion, dispersion; one scatter. Compiled on a step
@@ -183,7 +185,8 @@ def _pol_local(vec: Tensor, sizes: tuple, bond_k: Tensor, bond_x0: Tensor, angle
     ends = [0]
     for k in sizes:
         ends.append(ends[-1] + k)
-    vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
+    parts = [vec[ends[i]:ends[i + 1]] for i in range(7)]
+    vb, vu, vv, t1, t2, t3, vp = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
     e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
     e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
     e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, [1, 2, 3, 4], sign)
@@ -198,8 +201,10 @@ def _pol_local(vec: Tensor, sizes: tuple, bond_k: Tensor, bond_x0: Tensor, angle
     return scatter_sum(values, index, N * K).view(N, K)
 
 
-@fusable
-def _pol_scaled_pairs(vc: Tensor, ci: Tensor, cj: Tensor, cm: Tensor, cs: Tensor, q: Tensor, damp: Tensor, N: int,
+_pol_local = fusable(_pol_local_terms)
+
+
+def _pol_scaled_terms(vc: Tensor, ci: Tensor, cj: Tensor, cm: Tensor, cs: Tensor, q: Tensor, damp: Tensor, N: int,
                       ke: float, thole: float) -> Tensor:
     """The corrections of periodic ByteFF-Pol's Ewald sums on the pairs within 1,5 (vectors ``vc``): the charge
     scale less one times the bare Coulomb energy and the field scale less one times the Thole-damped field, as
@@ -215,9 +220,12 @@ def _pol_scaled_pairs(vc: Tensor, ci: Tensor, cj: Tensor, cm: Tensor, cs: Tensor
     return scatter_sum(at_i, ci, N) + scatter_sum(at_j, cj, N)
 
 
+_pol_scaled_pairs = fusable(_pol_scaled_terms)
+
+
 def _pol_real_space(vn: Tensor, valid: Tensor, beyond: Tensor, src: Tensor, dst: Tensor, atoms: Tensor, N: int,
                     cutoff2: float, alpha: float, thole: float, ke: float, prefactor: float, wall: float,
-                    damping: float) -> tuple:
+                    damping: float) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """The neighbor pairs of periodic ByteFF-Pol in one function of per-pair tensors: their per-atom energies
     ``(N, 4)`` (repulsion, dispersion and charge transfer of the pairs beyond 1,5, real-space Ewald
     electrostatics of every pair), the charges' field at the atoms (the Ewald field less the bare one plus
@@ -1766,10 +1774,11 @@ class ByteFFPol(_GraphParameterizedFF):
 
     def export_core(self) -> nn.Module:
         """The scriptable core of :func:`~xnn.common.deploy.export_torchscript_potential`: the parameters of the
-        bound system and the reference energy block, for molecules and clusters (see
-        :class:`~xnn.hybnn.models.byteff_export.ByteFFPolExport`)."""
-        from .byteff_export import ByteFFPolExport
-        return ByteFFPolExport(self)
+        bound system with the reference's terms, for molecules and clusters
+        (:class:`~xnn.hybnn.models.byteff_export.ByteFFPolExport`) or, with a cutoff, periodic cells
+        (:class:`~xnn.hybnn.models.byteff_export.ByteFFPolCellExport`)."""
+        from .byteff_export import ByteFFPolCellExport, ByteFFPolExport
+        return ByteFFPolExport(self) if self.all_pairs else ByteFFPolCellExport(self)
 
     def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
         """Switch the dipole predictor of the iterative solve in cells on (``"aspc"``, ``"gear"``,
