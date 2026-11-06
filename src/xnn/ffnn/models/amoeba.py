@@ -2720,7 +2720,17 @@ class Amoeba(InteratomicPotential):
         (:func:`~xnn.common.data.neighborlist.unique_pairs`), takes the place of the
         graph's neighbor list; ``single_image`` as in :meth:`stage_pairs`. Four entries
         ``(i, k, shift, count)`` are buffers of the plan's capacity with the number of
-        pairs on the device (single images, :func:`~xnn.common.data.grid_pairs.grid_pairs`)."""
+        pairs on the device (:func:`~xnn.common.data.grid_pairs.grid_pairs`)."""
+
+        def vectors(i: Tensor, k: Tensor, shift: Optional[Tensor]) -> Optional[Tensor]:
+            # a pair may come in more than one image: the scales of its far images need its vector
+            if single_image:
+                return None
+            r = data.pos[k] - data.pos[i]
+            if shift is not None:
+                r = r + shift @ data.cell.reshape(-1, 3, 3)[0].to(data.pos.dtype)
+            return r.to(data.model_dtype)
+
         # sorted by the first atom: the kernels add each block's contributions to that atom in
         # one operation, and the gathers of an atom's rows hit the cache
         if pairs is None:
@@ -2739,7 +2749,7 @@ class Amoeba(InteratomicPotential):
             # weight
             i, k, shift, total = pairs
             shift = None if data.cell is None else shift.to(data.pos.dtype)
-            scales = self._pair_scales(data, i, k, None).detach()
+            scales = self._pair_scales(data, i, k, vectors(i, k, shift)).detach()
             valid = (torch.arange(int(i.shape[0]), device=i.device) < total).to(scales.dtype)
             plan.valid, plan.count = valid, total.to(torch.int32)
             plan.pairs, plan.scales = (i, k, shift), scales * valid[:, None]
@@ -2750,13 +2760,7 @@ class Amoeba(InteratomicPotential):
         else:
             i, k, shift = pairs
             shift = None if data.cell is None else shift.to(data.pos.dtype)
-            r = None
-            if not single_image:
-                r = data.pos[k] - data.pos[i]
-                if shift is not None:
-                    r = r + shift @ data.cell.reshape(-1, 3, 3)[0].to(data.pos.dtype)
-                r = r.to(data.model_dtype)
-            scales = self._pair_scales(data, i, k, r)
+            scales = self._pair_scales(data, i, k, vectors(i, k, shift))
         scales = scales.detach()
         M = int(i.shape[0])
         cap = M if plan.capacity is None else int(plan.capacity)
@@ -4636,6 +4640,8 @@ class _MutualField:
         self.polar_dipoles: Optional[Tensor] = None
         self.polar = polar
         self.tol, self.max_iter = tol, max_iter
+        # the Coulomb constant of the polarization energy -C/2 mu . E (the adjoint shortcut and tolerance)
+        self.coulomb = COULOMB
         self.ew = ew
         self.pos, self.cell = pos, cell
         self.structures = [] if ew is None else ew["structures"]
@@ -4999,7 +5005,7 @@ class _ImplicitInduction(torch.autograd.Function):
 
             # the adjoint of the polarization energy is -C/2 times the dipoles of the polar field: its
             # tolerance is theirs times C/2, so that both dipole sets converge alike (as in Tinker)
-            tol = op.tol * (0.5 * COULOMB if op.phase == "adjoint" else 1.0)
+            tol = op.tol * (0.5 * op.coulomb if op.phase == "adjoint" else 1.0)
             ex = None if expol is None else expol.detach()
             if op.paired_rhs is not None and op.phase == "forward":
                 # the paired solve: the dipoles of the direct and of the polar field stacked, one set of
@@ -5049,14 +5055,14 @@ class _ImplicitInduction(torch.autograd.Function):
             # the identity holds when the incoming gradient is the polarization energy's; checked
             # with one synchronization, except inside a CUDA-graph capture (a step plan evaluates
             # the energy and nothing else depends on the dipoles there)
-            shortcut = bool(torch.allclose(grad_mu * mask, -0.5 * COULOMB * field_p, rtol=1e-9, atol=1e-14))
+            shortcut = bool(torch.allclose(grad_mu * mask, -0.5 * op.coulomb * field_p, rtol=1e-9, atol=1e-14))
         key = (tuple(grad_mu.shape), grad_mu.dtype, str(grad_mu.device), create_graph)
         if shortcut:
             # lam solves A lam = -C/2 E_p: lam = -C/2 times the dipoles of the polar field, which are
             # those of the direct field when the two fields coincide (d equals p), and were solved
             # with them otherwise (the paired solve), no solve here
             paired = op.polar_dipoles is not None
-            lam = -0.5 * COULOMB * (op.polar_dipoles if paired else mu)
+            lam = -0.5 * op.coulomb * (op.polar_dipoles if paired else mu)
             op.stats["adjoint"] = 0
             if op.collect_stats:
                 op.stats["adjoint_guess"] = False
@@ -5114,7 +5120,7 @@ class _ImplicitInduction(torch.autograd.Function):
                     # coordinates comes from the two potentials and one adjoint kernel, then through the
                     # coordinates' graph to the positions (lam is a multiple of mu under the shortcut)
                     _, plan = op.plans()[0]
-                    scale = -0.5 * COULOMB if (shortcut and op.polar_dipoles is None) else None
+                    scale = -0.5 * op.coulomb if (shortcut and op.polar_dipoles is None) else None
                     gu = plan.dipole_adjoint(mu_d, lam_d, op.alpha_p, scale)
                     grads = list(torch.autograd.grad(plan.u, inputs, gu, retain_graph=True, allow_unused=True))
                 else:

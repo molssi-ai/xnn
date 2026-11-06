@@ -35,7 +35,10 @@ Conventions and scope
 * Without ``cutoff`` every pair of a structure interacts (molecules and clusters,
   no cell). ByteFF also runs with a neighbor-list cutoff and periodic cells
   (truncated or switched, without Ewald sums). ByteFF-Pol solves its dipoles
-  directly per structure and takes no cell.
+  directly per structure without a cutoff; with one it evaluates periodic cells:
+  the short-range terms truncated at the cutoff with a long-range correction of
+  their tails, the charges and induced dipoles as Ewald sums with the reciprocal
+  part on a particle mesh, and the dipoles solved iteratively.
 """
 from __future__ import annotations
 
@@ -49,11 +52,26 @@ from torch import Tensor, nn
 
 from xnn.common.config.options import model_options
 from xnn.common.data import AtomicGraph
+from xnn.common.data.neighborlist import unique_pairs
 from xnn.common.models import InteratomicPotential, register_model
 from xnn.common.models.blocks import MLP
 from xnn.common.models.compiled import run_compiled
 from xnn.common.models.fast import resolve_use_fast
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import cell_volume, scatter_sum
+from xnn.ffnn.models.amoeba import (
+    SOLVE_PHASES,
+    DipolePredictor,
+    StepPlan,
+    _ImplicitInduction,
+    _kernels,
+    _kernels_supported,
+    _mesh_plans,
+    _MutualField,
+    _plan_vectors,
+    coulomb_ladder,
+    thole_ladder,
+)
+from xnn.ffnn.models.amoeba_ewald import SQRT_PI, ewald_ladder, fusable, fused
 from xnn.ffnn.models.classical_fast import (
     ClassicalFastPath,
     fast_bonded,
@@ -64,7 +82,7 @@ from xnn.ffnn.models.classical_fast import (
     needs_twice,
     wants_fast,
 )
-from xnn.ffnn.models.geometry import geometric_mean, half_edges, pair_vectors
+from xnn.ffnn.models.geometry import excluded_pairs, geometric_mean, half_edges, pair_image_shifts, pair_vectors
 from xnn.ffnn.models.oplslib import KCAL_TO_EV
 from xnn.ffnn.models.terms import (
     bond_angle,
@@ -108,6 +126,126 @@ def free_atom_table(column: int) -> list:
 
 def _mlp(n_in: int, hidden: int, n_out: int, layers: int, activation: str = "gelu", bias: bool = True) -> MLP:
     return MLP([n_in] + [hidden] * (layers - 1) + [n_out], activation, bias=bias)
+
+
+def _tail_sums(P: dict, counts: Tensor, cutoff: float, prefactor: float, wall: float, damping: float,
+               nodes: int = 64) -> Tensor:
+    """The pair-weighted tail integrals of the short-range terms of a periodic system.
+
+    ``sum_{a <= b} c_ab int_rc^inf r^2 U_ab(r) dr`` over the atom classes ``a, b`` (the
+    distinct molecules' atoms, ``counts`` copies each), ``c_aa = n_a (n_a + 1) / 2`` and
+    ``c_ab = n_a n_b``: the uniform-density estimate of the energy beyond the cutoff
+    is ``4 pi N / (N + 1)`` times this over the volume (``N`` atoms). One sum each for
+    the repulsion (with its wall), the dispersion and the charge transfer, by
+    Gauss-Legendre quadrature in ``x = r_c / r``.
+    """
+    x, w = np.polynomial.legendre.leggauss(nodes)
+    dtype, device = P["eps"].dtype, P["eps"].device
+    x = torch.as_tensor(0.5 * (x + 1.0), dtype=dtype, device=device)
+    w = torch.as_tensor(0.5 * w, dtype=dtype, device=device) * cutoff ** 3 / x ** 4
+    r = (cutoff / x).view(1, 1, -1)
+
+    def pair(k: str, mean: bool = False) -> Tensor:
+        v = P[k]
+        return (0.5 * (v[:, None] + v[None, :]) if mean else torch.sqrt(v[:, None] * v[None, :])).unsqueeze(-1)
+
+    r0 = pair("r0", mean=True)
+    rep = exp_repulsion(r, pair("eps"), pair("lam"), r0, prefactor, wall)
+    disp = damped_dispersion(r, pair("c6"), r0, damping)
+    ct = charge_transfer(r, pair("ct_eps"), pair("ct_lam"), r0)
+    n = counts.to(dtype)
+    weight = 0.5 * (n[:, None] * n[None, :] + torch.diag(n))
+    return torch.stack([((u * w).sum(-1) * weight).sum() for u in (rep, disp, ct)])
+
+
+def _fft_size(n: int) -> int:
+    """The smallest size of at least ``n`` whose prime factors are at most 7 (OpenMM's GPU platforms round
+    their meshes so)."""
+    while True:
+        m = n
+        for f in (2, 3, 5, 7):
+            while m % f == 0:
+                m //= f
+        if m == 1:
+            return n
+        n += 1
+
+
+@fusable
+def _pol_local(vec: Tensor, sizes: tuple, bond_k: Tensor, bond_x0: Tensor, angle_k: Tensor, angle_x0: Tensor,
+               torsion_k: Tensor, sign: Tensor, improper: Tensor, vdw_scale: Tensor, eps: Tensor, lam: Tensor,
+               r0: Tensor, c6: Tensor, b0: Tensor, b1: Tensor, a1: Tensor, t_owner: Tensor, p0: Tensor, p1: Tensor,
+               N: int, prefactor: float, wall: float, damping: float) -> Tensor:
+    """The bonded terms and the fixed 1,4 / 1,5 pairs of periodic ByteFF-Pol from their vectors ``vec`` (bonds,
+    the two arms of the angles, the three bonds of the torsions, the pairs, in ``sizes`` blocks), as per-atom
+    energies ``(N, 6)``: bond, angle, torsion, improper, repulsion, dispersion; one scatter. Compiled on a step
+    plan's fast path (:func:`~xnn.ffnn.models.amoeba_ewald.fusable`)."""
+    ends = [0]
+    for k in sizes:
+        ends.append(ends[-1] + k)
+    vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
+    e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
+    e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
+    e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, (1, 2, 3, 4), sign)
+    rp = torch.sqrt((vp * vp).sum(1))
+    rep = vdw_scale * exp_repulsion(rp, eps, lam, r0, prefactor, wall)
+    disp = vdw_scale * damped_dispersion(rp, c6, r0, damping)
+    K = 6
+    t_col = 2 + improper.long()
+    values = torch.cat([0.5 * e_bond, 0.5 * e_bond, e_angle, e_tors, 0.5 * rep, 0.5 * rep, 0.5 * disp, 0.5 * disp])
+    index = torch.cat([b0 * K, b1 * K, a1 * K + 1, t_owner * K + t_col, p0 * K + 4, p1 * K + 4, p0 * K + 5,
+                       p1 * K + 5])
+    return scatter_sum(values, index, N * K).view(N, K)
+
+
+@fusable
+def _pol_scaled_pairs(vc: Tensor, ci: Tensor, cj: Tensor, cm: Tensor, cs: Tensor, q: Tensor, damp: Tensor, N: int,
+                      ke: float, thole: float) -> Tensor:
+    """The corrections of periodic ByteFF-Pol's Ewald sums on the pairs within 1,5 (vectors ``vc``): the charge
+    scale less one times the bare Coulomb energy and the field scale less one times the Thole-damped field, as
+    ``(N, 4)``: electrostatic energy and field; one scatter per atom of the pair. Compiled on a step plan's fast
+    path."""
+    r = torch.sqrt((vc * vc).sum(1))
+    q_i, q_j = q.index_select(0, ci), q.index_select(0, cj)
+    e = 0.5 * ke * cm * q_i * q_j / r
+    tc = torch.full_like(r, thole)
+    fc = cs * thole_ladder(r, damp.index_select(0, ci), damp.index_select(0, cj), tc, tc, 1)[1]
+    at_i = torch.cat([e[:, None], (q_j * fc)[:, None] * vc], 1)
+    at_j = torch.cat([e[:, None], -(q_i * fc)[:, None] * vc], 1)
+    return scatter_sum(at_i, ci, N) + scatter_sum(at_j, cj, N)
+
+
+def _pol_real_space(vn: Tensor, valid: Tensor, beyond: Tensor, src: Tensor, dst: Tensor, atoms: Tensor, N: int,
+                    cutoff2: float, alpha: float, thole: float, ke: float, prefactor: float, wall: float,
+                    damping: float) -> tuple:
+    """The neighbor pairs of periodic ByteFF-Pol in one function of per-pair tensors: their per-atom energies
+    ``(N, 4)`` (repulsion, dispersion and charge transfer of the pairs beyond 1,5, real-space Ewald
+    electrostatics of every pair), the charges' field at the atoms (the Ewald field less the bare one plus
+    the Thole-damped one) and the mutual-induction ladders ``D1, D2`` per pair. ``valid`` weighs the pairs
+    (zero for a plan's padding, whose distance is set to one), ``beyond`` the short-range ones; ``atoms``
+    stacks the per-atom rows ``(N, 8)``: charge, damping volume, eps, lambda, r0, C6, CT eps, CT lambda.
+    The reference; a step plan's fast path runs :mod:`~xnn.hybnn.models.byteff_kernels` instead."""
+    r2 = torch.where(valid > 0, (vn * vn).sum(1), torch.ones_like(valid))
+    within = (r2 < cutoff2).to(vn.dtype) * valid
+    w = within * beyond
+    r = torch.sqrt(r2)
+    a_i, a_k = atoms.index_select(0, src), atoms.index_select(0, dst)
+    q_i, q_k = a_i[:, 0], a_k[:, 0]
+    mix = torch.sqrt(a_i[:, 2:8] * a_k[:, 2:8])
+    r0 = 0.5 * (a_i[:, 4] + a_k[:, 4])
+    rep = w * exp_repulsion(r, mix[:, 0], mix[:, 1], r0, prefactor, wall)
+    disp = w * damped_dispersion(r, mix[:, 3], r0, damping)
+    ct = w * charge_transfer(r, mix[:, 4], mix[:, 5], r0)
+    De = ewald_ladder(r, torch.full_like(r, alpha), 2)
+    Dc = coulomb_ladder(r, 2)
+    th = torch.full_like(r, thole)
+    Dt = thole_ladder(r, a_i[:, 1], a_k[:, 1], th, th, 2)
+    elec = within * ke * q_i * q_k * De[0]
+    f1 = within * (De[1] - Dc[1] + Dt[1])
+    half = 0.5 * torch.stack([rep, disp, ct, elec], 1)
+    node = scatter_sum(half, src, N) + scatter_sum(half, dst, N)
+    field = scatter_sum((q_k * f1)[:, None] * vn, src, N) - scatter_sum((q_i * f1)[:, None] * vn, dst, N)
+    return node, field, f1, within * (De[2] - Dc[2] + Dt[2])
 
 
 def _clamp(x: Tensor, lo: float, hi: float) -> Tensor:
@@ -388,6 +526,9 @@ class _GraphParameterizedFF(InteratomicPotential):
             raise ValueError("switch_width must satisfy 0 <= switch_width < cutoff")
         self.node_feature_dim = 1
         self._cache: Optional[tuple] = None
+        self._block_calls: dict = {}
+        self._compile_failed: set = set()
+        self._compile_checked: set = set()
         self.bound = False
         if structure is not None:
             self.bind(structure, charge=charge)
@@ -665,7 +806,12 @@ class _GraphParameterizedFF(InteratomicPotential):
         if self.training:
             self._cache = None
             return self.predicted_parameters()
-        params = tuple(self.parameters())
+        from xnn.common.models import compiled
+        cached = self.__dict__.get("_param_list")
+        if cached is None or cached[0] != compiled._registrations:
+            # kept until anything registers a parameter or module (walking the tree costs more than the check)
+            cached = self.__dict__["_param_list"] = (compiled._registrations, tuple(self.parameters()))
+        params = cached[1]
         key = (tuple(p._version for p in params), tuple(p.data_ptr() for p in params), params[0].dtype,
                params[0].device)
         if self._cache is None or self._cache[0] != key:
@@ -673,6 +819,13 @@ class _GraphParameterizedFF(InteratomicPotential):
                 self._cache = (key, self.predicted_parameters())
             self._row_cache = {}
         return self._cache[1]
+
+    def index_planner(self):
+        """The planner of a captured evaluation (:class:`~xnn.common.deploy.GraphedEvaluation`): without a
+        cutoff the batch of the bound system fixes every shape, so it is replayed unpadded; ``None`` with a
+        cutoff (periodic cells run on step plans instead, :class:`~xnn.common.deploy.StepGraph`)."""
+        from xnn.common.train.graphed import FixedShapePlanner
+        return FixedShapePlanner() if self.all_pairs else None
 
     def _check(self, data: AtomicGraph) -> int:
         if not self.bound:
@@ -707,12 +860,13 @@ class _GraphParameterizedFF(InteratomicPotential):
 
         tors = torch.cat([self._propers, self._impropers], 1)
         b, a, t, p = ex(self._bonds), ex(self._angles), ex(tors), ex(self._pair_list)
+        n14 = self._pairs14.shape[1]
         improper = (torch.arange(tors.shape[1], device=device) >= self._propers.shape[1]).repeat(B)
         owners = [b[0], b[1], a[1], torch.where(improper, t[0], t[1])] + [p[k] for _ in self._pair_names
                                                                            for k in (0, 1)]
-        n14 = self._pairs14.shape[1]
         plan = {"bonds": b, "angles": a, "propers": ex(self._propers), "impropers": ex(self._impropers),
                 "pairs": p, "improper": improper, "t_owner": torch.where(improper, t[0], t[1]),
+                "is14": (torch.arange(self._pair_list.shape[1], device=device) < n14).repeat(B),
                 "pairs14": ex(self._pair_list[:, :n14]), "far": ex(self._pair_list[:, n14:]),
                 "src": torch.cat([b[0], a[1], a[1], t[0], t[1], t[2], p[0]]),
                 "dst": torch.cat([b[1], a[0], a[2], t[1], t[2], t[3], p[1]]),
@@ -753,9 +907,45 @@ class _GraphParameterizedFF(InteratomicPotential):
         """Parameter arrays over the distinct molecules' atoms and terms (for the kernels)."""
         return {}
 
-    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict):
+    #: evaluations of one batch shape after which ``use_fast="auto"`` compiles the block: compiling takes
+    #: tens of seconds per shape and saves milliseconds per call
+    compile_after = 1000
+
+    def _run_block(self, block: nn.Module, data: AtomicGraph, B: int, args: tuple):
+        """An energy block, compiled where ``use_fast`` asks for it (eager where compiling fails)."""
+        from xnn.common.models import compiled
+        key = (type(block).__name__, B, data.model_dtype, str(data.pos.device), self.training)
+        if self.use_fast is False or not compiled.supported(data.pos.device, data.model_dtype) \
+                or key in self._compile_failed:
+            return block._reference(*args)
+        if self.use_fast == "auto":
+            self._block_calls[key] = self._block_calls.get(key, 0) + 1
+            if self._block_calls[key] <= self.compile_after:
+                return block._reference(*args)
+        if key not in self._compile_checked:
+            # the compiled derivatives are built at their first use: try them once on copies of the inputs, so
+            # a compiler failure for this shape falls back to the (identical) eager block
+            try:
+                with torch.enable_grad():
+                    trial = tuple(a.detach().requires_grad_(True) if isinstance(a, Tensor) and a.is_floating_point()
+                                  else a for a in args)
+                    out = run_compiled(block, *trial)
+                    out = out if isinstance(out, tuple) else (out,)
+                    g = torch.autograd.grad(sum(o.sum() for o in out), trial[0], create_graph=self.training)[0]
+                    if self.training:
+                        torch.autograd.grad(g.sum(), trial[1], allow_unused=True)
+            except Exception as err:
+                import warnings
+                self._compile_failed.add(key)
+                warnings.warn(f"compiling the energy block failed for this shape; evaluating it eagerly "
+                              f"({type(err).__name__})", RuntimeWarning, stacklevel=2)
+                return block._reference(*args)
+            self._compile_checked.add(key)
+        return run_compiled(block, *args)
+
+    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict, step: Optional[StepPlan] = None):
         """Per-atom energies ``{term: (N,)}`` and extra outputs from fused kernels, or ``None`` for the
-        reference."""
+        reference (``step``: a step plan, see :meth:`ByteFFPol.plan_step`)."""
         return None
 
     def _extra(self, data: AtomicGraph, R: dict, B: int) -> tuple:
@@ -763,37 +953,31 @@ class _GraphParameterizedFF(InteratomicPotential):
         return {}, {}
 
     def _reference_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict, total) -> tuple:
-        """The reference evaluation: per-atom energies, per-structure term totals and extra outputs."""
-        N = data.num_nodes
+        """The terms block on the bond and pair vectors (gathered here, with periodic images), compiled
+        where ``use_fast`` asks for it, plus the terms outside it: per-atom energies, per-structure term
+        totals and extra outputs."""
         vec = pair_vectors(data, plan["src"], plan["dst"])
-        vb, vu, vv, t1, t2, t3, vp = torch.split(vec, plan["sizes"])
-        e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), R["bond_k"], R["bond_x0"])
-        e_angle = harmonic(bond_angle(vu, vv), R["angle_k"], R["angle_x0"])
-        e_tors = fourier_series(torsion_cos(t1, t2, t3), R["torsion_k"], (1, 2, 3, 4), R["torsion_sign"])
-        pair = self._pair_energies(R, torch.sqrt((vp * vp).sum(1)))
-        values = [0.5 * e_bond, 0.5 * e_bond, e_angle, e_tors]
-        for name in self._pair_names:
-            values += [0.5 * pair[name], 0.5 * pair[name]]
-        node = scatter_sum(torch.cat(values), plan["owners"], N)
+        b, a, p = plan["bonds"], plan["angles"], plan["pairs"]
+        args = (vec, R["bond_k"], R["bond_x0"], R["angle_k"], R["angle_x0"], R["torsion_k"], R["torsion_sign"],
+                plan["improper"].to(vec.dtype), R["sigma2"], R["eps4"], R["qq"], plan["is14"].to(vec.dtype),
+                b[0], b[1], a[1], plan["t_owner"], p[0], p[1], tuple(plan["sizes"]), data.num_nodes)
+        e = self._run_block(self._terms, data, B, args)
+        node_terms = {k: e[:, j] for j, k in enumerate(_ByteFFTerms.TERMS)}
         extra_node, extra_out = self._extra(data, R, B)
-        for v in extra_node.values():
-            node = node + v
-        m = self._propers.shape[1]
-        tors = e_tors.view(B, -1)
-        terms = {"e_bond": total(e_bond), "e_angle": total(e_angle), "e_torsion": total(tors[:, :m]),
-                 "e_improper": total(tors[:, m:])}
-        terms.update(self._pair_totals(pair, B, total))
         for k, v in extra_node.items():
-            terms[k] = terms[k] + total(v) if k in terms else total(v)
-        return node, terms, extra_out
+            node_terms[k] = node_terms[k] + v
+        return sum(node_terms.values()), {k: total(v) for k, v in node_terms.items()}, extra_out
 
-    def forward(self, data: AtomicGraph) -> dict:
+    def forward(self, data: AtomicGraph, plan: Optional[StepPlan] = None) -> dict:
         """Evaluate the energy of conformations of the bound system.
 
         Parameters
         ----------
         data : AtomicGraph
             The batched graph, every structure a conformation of the bound system.
+        plan : StepPlan, optional
+            A step plan of a moving periodic structure (:meth:`ByteFFPol.plan_step`), whose
+            evaluations decide nothing on the host.
 
         Returns
         -------
@@ -801,14 +985,21 @@ class _GraphParameterizedFF(InteratomicPotential):
             ``node_energy`` ``(N,)``, ``energy`` ``(B,)``, ``charges`` ``(N,)``,
             ``node_features`` ``(N, 1)`` and one per-structure energy per term (eV).
         """
-        B = self._check(data)
+        step = plan
+        if step is not None and not hasattr(self, "plan_step"):
+            raise ValueError(f"{type(self).__name__} evaluates no step plans")
+        # a CUDA-graph capture (xnn.common.deploy.GraphedEvaluation) reads nothing from the device: the checks
+        # ran on the evaluations before it
+        capturing = data.pos.is_cuda and torch.cuda.is_current_stream_capturing()
+        replaying = step is not None and not step.recording
+        B = data.num_graphs if replaying or capturing else self._check(data)
         plan = self._plan(B, data.pos.device)
         R = self._rows(self._parameters_cached(), B, data.model_dtype)
 
         def total(v: Tensor) -> Tensor:
             return v.view(B, -1).to(torch.float64).sum(1)
 
-        kernel = self._kernel_terms(data, R, B, plan)
+        kernel = self._kernel_terms(data, R, B, plan, step)
         if kernel is not None:
             kernel, extra_out = kernel
             node = sum(kernel.values())
@@ -831,6 +1022,39 @@ def _width(kind: str) -> int:
 _BYTEFF_GRAPH = dict(atom_dim=32, feature_dim=8, node_mlp=(64, 256, 2), edge_mlp=(64, 256, 2), hidden=256,
                      layers=4, heads=16, head_dim=16, ffn=(256, 2), out_dim=256, jumping_knowledge="cat",
                      activation="gelu")
+
+
+class _ByteFFTerms(nn.Module):
+    """ByteFF's bonded terms and fixed pairs (the 1,4 pairs, and without a cutoff every pair beyond them) of
+    a batch as a function of their vectors and the parameter rows: per-atom energies (kcal/mol) of every
+    term. Evaluated eagerly it is the reference; the fast path compiles it."""
+
+    TERMS = ("e_bond", "e_angle", "e_torsion", "e_improper", "e_vdw", "e_coulomb", "e_vdw14", "e_coulomb14")
+    #: a bound system has fixed sizes; symbolic ones break the compiled second derivatives (torch 2.5)
+    static_shapes = True
+
+    def _reference(self, vec, bond_k, bond_x0, angle_k, angle_x0, torsion_k, sign, improper, sigma2, eps4, qq,
+                   is14, b0, b1, a1, t_owner, p0, p1, sizes, N):
+        ends = [0]
+        for k in sizes:
+            ends.append(ends[-1] + k)
+        vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
+        e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
+        e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
+        e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, (1, 2, 3, 4), sign)
+        r2 = (vp * vp).sum(1)
+        x = (sigma2 / r2) ** 3
+        h_vdw = 0.5 * eps4 * (x * x - x)
+        h_coul = 0.5 * qq / torch.sqrt(r2)
+        h_bond = 0.5 * e_bond
+        # one scatter into (atom, term): the torsions' and pairs' columns from their masks
+        K = len(self.TERMS)
+        t_col = 2 + improper.long()
+        p_col = 4 + 2 * is14.long()
+        values = torch.cat([h_bond, h_bond, e_angle, e_tors, h_vdw, h_vdw, h_coul, h_coul])
+        index = torch.cat([b0 * K, b1 * K, a1 * K + 1, t_owner * K + t_col, p0 * K + p_col, p1 * K + p_col,
+                           p0 * K + p_col + 1, p1 * K + p_col + 1])
+        return scatter_sum(values, index, N * K).view(N, K)
 
 
 @register_model("byteff")
@@ -865,11 +1089,12 @@ class ByteFF(ClassicalFastPath, _GraphParameterizedFF):
     use_fast : bool or "auto", optional
         Evaluate the energy terms with the fused GPU kernels of
         :mod:`~xnn.ffnn.models.classical_kernels` (the same numbers to round-off,
-        differentiable twice for force training, with parameter gradients).
-        ``"auto"`` (default) takes them on a CUDA device with Triton when the
-        nonbonded pairs come from a neighbor list (a cutoff); every pair of a
-        molecule batch stays on the reference, which is as fast there. ``True``
-        takes them on any CUDA device, ``False`` never.
+        differentiable twice for force training, with parameter gradients) when the
+        nonbonded pairs come from a neighbor list (a cutoff), on a CUDA device with
+        Triton. Without a cutoff (molecule batches) the terms are compiled instead,
+        which takes tens of seconds per batch shape: ``"auto"`` (default) compiles
+        after :attr:`compile_after` evaluations of one shape, ``True`` at once.
+        ``False`` evaluates every term eagerly.
 
     Notes
     -----
@@ -891,6 +1116,7 @@ class ByteFF(ClassicalFastPath, _GraphParameterizedFF):
                          nonbonded={**dict(pre=(512, 512, 4), out=(256, 3), tanh_output=20.0), **(nonbonded or {})},
                          members=members, supported_elements=supported_elements, cutoff=cutoff,
                          switch_width=switch_width, coulomb_constant=coulomb_constant, charge=charge)
+        self._terms = _ByteFFTerms()
 
     _pair_names = ("vdw", "coulomb")
     _atom_keys = ("charge", "sigma", "epsilon")
@@ -905,16 +1131,6 @@ class ByteFF(ClassicalFastPath, _GraphParameterizedFF):
         sigma = 0.5 * (sig[i] + sig[j])
         return {"sigma2": sigma * sigma, "eps4": 4.0 * lj * geometric_mean(eps[i], eps[j]),
                 "qq": self.coulomb_constant * qq * q[i] * q[j]}
-
-    def _pair_energies(self, R: dict, r: Tensor) -> dict:
-        x = (R["sigma2"] / (r * r)) ** 3
-        return {"vdw": R["eps4"] * (x * x - x), "coulomb": R["qq"] / r}
-
-    def _pair_totals(self, pair: dict, B: int, total) -> dict:
-        n14 = self._pairs14.shape[1]
-        v, c = pair["vdw"].view(B, -1), pair["coulomb"].view(B, -1)
-        return {"e_vdw": total(v[:, n14:]), "e_coulomb": total(c[:, n14:]),
-                "e_vdw14": total(v[:, :n14]), "e_coulomb14": total(c[:, :n14])}
 
     def _atom_rows(self, atoms: dict, B: int) -> dict:
         return {} if self.all_pairs else {"sigma": atoms["sigma"].repeat(B), "epsilon": atoms["epsilon"].repeat(B)}
@@ -949,12 +1165,12 @@ class ByteFF(ClassicalFastPath, _GraphParameterizedFF):
                 "proper_rows": P["proper_k"][self._propers_src].repeat(B, 1),
                 "improper_rows": P["improper_k"][self._impropers_src].repeat(B, 1)}
 
-    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict):
+    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict, step: Optional[StepPlan] = None):
         """The terms from the kernels of :mod:`~xnn.ffnn.models.classical_kernels` (harmonic terms as
         ``K (x - x0)^2`` with ``K = k / 2``, the torsions as phased Fourier series, Lennard-Jones and
         Coulomb from the pair kernel), or ``None`` where the reference runs."""
-        if self.use_fast == "auto" and self.all_pairs:
-            return None            # molecule batches: the reference is as fast (launch-bound either way)
+        if self.all_pairs:
+            return None            # molecule batches: the compiled terms block instead (launch-bound kernels)
         if not wants_fast(self, self.use_fast, data, R["charge"]):
             return None
         twice = needs_twice(self, data)
@@ -991,6 +1207,81 @@ class ByteFF(ClassicalFastPath, _GraphParameterizedFF):
             node["e_vdw"] = node["e_coulomb"] = torch.zeros_like(node["e_bond"])
         return node, {}
 
+    def lammps_input(self, pos, cell=None) -> tuple:
+        """The LAMMPS data file and commands that evaluate this model's energy for the bound system.
+
+        The predicted parameters become LAMMPS styles in real units: harmonic bonds and angles
+        (``K = k / 2``), ``dihedral fourier``, ``improper cvff`` (``d = -1``, ``n = 2``, center first),
+        ``lj/cut/coul/cut`` with arithmetic mixing and the 1,4 scale factors, one atom type per atom of
+        the distinct molecules; the charges are scaled to LAMMPS's Coulomb constant. Without a cutoff the
+        pair cutoff is the structure's extent plus 2 Angstrom (every pair interacts). Used by
+        :func:`~xnn.ffnn.models.lammps_input.write_lammps_input`.
+
+        Parameters
+        ----------
+        pos : array_like
+            Positions ``(n, 3)`` in Angstrom, in the bound system's order.
+        cell : array_like, optional
+            An orthorhombic cell ``(3, 3)``, with a cutoff only.
+
+        Returns
+        -------
+        tuple
+            The data file text, the commands (``read_data DATAFILE``) and the energy offset (0).
+        """
+        from xnn.common.models.ops import ATOMIC_MASSES
+        from xnn.ffnn.models.lammps_input import LAMMPS_COULOMB, _box, _check_switch, _data, _r, _styles
+        _check_switch(self)
+        pos = np.asarray(pos, float).reshape(-1, 3)
+        if self.all_pairs:
+            if cell is not None:
+                raise ValueError("a model without a cutoff takes no cell")
+            cutoff = float(np.linalg.norm(pos[:, None] - pos[None], axis=-1).max()) + 2.0
+        else:
+            cutoff = self.cutoff
+        pos, bounds, boundary = _box(pos, cell, cutoff)
+        with torch.no_grad():
+            P = {k: v.detach().double().cpu() for k, v in self.predicted_parameters().items()}
+        src = self._atom_src.cpu().numpy()
+        z = self._z.cpu().numpy()
+        q = P["charge"].numpy()[src] * math.sqrt(self.coulomb_constant / LAMMPS_COULOMB)
+        types = [int(u) + 1 for u in src]
+        masses = {int(u) + 1: ATOMIC_MASSES[int(zz)] for u, zz in sorted(set(zip(src.tolist(), z.tolist())))}
+        sections, tables = {}, {}
+
+        def rows(section, kind, key):
+            idx, srcs = getattr(self, f"_{kind}s").cpu().numpy(), getattr(self, f"_{kind}s_src").cpu().numpy()
+            table, out = {}, []
+            for m in range(idx.shape[1]):
+                k = key(int(srcs[m]))
+                if k is None:
+                    continue
+                table.setdefault(k, len(table) + 1)
+                out.append((table[k], *[int(a) + 1 for a in idx[:, m]]))
+            sections[section], tables[section] = out, table
+
+        rows("Bonds", "bond", lambda r: (_r(0.5 * P["bond_k"][r]), _r(P["bond_x0"][r])))
+        rows("Angles", "angle", lambda r: (_r(0.5 * P["angle_k"][r]), _r(math.degrees(float(P["angle_x0"][r])))))
+        rows("Dihedrals", "proper", lambda r: tuple((_r(P["proper_k"][r, s]), s + 1, 0 if s % 2 == 0 else 180)
+                                                    for s in range(4) if float(P["proper_k"][r, s]) != 0.0) or None)
+        rows("Impropers", "improper", lambda r: (_r(P["improper_k"][r, 0]),))
+        data = _data("xnn ByteFF", pos, bounds, masses, types, q, sections,
+                     {s: len(tables[s]) for s in tables})
+        cmds = ["units real", "atom_style full", f"boundary {boundary}",
+                f"pair_style lj/cut/coul/cut {cutoff!r}", "pair_modify mix arithmetic",
+                f"special_bonds lj 0.0 0.0 {self.fudge_lj!r} coul 0.0 0.0 {self.fudge_qq!r}"]
+        cmds += _styles(sections, {"bond": "harmonic", "angle": "harmonic", "dihedral": "fourier",
+                                   "improper": "cvff"})
+        cmds.append("read_data DATAFILE")
+        for t in sorted(masses):
+            cmds.append(f"pair_coeff {t} {t} {float(P['epsilon'][t - 1]):.15g} {float(P['sigma'][t - 1]):.15g}")
+        cmds += [f"bond_coeff {i} {k[0]:.15g} {k[1]:.15g}" for k, i in tables["Bonds"].items()]
+        cmds += [f"angle_coeff {i} {k[0]:.15g} {k[1]:.15g}" for k, i in tables["Angles"].items()]
+        cmds += [f"dihedral_coeff {i} {len(k)} " + " ".join(f"{a:.15g} {n} {d}" for a, n, d in k)
+                 for k, i in tables["Dihedrals"].items()]
+        cmds += [f"improper_coeff {i} {k[0]:.15g} -1 2" for k, i in tables["Impropers"].items()]
+        return data, cmds, 0.0
+
     @classmethod
     def from_config(cls, cfg) -> "ByteFF":
         """Construct from a model config: the keyword options of the class from ``cfg.extra``;
@@ -1011,6 +1302,9 @@ class _PolEnergy(nn.Module):
              "e_charge_transfer")
     #: a bound system has fixed sizes; symbolic ones break the compiled second derivatives (torch 2.5)
     static_shapes = True
+    #: the inductor's coalescing tiling analysis fails on some of this block's shapes (torch 2.11: an
+    #: uncaught CantSplit), so it is compiled without it
+    compile_options = {"triton.coalesce_tiling_analysis": False}
 
     def __init__(self, prefactor: float, wall: float, damping: float, ke: float, thole: float):
         super().__init__()
@@ -1037,17 +1331,19 @@ class _PolEnergy(nn.Module):
         rep = vdw_scale * exp_repulsion(r, eps, lam, r0, self.prefactor, self.wall)
         disp = vdw_scale * damped_dispersion(r, c6, r0, self.damping)
         ct = charge_transfer(r, ct_eps, ct_lam, r0)
+        elec = qq / r
         A, field = polarization_system(pos.view(B, n, 3), charge.view(B, n), alpha.view(B, n), damp.view(B, n),
                                        field_scale, self.thole)
 
-        def node(e, i, j=None):
-            if j is None:
-                return scatter_sum(e, i, N)
-            return scatter_sum(0.5 * e, i, N) + scatter_sum(0.5 * e, j, N)
-
-        energies = torch.stack([node(e_bond, b0, b1), node(e_angle, a1), node((1.0 - improper) * e_tors, t_owner),
-                                node(improper * e_tors, t_owner), node(rep, p0, p1), node(disp, p0, p1),
-                                node(qq / r, p0, p1), node(ct, p0, p1)], 1)
+        # one scatter into (atom, term)
+        K = len(self.TERMS)
+        t_col = 2 + improper.long()
+        values = [0.5 * e_bond, 0.5 * e_bond, e_angle, e_tors]
+        index = [b0 * K, b1 * K, a1 * K + 1, t_owner * K + t_col]
+        for col, e in ((4, rep), (5, disp), (6, elec), (7, ct)):
+            values += [0.5 * e, 0.5 * e]
+            index += [p0 * K + col, p1 * K + col]
+        energies = scatter_sum(torch.cat(values), torch.cat(index), N * K).view(N, K)
         return energies, A, field
 
 
@@ -1090,14 +1386,52 @@ class ByteFFPol(_GraphParameterizedFF):
         the dipoles are solved outside it). Compiling takes tens of seconds per
         batch shape: ``"auto"`` (default) compiles after :attr:`compile_after`
         evaluations of one shape, ``True`` at once (molecular dynamics,
-        training), ``False`` never.
+        training), ``False`` never. In cells, ``True`` and ``"auto"`` solve the
+        dipoles and run the mesh on fused GPU kernels when evaluating (the same
+        numbers to round-off), training stays on the reference.
+    cutoff : float, optional
+        ``None`` (default): every pair of a structure interacts (molecules and
+        clusters, no cell). A cutoff in Angstrom evaluates periodic cells: the
+        repulsion, dispersion and charge transfer of the neighbor pairs truncated
+        there, the charges and induced dipoles as Ewald sums.
+    ewald_tolerance : float, optional
+        Sets the Ewald coefficient ``sqrt(-ln(2 tol)) / cutoff`` and the mesh,
+        ``ceil(2 alpha L / (3 tol^(1/5)))`` points (at least six) along a cell
+        side ``L``, rounded up to a size whose prime factors are at most 7 (as
+        OpenMM's GPU platforms do). Default ``5e-5``.
+    ewald_alpha : float, optional
+        The Ewald coefficient in 1/Angstrom instead.
+    pme_grid : sequence of int, optional
+        The mesh instead.
+    pme_order : int, optional
+        B-spline order of the mesh. Default 5.
+    polar_eps : float, optional
+        Convergence of the iterative dipole solve of cells, the rms change per
+        iteration in Debye. Default ``1e-5``.
+    max_iter : int, optional
+        Iterations of that solve at most. Default 100.
+    long_range_correction : bool, optional
+        Add the uniform-density estimate of the short-range terms beyond the
+        cutoff. Default ``True``.
+    predictor : str, optional
+        Extrapolate the dipoles of the next step from the last ones as the start
+        of the iterative solve in cells (molecular dynamics): ``"aspc"``,
+        ``"gear"`` or ``"previous"`` (see
+        :class:`~xnn.ffnn.models.DipolePredictor`); ``None`` (default) starts from
+        the direct dipoles. The converged dipoles do not change.
+    predictor_history : int, optional
+        Dipole sets the predictor uses. Default 6.
 
     Notes
     -----
-    Every pair of a structure interacts (no cutoff, no cell). ``forward`` returns
-    ``e_repulsion``, ``e_dispersion``, ``e_electrostatics``, ``e_polarization`` and
-    ``e_charge_transfer`` besides the bonded terms, and the ``induced_dipoles``
-    ``(N, 3)`` in e Angstrom.
+    ``forward`` returns ``e_repulsion``, ``e_dispersion``, ``e_electrostatics``,
+    ``e_polarization`` and ``e_charge_transfer`` besides the bonded terms, and the
+    ``induced_dipoles`` ``(N, 3)`` in e Angstrom. A cell's sides must be at least
+    twice the cutoff long (its perpendicular widths), so that every pair interacts
+    with one image at most; the 1,2 to 1,5 pairs of a molecule take their nearest
+    images. In cells, :meth:`plan_step` records the host decisions of an evaluation
+    for :class:`~xnn.common.deploy.StepGraph`, which replays molecular dynamics
+    steps as CUDA graphs.
     """
 
     polarizable = True
@@ -1109,7 +1443,19 @@ class ByteFFPol(_GraphParameterizedFF):
                  coulomb_constant: float = COULOMB, charge14: float = 0.5, vdw14: float = 0.5,
                  induction14: float = 0.5, induction15: float = 1.0, thole: float = 0.39,
                  dispersion_damping: float = 120.0, wall: float = 1.5, repulsion_prefactor: float = 6.0,
-                 charge: int = 0, use_fast: Union[bool, str] = "auto"):
+                 charge: int = 0, use_fast: Union[bool, str] = "auto", cutoff: Optional[float] = None,
+                 ewald_tolerance: float = 5e-5, ewald_alpha: Optional[float] = None,
+                 pme_grid: Optional[Sequence[int]] = None, pme_order: int = 5, polar_eps: float = 1e-5,
+                 max_iter: int = 100, long_range_correction: bool = True, predictor: Optional[str] = None,
+                 predictor_history: int = 6):
+        self.ewald_tolerance = float(ewald_tolerance)
+        self.solver_stats: dict = {}
+        self._adjoints: dict = {}
+        self.set_dipole_predictor(predictor, predictor_history)
+        self.ewald_alpha = None if ewald_alpha is None else float(ewald_alpha)
+        self.pme_grid = None if pme_grid is None else [int(k) for k in pme_grid]
+        self.pme_order, self.polar_eps, self.max_iter = int(pme_order), float(polar_eps), int(max_iter)
+        self.long_range_correction = bool(long_range_correction)
         self.charge14, self.vdw14 = float(charge14), float(vdw14)
         self.use_fast = resolve_use_fast(use_fast)
         self.induction14, self.induction15 = float(induction14), float(induction15)
@@ -1119,13 +1465,11 @@ class ByteFFPol(_GraphParameterizedFF):
                          bonded={**dict(pre=(256, 256, 3), out=(256, 4), tanh_output=20.0, form="two_well"),
                                  **(bonded or {})},
                          nonbonded={**dict(pre=(256, 256, 3), out=(256, 3)), **(nonbonded or {})},
-                         members=members, supported_elements=supported_elements, cutoff=None,
+                         members=members, supported_elements=supported_elements, cutoff=cutoff,
                          coulomb_constant=coulomb_constant, charge=charge)
         self._energy = _PolEnergy(self.repulsion_prefactor, self.wall, self.dispersion_damping,
                                   self.coulomb_constant, self.thole)
-        self._block_calls: dict = {}
-        self._compile_failed: set = set()
-        self._compile_checked: set = set()
+
 
     def _bind_pairs(self, n: int) -> None:
         super()._bind_pairs(n)
@@ -1135,6 +1479,25 @@ class ByteFFPol(_GraphParameterizedFF):
             scale[p[0], p[1]] = v
             scale[p[1], p[0]] = v
         self.register_buffer("_field_scale", scale, persistent=False)
+        if not self.all_pairs:
+            # cells: the fixed pairs are the 1,4 and 1,5 pairs (repulsion and dispersion), the neighbor pairs
+            # exclude every pair within 1,5; the Ewald sums take every pair, corrected on those within 1,5
+            # by the charge scale (energy) and the field scale (induction) less one
+            p14, p15 = self._pairs14, self._pairs15
+            within = torch.cat([self._pairs12, self._pairs13, p14, p15], 1)
+            self.register_buffer("_pair_list", torch.cat([p14, p15], 1), persistent=False)
+            self.register_buffer("_pair_is15", torch.cat([torch.zeros(p14.shape[1], dtype=torch.bool),
+                                                          torch.ones(p15.shape[1], dtype=torch.bool)]).to(
+                within.device), persistent=False)
+            self.register_buffer("_excluded", within, persistent=False)
+            charge_scale, field_scale = [], []
+            for p, m, f in ((self._pairs12, 0.0, 0.0), (self._pairs13, 0.0, 0.0),
+                            (p14, self.charge14, self.induction14), (p15, 1.0, self.induction15)):
+                charge_scale += [m - 1.0] * p.shape[1]
+                field_scale += [f - 1.0] * p.shape[1]
+            self.register_buffer("_corrected", within, persistent=False)
+            self.register_buffer("_corr_scales", torch.tensor([charge_scale, field_scale], dtype=torch.float64,
+                                                              device=within.device).reshape(2, -1), persistent=False)
 
     _pair_names = ("repulsion", "dispersion", "electrostatics", "charge_transfer")
     _atom_keys = ("charge", "volume", "c6", "r0", "alpha", "damp", "lam", "eps", "ct_eps", "ct_lam")
@@ -1157,57 +1520,377 @@ class ByteFFPol(_GraphParameterizedFF):
                 "ct_lam": torch.sqrt(a["ct_lam"][i] * a["ct_lam"][j])}
 
     def _atom_rows(self, atoms: dict, B: int) -> dict:
-        return {k: atoms[k].repeat(B) for k in ("alpha", "damp")}
+        rows = {k: atoms[k].repeat(B) for k in ("alpha", "damp")}
+        if not self.all_pairs:
+            # the neighbor pairs of cells combine per-atom rows (named apart from the fixed pairs' rows)
+            rows.update({"atom_" + k: atoms[k].repeat(B) for k in ("lam", "eps", "r0", "c6", "ct_eps", "ct_lam")})
+        return rows
 
-    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict):
+    def _unique_rows(self, P: dict, B: int) -> dict:
+        """With a cutoff: the tail sums of the long-range correction (:func:`_tail_sums`)."""
+        if self.all_pairs or not self.long_range_correction:
+            return {}
+        counts = torch.bincount(self._atom_src, minlength=P["eps"].shape[0])
+        return {"tails": _tail_sums(P, counts, self.cutoff, self.repulsion_prefactor, self.wall,
+                                    self.dispersion_damping)}
+
+    def _kernel_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict, step: Optional[StepPlan] = None):
         """Every term from the energy block :class:`_PolEnergy`, eager (the reference) or compiled (the
-        fast path), and the induced dipoles of its polarization system."""
+        fast path), and the induced dipoles of its polarization system; with a cutoff the periodic terms
+        (:meth:`_periodic_terms`)."""
+        if not self.all_pairs:
+            return self._periodic_terms(data, R, B, plan, step)
         n, dtype = self.n_atoms, data.model_dtype
         b, a, p = plan["bonds"], plan["angles"], plan["pairs"]
         args = (data.pos.to(dtype), R["bond_k"], R["bond_x0"], R["angle_k"], R["angle_x0"], R["torsion_k"],
                 R["torsion_sign"], plan["improper"].to(dtype), R["vdw_scale"], R["lam"], R["eps"], R["r0"], R["c6"],
                 R["qq"], R["ct_eps"], R["ct_lam"], R["charge"], R["alpha"], R["damp"], self._field_scale.to(dtype),
                 plan["src"], plan["dst"], b[0], b[1], a[1], plan["t_owner"], p[0], p[1], tuple(plan["sizes"]), B, n)
-        e, A, field = self._run_block(data, B, args)
+        e, A, field = self._run_block(self._energy, data, B, args)
         mu = solve_dipoles(A, field)
         terms = {k: e[:, j] for j, k in enumerate(_PolEnergy.TERMS)}
         terms["e_polarization"] = -0.5 * self.coulomb_constant * (mu * field).sum(-1).reshape(-1)
         return terms, {"induced_dipoles": mu.reshape(-1, 3)}
 
-    #: evaluations of one batch shape after which ``use_fast="auto"`` compiles the block: compiling takes
-    #: tens of seconds per shape and saves milliseconds per call
-    compile_after = 1000
+    def _ewald_context(self, data: AtomicGraph, dtype: torch.dtype, step: Optional[StepPlan] = None) -> dict:
+        """The Ewald coefficient and meshes of a batch of cells, with the mesh groups of the induction
+        solve (:class:`~xnn.ffnn.models.amoeba._MutualField`): structures on one mesh share a plan. The
+        host decisions are a step plan's when it has them."""
+        layout = None if step is None else step.ewald
+        if layout is None:
+            layout = self._ewald_layout(data, dtype)
+            if step is not None:
+                step.ewald = layout
+        return {"structures": layout["structures"], "groups": layout["groups"], "plans": {},
+                "pos": data.pos.to(dtype), "cells": data.cell.to(dtype), "alpha_p_value": layout["alpha"],
+                "porder": self.pme_order, "mesh_self": False, "kernels": False}
 
-    def _run_block(self, data: AtomicGraph, B: int, args: tuple) -> tuple:
-        """The energy block, compiled where ``use_fast`` asks for it (eager where compiling fails)."""
-        from xnn.common.models import compiled
-        key = (B, data.model_dtype, str(data.pos.device), self.training)
-        if self.use_fast is False or not compiled.supported(data.pos.device, data.model_dtype) \
-                or key in self._compile_failed:
-            return self._energy._reference(*args)
-        if self.use_fast == "auto":
-            self._block_calls[key] = self._block_calls.get(key, 0) + 1
-            if self._block_calls[key] <= self.compile_after:
-                return self._energy._reference(*args)
-        if key not in self._compile_checked:
-            # the compiled derivatives are built at their first use: try them once on copies of the inputs, so
-            # a compiler failure for this shape falls back to the (identical) eager block
-            try:
-                with torch.enable_grad():
-                    trial = tuple(a.detach().requires_grad_(True) if isinstance(a, Tensor) and a.is_floating_point()
-                                  else a for a in args)
-                    e, A, field = run_compiled(self._energy, *trial)
-                    g = torch.autograd.grad(e.sum() + A.sum() + field.sum(), trial[0], create_graph=self.training)[0]
-                    if self.training:
-                        torch.autograd.grad(g.sum(), trial[1], allow_unused=True)
-            except Exception as err:
-                import warnings
-                self._compile_failed.add(key)
-                warnings.warn(f"compiling the ByteFF-Pol energy block failed for this shape; evaluating it eagerly "
-                              f"({type(err).__name__})", RuntimeWarning, stacklevel=2)
-                return self._energy._reference(*args)
-            self._compile_checked.add(key)
-        return run_compiled(self._energy, *args)
+    def _ewald_layout(self, data: AtomicGraph, dtype: torch.dtype) -> dict:
+        """The host decisions of the Ewald sums of a batch (checks, coefficient, meshes and groups)."""
+        message = "a ByteFF-Pol model with a cutoff evaluates periodic cells; give every structure one"
+        if data.cell is None:
+            raise ValueError(message)
+        cells = data.cell.to(dtype)
+        B, n, rc = data.num_graphs, self.n_atoms, self.cutoff
+        host = cells.detach().cpu().double()
+        volume = torch.abs(torch.linalg.det(host))
+        if bool((volume < 1e-8).any()) or (data.pbc is not None and not bool(data.pbc.all())):
+            raise ValueError(message + " (periodic along all three axes)")
+        widths = volume[:, None] / torch.linalg.norm(torch.linalg.cross(host[:, [1, 2, 0]], host[:, [2, 0, 1]]),
+                                                     dim=-1)
+        if bool((widths < 2.0 * rc - 1e-9).any()):
+            raise ValueError(f"every cell must be at least twice the cutoff ({2.0 * rc} Angstrom) wide")
+        tol = self.ewald_tolerance
+        alpha = self.ewald_alpha if self.ewald_alpha is not None else math.sqrt(-math.log(2.0 * tol)) / rc
+        by_mesh: dict = {}
+        for b in range(B):
+            mesh = (self.pme_grid if self.pme_grid is not None
+                    else [_fft_size(max(6, math.ceil(2.0 * alpha * float(host[b, i, i]) / (3.0 * tol ** 0.2))))
+                          for i in range(3)])
+            by_mesh.setdefault(tuple(mesh), []).append(b)
+        device = cells.device
+        groups, structures = [], []
+        for mesh, bs in by_mesh.items():
+            idx = torch.cat([torch.arange(b * n, (b + 1) * n, device=device) for b in bs])
+            groups.append({"bs": torch.tensor(bs, dtype=torch.long, device=device), "idx": idx,
+                           "batch": torch.arange(len(bs), device=device).repeat_interleave(n), "grid": list(mesh),
+                           "normals": None, "influence": None, "whole": len(bs) == B})
+            structures += [(b, None, list(mesh), None, None) for b in bs]
+        return {"structures": structures, "groups": groups, "alpha": alpha}
+
+    def _fast(self, data: AtomicGraph, dtype: torch.dtype) -> bool:
+        """Whether a periodic evaluation runs on the fused kernels: on CUDA, not training."""
+        return (self.use_fast is not False and not self.training and data.pos.is_cuda
+                and _kernels_supported(data.pos.device, dtype))
+
+    def plan_step(self, data: AtomicGraph, skin: float = 0.0, capacity: Optional[int] = None) -> StepPlan:
+        """Record the host decisions of an evaluation of a periodic structure for later evaluations of it
+        as it moves (see :class:`~xnn.ffnn.models.StepPlan`): the neighbor pairs as a Verlet list of
+        ``cutoff + skin``, the image shifts of the bonded vectors, the meshes and the Ewald coefficient.
+        Evaluations on the plan read nothing from the device but the convergence of the dipole solve,
+        and with fixed solve lengths not even that. The recording evaluation runs without gradients and
+        leaves the dipole predictor alone.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The batched graph, its neighbor list built with ``cutoff + skin``.
+        skin : float, optional
+            The margin of the neighbor list beyond the cutoff in Angstrom. Default 0.
+        capacity : int, optional
+            The number of pairs the plan holds, padded beyond the unique pairs of the neighbor
+            list; by default exactly those.
+
+        Returns
+        -------
+        StepPlan
+            The plan, for ``forward(data, plan)``.
+        """
+        if self.all_pairs:
+            raise ValueError("step plans need a cutoff (periodic cells)")
+        plan = StepPlan(skin, capacity)
+        with torch.no_grad():
+            self.forward(data, plan)
+        plan.recording = False
+        plan.converged = torch.ones((), dtype=torch.bool, device=data.pos.device)
+        plan.needed = torch.zeros(len(SOLVE_PHASES), dtype=torch.float64, device=data.pos.device)
+        return plan
+
+    def plan_pairs(self, data: AtomicGraph, plan: StepPlan) -> bool:
+        """Refresh the pair list of ``plan`` from the neighbor list of ``data`` in place.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The graph at the current positions, its neighbor list built with ``cutoff + skin``.
+        plan : StepPlan
+            The plan to refresh.
+
+        Returns
+        -------
+        bool
+            Whether the pairs fitted the plan's capacity and were copied.
+        """
+        src, dst = data.edge_index[0], data.edge_index[1]
+        if plan.capacity is not None and int((src < dst).sum()) > plan.capacity:
+            return False
+        fresh = StepPlan(plan.skin, plan.capacity)
+        with torch.no_grad():
+            self._record_pairs(data, fresh)
+        return plan.update(fresh, bonded=False)
+
+    def refresh_pairs(self, data: AtomicGraph, plan: StepPlan, cutoff: float) -> bool:
+        """Refresh the pair list of ``plan`` in place at the positions and cell of ``data``, one
+        structure, from a half neighbor list of ``cutoff`` (the cutoff plus the skin) found on the
+        device, without building a graph.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The plan's graph at the current step.
+        plan : StepPlan
+            The plan to refresh.
+        cutoff : float
+            The radius of the pair list.
+
+        Returns
+        -------
+        bool
+            Whether the pairs fitted the plan's capacity and were copied.
+        """
+        cell = data.cell.detach().reshape(-1, 3, 3)[0]
+        pbc = None if data.pbc is None else data.pbc.reshape(-1, 3)[0]
+        fresh = self.stage_pairs(data, plan, unique_pairs(data.pos.detach(), cutoff, cell, pbc))
+        return fresh is not None and plan.update(fresh, bonded=False)
+
+    def stage_pairs(self, data: AtomicGraph, plan: StepPlan, pairs: tuple,
+                    single_image: bool = False) -> Optional[StepPlan]:
+        """The unique pairs ``(i, k, shift)`` of ``data``, one structure, sorted by ``i``, recorded as
+        the pair list of a new plan for ``plan.update(fresh, bonded=False)``; ``plan`` is not touched,
+        so a step can still run on it meanwhile.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The plan's graph, its positions and cell where the pairs were found.
+        plan : StepPlan
+            The plan whose capacity and skin the new one takes.
+        pairs : tuple of Tensor
+            The pairs and their integer image shifts, or those in buffers of the plan's capacity
+            followed by their number on the device.
+        single_image : bool, optional
+            Every pair has one image within the list's cutoff. Unused: every image of an excluded
+            pair is excluded, its far images lying beyond the cutoff anyway.
+
+        Returns
+        -------
+        StepPlan or None
+            The new pair list, or ``None`` when the pairs exceed the capacity.
+        """
+        if plan.capacity is not None and int(pairs[0].shape[0]) > plan.capacity:
+            return None
+        fresh = StepPlan(plan.skin, plan.capacity)
+        with torch.no_grad():
+            self._record_pairs(data, fresh, pairs)
+        return fresh
+
+    def _record_pairs(self, data: AtomicGraph, plan: StepPlan, pairs: Optional[tuple] = None) -> None:
+        """Store the unique neighbor pairs of ``data`` in ``plan``, sorted by their first atom and
+        padded to the plan's capacity: atoms, image shifts, whether each lies beyond 1,5 (its
+        short-range weight) and the positions they were found at. ``pairs`` takes the place of the
+        graph's neighbor list: ``(i, k, shift)`` sorted by ``i``, or those in buffers of the plan's
+        capacity with their number on the device (nothing is read on the host)."""
+        dtype = data.model_dtype
+        n, B = self.n_atoms, data.num_graphs
+        if pairs is not None and len(pairs) == 4:
+            i, k, shift, total = pairs
+            weight = (~excluded_pairs(i, k, self._excluded, n, B, self)).to(dtype)
+            valid = (torch.arange(int(i.shape[0]), device=i.device) < total).to(dtype)
+            plan.pairs, plan.valid, plan.scales = (i, k, shift.to(data.pos.dtype)), valid, weight * valid
+            plan.count = total.reshape(1).to(torch.int32)
+            plan.reference = data.pos.detach().clone()
+            if self._fast(data, dtype):
+                plan.rows = _kernels().pair_rows(i, k, data.num_nodes, total, sorted_i=True)
+            return
+        if pairs is None:
+            src, dst = data.edge_index[0], data.edge_index[1]
+            sel = (src < dst).nonzero()[:, 0]
+            i, k = src.index_select(0, sel), dst.index_select(0, sel)
+            shift = data.cell_shifts.index_select(0, sel)
+            order = torch.argsort(i, stable=True)
+            i, k, shift = i[order], k[order], shift[order]
+        else:
+            i, k, shift = pairs
+        shift = shift.to(data.pos.dtype)
+        weight = (~excluded_pairs(i, k, self._excluded, n, B, self)).to(dtype)
+        M = int(i.shape[0])
+        cap = M if plan.capacity is None else int(plan.capacity)
+        if cap < M:
+            raise ValueError(f"the plan holds {cap} pairs, the neighbor list has {M}")
+        if cap > M > 0:
+            # the padding repeats the first pair with zero weight
+            fill = torch.zeros(cap - M, dtype=torch.long, device=i.device)
+            i, k, shift = torch.cat([i, i[fill]]), torch.cat([k, k[fill]]), torch.cat([shift, shift[fill]])
+            weight = torch.cat([weight, torch.zeros_like(weight[fill])])
+        valid = (torch.arange(int(i.shape[0]), device=i.device) < M).to(dtype)
+        plan.pairs, plan.valid, plan.scales = (i, k, shift), valid, weight * valid
+        plan.count = torch.tensor([M], dtype=torch.int32, device=i.device)
+        plan.reference = data.pos.detach().clone()
+        if self._fast(data, dtype):
+            plan.rows = _kernels().pair_rows(i, k, data.num_nodes, M, sorted_i=True)
+
+    def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
+        """Switch the dipole predictor of the iterative solve in cells on (``"aspc"``, ``"gear"``,
+        ``"previous"``) or off (``None``).
+
+        Parameters
+        ----------
+        kind : str or None
+            The extrapolation scheme (:class:`~xnn.ffnn.models.DipolePredictor`).
+        history : int, optional
+            Dipole sets it uses. Default 6.
+        """
+        if kind is None or str(kind).lower() == "none":
+            self.predictor = None
+        else:
+            self.predictor = DipolePredictor(str(kind).lower(), history)
+
+    def rewind_predictors(self) -> None:
+        """Take the dipoles of the last evaluation back out of the predictor, before a step is
+        evaluated again."""
+        if self.predictor is not None:
+            self.predictor.rewind()
+
+    def _periodic_terms(self, data: AtomicGraph, R: dict, B: int, plan: dict, step: Optional[StepPlan] = None):
+        """The terms of periodic cells: bonded terms and the 1,4 / 1,5 pairs on minimum-image vectors, the
+        short-range terms of the neighbor pairs beyond 1,5 within the cutoff (plus their long-range
+        correction), the Ewald sums of the charges (real-space pairs within the cutoff, mesh, self term,
+        and the scaled pairs within 1,5 corrected) and of the induced dipoles, which are solved by
+        conjugate gradients with the gradient through the adjoint system. On a step plan the pairs, image
+        shifts and Ewald layout are the plan's."""
+        n, N, dtype = self.n_atoms, data.num_nodes, data.model_dtype
+        C, rc, thole = self.coulomb_constant, self.cutoff, self.thole
+        recording = step is not None and step.recording
+        ew = self._ewald_context(data, dtype, step)
+        # the fast path of an evaluation on CUDA: the induction solve and the mesh on AMOEBA's kernels
+        # (differentiable once: training stays eager)
+        fast = self._fast(data, dtype)
+        ew["kernels"] = fast
+        off = (torch.arange(B, device=data.pos.device) * n).view(1, B, 1)
+        ci, cj = (self._corrected.unsqueeze(1) + off).reshape(2, -1)
+        if recording:
+            step.shifts = [pair_image_shifts(data, plan["src"], plan["dst"]), pair_image_shifts(data, ci, cj)]
+            self._record_pairs(data, step)
+        shifts = (None, None) if step is None else step.shifts
+        alpha_e = ew["alpha_p_value"]
+        node = {}
+
+        # the glue between the kernels runs compiled on a step plan's fast path (first derivatives only)
+        glue = fast and step is not None and not recording
+
+        # bonded terms and the fixed 1,4 and 1,5 pairs (repulsion and dispersion)
+        vec = pair_vectors(data, plan["src"], plan["dst"], shifts[0])
+        b, a, p = plan["bonds"], plan["angles"], plan["pairs"]
+        with fused(glue):
+            local = _pol_local(vec, tuple(plan["sizes"]), R["bond_k"], R["bond_x0"], R["angle_k"], R["angle_x0"],
+                               R["torsion_k"], R["torsion_sign"], plan["improper"], R["vdw_scale"], R["eps"], R["lam"],
+                               R["r0"], R["c6"], b[0], b[1], a[1], plan["t_owner"], p[0], p[1], N,
+                               self.repulsion_prefactor, self.wall, self.dispersion_damping)
+        node.update({k: local[:, j] for j, k in enumerate(("e_bond", "e_angle", "e_torsion", "e_improper"))})
+        rep, disp = local[:, 4], local[:, 5]
+
+        # neighbor pairs, once each: short-range terms beyond 1,5, real-space Ewald terms of every pair
+        if step is None:
+            src, dst, vn, _, _, beyond, _ = half_edges(data, self._excluded, n, self)
+            valid, beyond = torch.ones_like(vn[:, 0]), beyond.to(dtype)
+        else:
+            src, dst, pair_shift = step.pairs
+            vn = _plan_vectors(data, src, dst, pair_shift, step.count, fast, step.rows if fast else None)
+            valid, beyond = step.valid, step.scales
+        q, damp = R["charge"], R["damp"]
+        atoms = torch.stack([q, damp] + [R["atom_" + k] for k in ("eps", "lam", "r0", "c6", "ct_eps", "ct_lam")], 1)
+        constants = (rc * rc, alpha_e, thole, C, self.repulsion_prefactor, self.wall, self.dispersion_damping)
+        if fast and step is not None and not recording and step.rows is not None:
+            # a step plan's fast path (molecular dynamics, first derivatives only): the fused kernels walk
+            # the plan's rows
+            from .byteff_kernels import pol_real_space
+            pairs_node, field, D1u, D2u = pol_real_space(vn, src, dst, beyond, atoms, step.rows, step.count,
+                                                         *constants)
+        else:
+            pairs_node, field, D1u, D2u = _pol_real_space(vn, valid, beyond, src, dst, atoms, N, *constants)
+        rep, disp = rep + pairs_node[:, 0], disp + pairs_node[:, 1]
+        ct, elec = pairs_node[:, 2], pairs_node[:, 3]
+
+        # the pairs within 1,5: charge scale and field scale less one
+        cm, cs = self._corr_scales.to(dtype).repeat(1, B)
+        vc = pair_vectors(data, ci, cj, shifts[1])
+        with fused(glue):
+            scaled = _pol_scaled_pairs(vc, ci, cj, cm, cs, q, damp, N, C, thole)
+        elec, field = elec + scaled[:, 0], field + scaled[:, 1:]
+
+        # the mesh: reciprocal energy and field of the charges, and the self energy
+        for g, mp in _mesh_plans(ew, "m", self.pme_order):
+            idx = g["idx"]
+            qg = q if g["whole"] else q.index_select(0, idx)
+            phi, dphi, _ = mp.potential(qg, None, None, alpha_e, hessian=False)
+            if g["whole"]:
+                elec, field = elec + 0.5 * C * qg * phi, field - dphi
+            else:
+                elec, field = elec.index_add(0, idx, 0.5 * C * qg * phi), field.index_add(0, idx, -dphi)
+        elec = elec - C * alpha_e / SQRT_PI * q * q
+
+        # the induced dipoles: A mu = E with the real-space ladders, the mesh field and the self field
+        alpha = R["alpha"]
+        polar = alpha > 0
+        op = _MutualField(src, dst, N, polar, ew, self.polar_eps, self.max_iter, ew["pos"], ew["cells"])
+        op.n_polar, op.kernels, op.coulomb = N, fast, C * KCAL_TO_EV
+        # one field polarizes and is polarized: the adjoint of the polarization energy is -C/2 times the
+        # dipoles themselves, with no second solve (checked on the incoming gradient)
+        op.polar_field = (field * polar[:, None].to(dtype)).detach()
+        op.stats, op.adjoints = self.solver_stats, self._adjoints
+        if step is not None:
+            op.count, op.rows, op.collect_stats = step.count, step.rows if fast else None, False
+            op.select = (op.count, None)
+            if not recording:
+                op.fixed, op.converged, op.needed = step.solve_iterations, step.converged, step.needed
+        predict = self.predictor is not None and not self.training and not recording
+        if predict:
+            guess = self.predictor.predict(field)
+            if guess is not None and guess.shape == field.shape:
+                op.guess = guess.detach()
+        mu = _ImplicitInduction.apply(field, alpha, None, vn, D1u, D2u, ew["pos"], ew["cells"], op)
+        if predict:
+            self.predictor.push(mu.detach())
+        node["e_polarization"] = -0.5 * C * (mu * field).sum(1)
+
+        # the tails beyond the cutoff
+        if "tails" in R:
+            volume = cell_volume(ew["cells"])
+            tail = (4.0 * math.pi * n / (n + 1.0)) * R["tails"][None, :] / volume[:, None]     # (B, 3)
+            tail = tail.repeat_interleave(n, 0) / n
+            rep, disp, ct = rep + tail[:, 0], disp + tail[:, 1], ct + tail[:, 2]
+        node.update({"e_repulsion": rep, "e_dispersion": disp, "e_electrostatics": elec, "e_charge_transfer": ct})
+        return node, {"induced_dipoles": mu}
 
     def set_use_fast(self, use_fast):
         """Set when the energy block runs compiled (see ``use_fast`` of the model).
@@ -1228,8 +1911,11 @@ class ByteFFPol(_GraphParameterizedFF):
     @classmethod
     def from_config(cls, cfg) -> "ByteFFPol":
         """Construct from a model config; the options are read from ``cfg.extra``
-        (the keyword arguments of the class)."""
-        return cls(**_options(cfg, cls))
+        (the keyword arguments of the class). ``all_pairs`` (default true) evaluates every
+        pair, otherwise ``cfg.cutoff`` is the cutoff of periodic cells."""
+        opts = _options(cfg, cls)
+        opts["cutoff"] = None if model_options(cfg).get("all_pairs", True) else float(cfg.cutoff)
+        return cls(**opts)
 
 
 def _options(cfg, cls) -> dict:

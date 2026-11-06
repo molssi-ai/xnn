@@ -194,7 +194,7 @@ def from_byteff2(paths, *, structure=None, dtype=None, charge: int = 0, **option
 
 
 def from_foundation(name: str = "byteff-26", *, structure=None, cache_dir=None, dtype=None, charge: int = 0,
-                    local_files_only: bool = False):
+                    local_files_only: bool = False, **options):
     """Load a released ByteFF or ByteFF-Pol model through the model hub.
 
     The networks are downloaded on first use into the hub cache. They are
@@ -216,6 +216,8 @@ def from_foundation(name: str = "byteff-26", *, structure=None, cache_dir=None, 
         Total charge for bond perception when binding an ``ase.Atoms``.
     local_files_only : bool, optional
         Do not download; fail when a network is not cached.
+    **options
+        Options of the model class, for example ``cutoff`` for periodic cells.
 
     Returns
     -------
@@ -242,7 +244,8 @@ def from_foundation(name: str = "byteff-26", *, structure=None, cache_dir=None, 
             download_file(card.url, dest, md5=card.md5)
         paths.append(dest)
     species = cards[0].species
-    options = {"supported_elements": tuple(species)} if species else {}
+    if species:
+        options.setdefault("supported_elements", tuple(species))
     return from_byteff2(paths, structure=structure, dtype=dtype, charge=charge, **options)
 
 

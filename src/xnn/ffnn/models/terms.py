@@ -139,14 +139,20 @@ def solve_dipoles(A: Tensor, field: Tensor) -> Tensor:
     """The induced dipoles ``(B, n, 3)`` of the system ``A mu = E`` of :func:`polarization_system`.
 
     The matrix is symmetric positive definite unless atoms overlap (a polarization catastrophe): a
-    Cholesky factorization solves it, an LU factorization where that fails.
+    Cholesky factorization solves it, an LU factorization where that fails (not tested inside a CUDA-graph
+    capture, which reads nothing from the device).
     """
     B, n = field.shape[0], field.shape[1]
     rhs = field.reshape(B, 3 * n, 1)
     L, info = torch.linalg.cholesky_ex(A)
-    if bool((info != 0).any()):
+    # a CUDA-graph capture reads nothing from the device: the factorization of the recorded step serves
+    capturing = A.is_cuda and torch.cuda.is_current_stream_capturing()
+    if not capturing and bool((info != 0).any()):
         return torch.linalg.solve(A, rhs).reshape(B, n, 3)
-    return torch.cholesky_solve(rhs, L).reshape(B, n, 3)
+    # two triangular solves (cuBLAS) rather than cholesky_solve, whose batched GPU path (MAGMA) allocates
+    # memory and so cannot be captured
+    y = torch.linalg.solve_triangular(L, rhs, upper=False)
+    return torch.linalg.solve_triangular(L.mT, y, upper=True).reshape(B, n, 3)
 
 
 def induced_dipoles(pos: Tensor, q: Tensor, alpha: Tensor, damp: Tensor, scale: Tensor, thole: float,
