@@ -46,14 +46,18 @@ The distribution is `xnns`; the import name and the command line are `xnn`.
 
 ## Quick start
 
-One script loads data, trains a model, loads pre-trained models and fine-tunes
-one. Structures are plain dictionaries (`pos`, `atomic_numbers`, optional
+One script loads data, trains a model, loads pre-trained models, fine-tunes
+one and deploys it. Structures are plain dictionaries (`pos`, `atomic_numbers`, optional
 `cell`, `pbc` and `energy` / `forces` / `stress` labels), any ASE-readable
 file, or a dataset from the xnn hub:
 
 ```python
+from ase import Atoms, units
+from ase.md.verlet import VelocityVerlet
+
 from xnn.common.config import Config
 from xnn.common.data import AtomicDataset, load_dataset
+from xnn.common.deploy import XNNCalculator, export_to_lammps
 from xnn.common.models import from_pretrained, list_models
 from xnn.common.train import Trainer
 from xnn.gnn.models import TensorNet
@@ -87,6 +91,16 @@ ft.model.extra = {"pretrained": "mace-off23-small", "lora": {"rank": 16},
 ft.optim.epochs = 10
 ft.output_dir = "runs/mace-off23-lora"
 Trainer(ft, AtomicDataset(structures, cutoff=4.5)).fit()
+
+# Deploy: the fine-tuned model (LoRA updates folded in) as an ASE calculator, 20 MD steps of aspirin
+atoms = Atoms(numbers=structures[0]["atomic_numbers"], positions=structures[0]["pos"])
+atoms.calc = XNNCalculator.from_pretrained("runs/mace-off23-lora/best.pt")
+print(atoms.get_potential_energy(), atoms.get_forces().shape)
+VelocityVerlet(atoms, timestep=0.5 * units.fs).run(20)
+
+# Deploy: the same model as a TorchScript file for LAMMPS (no xnn needed to run it)
+export_to_lammps(from_pretrained("runs/mace-off23-lora/best.pt", wrap=False), cutoff=4.5,
+                 path="mace-off23-lora.pt")
 ```
 
 - The same training runs from the command line:
@@ -94,34 +108,13 @@ Trainer(ft, AtomicDataset(structures, cutoff=4.5)).fit()
 - Fine-tuning also covers full fine-tuning, multi-head replay
   (`heads: [pt_head, Default]` with `data.replay_path`, original or
   pseudolabelled replay data) and layer freezing (`optim.freeze`).
-- Converting the MACE checkpoints needs `mace-torch` once
-  (`pip install "xnns[examples]"`).
-
-## Benchmark
-
-Score pre-trained checkpoints on one dataset (energy / force / stress MAE, MSE
-or RMSE, per atom or as atomization energies), tabulated per model and written
-to CSV, JSON or Markdown:
-
-```bash
-xnn benchmark --config configs/benchmark.yaml
-```
-
-## Deploy
-
-```python
-from xnn.common.deploy import XNNCalculator, export_to_lammps
-
-# Export as ASE calculator
-atoms.calc = XNNCalculator(model, cutoff=5.0)
-
-# Export to LAMMPS (TorchScript)
-export_to_lammps(model, cutoff=5.0, path="deployed.pt")
-```
-
-`xnn mdi --ckpt runs/exp/best.pt` serves a model to an external MD code through
-the MolSSI Driver Interface. `DomainParallel` splits one large box over the GPUs
-of a `torchrun` launch, with the same energies, forces and stress as one GPU.
+- Score pre-trained checkpoints on one dataset (energy / force / stress MAE, MSE
+  or RMSE, per atom or as atomization energies), tabulated per model and written
+  to CSV, JSON or Markdown with `xnn benchmark --config configs/benchmark.yaml`
+- `xnn mdi --ckpt runs/mace-off23-lora/best.pt` serves a model to an external MD
+  code through the MolSSI Driver Interface.
+- `DomainParallel` splits one large box over the GPUs of a `torchrun` launch,
+  with the same energies, forces and stress as one GPU.
 
 ## Models
 
