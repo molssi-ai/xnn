@@ -275,16 +275,58 @@ def cell_grid(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
         from .grid_pairs import grid_shape
     except ImportError:
         return None
-    rows = cell.detach().reshape(3, 3).double().cpu()
-    if bool((rows - torch.diag(torch.diagonal(rows))).abs().max() > 0):
+    lengths = _orthorhombic_edges(cell)
+    if lengths is None:
         return None
-    lengths = torch.diagonal(rows).abs().tolist()
     # on a CPU, cells of half the cutoff where the cell has room for five per axis
     shape = None if pos.is_cuda else grid_shape(lengths, cutoff, 2)
     if shape is not None:
         return torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape, None, 2
     shape = grid_shape(lengths, cutoff)
     return None if shape is None else (torch.diagonal(cell.detach().reshape(3, 3)).abs(), shape)
+
+
+def _orthorhombic_edges(cell: Tensor) -> Optional[list]:
+    """The edges of an orthorhombic cell (a host read), or ``None`` for another cell."""
+    rows = cell.detach().reshape(3, 3).double().cpu()
+    if bool((rows - torch.diag(torch.diagonal(rows))).abs().max() > 0):
+        return None
+    return torch.diagonal(rows).abs().tolist()
+
+
+def small_cell(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
+               pbc: Optional[Tensor] = None) -> Optional[Tensor]:
+    """The edges of a cell whose pairs :func:`~xnn.common.data.grid_pairs.grid_pairs`
+    finds without a grid (``shape=None``): orthorhombic, periodic on every axis,
+    too small for :func:`cell_grid` but with every edge over ``cutoff``, and the
+    positions on a CUDA device with Triton.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Cartesian positions of shape ``(N, 3)``.
+    cutoff : float
+        Neighbor cutoff radius.
+    cell : Tensor, optional
+        Lattice vectors as rows, of shape ``(3, 3)``.
+    pbc : Tensor, optional
+        Boolean periodicity flags of shape ``(3,)``.
+
+    Returns
+    -------
+    Tensor or None
+        The edges ``(3,)`` on the device, or ``None`` for another cell.
+    """
+    if cell is None or pbc is None or not pos.is_cuda or not bool(pbc.all()):
+        return None
+    try:
+        from . import grid_pairs  # noqa: F401
+    except ImportError:
+        return None
+    lengths = _orthorhombic_edges(cell)
+    if lengths is None or min(lengths) <= cutoff or cell_grid(pos, cutoff, cell, pbc) is not None:
+        return None
+    return torch.diagonal(cell.detach().reshape(3, 3)).abs()
 
 
 def unique_pairs(pos: Tensor, cutoff: float, cell: Optional[Tensor] = None,
