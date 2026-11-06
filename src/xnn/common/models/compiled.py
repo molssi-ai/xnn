@@ -10,6 +10,7 @@ inputs (indices) as constants, so a force loss trains through it. A block with
 dropout that acts (training mode) runs the reference.
 """
 import sys
+from typing import Optional
 
 import torch
 from torch import Tensor
@@ -116,12 +117,34 @@ def _state(block: torch.nn.Module):
     return state[1:]
 
 
+def _inductor_options(options: Optional[dict]) -> Optional[dict]:
+    """The inductor options of a block (its ``compile_options``) that this PyTorch knows; ``None`` for none."""
+    if not options:
+        return None
+    import torch._inductor.config as config
+    known = {}
+    for name, value in options.items():
+        node = config
+        for part in name.split("."):
+            node = getattr(node, part, _MISSING)
+            if node is _MISSING:
+                break
+        if node is not _MISSING:
+            known[name] = value
+    return known or None
+
+
+_MISSING = object()
+
+
 def run_compiled(block: torch.nn.Module, *args):
     """``block._reference(*args)`` on the compiled path (the reference where dropout acts).
 
     Python values among ``args`` (sizes, ``None``) are compiled in as constants. Blocks of one
     structure share one compiled function (their weights are its inputs). A block whose class sets
-    ``static_shapes = True`` is compiled for the sizes it meets instead of symbolic ones.
+    ``static_shapes = True`` is compiled for the sizes it meets instead of symbolic ones, and one whose class
+    sets ``compile_options`` (inductor options, e.g. ``{"triton.coalesce_tiling_analysis": False}``) is compiled
+    with those this PyTorch knows.
     """
     structure, params, buffers, stochastic = _state(block)
     if stochastic:
@@ -132,9 +155,14 @@ def run_compiled(block: torch.nn.Module, *args):
     fn = _SHARED.get(key)
     if fn is None:
         raw, n_diff, n_const = _functional(block, len(args), list(kinds), list(values))
+        # torch.compile keeps a few compiled versions per code object, and the closures of _functional
+        # share theirs: past that limit further blocks, shapes or precisions would run eagerly, so each
+        # compiled function gets its own copy (as compile_twice_differentiable does for its stages)
+        raw.__code__ = raw.__code__.replace(co_name=raw.__name__)
         dynamic = not getattr(block, "static_shapes", False)
-        fn = _SHARED[key] = (compile_twice_differentiable(raw, n_diff, n_const, dynamic=dynamic) if block.training
-                             else torch.compile(raw, dynamic=dynamic))
+        options = _inductor_options(getattr(block, "compile_options", None))
+        fn = _SHARED[key] = (compile_twice_differentiable(raw, n_diff, n_const, dynamic=dynamic, options=options)
+                             if block.training else torch.compile(raw, dynamic=dynamic, options=options))
     # contiguous inputs: a transposed view as an input of the twice-differentiated graph trips
     # the compiler (symbolic strides)
     diff = [a.contiguous() for a in args if _kind(a) == "d"]

@@ -48,6 +48,8 @@ class NoIndexPlanner:
 
     #: No plan entries.
     offsets: Dict[str, Optional[str]] = {}
+    #: Whether a batch is padded by an inert structure to fixed counts.
+    pads: bool = True
 
     def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
         return {}
@@ -61,6 +63,14 @@ class NoIndexPlanner:
     def pad(plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:
         """The empty plan."""
         return {}
+
+
+class FixedShapePlanner(NoIndexPlanner):
+    """The planner of a model whose shapes the batch fixes by itself and which takes no padding
+    structure (a model bound to one system, :class:`~xnn.hybnn.models.ByteFF`): a captured evaluation
+    replays the batch as it comes and is recorded again when its counts change."""
+
+    pads = False
 
 
 def index_planner(model: torch.nn.Module) -> Optional[Callable]:

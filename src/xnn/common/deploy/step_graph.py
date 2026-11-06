@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import collections
 import math
+import warnings
 from typing import Optional
 
 import torch
 from torch import Tensor, nn
 
 from ..data import structure_to_graph
-from ..data.neighborlist import cell_grid, half_list, unique_pairs
+from ..data.neighborlist import cell_grid, half_list, small_cell, unique_pairs
 
 # the phases of the fixed-length solves, in the order of a plan's ``needed`` counts
 PHASES = ("forward", "adjoint")
@@ -87,6 +88,24 @@ class StepGraph:
     and its bonded vectors follow atoms wrapped back into the cell since the
     pair list was built. The first call of a run is an outer step.
 
+    With ``late_checks`` a replayed step returns before its status (pair
+    list, convergence, iterations needed) reaches the host. The status is
+    read during the next step, after that step's replay is queued, so the
+    device is not left idle while the host decides. The pair list is then
+    built one step earlier. A step whose list turns out outdated or whose
+    solves did not converge has already returned its results: it is counted
+    in ``late_failures`` with a warning, and the step that reads it is
+    evaluated as without late checks (rebuilt, or with longer solves). A step
+    that rebuilds the pair list takes the new list behind its replay and
+    leaves its status to the next step too, when the list is found on the
+    device alone: a grid search, or with late checks every pair of a smaller
+    orthorhombic cell (each edge over the list's cutoff). A new list that does
+    not hold (an atom wrapped back into the cell, more pairs than the plan
+    holds) is built again in full by the next step. A step at which an atom
+    is wrapped back into the cell is only seen to fail after it returned, so
+    late checks suit integrators that do not wrap the positions. :meth:`settle`
+    reads the status of the last step of a run.
+
     Parameters
     ----------
     model : torch.nn.Module
@@ -109,6 +128,9 @@ class StepGraph:
         Record the step as a CUDA graph on a GPU, by default ``True``.
     compute_dtype : torch.dtype, optional
         The model's dtype for a geometry kept in float64.
+    late_checks : bool, optional
+        Read the status of a replayed step during the next step, by default
+        ``False``.
 
     Raises
     ------
@@ -117,7 +139,8 @@ class StepGraph:
     """
 
     def __init__(self, model: nn.Module, cutoff: float, skin: float = 1.0, margin: float = 1.2, warmup: int = 8,
-                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None, shorten: int = 25):
+                 capture: bool = True, compute_dtype: Optional[torch.dtype] = None, shorten: int = 25,
+                 late_checks: bool = False):
         # in training mode the forces would carry a graph for a force loss, and the
         # backward pass would solve the dipoles again
         self.model = model.eval()
@@ -127,11 +150,14 @@ class StepGraph:
         self.cutoff, self.skin, self.margin = float(cutoff), float(skin), float(margin)
         self.warmup, self.capture, self.compute_dtype = int(warmup), bool(capture), compute_dtype
         self.shorten = int(shorten)
+        self.late_checks = bool(late_checks)
         self.rebuilds = 0
         # rebuilds found only after a replay, which then replays again
         self.late_rebuilds = 0
         # rebuilds done behind a replay
         self.overlapped = 0
+        # steps under late checks found outdated or unconverged after their results were returned
+        self.late_failures = 0
         self.full_rebuilds = 0
         self.recordings = 0
         self.replays = 0
@@ -181,6 +207,13 @@ class StepGraph:
         # steps of fixed length since the last failed length
         self.needed: list = []
         self.settled = 0
+        # under late checks: the status of the last replayed step on its way to the host (an event, the
+        # pinned host buffer, the number of counts, whether it ends with the cell test), and the buffer
+        self.previous: Optional[tuple] = None
+        self.host: Optional[Tensor] = None
+        self.event = None
+        # a pair list taken late that did not hold: the next rebuild is a whole plan
+        self.stale = False
 
     def __call__(self, struct: dict, terms: str = "all") -> dict:
         """Evaluate one step.
@@ -231,6 +264,8 @@ class StepGraph:
                 return self._valence()
             if terms != self.terms:
                 self.terms, self.cuda_graph = terms, None
+            if self.cuda_graph is None:
+                self.settle()
             if self.cuda_graph is not None:
                 out = self._replay(struct)
                 if out is not None:
@@ -240,6 +275,11 @@ class StepGraph:
                 self.pending = False
                 self._refresh(struct)
         out = self._eager()
+        if self.late_checks and self._recordable() and not self._refresh(struct):
+            # the first replays read their status a step late, and the eager steps before them rebuild only
+            # an outdated list: they start from a list built at these positions (a new plan is evaluated
+            # once before it is recorded)
+            return out
         self._record()
         return out
 
@@ -266,7 +306,7 @@ class StepGraph:
         self.plan = self.core.plan_step(graph, self.skin, capacity)
         self.plan.solve_iterations = lengths
         self.graph, self.pos, self.cell = graph, graph.pos, graph.cell
-        self.gridded = cell_grid(self.pos, self.cutoff + self.skin, *self._box()) is not None
+        self.gridded = self._search() is not None
         self.cuda_graph = None
         self.valence_graph, self.valence_steps = None, 0
         self._listed()
@@ -322,7 +362,9 @@ class StepGraph:
         the image shifts of its bonded vectors, and the whole plan is recorded."""
         self.rebuilds += 1
         self._listed()
-        if (hasattr(self.core, "refresh_pairs") and self.graph.num_graphs == 1 and not self._jumped()
+        # a list taken late that did not hold may hide an atom wrapped back into the cell
+        jumped, self.stale = self.stale, False
+        if (hasattr(self.core, "refresh_pairs") and self.graph.num_graphs == 1 and not jumped and not self._jumped()
                 and self.core.refresh_pairs(self.graph, self.plan, self.cutoff + self.skin)):
             # the pairs found once each at the plan's positions, without a graph
             return True
@@ -331,7 +373,7 @@ class StepGraph:
         graph = self._graph(struct)
         src, dst = graph.edge_index
         if int((src < dst).sum()) <= self.plan.capacity:
-            if not self._jumped() and self.core.plan_pairs(graph, self.plan):
+            if not jumped and not self._jumped() and self.core.plan_pairs(graph, self.plan):
                 return True
             self.full_rebuilds += 1
             new = self.core.plan_step(graph, self.skin, self.plan.capacity)
@@ -376,11 +418,22 @@ class StepGraph:
             self.side.wait_stream(torch.cuda.current_stream(self.pos.device))
         return half
 
+    def _search(self) -> Optional[tuple]:
+        """The edges and cells per axis of the staged search on the device: :func:`cell_grid`, or with late
+        checks the edges of a smaller cell searched without a grid (no cells, :func:`small_cell`); ``None``
+        when vesin finds the pairs."""
+        cut = self.cutoff + self.skin
+        grid = cell_grid(self.pos, cut, *self._box())
+        if grid is None and self.late_checks:
+            edges = small_cell(self.pos, cut, *self._box())
+            grid = None if edges is None else (edges, None)
+        return grid
+
     def _grid(self):
-        """:func:`cell_grid` of the staged search, kept while the caller's cell is unchanged."""
+        """:meth:`_search`, kept while the caller's cell is unchanged."""
         key = (self._cell_key, self.cutoff + self.skin)
         if self._grid_cache is None or self._grid_cache[0] != key or self._cell_key is None:
-            self._grid_cache = (key, cell_grid(self.pos, self.cutoff + self.skin, *self._box()))
+            self._grid_cache = (key, self._search())
         return self._grid_cache[1]
 
     def _stage(self, half: tuple) -> tuple:
@@ -398,7 +451,7 @@ class StepGraph:
                 pairs = grid_pairs(self.pos.detach(), cut, *grid, capacity=self.plan.capacity)
                 if len(pairs) == 4:
                     over = pairs[3][0] > int(self.plan.capacity)
-                fresh = self.core.stage_pairs(self.graph, self.plan, pairs, single_image=True)
+                fresh = self.core.stage_pairs(self.graph, self.plan, pairs, single_image=grid[1] is not None)
             else:
                 fresh = self.core.stage_pairs(self.graph, self.plan,
                                               unique_pairs(self.pos.detach(), cut, *self._box(), half=half or None))
@@ -463,16 +516,25 @@ class StepGraph:
         fresh = jump = None
         if half is not None:
             fresh, jump = self._stage(half)
-        # one read from the device: the rebuild flags, the convergence, the iterations needed and a jump
-        if self.status is not None:
-            status = self.status if jump is None else torch.cat([self.status, jump.reshape(1).to(torch.float64)])
-        else:
-            flags = [self.flag, self.due, self.plan.converged]
-            status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]
-                               + ([] if jump is None else [jump.reshape(1).to(torch.float64)]))
-        if self.shift_bound is not None:
-            # the cell has changed since the pair list: the test that counts the images' move too
-            status = torch.cat([status, self._cell_outdated().reshape(1).to(torch.float64)])
+        status = self._status(jump)
+        # under late checks the step before is read while this one runs
+        seen = self._previous()
+        if rebuild:
+            # this step rebuilds: a rebuild the step before asked for is this one
+            self.pending = False
+        if self.late_checks and seen in (None, (False, True)) and not self.stale and (
+                not rebuild or (half == () and fresh is not None)):
+            self._queue(status, jump is not None)
+            if rebuild and self.plan.update(fresh, bonded=False):
+                # the new pairs, found on the device alone, are taken behind this replay; the next step reads
+                # whether they hold
+                self.rebuilds += 1
+                self.overlapped += 1
+                self._listed()
+            elif rebuild:
+                self.pending = True
+            self.replays += 1
+            return {key: value.clone() for key, value in self.outputs.items()}
         status = status.tolist()
         n = int(self.plan.needed.numel())
         (outdated, due, converged), needed = status[:3], status[3:3 + n]
@@ -481,12 +543,15 @@ class StepGraph:
             fresh = None
         if self.shift_bound is not None and status[-1]:
             outdated = True
+        if self.stale:
+            # the pair list the step before took late does not hold: built again in full
+            outdated, rebuild = True, False
         if outdated or not converged:
             # the step is evaluated again at the same positions
             self._rewind()
         if outdated:
             self.late_rebuilds += 1
-            if self._rebuild(struct, fresh) if rebuild else self._refresh(struct):
+            if (self._rebuild(struct, fresh) if rebuild else self._refresh(struct)) and self.cuda_graph is not None:
                 return self._replay(struct)
             return None
         if not converged:
@@ -496,8 +561,12 @@ class StepGraph:
             return None
         self.replays += 1
         out = {key: value.clone() for key, value in self.outputs.items()}
-        # a shortened length drops the graph: the next step records it again
-        self._shorten(needed)
+        if seen is not None and not seen[1] and self.plan.solve_iterations is not None:
+            # the step before did not converge in the fixed length (late checks): it is raised
+            self._lengthen()
+        else:
+            # a shortened length drops the graph: the next step records it again
+            self._shorten(needed)
         if rebuild:
             # these results are valid on the old pairs; the next step takes the new ones
             self._rebuild(struct, fresh)
@@ -505,6 +574,80 @@ class StepGraph:
             # the pairs hold for one more step: it builds them again while it replays
             self.pending = True
         return out
+
+    def _status(self, jump: Optional[Tensor]) -> Tensor:
+        """The status of the replayed step as one float64 tensor on the device: the rebuild flags, the
+        convergence, the iterations needed, a jump when the pairs were staged, and the cell test."""
+        if self.status is not None:
+            status = self.status if jump is None else torch.cat([self.status, jump.reshape(1).to(torch.float64)])
+        else:
+            flags = [self.flag, self.due, self.plan.converged]
+            status = torch.cat([torch.stack(flags).to(torch.float64), self.plan.needed]
+                               + ([] if jump is None else [jump.reshape(1).to(torch.float64)]))
+        if self.shift_bound is not None:
+            # the cell has changed since the pair list: the test that counts the images' move too
+            status = torch.cat([status, self._cell_outdated().reshape(1).to(torch.float64)])
+        return status
+
+    def _queue(self, status: Tensor, jumps: bool = False) -> None:
+        """Copy ``status`` to the pinned host buffer behind the replay, to be read by the next step;
+        ``jumps``: it holds the jump test of a pair list staged during the replay."""
+        if self.host is None or self.host.shape != status.shape:
+            self.host = torch.empty(status.shape, dtype=status.dtype, pin_memory=True)
+            self.event = torch.cuda.Event()
+        self.host.copy_(status, non_blocking=True)
+        self.event.record()
+        self.previous = (self.event, self.host, int(self.plan.needed.numel()), self.shift_bound is not None, jumps)
+
+    def _previous(self) -> Optional[tuple]:
+        """Read the status of the last step returned under late checks: ``None`` without one, else whether
+        its pair list was outdated and whether its solves converged. A step that held passes its counts
+        and its rebuild flag on as it would have when read at once; one that failed is counted and warned
+        about. A new pair list it took that does not hold marks the list stale (:attr:`stale`)."""
+        if self.previous is None:
+            return None
+        event, host, n, celled, jumps = self.previous
+        self.previous = None
+        event.synchronize()
+        status = host.tolist()
+        (outdated, due, converged), needed = status[:3], status[3:3 + n]
+        outdated = bool(outdated or (celled and status[-1]))
+        if jumps and status[3 + n]:
+            # the pairs it found while it ran: an atom wrapped back into the cell, or more pairs than fit
+            self.stale = True
+            warnings.warn("StepGraph: a pair list taken behind a replay did not hold (an atom wrapped back into "
+                          "the cell, or more pairs than the plan holds); the next step builds it in full",
+                          RuntimeWarning, stacklevel=4)
+        if outdated or not converged:
+            self.late_failures += 1
+            what = "its pair list was outdated" if outdated else "its solves did not converge in the fixed length"
+            warnings.warn(f"StepGraph: a step returned before its late check failed ({what}); "
+                          f"{self.late_failures} such steps so far", RuntimeWarning, stacklevel=4)
+            return outdated, bool(converged)
+        self._shorten(needed)
+        if due and not jumps:
+            # (a step that found new pairs flags the rebuild of the list before them)
+            self.pending = True
+        return False, True
+
+    def settle(self) -> bool:
+        """Read the status of the last step under late checks, as the next step would (a failed step is
+        counted and warned about, and the next step rebuilds or solves longer).
+
+        Returns
+        -------
+        bool
+            Whether the last step held (``True`` without a step to read).
+        """
+        seen = self._previous()
+        if seen is None:
+            return True
+        outdated, converged = seen
+        if outdated or self.stale:
+            self.pending = True
+        if not converged and self.plan.solve_iterations is not None:
+            self._lengthen()
+        return not outdated and converged and not self.stale
 
     def _length(self, phase: str, count: int) -> int:
         """The fixed length for solves whose largest count over the last ``shorten`` steps was
@@ -574,24 +717,33 @@ class StepGraph:
             self.recent.append({phase: int(stats[phase]) for phase in ("forward", "adjoint") if phase in stats})
         return out
 
+    def _ahead(self) -> int:
+        """The steps the pair list must still hold when a replayed step flags a rebuild: the next one,
+        whose replay builds it, and with late checks the one after, which reads the flag."""
+        return 3 if self.late_checks else 2
+
+    def _recordable(self) -> bool:
+        """Whether the step just evaluated is recorded now."""
+        return (self.capture and self.pos.is_cuda and self.cuda_graph is None
+                and self.plan.solve_iterations is not None)
+
     def _record(self) -> None:
-        if (not self.capture or not self.pos.is_cuda or self.cuda_graph is not None
-                or self.plan.solve_iterations is None):
+        if not self._recordable():
             return
         graph = torch.cuda.CUDAGraph()
         self.last = self.pos.detach().clone()
         checks = getattr(self.plan, "checks", None)
         if callable(checks):
             # its kernel is built before the capture (no kernel is loaded during one); last stays pos
-            checks(self.pos, self.last, steps=2)
+            checks(self.pos, self.last, steps=self._ahead())
         with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
             outputs = self._run()
             flag = due = status = None
             if callable(checks):
-                status = checks(self.pos, self.last, steps=2)
+                status = checks(self.pos, self.last, steps=self._ahead())
             else:
                 flag = self.plan.outdated(self.pos)
-                due = self.plan.due(self.pos, self.last, steps=2)
+                due = self.plan.due(self.pos, self.last, steps=self._ahead())
                 self.last.copy_(self.pos.detach())
         self.cuda_graph, self.outputs, self.flag, self.due, self.status = graph, outputs, flag, due, status
         self.recordings += 1
