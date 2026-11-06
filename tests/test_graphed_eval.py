@@ -36,12 +36,16 @@ def test_a_model_without_an_index_planner_is_rejected():
 def _model(name):
     if name == "physnet":
         return _physnet()
+    if name == "mace":
+        pytest.importorskip("e3nn")
+        from test_trainer_cuda_graph import _small as small
+        return small("mace")
     from test_trainer_cuda_graph import _small
     return _small(name)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr"])
+@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr", "mace"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_replays_equal_ordinary_evaluations(name, dtype):
     """Energies and forces (charges and dipoles of PhysNet) along a sequence of inputs (the steps of a
@@ -49,7 +53,7 @@ def test_replays_equal_ordinary_evaluations(name, dtype):
     ordinary evaluation's."""
     model = _model(name).to("cuda", dtype).eval()
     wrapped = ForceStressOutput(model).eval()
-    graphed = GraphedEvaluation(wrapped)
+    graphed = GraphedEvaluation(wrapped, trial=0)
     inputs = ([[_molecule(8, 0, k)] for k in range(5)] + [[_molecule(14, 4, k)] for k in range(4)]
               + [[_molecule(6, 6), _molecule(5, 7)]])
     tol = 1e-12 if dtype == torch.float64 else 1e-5
@@ -105,3 +109,30 @@ def test_padded_inputs_give_the_ordinary_results_and_keep_their_counts():
     third.cell = torch.eye(3, dtype=torch.float64)[None] * 20.0
     with pytest.raises(RuntimeError, match="same fields"):
         graphed._load(third)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("winner", ["replay", "eager"])
+def test_the_trial_keeps_the_faster_evaluation(monkeypatch, winner):
+    """After a capture the faster of replays and ordinary evaluations is kept; an ordinary winner
+    releases the graph. The results equal the ordinary evaluation's either way."""
+    model = _physnet().to("cuda").eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped)
+    monkeypatch.setattr(graphed, "_choose", lambda graph: winner)
+    for k in range(5):
+        g = structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda")
+        ref, out = wrapped(g), graphed(g)
+        assert torch.allclose(out["forces"], ref["forces"].detach(), atol=1e-5)
+        assert torch.allclose(out["energy"], ref["energy"].detach(), atol=1e-5)
+    assert graphed.mode == winner and (graphed.graph is None) == (winner == "eager")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_the_trial_times_both_evaluations():
+    """The trial itself runs and picks one of the two."""
+    model = _physnet().to("cuda").eval()
+    graphed = GraphedEvaluation(ForceStressOutput(model).eval(), trial=2)
+    for k in range(4):
+        graphed(structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda"))
+    assert graphed.mode in ("replay", "eager")

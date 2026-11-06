@@ -760,7 +760,7 @@ def test_mdi_engine_takes_late_checks_and_unwraps_the_driver_positions():
 
 def test_byteff_pol_torchscript_export(tmp_path):
     """The TorchScript export of a bound ByteFF-Pol model gives the reference energy, forces and charges of a
-    cluster to round-off; other atoms, a cell and a model of periodic cells are refused."""
+    cluster to round-off; other atoms and a cell are refused."""
     from xnn.common.deploy import export_torchscript_potential
     mols = [_mol("O"), _mol("[Li+]")]
     torch.manual_seed(1)
@@ -780,6 +780,30 @@ def test_byteff_pol_torchscript_export(tmp_path):
     with pytest.raises(Exception, match="cells"):
         scripted(torch.tensor(pos), torch.tensor(z), torch.eye(3, dtype=torch.float64) * 30.0,
                  torch.ones(3, dtype=torch.bool))
-    periodic = _pol_box()[0]
-    with pytest.raises(ValueError, match="periodic"):
-        export_torchscript_potential(periodic, periodic.cutoff, str(tmp_path / "box.pt"))
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))])
+def test_byteff_pol_torchscript_export_of_a_cell(tmp_path, device):
+    """The TorchScript export of a bound ByteFF-Pol model with a cutoff gives the reference energy, forces,
+    stress and charges of a periodic cell (pairs in more than one image, the mesh of the model's rule, the
+    induced dipoles by the reference's solve) to round-off; a molecule and a narrow cell are refused."""
+    from xnn.common.deploy import export_torchscript_potential
+    model, pos, z, L = _pol_box()
+    model = model.to(device).eval()
+    s = {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(z, device=device),
+         "cell": torch.eye(3, device=device) * L, "pbc": torch.ones(3, dtype=torch.bool, device=device)}
+    want = ForceStressOutput(model, compute_stress=True).eval()(structure_to_graph(s, model.cutoff, device=device))
+    path = export_torchscript_potential(model, model.cutoff, str(tmp_path / "byteff_pol_cell.pt"))
+    scripted = torch.jit.load(path, map_location=device)
+    got = scripted(s["pos"], s["atomic_numbers"], s["cell"], s["pbc"])
+    scale = float(want["forces"].abs().max())
+    assert torch.allclose(got["energy"], want["energy"].detach(), rtol=1e-12, atol=1e-12)
+    assert torch.allclose(got["forces"], want["forces"].detach(), rtol=1e-10, atol=1e-11 * scale)
+    assert torch.allclose(got["stress"], want["stress"].detach().reshape(3, 3), rtol=1e-10, atol=1e-12)
+    assert torch.equal(got["charges"], want["charges"].detach())
+    with pytest.raises(Exception, match="periodic"):
+        scripted(s["pos"], s["atomic_numbers"])
+    with pytest.raises(Exception, match="twice the cutoff"):
+        scripted(s["pos"], s["atomic_numbers"], torch.eye(3, device=device) * 1.5 * model.cutoff, s["pbc"])

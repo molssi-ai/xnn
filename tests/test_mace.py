@@ -128,6 +128,46 @@ def test_periodic_stress():
     assert out["stress"].shape == (1, 3, 3)
 
 
+@pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"}])
+def test_blocked_message_pass_equals_one_pass(blocks):
+    """The message pass in blocks of edges (each recomputed in the backward) gives the single
+    pass's energy, forces, stress and the parameter gradient of a force loss."""
+    from xnn.gnn.models.mace import set_message_blocks
+    torch.manual_seed(0)
+    model = _build(T=2, **blocks)
+    g = _graph(n=12, periodic=True)
+    out = {}
+    for block in ("off", 37):
+        set_message_blocks(model, block)
+        model.zero_grad()
+        model.train()
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        loss = res["energy"].sum() + (res["forces"] ** 2).sum()
+        loss.backward()
+        grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+        out[block] = (res["energy"].detach(), res["forces"].detach(), res["stress"].detach(), grads)
+    assert g.edge_index.shape[1] > 3 * 37
+    for a, b in zip(out["off"], out[37]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+
+
+def test_message_blocks_setting():
+    """"auto" stays a single pass on the CPU; a block as large as the edges is a single pass;
+    other values are refused."""
+    from xnn.gnn.models.mace import set_message_blocks
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    feats = torch.zeros(500, 8)
+    assert block._message_block_size(feats) == 0
+    set_message_blocks(model, 1000)
+    assert block.message_block == "1000" and block._message_block_size(feats) == 0
+    set_message_blocks(model, 100)
+    assert block._message_block_size(feats) == 100
+    with pytest.raises(ValueError):
+        set_message_blocks(model, "sometimes")
+
+
 def test_pair_repulsion_runs():
     pytest.importorskip("ase")
     model = ForceStressOutput(_build(T=1, max_L=0, max_ell=2, pair_repulsion=True))
