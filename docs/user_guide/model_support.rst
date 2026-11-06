@@ -289,8 +289,8 @@ Why a cell is orange or red:
 - **ByteFF, LAMMPS (orange).** It deploys as inputs for LAMMPS's own styles,
   with the parameters of the system it is bound to.
 - **ByteFF-Pol, LAMMPS (orange).** It exports as TorchScript with the
-  parameters of the system it is bound to, for molecules and clusters. Periodic
-  cells are not exported yet.
+  parameters of the system it is bound to, for molecules, clusters and
+  periodic cells.
 - **D4, Reference-Path (orange).** See the add-on terms below.
 
 Notes on individual models:
@@ -348,8 +348,9 @@ Notes on individual models:
   plans replayed as CUDA graphs (:class:`~xnn.common.deploy.StepGraph`), with
   fused pair kernels. The MDI engine runs them with the ASPC dipole predictor
   and late checks (``StepGraph(..., late_checks=True)``). On an A100 a float32
-  step then takes 0.85 to 0.94 times as long as in byteff2's OpenMM CUDA setup.
-  Without them, it takes up to 1.08 times as long.
+  step then takes 0.84 to 0.92 times as long as in byteff2's OpenMM CUDA setup.
+  Without them, it takes up to 1.09 times as long. A float64 step takes 0.38 to
+  0.56 times as long as OpenMM's double-precision step.
 - **BAMBOO.** The upstream is release 202404 (commit ``386ac0f``). Its forces
   are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.
