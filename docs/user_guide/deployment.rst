@@ -30,7 +30,7 @@ and dipole for models that can predict them:
 The net charge and spin multiplicity can come from ``atoms.info`` entries in an
 ASE ``*.xyz`` file. See the :ref:`howto-ase` guide for more information. On a
 GPU, ``cuda_graph=True`` replays each evaluation as one CUDA graph for
-DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, which is faster for small structures (see
+DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE, which is faster for small structures (see
 :ref:`howto-fast-paths`).
 
 TorchScript

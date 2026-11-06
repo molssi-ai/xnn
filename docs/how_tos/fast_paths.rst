@@ -219,7 +219,10 @@ What to expect from fast implementations
   the backward pass instead of being kept in memory
   (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model; ``True``
   helps on small GPUs). For PaiNN this needs about a third of the memory of an
-  evaluation for 25 to 60 % more time. The SchNet, PaiNN and TensorNet kernels
+  evaluation for 25 to 60 % more time. When the per-edge weights of all edges would
+  not fit in the free GPU memory, MACE evaluates its message pass in blocks of
+  edges and repeats each block in the backward pass, so larger structures fit
+  (:func:`~xnn.gnn.models.set_message_blocks` sets it per model). The SchNet, PaiNN and TensorNet kernels
   need about half the memory of their reference counterparts, the AIMNet2 kernels
   a quarter to three quarters, the Allegro kernels a half to two thirds, the CACE
   kernels under half, the DimeNet kernels a tenth to two fifths and the DimeNet++
@@ -238,7 +241,7 @@ What to expect from fast implementations
 Captured training steps
 =======================
 A training step on small molecules is bound by kernel launches, not by the
-GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, the
+GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE, the
 trainer can record the whole step once as a CUDA graph and replay it for every
 batch:
 
@@ -262,7 +265,7 @@ ordinary steps.
 Captured evaluations
 ====================
 An evaluation of a small structure is bound by kernel launches in the same
-way. For DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, the ASE calculator
+way. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE, the ASE calculator
 can record the evaluation once as a CUDA graph and replay it at every step:
 
 .. code-block:: python
@@ -273,8 +276,10 @@ can record the evaluation once as a CUDA graph and replay it at every step:
 
 Each structure is padded to fixed atom and edge counts with one inert
 structure, with 5 % headroom. A structure that outgrows the counts is recorded
-again. The replay runs the reference implementation, so the results equal
-those of ordinary evaluations up to round-off. SpookyNet's replay also uses
+again. The replay runs the same code as an ordinary evaluation, so the results equal
+those of ordinary evaluations up to round-off. After each recording, a few
+replays are timed against ordinary evaluations and the faster is kept: large
+structures, where the padding costs more than the launches, run ordinarily. SpookyNet's replay also uses
 its compiled block where ``"auto"`` takes it.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any
 evaluation of a graph.
