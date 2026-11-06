@@ -237,3 +237,56 @@ def test_late_checks_rebuild_behind_the_replay():
         if step == 10:
             assert stepper.overlapped > 0 and stepper.late_failures == 0
     assert stepper.settle()
+
+
+class _Read:
+    """A status already on the host: the event of a late read."""
+
+    def synchronize(self):
+        pass
+
+
+def test_late_status_reads_on_the_host():
+    """The decisions on a step's status read a step late: a step that held passes on its rebuild flag; an
+    outdated or unconverged one is counted with a warning and asks for a rebuild or longer solves; a pair
+    list taken behind a replay that did not hold is built again in full by the next step, which equals the
+    fresh evaluation."""
+    ref, model = (ForceStressOutput(_box(Amoeba), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, late_checks=True)
+    velocity = np.random.default_rng(10).normal(scale=0.002, size=BOX.shape)
+    for step in range(3):
+        stepper(_struct(BOX + step * velocity, "cpu"))
+    n = int(stepper.plan.needed.numel())
+    needed = [1.0] * n
+
+    def read(outdated=0.0, due=0.0, converged=1.0, jump=None):
+        tail = [] if jump is None else [jump]
+        status = torch.tensor([outdated, due, converged] + needed + tail, dtype=torch.float64)
+        stepper.previous = (_Read(), status, n, False, jump is not None)
+
+    assert stepper.settle()
+    read(due=1.0)
+    assert stepper.settle() and stepper.pending and stepper.late_failures == 0
+    stepper.pending = False
+    read(due=1.0, jump=0.0)
+    assert stepper.settle() and not stepper.pending
+    read(outdated=1.0)
+    with pytest.warns(RuntimeWarning, match="outdated"):
+        assert not stepper.settle()
+    assert stepper.late_failures == 1 and stepper.pending
+    stepper.pending = False
+    lengths = dict(stepper.plan.solve_iterations)
+    read(converged=0.0)
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        assert not stepper.settle()
+    assert stepper.late_failures == 2 and stepper.plan.solve_iterations is None and stepper.floor == lengths
+    read(jump=1.0)
+    with pytest.warns(RuntimeWarning, match="did not hold"):
+        assert not stepper.settle()
+    assert stepper.stale and stepper.pending
+    full = stepper.full_rebuilds
+    s = _struct(BOX + 3 * velocity, "cpu")
+    got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+    assert not stepper.stale and stepper.full_rebuilds > full
+    for key in ("energy", "forces", "stress"):
+        assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), key

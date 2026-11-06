@@ -282,9 +282,26 @@ structure enters the products.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options, including ``radial_basis`` (expnorm, gaussian or bessel),
-``trainable_rbf``, ``activation`` and ``energy_shift`` / ``energy_scale``, are
-also available.
+Other options are also available:
+
+- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (the smooth
+  spherical Bessel basis of `Kocer et al., AIP Adv. 10, 015021 (2020)
+  <https://doi.org/10.1063/1.5111045>`_), with ``trainable_rbf``;
+- ``activation`` and ``energy_shift`` / ``energy_scale``;
+- ``readout``: mlp (the default) or gated (a gated MLP on the feature
+  projection), with ``readout_hidden`` for its widths;
+- ``self_pairs``: whether every atom is its own neighbor (the default) or not.
+
+The MatGL TensorNet foundation potentials trained on MatPES load with one call:
+
+.. code-block:: python
+
+   from xnn.gnn.models import TensorNet
+
+   model = TensorNet.from_foundation("tensornet-matpes-pbe-2025.2")   # or tensornet-matpes-r2scan-2025.2
+
+- They use the smooth spherical Bessel basis, the gated readout and no self pairs.
+- The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
 
 SE(3) steerable CNN and 3D CNN
 ==============================

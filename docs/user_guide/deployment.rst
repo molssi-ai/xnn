@@ -78,11 +78,14 @@ checkpoint to LAMMPS ``fix mdi/qm`` or any other `MDI
            -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
 
 You can use the ``--dispersion d4`` flag to add a dispersion term to a plain
-model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA and HIPPO
-the engine predicts each step's induced dipoles from the last steps
-(``--dipole-predictor``, ASPC by default). On a GPU it also evaluates their
+model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA, HIPPO
+and ByteFF-Pol the engine predicts each step's induced dipoles from the last
+steps (``--dipole-predictor``, ASPC by default). On a GPU it also evaluates their
 steps on a Verlet pair list (``--skin``, 1 angstrom by default) and replays each
 step as one CUDA graph. The ``--step-graph off`` flag disables this behavior.
+For ByteFF-Pol the engine also reads each step's checks during the next step,
+so the GPU never waits (``--late-checks``, on by default for ByteFF-Pol only).
+It unwraps the positions the driver sends against the last step.
 The :ref:`cli` guide lists every option available to you. 
 
 There are example notebooks in ``notebooks/examples/common/deploy`` which illustrate how to drive
@@ -107,6 +110,29 @@ subtracted dispersion term back to the predicted energies at the inference time:
 
 You can use the ``--no-dispersion`` flag to serve or export your model without
 it.
+
+One structure on several GPUs
+=============================
+
+.. code-block:: python
+
+   # torchrun --nproc-per-node=8 run.py
+   import torch
+   import torch.distributed as dist
+   from xnn.common.deploy import DomainParallel
+
+   dist.init_process_group("nccl")
+   torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
+   dp = DomainParallel(model.cuda().eval())
+   out = dp(graph.cuda())          # energy, forces and stress on every process
+
+- :class:`~xnn.common.deploy.DomainParallel` cuts the box into one sub-domain per GPU.
+- Each GPU evaluates its own atoms plus copies of their neighbors out to the
+  model's receptive field. The results equal a single-GPU evaluation.
+- The memory per GPU falls with the number of GPUs, so a box too large for one
+  GPU fits on several.
+- Models with long-range terms (Coulomb sums, LES, D4) are refused. AIMNet2
+  without its Coulomb term is supported: its charge constraint sums over all GPUs.
 
 Which model deploys how
 =======================

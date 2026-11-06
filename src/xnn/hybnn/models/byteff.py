@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -186,7 +186,7 @@ def _pol_local(vec: Tensor, sizes: tuple, bond_k: Tensor, bond_x0: Tensor, angle
     vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
     e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
     e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
-    e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, (1, 2, 3, 4), sign)
+    e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, [1, 2, 3, 4], sign)
     rp = torch.sqrt((vp * vp).sum(1))
     rep = vdw_scale * exp_repulsion(rp, eps, lam, r0, prefactor, wall)
     disp = vdw_scale * damped_dispersion(rp, c6, r0, damping)
@@ -1041,7 +1041,7 @@ class _ByteFFTerms(nn.Module):
         vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
         e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
         e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
-        e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, (1, 2, 3, 4), sign)
+        e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, [1, 2, 3, 4], sign)
         r2 = (vp * vp).sum(1)
         x = (sigma2 / r2) ** 3
         h_vdw = 0.5 * eps4 * (x * x - x)
@@ -1314,19 +1314,23 @@ class _PolEnergy(nn.Module):
     def extra_repr(self) -> str:
         return f"prefactor={self.prefactor}, wall={self.wall}, damping={self.damping}, ke={self.ke}, thole={self.thole}"
 
-    def _reference(self, pos, bond_k, bond_x0, angle_k, angle_x0, torsion_k, sign, improper, vdw_scale, lam, eps,
-                   r0, c6, qq, ct_eps, ct_lam, charge, alpha, damp, field_scale, src, dst, b0, b1, a1, t_owner, p0,
-                   p1, sizes, B, n):
+    def _reference(self, pos: Tensor, bond_k: Tensor, bond_x0: Tensor, angle_k: Tensor, angle_x0: Tensor,
+                   torsion_k: Tensor, sign: Tensor, improper: Tensor, vdw_scale: Tensor, lam: Tensor, eps: Tensor,
+                   r0: Tensor, c6: Tensor, qq: Tensor, ct_eps: Tensor, ct_lam: Tensor, charge: Tensor, alpha: Tensor,
+                   damp: Tensor, field_scale: Tensor, src: Tensor, dst: Tensor, b0: Tensor, b1: Tensor, a1: Tensor,
+                   t_owner: Tensor, p0: Tensor, p1: Tensor, sizes: List[int], B: int,
+                   n: int) -> Tuple[Tensor, Tensor, Tensor]:
         N = B * n
         vec = pos.index_select(0, dst) - pos.index_select(0, src)
         # slices at fixed offsets (the compiled second derivative of a split with a size list fails)
         ends = [0]
         for k in sizes:
             ends.append(ends[-1] + k)
-        vb, vu, vv, t1, t2, t3, vp = (vec[ends[i]:ends[i + 1]] for i in range(7))
+        parts = [vec[ends[i]:ends[i + 1]] for i in range(7)]
+        vb, vu, vv, t1, t2, t3, vp = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
         e_bond = harmonic(torch.sqrt((vb * vb).sum(1)), bond_k, bond_x0)
         e_angle = harmonic(bond_angle(vu, vv), angle_k, angle_x0)
-        e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, (1, 2, 3, 4), sign)
+        e_tors = fourier_series(torsion_cos(t1, t2, t3), torsion_k, [1, 2, 3, 4], sign)
         r = torch.sqrt((vp * vp).sum(1))
         rep = vdw_scale * exp_repulsion(r, eps, lam, r0, self.prefactor, self.wall)
         disp = vdw_scale * damped_dispersion(r, c6, r0, self.damping)
@@ -1335,14 +1339,13 @@ class _PolEnergy(nn.Module):
         A, field = polarization_system(pos.view(B, n, 3), charge.view(B, n), alpha.view(B, n), damp.view(B, n),
                                        field_scale, self.thole)
 
-        # one scatter into (atom, term)
-        K = len(self.TERMS)
+        # one scatter into (atom, term), a column per entry of TERMS
+        K = 8
         t_col = 2 + improper.long()
-        values = [0.5 * e_bond, 0.5 * e_bond, e_angle, e_tors]
-        index = [b0 * K, b1 * K, a1 * K + 1, t_owner * K + t_col]
-        for col, e in ((4, rep), (5, disp), (6, elec), (7, ct)):
-            values += [0.5 * e, 0.5 * e]
-            index += [p0 * K + col, p1 * K + col]
+        values = [0.5 * e_bond, 0.5 * e_bond, e_angle, e_tors, 0.5 * rep, 0.5 * rep, 0.5 * disp, 0.5 * disp,
+                  0.5 * elec, 0.5 * elec, 0.5 * ct, 0.5 * ct]
+        index = [b0 * K, b1 * K, a1 * K + 1, t_owner * K + t_col, p0 * K + 4, p1 * K + 4, p0 * K + 5, p1 * K + 5,
+                 p0 * K + 6, p1 * K + 6, p0 * K + 7, p1 * K + 7]
         energies = scatter_sum(torch.cat(values), torch.cat(index), N * K).view(N, K)
         return energies, A, field
 
@@ -1436,6 +1439,8 @@ class ByteFFPol(_GraphParameterizedFF):
 
     polarizable = True
     foundation_default = "byteff-pol-25"
+    # the MDI engine's StepGraph reads each step's status during the next step for this model
+    late_checks = True
 
     def __init__(self, structure=None, *, graph: Optional[dict] = None, bonded: Optional[dict] = None,
                  nonbonded: Optional[dict] = None, members: int = 1,
@@ -1758,6 +1763,13 @@ class ByteFFPol(_GraphParameterizedFF):
         plan.reference = data.pos.detach().clone()
         if self._fast(data, dtype):
             plan.rows = _kernels().pair_rows(i, k, data.num_nodes, M, sorted_i=True)
+
+    def export_core(self) -> nn.Module:
+        """The scriptable core of :func:`~xnn.common.deploy.export_torchscript_potential`: the parameters of the
+        bound system and the reference energy block, for molecules and clusters (see
+        :class:`~xnn.hybnn.models.byteff_export.ByteFFPolExport`)."""
+        from .byteff_export import ByteFFPolExport
+        return ByteFFPolExport(self)
 
     def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
         """Switch the dipole predictor of the iterative solve in cells on (``"aspc"``, ``"gear"``,

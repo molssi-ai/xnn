@@ -109,6 +109,22 @@ the atomic numbers (``atomic_numbers=z``). LAMMPS solves its charges with
 system it is bound to. Without a cutoff, its pair cutoff covers the whole
 structure, so every pair interacts as in xnn.
 
+ByteFF-Pol
+==========
+A bound ByteFF-Pol model exports as TorchScript with the same function as the
+neural network potentials:
+
+.. code-block:: python
+
+   from xnn.common.deploy import export_torchscript_potential
+
+   export_torchscript_potential(model, cutoff=10.0, path="byteff_pol.pt")
+
+The file holds the parameters of the system the model is bound to. It
+evaluates every pair of that system and solves the induced dipoles exactly,
+so the whole system must be on one rank, with its atoms in the bound order.
+It takes molecules and clusters. Periodic cells are refused.
+
 AMOEBA and HIPPO
 ================
 AMOEBA and HIPPO models export to LAMMPS's AMOEBA package with the same

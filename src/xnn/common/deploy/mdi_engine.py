@@ -122,6 +122,13 @@ class MDIEngine:
         ``False`` never. Other models ignore it.
     skin : float, optional
         The margin of the Verlet pair list in angstrom, by default 1.
+    late_checks : bool or str, optional
+        Read each step's status during the next step (see
+        :class:`~xnn.common.deploy.step_graph.StepGraph`). ``"auto"``
+        (default) follows the model (ByteFF-Pol on, AMOEBA and HIPPO off).
+        With late checks the positions of a cell are unwrapped against the
+        last step, so an atom the driver wraps back into the cell keeps its
+        pair list.
 
     Attributes
     ----------
@@ -145,7 +152,7 @@ class MDIEngine:
     def __init__(self, model: torch.nn.Module, cutoff: float,
                  device: str = "cpu", total_charge: float = 0.0,
                  dipole_predictor: str | None = "aspc", step_graph: bool | str = "auto",
-                 skin: float = 1.0):
+                 skin: float = 1.0, late_checks: bool | str = "auto"):
         self.device = torch.device(device)
         self.model = model.to(self.device).eval()
         for p in self.model.parameters():
@@ -162,6 +169,8 @@ class MDIEngine:
         self.steps = None
         if step_graph not in (True, False, "auto"):
             raise ValueError(f"step_graph must be True, False or 'auto' (got {step_graph!r})")
+        if late_checks not in (True, False, "auto"):
+            raise ValueError(f"late_checks must be True, False or 'auto' (got {late_checks!r})")
         if step_graph == "auto":
             # replaying the step pays on a GPU at every size measured; the CPU keeps the plain step
             step_graph = self.device.type == "cuda" and plan_core(self.model) is not None
@@ -169,7 +178,12 @@ class MDIEngine:
             if plan_core(self.model) is None:
                 logger.info("the model records no step plans: the steps are evaluated as usual")
             else:
-                self.steps = StepGraph(self.model, self.cutoff, skin=skin, compute_dtype=self.dtype)
+                if late_checks == "auto":
+                    late_checks = bool(getattr(plan_core(self.model), "late_checks", False))
+                self.steps = StepGraph(self.model, self.cutoff, skin=skin, compute_dtype=self.dtype,
+                                       late_checks=late_checks)
+        # under late checks: the positions of the last step, unwrapped (angstrom)
+        self._unwrapped: np.ndarray | None = None
 
         # system state, set by driver commands (MDI atomic units)
         self.natoms: int | None = None
@@ -202,7 +216,8 @@ class MDIEngine:
                         head: str | None = None,
                         dipole_predictor: str | None = "aspc",
                         step_graph: bool | str = "auto",
-                        skin: float = 1.0) -> "MDIEngine":
+                        skin: float = 1.0,
+                        late_checks: bool | str = "auto") -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -268,6 +283,8 @@ class MDIEngine:
             a GPU (see the class).
         skin : float, optional
             The margin of the Verlet pair list in angstrom (see the class).
+        late_checks : bool or str, optional
+            Read each step's status during the next step (see the class).
 
         Returns
         -------
@@ -291,7 +308,22 @@ class MDIEngine:
                     cfg.model.name, path, cutoff,
                     str(float_dtype(model)).replace("torch.", ""), total_charge)
         return cls(model, cutoff=cutoff, device=device, total_charge=total_charge,
-                   dipole_predictor=dipole_predictor, step_graph=step_graph, skin=skin)
+                   dipole_predictor=dipole_predictor, step_graph=step_graph, skin=skin,
+                   late_checks=late_checks)
+
+    def _positions(self) -> np.ndarray:
+        """The positions in angstrom; under late checks in a cell, unwrapped against the last step (an atom
+        moves by much less than half a cell per step), so a step never sees an atom jump by a lattice vector."""
+        pos = self.coords_bohr * BOHR_TO_ANGSTROM
+        if self.steps is None or not self.steps.late_checks or self.cell_bohr is None:
+            return pos
+        last = self._unwrapped
+        if last is not None and last.shape == pos.shape:
+            cell = self.cell_bohr * BOHR_TO_ANGSTROM
+            jumps = np.round((pos - last) @ np.linalg.inv(cell))
+            pos = pos - jumps @ cell
+        self._unwrapped = pos
+        return pos
 
     # evaluation
 
@@ -324,8 +356,7 @@ class MDIEngine:
         # formed from float32 absolute coordinates carry an error that grows
         # with the box (graph.compute_dtype gives the model its own dtype)
         struct = {
-            "pos": torch.as_tensor(self.coords_bohr * BOHR_TO_ANGSTROM,
-                                   dtype=torch.float64, device=self.device),
+            "pos": torch.as_tensor(self._positions(), dtype=torch.float64, device=self.device),
             "atomic_numbers": torch.as_tensor(self.atomic_numbers,
                                               dtype=torch.long,
                                               device=self.device),
@@ -462,6 +493,7 @@ class MDIEngine:
                 self.natoms = mdi.MDI_Recv(1, mdi.MDI_INT, comm)
                 if self.steps is not None:
                     self.steps.reset()
+                    self._unwrapped = None
 
             elif command == ">ELEMENTS":
                 elements = mdi.MDI_Recv(self.natoms, mdi.MDI_INT, comm)
@@ -469,6 +501,7 @@ class MDIEngine:
                 self._needs_calculation = True
                 if self.steps is not None:
                     self.steps.reset()
+                    self._unwrapped = None
                 logger.info("received %d atoms, elements %s", self.natoms,
                             sorted(set(self.atomic_numbers.tolist())))
 
@@ -607,6 +640,10 @@ def main(argv=None) -> None:
                         "(default) on a GPU, 'on' also on the CPU, 'off' never")
     p.add_argument("--skin", type=float, default=1.0,
                    help="margin of the Verlet pair list of --step-graph in angstrom (default 1)")
+    p.add_argument("--late-checks", choices=["auto", "on", "off"], default="auto",
+                   help="--step-graph reads each step's status during the next step, so the GPU never "
+                        "waits for the host: 'auto' (default) as the model prefers (ByteFF-Pol on, "
+                        "AMOEBA and HIPPO off), 'on', 'off'")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -637,7 +674,9 @@ def main(argv=None) -> None:
                                        else args.dipole_predictor,
                                        step_graph={"auto": "auto", "on": True,
                                                    "off": False}[args.step_graph],
-                                       skin=args.skin)
+                                       skin=args.skin,
+                                       late_checks={"auto": "auto", "on": True,
+                                                    "off": False}[args.late_checks])
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

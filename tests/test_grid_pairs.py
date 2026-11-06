@@ -140,3 +140,20 @@ def test_the_search_of_a_cell_too_small_for_a_grid(monkeypatch, cutoff, dtype):
     skewed = cell.to("cuda", dtype)
     skewed[1, 0] = 1.0
     assert nl.small_cell(gpu, cutoff, skewed, pbc.cuda()) is None
+
+
+def test_the_search_without_a_grid_interpreted(monkeypatch):
+    """The search of a cell too small for a grid, run by Triton's interpreter on CPU tensors (machines
+    without CUDA), finds the reference pairs, two images of a pair included."""
+    import os
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    pytest.importorskip("triton")
+    from xnn.common.data.grid_pairs import grid_pairs
+    pos, cell = _box(n=40)
+    pbc = torch.ones(3, dtype=torch.bool)
+    want = _reference(monkeypatch, pos, 7.0, cell, pbc)
+    i, k, s, total = grid_pairs(pos, 7.0, torch.diagonal(cell), None, capacity=len(want) + 3)
+    M = int(total)
+    assert M == len(want) and _as_set(i[:M], k[:M], s[:M]) == want
+    assert len({(a, b) for a, b, *_ in want}) < len(want)

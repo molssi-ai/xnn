@@ -331,7 +331,8 @@ def _linear_center(mol, i: int, ends: tuple) -> bool:
     if a.GetAtomicNum() == 7 and a.GetDegree() == 2 and a.GetFormalCharge() == 1:
         for j in ends:
             b = mol.GetAtomWithIdx(j)
-            if b.GetAtomicNum() == 7 and b.GetTotalNumHs() == 1:
+            # every hydrogen on the nitrogen, those that are atoms of the graph included (SMARTS [#7H1])
+            if b.GetAtomicNum() == 7 and b.GetTotalNumHs(includeNeighbors=True) == 1:
                 return False
         return True
     return False

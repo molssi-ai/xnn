@@ -725,3 +725,61 @@ def test_byteff_pol_step_graph_late_checks():
             assert torch.allclose(got[key], want[key].detach(), rtol=1e-8, atol=1e-9), (step, key)
     assert stepper.settle() and stepper.late_failures == 0
     assert stepper.rebuilds >= 1 and stepper.replays > 0
+
+
+def test_mdi_engine_takes_late_checks_and_unwraps_the_driver_positions():
+    """An MDI engine on step plans reads ByteFF-Pol's steps late (the model's choice, which the caller can
+    override), and unwraps positions a driver wraps back into the cell against the last step: the energies
+    equal fresh evaluations of the wrapped positions."""
+    from xnn.common.deploy.mdi_engine import BOHR_TO_ANGSTROM, HARTREE_TO_EV, MDIEngine
+    model, pos, z, L = _pol_box()
+    model = model.eval()
+    wrapped = ForceStressOutput(model, compute_stress=True)
+    engine = MDIEngine(wrapped, model.cutoff, step_graph=True, skin=0.3)
+    assert engine.steps.late_checks
+    assert not MDIEngine(wrapped, model.cutoff, step_graph=True, late_checks=False).steps.late_checks
+    with pytest.raises(ValueError, match="late_checks"):
+        MDIEngine(wrapped, model.cutoff, late_checks="yes")
+    engine.natoms, engine.atomic_numbers = len(z), np.asarray(z)
+    engine.cell_bohr = np.eye(3) * L / BOHR_TO_ANGSTROM
+    velocity = np.random.default_rng(4).normal(scale=0.01, size=pos.shape)
+    for step in range(4):
+        x = pos + step * velocity
+        sent = x.copy()
+        if step >= 2:
+            # the driver wraps atom 0 back into the cell
+            sent[0, 0] += L
+        engine.coords_bohr = sent / BOHR_TO_ANGSTROM
+        engine.calculate()
+        assert np.allclose(engine._unwrapped, x, atol=1e-12)
+        s = {"pos": torch.tensor(sent), "atomic_numbers": torch.tensor(z), "cell": torch.eye(3) * L,
+             "pbc": torch.ones(3, dtype=torch.bool)}
+        want = wrapped(structure_to_graph(s, model.cutoff))["energy"]
+        assert engine.energy * HARTREE_TO_EV == pytest.approx(float(want.sum()), rel=1e-9, abs=1e-10)
+
+
+def test_byteff_pol_torchscript_export(tmp_path):
+    """The TorchScript export of a bound ByteFF-Pol model gives the reference energy, forces and charges of a
+    cluster to round-off; other atoms, a cell and a model of periodic cells are refused."""
+    from xnn.common.deploy import export_torchscript_potential
+    mols = [_mol("O"), _mol("[Li+]")]
+    torch.manual_seed(1)
+    model = ByteFFPol(mols, **SMALL_POL).eval()
+    pos = np.concatenate([_coords(mols[0])[0], np.array([[0.0, 0.0, 2.2]])])
+    pos = pos + np.random.default_rng(2).normal(0.0, 0.03, pos.shape)
+    z = _z(mols)
+    want = ForceStressOutput(model).eval()(_graphs(z, [pos], model))
+    path = export_torchscript_potential(model, 6.0, str(tmp_path / "byteff_pol.pt"))
+    scripted = torch.jit.load(path)
+    got = scripted(torch.tensor(pos), torch.tensor(z))
+    assert torch.allclose(got["energy"], want["energy"].detach(), rtol=1e-12, atol=1e-12)
+    assert torch.allclose(got["forces"], want["forces"].detach(), rtol=1e-10, atol=1e-11)
+    assert torch.equal(got["charges"], want["charges"].detach())
+    with pytest.raises(Exception, match="bound"):
+        scripted(torch.tensor(pos), torch.tensor(z[::-1].copy()))
+    with pytest.raises(Exception, match="cells"):
+        scripted(torch.tensor(pos), torch.tensor(z), torch.eye(3, dtype=torch.float64) * 30.0,
+                 torch.ones(3, dtype=torch.bool))
+    periodic = _pol_box()[0]
+    with pytest.raises(ValueError, match="periodic"):
+        export_torchscript_potential(periodic, periodic.cutoff, str(tmp_path / "box.pt"))

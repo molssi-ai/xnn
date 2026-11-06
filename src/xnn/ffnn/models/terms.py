@@ -14,7 +14,7 @@ tensor and are solved for directly (Cholesky factorization).
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import List
 
 import torch
 from torch import Tensor
@@ -40,7 +40,7 @@ def harmonic(x: Tensor, k: Tensor, x0: Tensor) -> Tensor:
     return 0.5 * k * (x - x0) ** 2
 
 
-def fourier_series(cos1: Tensor, k: Tensor, n: Sequence[int], sign) -> Tensor:
+def fourier_series(cos1: Tensor, k: Tensor, n: List[int], sign: Tensor) -> Tensor:
     """``sum_m k_m [1 + s_m cos(n_m phi)]`` per torsion, the phases zero (``s = 1``) or
     pi (``s = -1``).
 
@@ -53,10 +53,10 @@ def fourier_series(cos1: Tensor, k: Tensor, n: Sequence[int], sign) -> Tensor:
         ``cos phi`` of the torsions ``(M,)``.
     k : Tensor
         Barrier parameters ``(M, K)``.
-    n : sequence of int
+    n : list of int
         The multiplicity of each column of ``k``.
-    sign : sequence of float or Tensor
-        The sign ``s`` of each column.
+    sign : Tensor
+        The sign ``s`` of each column, ``(K,)`` or ``(M, K)``.
 
     Returns
     -------
@@ -67,7 +67,7 @@ def fourier_series(cos1: Tensor, k: Tensor, n: Sequence[int], sign) -> Tensor:
     for _ in range(1, max(n)):
         cols.append(2.0 * cos1 * cols[-1] - cols[-2])
     t = torch.stack([cols[m] for m in n], -1)
-    s = torch.as_tensor(sign, dtype=cos1.dtype, device=cos1.device)
+    s = sign.to(dtype=cos1.dtype, device=cos1.device)
     return (k * (1.0 + s * t)).sum(-1)
 
 
@@ -146,13 +146,19 @@ def solve_dipoles(A: Tensor, field: Tensor) -> Tensor:
     rhs = field.reshape(B, 3 * n, 1)
     L, info = torch.linalg.cholesky_ex(A)
     # a CUDA-graph capture reads nothing from the device: the factorization of the recorded step serves
-    capturing = A.is_cuda and torch.cuda.is_current_stream_capturing()
+    capturing = False if torch.jit.is_scripting() else _capturing(A)
     if not capturing and bool((info != 0).any()):
         return torch.linalg.solve(A, rhs).reshape(B, n, 3)
     # two triangular solves (cuBLAS) rather than cholesky_solve, whose batched GPU path (MAGMA) allocates
     # memory and so cannot be captured
     y = torch.linalg.solve_triangular(L, rhs, upper=False)
-    return torch.linalg.solve_triangular(L.mT, y, upper=True).reshape(B, n, 3)
+    return torch.linalg.solve_triangular(L.transpose(-2, -1), y, upper=True).reshape(B, n, 3)
+
+
+@torch.jit.unused
+def _capturing(A: Tensor) -> bool:
+    """Whether ``A`` lives on a CUDA stream that records a graph (not in TorchScript, which never captures)."""
+    return A.is_cuda and torch.cuda.is_current_stream_capturing()
 
 
 def induced_dipoles(pos: Tensor, q: Tensor, alpha: Tensor, damp: Tensor, scale: Tensor, thole: float,

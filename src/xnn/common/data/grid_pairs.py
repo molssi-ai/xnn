@@ -91,7 +91,9 @@ def _small_cell_pairs(pos_ptr, box_ptr, count_ptr, offset_ptr, i_ptr, k_ptr, shi
     offs = tl.arange(0, BLOCK)
     base = tl.load(offset_ptr + i)
     count = tl.sum(tl.zeros([BLOCK], dtype=tl.int32), 0)
-    for k0 in range(i + 1, N, BLOCK):
+    # a while loop: its bound depends on the program (Triton's interpreter runs no such range)
+    k0 = i + 1
+    while k0 < N:
         k = k0 + offs
         m = k < N
         dx = tl.load(pos_ptr + 3 * k + 0, mask=m, other=0.0) - px
@@ -124,6 +126,7 @@ def _small_cell_pairs(pos_ptr, box_ptr, count_ptr, offset_ptr, i_ptr, k_ptr, shi
                 tl.store(shift_ptr + 3 * at + 1, ay * by - iy, mask=put)
                 tl.store(shift_ptr + 3 * at + 2, az * bz - iz, mask=put)
             count += tl.sum(hit.to(tl.int32), 0)
+        k0 += BLOCK
     if not WRITE:
         tl.store(count_ptr + i, count)
 
@@ -423,7 +426,8 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capaci
     shape : tuple of int or None
         The cells per axis, from :func:`grid_shape` with ``span``; ``None`` searches
         without a grid, every atom against those of higher index (a cell too small
-        for one, every edge over ``cutoff``; positions on a GPU).
+        for one, every edge over ``cutoff``; positions on a GPU, or on the CPU under
+        Triton's interpreter).
     capacity : int, optional
         Write the pairs into buffers of this many entries, without reading their number
         on the host: the entries past it repeat the first pair, and their number comes
@@ -448,8 +452,6 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capaci
     box = torch.cat([lengths, torch.full((1,), float(cutoff) ** 2, dtype=pos.dtype, device=device)])
     counts = torch.empty(N, dtype=torch.int32, device=device)
     if shape is None:
-        if not pos.is_cuda:
-            raise ValueError("the search without a grid runs on a GPU")
         args, sizes, block = (pos, box), (N,), GRID_BLOCK
         run = lambda *a, **k: _small_cell_pairs[(N,)](*a, **k)  # noqa: E731
         return _two_passes(run, args, sizes, block, counts, N, capacity, index_dtype, shift_dtype)
