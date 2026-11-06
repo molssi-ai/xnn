@@ -12,7 +12,8 @@ and the path choice is made at runtime.
 
 Currently, the fast paths exist for the message phase and the symmetric
 contraction of MACE and NequIP (where we use `cuEquivariance
-<https://github.com/NVIDIA/cuEquivariance>`_), the continuous-filter convolution
+<https://github.com/NVIDIA/cuEquivariance>`_), the equivariant linear layers and
+the element self-connections of MACE, the continuous-filter convolution
 of SchNet, the message block of PaiNN, the embedding and interaction layers of
 TensorNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
@@ -219,16 +220,21 @@ What to expect from fast implementations
   the backward pass instead of being kept in memory
   (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model; ``True``
   helps on small GPUs). For PaiNN this needs about a third of the memory of an
-  evaluation for 25 to 60 % more time. When the per-edge weights of all edges would
-  not fit in the free GPU memory, MACE evaluates its message pass in blocks of
-  edges and repeats each block in the backward pass, so larger structures fit
-  (:func:`~xnn.gnn.models.set_message_blocks` sets it per model). The SchNet, PaiNN and TensorNet kernels
+  evaluation for 25 to 60 % more time. The SchNet, PaiNN and TensorNet kernels
   need about half the memory of their reference counterparts, the AIMNet2 kernels
   a quarter to three quarters, the Allegro kernels a half to two thirds, the CACE
   kernels under half, the DimeNet kernels a tenth to two fifths and the DimeNet++
   kernels about half from a hundred atoms on. The LES fast path
   needs 10 to 30 times less memory than its reference counterpart on large
   periodic cells.
+- **Large structures.** When MACE's per-edge weights would not fit in GPU memory,
+  MACE processes the edges in blocks. Each block is recomputed in the backward
+  pass in evaluation (training keeps every block). Larger structures fit, at the
+  cost of a second pass over the edges.
+  :func:`~xnn.gnn.models.set_message_blocks` sets the blocks per model.
+- **MACE self-connections.** The fast path groups the atoms by element and
+  multiplies each group by its own weights. Grouping reads the element counts on
+  the host, so a captured CUDA graph keeps the reference self-connection.
 - **Export.** TorchScript and LAMMPS export frameworks always script the
   reference implementation. Therefore, an exported model runs anywhere
   TorchScript does.
@@ -278,8 +284,8 @@ Each structure is padded to fixed atom and edge counts with one inert
 structure, with 5 % headroom. A structure that outgrows the counts is recorded
 again. The replay runs the same code as an ordinary evaluation, so the results equal
 those of ordinary evaluations up to round-off. After each recording, a few
-replays are timed against ordinary evaluations and the faster is kept: large
-structures, where the padding costs more than the launches, run ordinarily. SpookyNet's replay also uses
+replays are timed against ordinary evaluations, and the faster one is kept.
+Large structures therefore run ordinarily. SpookyNet's replay also uses
 its compiled block where ``"auto"`` takes it.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any
 evaluation of a graph.

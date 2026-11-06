@@ -282,15 +282,13 @@ structure enters the products.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options are also available:
+Other options:
 
-- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (the smooth
-  spherical Bessel basis of `Kocer et al., AIP Adv. 10, 015021 (2020)
-  <https://doi.org/10.1063/1.5111045>`_), with ``trainable_rbf``;
-- ``activation`` and ``energy_shift`` / ``energy_scale``;
-- ``readout``: mlp (the default) or gated (a gated MLP on the feature
-  projection), with ``readout_hidden`` for its widths;
-- ``self_pairs``: whether every atom is its own neighbor (the default) or not.
+- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (`Kocer et al.,
+  AIP Adv. 10, 015021 (2020) <https://doi.org/10.1063/1.5111045>`_).
+- ``trainable_rbf``, ``activation``, ``energy_shift`` and ``energy_scale``.
+- ``readout``: mlp (default) or gated. ``readout_hidden`` sets its widths.
+- ``self_pairs``: whether each atom is its own neighbor (default ``true``).
 
 The MatGL TensorNet foundation potentials trained on MatPES load with one call:
 
