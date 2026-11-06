@@ -893,7 +893,10 @@ as one CUDA graph (``--step-graph``).
 solve convergence) during the next step, so the GPU does not wait for the
 host. A step that needed a new pair list or longer solves has then already
 returned its results. It is counted in ``late_failures`` with a warning, and
-the next step rebuilds or solves longer. The option is off by default.
+the next step rebuilds or solves longer. In orthorhombic cells the new pair
+lists are found on the GPU while a step runs. Pass unwrapped positions: a step
+that wraps an atom back into the cell only fails after it returned. The option
+is off by default.
 
 .. code-block:: python
 
