@@ -1018,6 +1018,8 @@ def _plan_vectors(data: AtomicGraph, i: Tensor, k: Tensor, shift: Optional[Tenso
 
 # the phases of the induced-dipole solves a step plan runs at fixed length, in the order of ``StepPlan.needed``
 SOLVE_PHASES = ("forward", "adjoint")
+# the term subsets an evaluation on a step plan computes (see StepPlan)
+PLAN_TERMS = ("all", "valence", "nonbonded")
 
 
 class StepPlan:
@@ -1042,6 +1044,14 @@ class StepPlan:
     phase in the order of ``SOLVE_PHASES``, the iterations the last solve of
     that phase needed (zero for a phase that did not run). Build a plan with
     :meth:`Amoeba.plan_step`.
+
+    ``terms`` selects the terms an evaluation on the plan computes, for
+    multiple time step integrators: ``"all"`` (default), ``"valence"`` (the
+    bonded terms and the reference energies, without pairs, multipoles or
+    solves) or ``"nonbonded"`` (the rest, the induction included). The two
+    subsets add up to the whole energy, forces and stress. A valence
+    evaluation follows atoms wrapped back into the cell since the pairs were
+    found by whole lattice vectors, so it needs no check of the positions.
     """
 
     def __init__(self, skin: float = 0.0, capacity: Optional[int] = None):
@@ -1053,6 +1063,9 @@ class StepPlan:
         # valence block takes, which it then forms in one gather
         self.image_pairs: list = []
         self.valence_calls = 0
+        # the first of those calls that the valence energies take (the frames' follow)
+        self.energy_calls = 0
+        self.terms = "all"
         self.pairs: Optional[tuple] = None
         self.valid: Optional[Tensor] = None
         # the number of valid pairs as an int32 tensor on the device, read by the pair kernels
@@ -1187,10 +1200,13 @@ class _Images:
     with a complete plan they are replayed in the same order."""
 
     def __init__(self, data: AtomicGraph, plan: Optional[StepPlan], shifts: Optional[list] = None,
-                 pairs: Optional[list] = None, plain: Optional[dict] = None):
+                 pairs: Optional[list] = None, plain: Optional[dict] = None, jumps: Optional[Tensor] = None):
         # the recorded shifts may be given on their own (a compiled block takes the list, not the
         # plan: an object whose attributes change would be guarded by identity and recompiled)
         self.data, self.plan, self.calls = data, plan, 0
+        # the whole lattice vectors every atom moved by since the shifts were found (wrapped back into
+        # the cell), which the replayed shifts take back
+        self.jumps = jumps
         self.shifts = shifts if shifts is not None else (None if plan is None else plan.shifts)
         # with the recorded atom pairs of the first calls, those vectors are formed in one gather and
         # served call by call: one scatter per side in the backward pass instead of one per call
@@ -1213,15 +1229,22 @@ class _Images:
         elif self.pairs and self.calls < len(self.pairs):
             if self._parts is None:
                 k = len(self.pairs)
-                vec = pair_vectors(self.data, torch.cat([pa for pa, _ in self.pairs]),
-                                   torch.cat([pb for _, pb in self.pairs]), shift=torch.cat(self.shifts[:k]))
+                pa, pb = torch.cat([pa for pa, _ in self.pairs]), torch.cat([pb for _, pb in self.pairs])
+                vec = pair_vectors(self.data, pa, pb, shift=self._unwrapped(torch.cat(self.shifts[:k]), pa, pb))
                 self._parts = vec.split([int(pa.shape[0]) for pa, _ in self.pairs])
             self.calls += 1
             return self._parts[self.calls - 1]
         else:
-            shift = self.shifts[self.calls]
+            shift = self._unwrapped(self.shifts[self.calls], a, b)
         self.calls += 1
         return pair_vectors(self.data, a, b, shift=shift)
+
+    def _unwrapped(self, shift: Tensor, a: Tensor, b: Tensor) -> Tensor:
+        """The recorded ``shift`` of the vectors from ``a`` to ``b`` for atoms that moved by whole
+        lattice vectors since."""
+        if self.jumps is None or shift is None:
+            return shift
+        return shift + (self.jumps.index_select(0, a) - self.jumps.index_select(0, b)).to(shift.dtype)
 
     def _plain_call(self, a: Tensor, b: Tensor) -> Tensor:
         pairs = self.plain.get("pairs")
@@ -1240,6 +1263,48 @@ class _Images:
         self.plain["pairs"] = None
         self.plain.pop("new", None)
         return pair_vectors(self.data, a, b)
+
+
+def lattice_jumps(pos: Tensor, reference: Tensor, cell: Tensor, batch: Tensor, pbc: Optional[Tensor]) -> Tensor:
+    """The whole lattice vectors ``(N, 3)`` by which every atom moved from
+    ``reference`` to ``pos``: the rounded fractional displacements along the
+    periodic axes (zero in the zero cell of a molecule). They are the wraps
+    back into the cell while the atoms themselves move by less than half a
+    cell height. Formed on the device without reading it.
+
+    Parameters
+    ----------
+    pos, reference : Tensor
+        Positions ``(N, 3)``.
+    cell : Tensor
+        Lattice vectors as rows, ``(B, 3, 3)``.
+    batch : Tensor
+        The structure of every atom ``(N,)``.
+    pbc : Tensor or None
+        Periodic axes ``(B, 3)``.
+
+    Returns
+    -------
+    Tensor
+        The jumps in lattice vectors, in the dtype of ``pos``.
+    """
+    with torch.no_grad():
+        dtype = pos.dtype
+        cell = cell.detach().reshape(-1, 3, 3).to(dtype)
+        # the reciprocal vectors as rows: cross products over the signed volume
+        cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
+                             torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
+        volume = (cell[:, 0] * cross[:, 0]).sum(-1)
+        cells = volume.abs() > 1e-8
+        recip = cross / torch.where(cells, volume, torch.ones_like(volume))[:, None, None]
+        axes = cells[:, None].to(dtype).expand(-1, 3)
+        if pbc is not None:
+            axes = axes * pbc.reshape(-1, 3).to(device=pos.device, dtype=dtype)
+        step = pos.detach() - reference.to(dtype)
+        if recip.shape[0] == 1:
+            return torch.round(step @ recip[0].T) * axes[0]
+        frac = (step[:, None, :] * recip.index_select(0, batch)).sum(-1)
+        return torch.round(frac) * axes.index_select(0, batch)
 
 
 def dipole_field(m: Tensor, r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
@@ -2655,7 +2720,17 @@ class Amoeba(InteratomicPotential):
         (:func:`~xnn.common.data.neighborlist.unique_pairs`), takes the place of the
         graph's neighbor list; ``single_image`` as in :meth:`stage_pairs`. Four entries
         ``(i, k, shift, count)`` are buffers of the plan's capacity with the number of
-        pairs on the device (single images, :func:`~xnn.common.data.grid_pairs.grid_pairs`)."""
+        pairs on the device (:func:`~xnn.common.data.grid_pairs.grid_pairs`)."""
+
+        def vectors(i: Tensor, k: Tensor, shift: Optional[Tensor]) -> Optional[Tensor]:
+            # a pair may come in more than one image: the scales of its far images need its vector
+            if single_image:
+                return None
+            r = data.pos[k] - data.pos[i]
+            if shift is not None:
+                r = r + shift @ data.cell.reshape(-1, 3, 3)[0].to(data.pos.dtype)
+            return r.to(data.model_dtype)
+
         # sorted by the first atom: the kernels add each block's contributions to that atom in
         # one operation, and the gathers of an atom's rows hit the cache
         if pairs is None:
@@ -2674,7 +2749,7 @@ class Amoeba(InteratomicPotential):
             # weight
             i, k, shift, total = pairs
             shift = None if data.cell is None else shift.to(data.pos.dtype)
-            scales = self._pair_scales(data, i, k, None).detach()
+            scales = self._pair_scales(data, i, k, vectors(i, k, shift)).detach()
             valid = (torch.arange(int(i.shape[0]), device=i.device) < total).to(scales.dtype)
             plan.valid, plan.count = valid, total.to(torch.int32)
             plan.pairs, plan.scales = (i, k, shift), scales * valid[:, None]
@@ -2685,13 +2760,7 @@ class Amoeba(InteratomicPotential):
         else:
             i, k, shift = pairs
             shift = None if data.cell is None else shift.to(data.pos.dtype)
-            r = None
-            if not single_image:
-                r = data.pos[k] - data.pos[i]
-                if shift is not None:
-                    r = r + shift @ data.cell.reshape(-1, 3, 3)[0].to(data.pos.dtype)
-                r = r.to(data.model_dtype)
-            scales = self._pair_scales(data, i, k, r)
+            scales = self._pair_scales(data, i, k, vectors(i, k, shift))
         scales = scales.detach()
         M = int(i.shape[0])
         cap = M if plan.capacity is None else int(plan.capacity)
@@ -2842,7 +2911,8 @@ class Amoeba(InteratomicPotential):
         plan : StepPlan, optional
             The host decisions of this structure, from :meth:`plan_step`:
             the evaluation reads them instead of deciding them again, and
-            takes its pairs from the plan instead of the neighbor list.
+            takes its pairs from the plan instead of the neighbor list. Its
+            ``terms`` select the terms evaluated (all by default).
 
         Returns
         -------
@@ -2864,7 +2934,12 @@ class Amoeba(InteratomicPotential):
                                  f"(got {data.n_atoms.tolist()})")
             if not bool((data.atomic_numbers == self.top_z.repeat(B)).all()):
                 raise ValueError("atomic numbers do not match the bound topology's element sequence")
-        else:
+        terms = "all" if plan is None or plan.recording else plan.terms
+        if terms not in PLAN_TERMS:
+            raise ValueError(f"plan terms must be one of {PLAN_TERMS} (got {terms!r})")
+        if terms == "valence":
+            return self._valence_only(data, plan, B, N)
+        if plan is not None and not plan.recording:
             # the solves of this evaluation and of its backward pass report here
             plan.converged.fill_(True)
         for predictor in (self.predictor, self.adjoint_predictor):
@@ -2900,7 +2975,9 @@ class Amoeba(InteratomicPotential):
         img.calls = val["img_calls"]
         if recording:
             plan.valence_calls = int(val["img_calls"])
-        out_terms = val["terms"]
+            plan.energy_calls = int(val["energy_calls"])
+        # the valence energies belong to the other subset of a multiple time step integrator
+        out_terms = {} if terms == "nonbonded" else val["terms"]
         q_perm, d_perm, Q_perm = val["q"], val["d"], val["Q"]
         br, bt, bi, theta, theta_plain, theta0, ai = (val[k] for k in ("br", "bt", "bi", "theta", "theta_plain",
                                                                       "theta0", "ai"))
@@ -2910,8 +2987,8 @@ class Amoeba(InteratomicPotential):
                                  img, plan)
         out_terms.update(nb["terms"])
 
-        e_ref_node = self.atom_ref(data.atomic_numbers).squeeze(-1)
-        out_terms["e_ref"] = e_ref_node
+        if terms == "all":
+            out_terms["e_ref"] = self.atom_ref(data.atomic_numbers).squeeze(-1)
         mu_ind = nb["induced"]
         with fused(active):
             stacked, node_energy, dipole = _assemble(list(out_terms.values()), data.batch, B, q_perm, data.pos,
@@ -2932,16 +3009,42 @@ class Amoeba(InteratomicPotential):
             result[k] = totals[t]
         return result
 
+    def _valence_only(self, data: AtomicGraph, plan: StepPlan, B: int, N: int) -> dict[str, Tensor]:
+        """The valence terms and the reference energies on a complete plan (``terms="valence"``): no
+        pairs, multipoles or solves, and the bonded vectors of atoms wrapped back into the cell since
+        the pairs were found follow them (:func:`lattice_jumps`)."""
+        dtype = self.ff.params["bond_k"].dtype
+        # the pair count decides the route as it does for the whole evaluation on this plan
+        stand_in = data.pos.new_empty(1, dtype=dtype).expand(int(plan.pairs[0].shape[0]))
+        jumps = None
+        if data.cell is not None and plan.reference is not None:
+            jumps = lattice_jumps(data.pos, plan.reference, data.cell, data.batch, data.pbc)
+        with fused(self._fused_active(stand_in)):
+            val = self._valence(data, None, plan.shifts, B, N, plan.image_pairs[:plan.energy_calls], None,
+                                False, jumps)
+        out_terms = val["terms"]
+        out_terms["e_ref"] = self.atom_ref(data.atomic_numbers).squeeze(-1)
+        stacked = torch.stack([v.to(dtype) for v in out_terms.values()])
+        node_energy = stacked.sum(0)
+        totals = structure_sums(stacked, data.batch, B)
+        result = {"node_energy": node_energy, "energy": self.aggregate_energy(node_energy, data)}
+        for t, k in enumerate(out_terms):
+            result[k] = totals[t]
+        return result
+
     @fusable
     @region("amoeba.valence")
     def _valence(self, data: AtomicGraph, plan: Optional[StepPlan], shifts: Optional[list], B: int, N: int,
-                 pairs: Optional[list] = None, plain: Optional[dict] = None) -> dict:
+                 pairs: Optional[list] = None, plain: Optional[dict] = None, multipoles: bool = True,
+                 jumps: Optional[Tensor] = None) -> dict:
         """The valence terms per atom, the global-frame multipoles with the charge flux, and
         the bond and angle quantities the intermediates report; one compiled block on the
         fused path. ``plan`` is given while it records its image shifts, ``shifts`` (its list)
-        when they are replayed, with ``pairs`` (the plan's atom pairs of these calls) in one gather;
-        the count of image calls is returned for the terms that follow."""
-        img = _Images(data, plan, shifts, pairs, plain)
+        when they are replayed, with ``pairs`` (the plan's atom pairs of these calls) in one gather
+        and the ``jumps`` of atoms wrapped since (:class:`_Images`); the count of image calls is
+        returned for the terms that follow, and the count the energies take. Without
+        ``multipoles`` only the energies are formed."""
+        img = _Images(data, plan, shifts, pairs, plain, jumps)
         n = int(self.top_type.shape[0])
         device = data.pos.device
         P = self.ff.params
@@ -3133,6 +3236,10 @@ class Amoeba(InteratomicPotential):
         else:
             out_terms["e_tortor"] = zeros_n
 
+        energy_calls = img.calls
+        if not multipoles:
+            return {"terms": out_terms, "img_calls": img.calls, "energy_calls": energy_calls}
+
         # permanent multipoles (global frame) and the charge flux
         q_perm, d_perm, Q_perm = self._rotated_multipoles(data, B, img)
         dq = self._charge_flux(data, B, br, bt, bi, theta_plain, theta0, ai, N) if self._has_cflux() else None
@@ -3141,7 +3248,7 @@ class Amoeba(InteratomicPotential):
 
         return {"terms": out_terms, "q": q_perm, "d": d_perm, "Q": Q_perm, "br": br, "bt": bt, "bi": bi,
                 "theta": theta, "theta_plain": theta_plain, "theta0": theta0, "ai": ai, "e_bond": e_bond,
-                "e_angle": e_angle, "img_calls": img.calls}
+                "e_angle": e_angle, "img_calls": img.calls, "energy_calls": energy_calls}
 
     # pieces of the forward
     def _bond_r0_of(self, a: Tensor, b: Tensor, B: int) -> Tensor:
@@ -4247,13 +4354,21 @@ class DipolePredictor:
             raise ValueError("the predictor history needs at least one dipole set")
         self.kind = kind
         self.history = 1 if kind == "previous" else int(history)
-        self._sets: list = []
-        # a full history: the sets and a spare (the oldest set of the last push, for rewind) as the rows of
-        # one buffer, so a push shifts them in place with one copy
+        # the sets, newest first, as the first rows of one buffer with a spare row (the oldest set of the
+        # last push, for rewind): a push shifts them in place with one copy, so a recorded CUDA graph
+        # advances the history on replay
         self._buffer: Optional[Tensor] = None
+        self._count = 0
+        # the weights for every number of sets, rows padded with zeros: one product of fixed shape
+        self._weights: Optional[Tensor] = None
         self._grew = False
         # whether the evaluation that is running or last ran stored dipoles here
         self.pushed = False
+
+    @property
+    def _sets(self) -> list:
+        """The stored sets, newest first (views of the buffer's rows)."""
+        return [] if self._buffer is None else list(self._buffer[:self._count].unbind(0))
 
     @staticmethod
     def coefficients(kind: str, m: int) -> list:
@@ -4281,8 +4396,9 @@ class DipolePredictor:
 
     def reset(self) -> None:
         """Forget the stored dipoles."""
-        self._sets = []
         self._buffer = None
+        self._weights = None
+        self._count = 0
         self._grew = False
 
     def push(self, mu: Tensor) -> None:
@@ -4293,34 +4409,33 @@ class DipolePredictor:
         mu : Tensor
             The dipoles ``(N, 3)``.
         """
-        if self._sets and (self._sets[0].shape != mu.shape or self._sets[0].dtype != mu.dtype
-                           or self._sets[0].device != mu.device):
+        mu = mu.detach()
+        if self._buffer is not None and (self._buffer.shape[1:] != mu.shape or self._buffer.dtype != mu.dtype
+                                         or self._buffer.device != mu.device):
             self.reset()
+        if self._buffer is None:
+            # zeros: the rows beyond the stored sets meet zero weights
+            self._buffer = mu.new_zeros((self.history + 1,) + tuple(mu.shape))
+            table = torch.zeros(self.history, self.history, dtype=torch.float64)
+            for m in range(1, self.history + 1):
+                table[m - 1, :m] = torch.tensor(self.coefficients(self.kind, m), dtype=torch.float64)
+            self._weights = table.to(device=mu.device, dtype=mu.dtype)
         self.pushed = True
-        if len(self._sets) == self.history:
-            # a full history shifts in place, so a recorded CUDA graph advances it on replay; the
-            # oldest set goes to the spare row, so a step evaluated again can take this one back
-            if self._buffer is None:
-                self._buffer = torch.stack(self._sets + [self._sets[-1]])
-                self._sets = list(self._buffer[:self.history].unbind(0))
-            self._buffer.copy_(torch.cat([mu.detach()[None].to(self._buffer.dtype), self._buffer[:self.history]]))
-            self._grew = False
-        else:
-            self._sets = [mu.detach().clone()] + self._sets
-            self._grew = True
+        self._buffer.copy_(torch.cat([mu[None], self._buffer[:-1]]))
+        self._grew = self._count < self.history
+        self._count = min(self._count + 1, self.history)
 
     def rewind(self) -> None:
         """Take back the dipoles of the last :meth:`push`, as many times as it ran
         (a recorded CUDA graph pushes on every replay), before a step is evaluated
         again at the same positions: the history then holds each step once. Only
         the last push can be taken back."""
-        if not self.pushed or not self._sets:
+        if not self.pushed or not self._count:
             return
+        self._buffer[:-1].copy_(self._buffer[1:].clone())
         if self._grew:
-            self._sets = self._sets[1:]
+            self._count -= 1
             self._grew = False
-        elif self._buffer is not None:
-            self._buffer[:self.history].copy_(self._buffer[1:].clone())
         self.pushed = False
 
     def predict(self, like: Tensor) -> Optional[Tensor]:
@@ -4336,10 +4451,11 @@ class DipolePredictor:
         Tensor or None
             The prediction ``(N, 3)``.
         """
-        if not self._sets or self._sets[0].shape != like.shape or self._sets[0].dtype != like.dtype \
-                or self._sets[0].device != like.device:
+        buf = self._buffer
+        if not self._count or buf.shape[1:] != like.shape or buf.dtype != like.dtype or buf.device != like.device:
             return None
-        return _extrapolate(tuple(self.coefficients(self.kind, len(self._sets))), tuple(self._sets))
+        # the weights of the stored sets against every row: one matrix-vector product, whatever the count
+        return (self._weights[self._count - 1] @ buf[:self.history].reshape(self.history, -1)).view(like.shape)
 
 
 @fusable
@@ -4350,15 +4466,6 @@ def _assemble(values: list, batch: Tensor, B: int, q: Tensor, pos: Tensor, d: Te
     stacked = torch.stack([v.to(dtype) for v in values])
     dip_atoms = q[:, None] * pos.to(dtype) + d + mu
     return stacked, stacked.sum(0), scatter_sum(dip_atoms, batch, B)
-
-
-@fusable
-def _extrapolate(weights: tuple, sets: tuple) -> Tensor:
-    """``sum(w * mu)`` over the stored dipole sets: one generated kernel on the fused path."""
-    out = weights[0] * sets[0]
-    for w, mu in zip(weights[1:], sets[1:]):
-        out = out + w * mu
-    return out
 
 
 #: ``use_fast="auto"``: the minimum number of pairs per GPU model and precision from which the fast
@@ -4533,6 +4640,8 @@ class _MutualField:
         self.polar_dipoles: Optional[Tensor] = None
         self.polar = polar
         self.tol, self.max_iter = tol, max_iter
+        # the Coulomb constant of the polarization energy -C/2 mu . E (the adjoint shortcut and tolerance)
+        self.coulomb = COULOMB
         self.ew = ew
         self.pos, self.cell = pos, cell
         self.structures = [] if ew is None else ew["structures"]
@@ -4896,7 +5005,7 @@ class _ImplicitInduction(torch.autograd.Function):
 
             # the adjoint of the polarization energy is -C/2 times the dipoles of the polar field: its
             # tolerance is theirs times C/2, so that both dipole sets converge alike (as in Tinker)
-            tol = op.tol * (0.5 * COULOMB if op.phase == "adjoint" else 1.0)
+            tol = op.tol * (0.5 * op.coulomb if op.phase == "adjoint" else 1.0)
             ex = None if expol is None else expol.detach()
             if op.paired_rhs is not None and op.phase == "forward":
                 # the paired solve: the dipoles of the direct and of the polar field stacked, one set of
@@ -4946,14 +5055,14 @@ class _ImplicitInduction(torch.autograd.Function):
             # the identity holds when the incoming gradient is the polarization energy's; checked
             # with one synchronization, except inside a CUDA-graph capture (a step plan evaluates
             # the energy and nothing else depends on the dipoles there)
-            shortcut = bool(torch.allclose(grad_mu * mask, -0.5 * COULOMB * field_p, rtol=1e-9, atol=1e-14))
+            shortcut = bool(torch.allclose(grad_mu * mask, -0.5 * op.coulomb * field_p, rtol=1e-9, atol=1e-14))
         key = (tuple(grad_mu.shape), grad_mu.dtype, str(grad_mu.device), create_graph)
         if shortcut:
             # lam solves A lam = -C/2 E_p: lam = -C/2 times the dipoles of the polar field, which are
             # those of the direct field when the two fields coincide (d equals p), and were solved
             # with them otherwise (the paired solve), no solve here
             paired = op.polar_dipoles is not None
-            lam = -0.5 * COULOMB * (op.polar_dipoles if paired else mu)
+            lam = -0.5 * op.coulomb * (op.polar_dipoles if paired else mu)
             op.stats["adjoint"] = 0
             if op.collect_stats:
                 op.stats["adjoint_guess"] = False
@@ -5011,7 +5120,7 @@ class _ImplicitInduction(torch.autograd.Function):
                     # coordinates comes from the two potentials and one adjoint kernel, then through the
                     # coordinates' graph to the positions (lam is a multiple of mu under the shortcut)
                     _, plan = op.plans()[0]
-                    scale = -0.5 * COULOMB if (shortcut and op.polar_dipoles is None) else None
+                    scale = -0.5 * op.coulomb if (shortcut and op.polar_dipoles is None) else None
                     gu = plan.dipole_adjoint(mu_d, lam_d, op.alpha_p, scale)
                     grads = list(torch.autograd.grad(plan.u, inputs, gu, retain_graph=True, allow_unused=True))
                 else:

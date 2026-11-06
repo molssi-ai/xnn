@@ -219,6 +219,20 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |O|
      - |Y|
+   * - ByteFF
+     - |O|
+     - |O|
+     - |O|
+     - |Y|
+     - |Y|
+     - |Y|
+   * - ByteFF-Pol
+     - |O|
+     - |O|
+     - |O|
+     - |Y|
+     - |Y|
+     - |Y|
    * - PM3 / PM6 / PM6-ORG / PM7
      - |Y|
      - |Y|
@@ -253,6 +267,32 @@ and is at least as fast, for evaluation and for a training step.
   SpookyNet it is the other way round: their fast paths win on small systems, so ``"auto"`` takes them below a
   measured size.
 
+Why a cell is orange or red:
+
+- **SE(3) steerable CNN, 3D CNN and spherical CNN, LAMMPS (red).** They build
+  a grid around every atom at every step. That suits datasets of small
+  molecules, not long molecular dynamics, so they have no LAMMPS export. They
+  run molecular dynamics through ASE and MDI.
+- **OPLS, AMBER, CHARMM, DREIDING and ReaxFF, LAMMPS (orange).** They deploy
+  as inputs for LAMMPS's own styles, not as a TorchScript file. LAMMPS
+  evaluates the same energy to round-off, but only in orthorhombic cells and
+  without a switched cutoff. ReaxFF-nn has no LAMMPS route: LAMMPS has no
+  style for its neural bond orders.
+- **AMOEBA and HIPPO, LAMMPS (orange).** They deploy to LAMMPS's AMOEBA
+  package, which has no charge flux. In a cell, the forces of LAMMPS 29Aug2024
+  do not match its energy.
+- **SpookyNet, Fast-Path (Training) (orange).** In ordinary training steps its
+  fast path is faster only on large systems. Captured training steps are
+  faster with it at every size.
+- **ByteFF and ByteFF-Pol, ASE and MDI (orange).** Their parameters are
+  predicted from the molecules, so a model serves the system it is bound to.
+- **ByteFF, LAMMPS (orange).** It deploys as inputs for LAMMPS's own styles,
+  with the parameters of the system it is bound to.
+- **ByteFF-Pol, LAMMPS (orange).** It exports as TorchScript with the
+  parameters of the system it is bound to, for molecules and clusters. Periodic
+  cells are not exported yet.
+- **D4, Reference-Path (orange).** See the add-on terms below.
+
 Notes on individual models:
 
 - **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
@@ -278,10 +318,6 @@ Notes on individual models:
   only on CPUs. There, a 2G model forms its forces from written-out derivatives
   in one compiled pass, which takes 0.54 to 0.89 of RuNNer's time on one and
   eight threads.
-- **The CNNs in LAMMPS.** The SE(3) steerable CNN, the 3D CNN and the
-  spherical CNN build a grid around every atom at every step. They suit
-  datasets of small molecules more than long molecular dynamics, so they have
-  no LAMMPS export. They run molecular dynamics through ASE and MDI.
 - **SE(3) steerable CNN and 3D CNN.** Their fast path runs the 3D
   convolutions on cuDNN's channels-last kernels, in batch chunks that bound
   the kernels' workspace, with cuDNN's algorithm search. From a few molecules
@@ -296,6 +332,24 @@ Notes on individual models:
   differentiated twice, so the upstream cannot train on forces. On a single
   molecule in float32 evaluation, it pads the spectra to take all degrees in
   one product, which needs about a third more memory than the upstream.
+- **ByteFF and ByteFF-Pol.** A model serves one system at a time: bind it with
+  ``model.bind(...)`` before an ASE calculator evaluates it, or with the
+  ``structure`` option of the checkpoint's config for the MDI engine. The
+  upstream is ByteDance-Seed/byteff2 1.1.0 (commit ``663451d``). For molecules
+  and clusters, the reference is faster than it on its CPU and on an A100. In
+  periodic cells, ByteFF-Pol reproduces byteff2's OpenMM setup, whose AMOEBA
+  scale factors byteff2 patches. There the reference is faster than OpenMM's CPU
+  platform.
+- **ByteFF and ByteFF-Pol fast paths.** With a neighbor-list cutoff, ByteFF runs
+  its terms on the classical force-field kernels. Without one, ByteFF and
+  ByteFF-Pol compile their energy terms, after 1000 evaluations of one system
+  under ``"auto"`` or at once with ``use_fast=True``. In cells, ByteFF-Pol
+  solves its dipoles on the AMOEBA kernels, and molecular dynamics runs on step
+  plans replayed as CUDA graphs (:class:`~xnn.common.deploy.StepGraph`), with
+  fused pair kernels. The MDI engine runs them with the ASPC dipole predictor
+  and late checks (``StepGraph(..., late_checks=True)``). On an A100 a float32
+  step then takes 0.85 to 0.94 times as long as in byteff2's OpenMM CUDA setup.
+  Without them, it takes up to 1.08 times as long.
 - **BAMBOO.** The upstream is release 202404 (commit ``386ac0f``). Its forces
   are the exact gradient of the energy. The forces the
   upstream code reports differ from that gradient by about one part in 10^10.
@@ -334,10 +388,12 @@ Notes on individual models:
   eager terms. A stress loss trains on the eager terms. An MD step of a
   classical field with :class:`~xnn.ffnn.models.ReaxFFStepper` is faster than
   with the GPU build of LAMMPS, list rebuilds included.
-- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING and classical
+- **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING, ByteFF and classical
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.
-  These styles evaluate the model to round-off. ReaxFF-nn has no LAMMPS route.
+  These styles evaluate the model to round-off. ByteFF writes the parameters
+  of the system it is bound to. ReaxFF-nn has no LAMMPS route. ByteFF-Pol
+  exports as TorchScript (see :ref:`howto-lammps`).
 - **PM3, PM6, PM6-ORG and PM7.** All four match MOPAC to its printed precision.
   MOPAC runs only on CPUs. On the same cores and at the same SCF convergence
   (MOPAC's ``PRECISE``), PM3 and PM6 are faster than MOPAC at every size.

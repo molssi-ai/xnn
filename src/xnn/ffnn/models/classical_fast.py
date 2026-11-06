@@ -53,19 +53,19 @@ def exclusion_rows(module, excl_index: Tensor, n: int) -> tuple:
 
 def fast_nonbonded(data: AtomicGraph, n: int, B: int, compact: Tensor, q: Tensor, table: Tensor, ke: float,
                    excl_index: Tensor, cutoff: float, width: float, form: int, module=None,
-                   twice: bool = False) -> tuple:
+                   twice: bool = False, tiny: float = TINY) -> tuple:
     """The per-atom van der Waals and Coulomb energies ``(N,)`` each, in the model's dtype, from the pair
     kernel on the graph's directed neighbor list (each pair once, ``i < k``), without the excluded pairs
     ``excl_index`` ``(2, E)`` of one structure (``i < k``), with the compact types ``compact`` ``(n,)`` of one
     structure, the charges ``q`` ``(N,)`` and the ``(T, T, 3)`` table of the form; ``twice`` the kernels
-    differentiable twice (:mod:`.classical_train`)."""
+    differentiable twice (:mod:`.classical_train`); ``tiny`` the regularizer of the distances (0 for none)."""
     from . import classical_kernels as kk
     from . import classical_train as kt
     rows = exclusion_rows(module, excl_index, n) if excl_index.shape[1] > 0 else None
     shifts = data.cell_shifts if data.cell is not None else None
     pairs = kt.pair_terms_twice if twice else kk.pair_terms
     return pairs(data.pos, data.cell, data.batch, data.edge_index[0], data.edge_index[1], shifts, rows, n,
-                         compact.repeat(B), q, table, data.model_dtype, ke, TINY, cutoff, width, form)
+                         compact.repeat(B), q, table, data.model_dtype, ke, tiny, cutoff, width, form)
 
 
 # the vectors of each kind of bonded term, as (from, to) rows of its atom indices
@@ -93,21 +93,23 @@ def image_shifts(data: AtomicGraph, terms: list) -> list:
 
 
 def fast_bonded(data: AtomicGraph, idx: Tensor, kind: str, params: tuple, shifts: Optional[Tensor],
-                options: Optional[dict] = None, extra: tuple = (0.0, 0.0), twice: bool = False) -> Tensor:
+                options: Optional[dict] = None, extra: tuple = (0.0, 0.0), twice: bool = False,
+                tiny: float = TINY) -> Tensor:
     """The per-atom energies ``(N,)`` of one class of bonded terms from the kernels of
     :mod:`.classical_kernels` (``kind``, ``params`` and ``extra`` as there), in the model's dtype; ``twice``
-    the kernels differentiable twice (:mod:`.classical_train`)."""
+    the kernels differentiable twice (:mod:`.classical_train`); ``tiny`` the regularizer of the lengths (0 for
+    none)."""
     from . import classical_kernels as kk
     from . import classical_train as kt
     dtype = data.model_dtype
     bound = min(0.9999999999, 1.0 - 4.0 * torch.finfo(dtype).eps)
     terms = kt.bonded_terms_twice if twice else kk.bonded_terms
-    return terms(data.pos, data.cell, data.batch, idx, shifts, kind, params, dtype, TINY, bound, options,
+    return terms(data.pos, data.cell, data.batch, idx, shifts, kind, params, dtype, tiny, bound, options,
                            extra)
 
 
 def fast_pairs14(data: AtomicGraph, pairs: Tensor, shifts: Optional[Tensor], compact: Tensor, B: int, q: Tensor,
-                 table: Tensor, ke: float, twice: bool = False) -> tuple:
+                 table: Tensor, ke: float, twice: bool = False, tiny: float = TINY) -> tuple:
     """The per-atom van der Waals and Coulomb energies ``(N,)`` each of the 1,4 pairs ``pairs`` ``(2, P)``
     (``i < k``, of the batch) with their image shifts ``(1, P, 3)`` from the pair kernel, without a cutoff, the
     tables and the Coulomb constant already scaled."""
@@ -115,7 +117,7 @@ def fast_pairs14(data: AtomicGraph, pairs: Tensor, shifts: Optional[Tensor], com
     from . import classical_train as kt
     terms = kt.pair_terms_twice if twice else kk.pair_terms
     return terms(data.pos, data.cell, data.batch, pairs[0], pairs[1], None if shifts is None else shifts[0],
-                         None, 1, compact.repeat(B), q, table, data.model_dtype, ke, TINY, 1.0e15, 0.0, 0)
+                         None, 1, compact.repeat(B), q, table, data.model_dtype, ke, tiny, 1.0e15, 0.0, 0)
 
 
 def evaluate_spec(data: AtomicGraph, spec: dict, module) -> dict:

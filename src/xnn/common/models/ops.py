@@ -343,7 +343,8 @@ def make_activation(activation) -> nn.Module:
         (original ANI-1), ``"tanh"``, ``"relu"``, ``"sigmoid"``, ``"ssp"``
         (the exact shifted softplus of SchNet / PhysNet), ``"softplus"``
         (:class:`Softplus`), ``"scaled_tanh"`` (:class:`ScaledTanh`),
-        ``"square"`` or ``"linear"`` (the identity); or an ``nn.Module`` used
+        ``"square"``, ``"gelu"`` (:class:`GELU`, the exact form) or
+        ``"linear"`` (the identity); or an ``nn.Module`` used
         as-is.
 
     Returns
@@ -360,6 +361,7 @@ def make_activation(activation) -> nn.Module:
         return activation
     factories = {
         "silu": SiLU,
+        "gelu": GELU,
         "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
         "gaussian": GaussianActivation,
         "tanh": nn.Tanh,

@@ -11,7 +11,8 @@ synchronization inside the evaluation, as the captured training step of
 * the index work whose sizes depend on the input runs before the replay, through the model's
   ``index_planner()``;
 * the counts carry a margin, and an input that outgrows them (or has another number of structures)
-  is captured again.
+  is captured again; a model bound to one system (its planner's ``pads`` false) is replayed on the
+  batch as it comes, and captured again when the counts change.
 
 The replay runs the same reference code as an ordinary evaluation, so the results agree with it to
 round-off.
@@ -99,6 +100,15 @@ class GraphedEvaluation:
             if isinstance(v, Tensor) and v.requires_grad:
                 setattr(graph, f.name, v.detach())
         n, e = graph.num_nodes, int(graph.edge_index.shape[1])
+        if not getattr(self.planner, "pads", True):
+            # a model that takes no padding structure: the batch is replayed as it comes, and recorded
+            # again when its counts change
+            if self.cap is None or (self.cap.atoms, self.cap.edges, self.n_graphs) != (n, e, graph.num_graphs):
+                self.n_graphs = graph.num_graphs
+                self.cap = Capacity(atoms=n, edges=e, plan={})
+                self._reset()
+            graph.index_plan, graph.index_sizes = {}, {}
+            return graph
         # planners work on CPU graphs (in training, the data-loader workers); one that plans nothing
         # (NoIndexPlanner) needs no copy
         plan = self.planner(graph.to("cpu") if self.planner.offsets else graph)

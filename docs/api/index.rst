@@ -21,7 +21,7 @@ matching what you need:
 - :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO and the ``.frc`` force-field reader
 - :mod:`xnn.trfnn`: ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 and the
   edge attention primitive
-- :mod:`xnn.hybnn`: BAMBOO, SpookyNet
+- :mod:`xnn.hybnn`: BAMBOO, SpookyNet, ByteFF, ByteFF-Pol
 
 .. autosummary::
    :toctree: generated

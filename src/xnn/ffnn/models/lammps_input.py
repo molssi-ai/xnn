@@ -397,7 +397,8 @@ def lammps_input(model, pos, cell=None, atomic_numbers=None) -> tuple:
     model : nn.Module
         An :class:`~xnn.ffnn.models.OPLS`, :class:`~xnn.ffnn.models.Amber`,
         :class:`~xnn.ffnn.models.Charmm`, :class:`~xnn.ffnn.models.Dreiding` or classical
-        :class:`~xnn.ffnn.models.ReaxFF` model.
+        :class:`~xnn.ffnn.models.ReaxFF` model, or a model with its own ``lammps_input(pos, cell)``
+        method (:class:`~xnn.hybnn.models.byteff.ByteFF`).
     pos : array_like
         Positions ``(n, 3)`` in Angstrom, in the order of the bound topology.
     cell : array_like, optional
@@ -420,6 +421,9 @@ def lammps_input(model, pos, cell=None, atomic_numbers=None) -> tuple:
     model = getattr(model, "model", model)
     pos = np.asarray(pos.detach().cpu() if hasattr(pos, "detach") else pos, float).reshape(-1, 3)
     cell = None if cell is None else np.asarray(cell.detach().cpu() if hasattr(cell, "detach") else cell, float)
+    own = getattr(model, "lammps_input", None)
+    if callable(own):                  # a model of another family that writes its own inputs (ByteFF)
+        return own(pos, cell) + ({},)
     pos, bounds, boundary = _box(pos, cell, float(model.cutoff))
     if isinstance(model, ReaxFF):
         return _reaxff(model, pos, bounds, boundary, atomic_numbers)

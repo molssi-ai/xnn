@@ -345,6 +345,21 @@ the dissociation of diatomics with and without nonlocal interactions
    Nonlocal charge transfer: the 4G-HDNNP benchmarks <nb/examples/hybnn/spookynet/spookynet_charge_transfer>
    SpookyNet on MD17 <nb/examples/hybnn/spookynet/spookynet_md17>
 
+ByteFF and ByteFF-Pol (hybnn)
+=============================
+
+The released ByteFF-26 and ByteFF-Pol-25 networks: predicted parameters and
+their ensemble spread, geometry, a torsion scan and dynamics of a drug-like
+molecule, electrolyte dimers and a lithium cluster resolved into repulsion,
+dispersion, electrostatics, polarization and charge transfer, and a periodic
+electrolyte box with particle-mesh Ewald electrostatics and induction.
+
+.. example-toctree::
+   :caption: ByteFF and ByteFF-Pol (hybnn)
+
+   ByteFF on a drug-like molecule: parameters, geometry, torsions and dynamics <nb/examples/hybnn/byteff/byteff_drug_like_molecule>
+   ByteFF-Pol on electrolyte clusters: energy decomposition and many-body polarization <nb/examples/hybnn/byteff/byteff_pol_electrolyte_clusters>
+
 ReaxFF / ReaxFF-nn (ffnn)
 =========================
 

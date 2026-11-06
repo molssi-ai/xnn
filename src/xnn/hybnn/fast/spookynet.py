@@ -24,8 +24,8 @@ NEVER = 1 << 62
 #: When ``use_fast="auto"`` takes the compiled block in evaluation mode (energy and forces): below an
 #: edge count, since it saves kernel launches. Larger graphs, and large batches of small molecules,
 #: are bound by the GPU's work, where the compiled code is not faster. A T4 gains in float32 at every
-#: size and never in float64 (its float64 throughput is low).
-AUTO_POLICY = AutoPolicy(min_edges_float64={"T4": NEVER}, max_edges={"T4": NEVER}, default_min_edges=0,
+#: size. A T4 or an L40S never gains in float64 (their float64 throughput is low).
+AUTO_POLICY = AutoPolicy(min_edges_float64={"L40S": NEVER, "T4": NEVER}, max_edges={"T4": NEVER}, default_min_edges=0,
                          default_min_edges_float64=0, default_max_edges=30_000, default_max_edges_float64=30_000)
 
 #: Edge counts above which ``use_fast="auto"`` takes the fused MLPs in an ordinary training step (a force
@@ -37,9 +37,10 @@ AUTO_POLICY_TRAINING = AutoPolicy(min_edges={"A30": 30_000, "T4": 30_000, "V100"
                                   default_min_edges=NEVER, default_min_edges_float64=NEVER)
 
 #: The same for a captured training step (a padded batch with an index plan, replayed as a CUDA graph),
-#: where only the GPU's work counts: the fused MLPs run fewer kernels at every size (not in float64 on a
-#: T4).
-AUTO_POLICY_CAPTURED = AutoPolicy(min_edges_float64={"T4": NEVER}, default_min_edges=0, default_min_edges_float64=0)
+#: where only the GPU's work counts: the fused MLPs run fewer kernels at every size (not in float64 on an
+#: L40S or a T4).
+AUTO_POLICY_CAPTURED = AutoPolicy(min_edges_float64={"L40S": NEVER, "T4": NEVER}, default_min_edges=0,
+                                  default_min_edges_float64=0)
 
 
 def supported(device: torch.device, dtype: torch.dtype) -> bool:

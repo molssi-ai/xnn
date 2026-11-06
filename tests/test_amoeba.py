@@ -682,6 +682,13 @@ def test_dipole_predictor_coefficients_and_history():
     assert pred.predict(torch.zeros(4, 3, dtype=torch.float64)) is None
     pred.push(torch.zeros(4, 3, dtype=torch.float64))
     assert len(pred._sets) == 1
+    # a history that fills and then shifts gives the weighted sum of its newest sets
+    pred, g = P("aspc", 4), torch.Generator().manual_seed(3)
+    sets = [torch.randn(5, 3, generator=g, dtype=torch.float64) for _ in range(6)]
+    for m, mu in enumerate(sets, 1):
+        pred.push(mu)
+        want = sum(w * x for w, x in zip(P.coefficients("aspc", min(m, 4)), reversed(sets[:m])))
+        assert torch.allclose(pred.predict(mu), want, rtol=1e-13, atol=1e-13)
     with pytest.raises(ValueError):
         P("lsq")
 

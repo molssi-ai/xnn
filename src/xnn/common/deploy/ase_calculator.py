@@ -73,7 +73,7 @@ class XNNCalculator(Calculator):
         (:class:`~xnn.common.deploy.GraphedEvaluation`): faster on small
         structures, where an evaluation is bound by kernel launches; the same
         results. Needs a model with an index planner (DimeNet, GemNet,
-        PhysNet). Default ``False``.
+        PhysNet, ByteFF and ByteFF-Pol without a cutoff). Default ``False``.
 
     Raises
     ------

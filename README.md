@@ -2,6 +2,9 @@
 
 [![Tests](https://github.com/molssi-ai/xnn/actions/workflows/tests.yml/badge.svg)](https://github.com/molssi-ai/xnn/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/molssi-ai/xnn/graph/badge.svg)](https://codecov.io/gh/molssi-ai/xnn)
+[![Discussions](https://img.shields.io/github/discussions/molssi-ai/xnn)](https://github.com/molssi-ai/xnn/discussions)
+[![Issues](https://img.shields.io/github/issues/molssi-ai/xnn)](https://github.com/molssi-ai/xnn/issues)
+[![Pull requests](https://img.shields.io/github/issues-pr/molssi-ai/xnn)](https://github.com/molssi-ai/xnn/pulls)
 
 Machine-learning interatomic potentials for molecules and materials behind one
 PyTorch interface. 
@@ -144,7 +147,7 @@ the MolSSI Driver Interface.
 | Convolutional neural networks (`cnn`) | 3D steerable-/ conventional- / spherical-CNN |
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO |
 | Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
-| Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet |
+| Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet, ByteFF, ByteFF-Pol |
 | Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable) |
 
 Each model is checked against its reference code or paper
@@ -177,7 +180,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.24.0},
+  version = {0.25.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

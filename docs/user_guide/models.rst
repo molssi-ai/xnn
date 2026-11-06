@@ -282,9 +282,26 @@ structure enters the products.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options, including ``radial_basis`` (expnorm, gaussian or bessel),
-``trainable_rbf``, ``activation`` and ``energy_shift`` / ``energy_scale``, are
-also available.
+Other options are also available:
+
+- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (the smooth
+  spherical Bessel basis of `Kocer et al., AIP Adv. 10, 015021 (2020)
+  <https://doi.org/10.1063/1.5111045>`_), with ``trainable_rbf``;
+- ``activation`` and ``energy_shift`` / ``energy_scale``;
+- ``readout``: mlp (the default) or gated (a gated MLP on the feature
+  projection), with ``readout_hidden`` for its widths;
+- ``self_pairs``: whether every atom is its own neighbor (the default) or not.
+
+The MatGL TensorNet foundation potentials trained on MatPES load with one call:
+
+.. code-block:: python
+
+   from xnn.gnn.models import TensorNet
+
+   model = TensorNet.from_foundation("tensornet-matpes-pbe-2025.2")   # or tensornet-matpes-r2scan-2025.2
+
+- They use the smooth spherical Bessel basis, the gated readout and no self pairs.
+- The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
 
 SE(3) steerable CNN and 3D CNN
 ==============================
@@ -545,6 +562,70 @@ models can be loaded with ``SpookyNet.from_reference_checkpoint(path)``.
 Other options, including ``nonlocal_interactions``, ``attention`` (favor /
 exact), ``zbl_repulsion`` and ``ewald``, are also available. The outputs also
 include ``charges`` and ``dipole``.
+
+ByteFF and ByteFF-Pol
+=====================
+:class:`~xnn.hybnn.models.byteff.ByteFF` and
+:class:`~xnn.hybnn.models.byteff.ByteFFPol` (`ByteDance-Seed/byteff2
+<https://github.com/ByteDance-Seed/byteff2>`_) are classical force fields whose
+parameters a graph transformer predicts from the two-dimensional molecular
+graph. ByteFF (`Zheng et al., Chem. Sci. 16, 2730 (2025)
+<https://doi.org/10.1039/D4SC06640E>`_) has the AMBER functional form.
+ByteFF-Pol (`Zheng et al., Nat. Commun. 17, 8276 (2026)
+<https://doi.org/10.1038/s41467-026-73566-3>`_) adds polarization and splits the
+non-bonded energy into repulsion, dispersion, electrostatics, polarization and
+charge transfer terms.
+
+.. code-block:: python
+
+   from xnn.hybnn.models import ByteFF, ByteFFPol
+
+   model = ByteFF.from_foundation("byteff-26")       # five networks, averaged
+   model.bind("CC(=O)Nc1ccc(O)cc1")                  # SMILES, RDKit Mol or ase.Atoms
+   params = model.predicted_parameters()             # kcal/mol, Angstrom, radians, e
+
+   pol = ByteFFPol.from_foundation()                 # ByteFF-Pol-25
+   pol.bind(["CCOC(=O)OC", "[Li+]"])                 # a cluster
+
+   box = ByteFFPol.from_foundation(cutoff=10.0)      # periodic cells (Ewald sums)
+   box.bind(["COC(=O)OC"] * 60 + ["[Li+]", "FS(=O)(=O)[N-]S(=O)(=O)F"] * 5)
+
+- A model is bound to one system. Every structure it evaluates is a
+  conformation of that system, in the atom order of the bound molecules.
+- The parameters are predicted once per distinct molecule and reused until the
+  weights change.
+- Every pair of atoms interacts by default. Both models also take a cutoff
+  (``all_pairs: false``) for periodic cells. ByteFF truncates or switches its
+  pairs there. ByteFF-Pol truncates its short-range terms, adds their long-range
+  correction and sums the charges and induced dipoles by particle mesh Ewald, as
+  byteff2's OpenMM setup does. A cell must be at least twice the cutoff wide.
+- For molecular dynamics in a cell, :class:`~xnn.common.deploy.StepGraph`
+  evaluates ByteFF-Pol on a step plan (:meth:`~xnn.hybnn.models.ByteFFPol.plan_step`):
+  a Verlet pair list, fixed solve lengths and, on a GPU, one replayed CUDA
+  graph per step. ``predictor: aspc`` starts each dipole solve from the last
+  steps' dipoles. Install the ``vesin`` extra: it finds the next pair list
+  while a step runs. ``StepGraph(..., late_checks=True)`` keeps the GPU busy
+  between steps (see the step plans of AMOEBA and HIPPO below).
+- With a cutoff on a GPU, ByteFF evaluates its terms with the fused kernels of
+  the classical force fields (``use_fast``), for inference and training alike.
+- Without a cutoff, ByteFF and ByteFF-Pol compile their energy terms on a GPU
+  (``use_fast``). Compiling takes tens of seconds per system and batch size,
+  so ``"auto"`` waits for 1000 evaluations. Pass ``use_fast=True`` for
+  molecular dynamics and training.
+- For molecules and clusters on a GPU,
+  :class:`~xnn.common.deploy.GraphedEvaluation` (or
+  ``XNNCalculator(..., cuda_graph=True)``) replays an evaluation as one CUDA
+  graph: five to eight times faster for small systems, with the same results.
+- The released networks are licensed for non-commercial use only (CC BY-NC
+  4.0). They download on first use, and xnn states their terms when they load.
+
+.. code-block:: yaml
+
+   model:
+     name: byteff                # or byteff_pol
+     cutoff: 0.1                 # Neighbor-list radius; every pair interacts
+     structure: CCO
+     members: 1
 
 ReaxFF / ReaxFF-nn
 ==================
@@ -824,6 +905,37 @@ Verlet pair list built with ``cutoff + skin``, and ``plan.outdated(pos)``
 tells when to rebuild it. The MDI engine turns the predictor on, sets
 ``use_fast="auto"``, runs the steps on a plan on a GPU and replays each step
 as one CUDA graph (``--step-graph``).
+
+``StepGraph(..., late_checks=True)`` reads each step's status (pair list,
+solve convergence) during the next step, so the GPU does not wait for the
+host. A step that needed a new pair list or longer solves has then already
+returned its results. It is counted in ``late_failures`` with a warning, and
+the next step rebuilds or solves longer. In orthorhombic cells the new pair
+lists are found on the GPU while a step runs. Pass unwrapped positions: a step
+that wraps an atom back into the cell only fails after it returned. The option
+is off by default.
+
+.. code-block:: python
+
+   from xnn.common.deploy import StepGraph
+
+   steps = StepGraph(model, cutoff, skin=1.5)
+   slow = steps(structure, terms="nonbonded")["forces"]      # outer step, e.g. 2 fs
+   for _ in range(8):
+       ...                                                   # move the atoms by 0.25 fs
+       fast = steps(structure, terms="valence")["forces"]    # inner step
+
+``StepGraph`` also splits a step for multiple time step integrators (RESPA):
+
+- ``terms="valence"`` evaluates the bonded terms and the reference energies
+  of an inner step.
+- ``terms="nonbonded"`` evaluates the rest of an outer step: pairs, meshes
+  and the induced dipoles.
+- The two subsets add up to the whole energy, forces and stress.
+- Outer steps make every decision of the run. Inner steps replay their own
+  CUDA graph and wait for nothing.
+- Long outer steps move the atoms further between pair lists. A skin of
+  about 1.5 Angstrom rebuilds them less often.
 
 Training and files
 ------------------

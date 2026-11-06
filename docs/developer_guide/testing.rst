@@ -30,7 +30,7 @@ What the tests check
   GemNet, SpookyNet, SchNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, PhysNet,
   ANI, the spherical CNN, HDNNP against the RuNNer executable when
   ``XNN_RUNNER`` points to it,
-  BAMBOO, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
+  BAMBOO, ByteFF, ByteFF-Pol, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
   AMBER, CHARMM and DREIDING, Tinker for AMOEBA and HIPPO, MOPAC for the NDDO
   methods), and otherwise an independent implementation of the paper's
   equations with its published tables (the SE(3) steerable CNN).

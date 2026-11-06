@@ -88,3 +88,205 @@ def test_steps_follow_a_changing_cell(cls, stress, device):
     if device == "cuda":
         assert stepper.replays > 0
 
+
+
+VALENCE_TERMS = ("e_bond", "e_angle", "e_strbnd", "e_urey", "e_opbend", "e_torsion", "e_pitors", "e_tortor", "e_ref")
+
+
+def _struct(pos, device):
+    return {"pos": torch.tensor(pos, device=device), "atomic_numbers": torch.tensor(Z, device=device),
+            "cell": torch.tensor(CELL, device=device), "pbc": torch.ones(3, dtype=torch.bool, device=device)}
+
+
+def _valence_reference(core, s, device):
+    """The valence energy and forces of a plain evaluation (its valence terms differentiated)."""
+    graph = structure_to_graph(s, 6.3, device=device)
+    graph.pos.requires_grad_(True)
+    out = core(graph)
+    energy = sum(out[key] for key in VALENCE_TERMS)
+    return energy.detach(), -torch.autograd.grad(energy.sum(), graph.pos)[0]
+
+
+@pytest.mark.parametrize("cls", (Amoeba, Hippo))
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="records on a GPU"))])
+def test_inner_and_outer_steps_split_the_terms(cls, device):
+    """Multiple time steps on one plan: inner (valence) steps equal the valence terms of a plain evaluation,
+    also with an atom wrapped by a lattice vector between outer steps, and an inner plus an outer step at the
+    same positions equal the whole step (energy, forces, stress)."""
+    ref = ForceStressOutput(_box(cls), compute_stress=True).to(device).eval()
+    model = ForceStressOutput(_box(cls, predictor="aspc"), compute_stress=True).to(device).eval()
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
+    with pytest.raises(ValueError):
+        stepper(_struct(BOX, device), terms="valence")
+    with pytest.raises(ValueError):
+        stepper(_struct(BOX, device), terms="bonded")
+    velocity = np.random.default_rng(11).normal(scale=0.001, size=BOX.shape)
+    pos = BOX.copy()
+    for outer in range(6):
+        s = _struct(pos, device)
+        slow, fast = stepper(s, terms="nonbonded"), stepper(s, terms="valence")
+        want = ref(structure_to_graph(s, 6.3, device=device))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(slow[key] + fast[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, outer)
+        for inner in range(3):
+            pos = pos + velocity
+            if (outer, inner) == (3, 1):
+                pos[1, 0] += CELL[0, 0]
+            s = _struct(pos, device)
+            fast = stepper(s, terms="valence")
+            energy, forces = _valence_reference(ref.model, s, device)
+            assert torch.allclose(fast["energy"], energy, rtol=1e-10, atol=1e-9), (outer, inner)
+            assert torch.allclose(fast["forces"], forces, rtol=1e-9, atol=1e-8), (outer, inner)
+    if device == "cuda":
+        assert stepper.valence_replays > 0 and stepper.replays > 0
+
+
+def test_a_cell_tensor_changed_in_place_is_followed():
+    """The same cell tensor passed at every step is compared with the plan's once, and followed when it
+    changes in place."""
+    ref, model = (ForceStressOutput(_box(Hippo), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
+    cell = torch.tensor(CELL)
+    s = {"pos": torch.tensor(BOX), "atomic_numbers": torch.tensor(Z), "cell": cell,
+         "pbc": torch.ones(3, dtype=torch.bool)}
+    for step in range(5):
+        if step >= 3:
+            cell.mul_(1.0005)
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, step)
+    assert stepper._seen_cell[0] is cell
+
+
+@pytest.mark.parametrize("cls", (Amoeba, Hippo))
+def test_late_checks_count_failed_steps_and_recover(cls):
+    """With late checks a replayed step returns before its status is read. Steps that move smoothly equal
+    fresh evaluations. An atom pushed past half the skin in one step outdates the pair list: that step has
+    already returned (no pair is missing yet), the next one reads it with a warning, rebuilds and equals
+    the fresh evaluation. A step read as unconverged raises the solve lengths. The default stepper reads
+    every status at once and builds the pair list one step later."""
+    if not torch.cuda.is_available():
+        pytest.skip("replays on a GPU")
+    ref, model = (ForceStressOutput(_box(cls), compute_stress=True).to("cuda").eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, late_checks=True)
+    assert stepper._ahead() == 3 and StepGraph(model, 6.3)._ahead() == 2
+    velocity = np.random.default_rng(8).normal(scale=0.002, size=BOX.shape)
+    kick = np.zeros_like(BOX)
+    for step in range(14):
+        if step == 7:
+            kick[0, 0] = 0.3
+        s = _struct(BOX + step * velocity + kick, "cuda")
+        if step == 8:
+            rebuilds = stepper.rebuilds
+            with pytest.warns(RuntimeWarning, match="pair list was outdated"):
+                got = stepper(s)
+            assert stepper.late_failures == 1 and stepper.rebuilds > rebuilds
+        elif step == 11:
+            assert stepper.previous is not None and stepper.plan.solve_iterations
+            # the last step's status, as read on the host, says its solves did not converge
+            event, host = stepper.previous[:2]
+            event.synchronize()
+            host[2] = 0.0
+            with pytest.warns(RuntimeWarning, match="did not converge"):
+                got = stepper(s)
+            assert stepper.late_failures == 2 and stepper.plan.solve_iterations is None and stepper.floor
+        else:
+            got = stepper(s)
+        want = ref(structure_to_graph(s, 6.3, device="cuda"))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, step)
+    assert stepper.replays > 0 and stepper.settle()
+
+
+def test_late_checks_rebuild_behind_the_replay():
+    """With late checks a cell too small for a grid finds its pair lists on the device: a rebuild takes them
+    behind the step's replay and the steps equal fresh evaluations. A list that does not hold (an atom
+    wrapped back into the cell while it was found) is built again in full by the next step, with a warning;
+    the wrapping step itself returned before its check, a late failure."""
+    if not torch.cuda.is_available():
+        pytest.skip("replays on a GPU")
+    ref, model = (ForceStressOutput(_box(Amoeba), compute_stress=True).to("cuda").eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, late_checks=True)
+    velocity = np.random.default_rng(9).normal(scale=0.008, size=BOX.shape)
+    wrap = np.zeros_like(BOX)
+    for step in range(16):
+        if step == 11:
+            # a rebuild at this step, while atom 0 is wrapped back into the cell by one edge
+            stepper.pending = True
+            wrap[0, 0] = CELL[0, 0]
+        s = _struct(BOX + step * velocity + wrap, "cuda")
+        if step == 11:
+            assert stepper.gridded and stepper.cuda_graph is not None and stepper.previous is not None
+            overlapped, failures = stepper.overlapped, stepper.late_failures
+            stepper(s)
+            assert stepper.overlapped == overlapped + 1 and stepper.late_failures == failures
+            continue
+        if step == 12:
+            full = stepper.full_rebuilds + stepper.recordings
+            with pytest.warns(RuntimeWarning, match="did not hold"):
+                got = stepper(s)
+            assert stepper.late_failures == failures + 1 and not stepper.stale
+            assert stepper.full_rebuilds + stepper.recordings > full
+        else:
+            got = stepper(s)
+        want = ref(structure_to_graph(s, 6.3, device="cuda"))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, step)
+        if step == 10:
+            assert stepper.overlapped > 0 and stepper.late_failures == 0
+    assert stepper.settle()
+
+
+class _Read:
+    """A status already on the host: the event of a late read."""
+
+    def synchronize(self):
+        pass
+
+
+def test_late_status_reads_on_the_host():
+    """The decisions on a step's status read a step late: a step that held passes on its rebuild flag; an
+    outdated or unconverged one is counted with a warning and asks for a rebuild or longer solves; a pair
+    list taken behind a replay that did not hold is built again in full by the next step, which equals the
+    fresh evaluation."""
+    ref, model = (ForceStressOutput(_box(Amoeba), compute_stress=True).eval() for _ in range(2))
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2, late_checks=True)
+    velocity = np.random.default_rng(10).normal(scale=0.002, size=BOX.shape)
+    for step in range(3):
+        stepper(_struct(BOX + step * velocity, "cpu"))
+    n = int(stepper.plan.needed.numel())
+    needed = [1.0] * n
+
+    def read(outdated=0.0, due=0.0, converged=1.0, jump=None):
+        tail = [] if jump is None else [jump]
+        status = torch.tensor([outdated, due, converged] + needed + tail, dtype=torch.float64)
+        stepper.previous = (_Read(), status, n, False, jump is not None)
+
+    assert stepper.settle()
+    read(due=1.0)
+    assert stepper.settle() and stepper.pending and stepper.late_failures == 0
+    stepper.pending = False
+    read(due=1.0, jump=0.0)
+    assert stepper.settle() and not stepper.pending
+    read(outdated=1.0)
+    with pytest.warns(RuntimeWarning, match="outdated"):
+        assert not stepper.settle()
+    assert stepper.late_failures == 1 and stepper.pending
+    stepper.pending = False
+    lengths = dict(stepper.plan.solve_iterations)
+    read(converged=0.0)
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        assert not stepper.settle()
+    assert stepper.late_failures == 2 and stepper.plan.solve_iterations is None and stepper.floor == lengths
+    read(jump=1.0)
+    with pytest.warns(RuntimeWarning, match="did not hold"):
+        assert not stepper.settle()
+    assert stepper.stale and stepper.pending
+    full = stepper.full_rebuilds
+    s = _struct(BOX + 3 * velocity, "cpu")
+    got, want = stepper(s), ref(structure_to_graph(s, 6.3))
+    assert not stepper.stale and stepper.full_rebuilds > full
+    for key in ("energy", "forces", "stress"):
+        assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), key

@@ -1,0 +1,42 @@
+# ByteFF (Zheng et al., Chem. Sci. 16, 2730 (2025)): a graph transformer reads the
+# 2D molecular graph and predicts an AMBER-form force field (bonds, angles,
+# torsions, impropers, Lennard-Jones, charges). The released ByteFF-26 networks
+# load with ByteFF.from_foundation("byteff-26"); a model is bound to a system
+# with model.bind(...) or the structure option.
+name: byteff
+cutoff: 0.1              # neighbor-list radius; with all_pairs: false, the nonbonded cutoff (Angstrom)
+all_pairs: true          # every pair of a structure interacts (molecules and clusters, no cell)
+structure: null          # SMILES (or list of SMILES) of the system to bind
+members: 1               # ensemble networks whose parameters are averaged
+supported_elements: [1, 6, 7, 8, 9, 15, 16, 17, 35, 53]
+switch_width: 0.0        # width of the switch to zero at the cutoff (Angstrom)
+coulomb_constant: 332.0637141491396   # kcal Angstrom / (mol e^2)
+fudge_qq: 0.8333333333   # 1-4 Coulomb scale
+fudge_lj: 0.5            # 1-4 Lennard-Jones scale
+charge: 0                # total charge, for bond perception from coordinates
+use_fast: auto           # GPU fast path: kernels with a cutoff, else a compiled block after 1000 calls (true, false)
+graph:                   # graph transformer
+  atom_dim: 32           # element embedding width
+  feature_dim: 8         # width of the other atom and bond embeddings
+  node_mlp: [64, 256, 2] # atom embedding MLP (hidden, out, layers)
+  edge_mlp: [64, 256, 2] # bond embedding MLP (hidden, out, layers)
+  hidden: 256            # attention layer width
+  layers: 4              # attention layers
+  heads: 16              # attention heads
+  head_dim: 16           # width per head
+  ffn: [256, 2]          # feed-forward MLP (hidden, layers)
+  out_dim: 256           # width of the atom states
+  jumping_knowledge: cat # cat, last or null
+  activation: gelu
+  scale_by_degree: false # weight attention by the receiving atom's bonds
+bonded:                  # bond / angle / torsion / improper head
+  pre: [256, 256, 3]     # pooling MLP (hidden, out, layers)
+  out: [256, 4]          # per-parameter MLPs (hidden, layers)
+  tanh_output: 20.0      # bound of the raw outputs
+  form: harmonic         # harmonic or two_well
+  activation: gelu
+nonbonded:               # Lennard-Jones and charge head
+  pre: [512, 512, 4]     # bond charge increment MLP (hidden, out, layers)
+  out: [256, 3]          # output MLPs (hidden, layers)
+  tanh_output: 20.0      # range of sigma and epsilon, bound of the increments
+  activation: gelu

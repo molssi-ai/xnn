@@ -8,6 +8,8 @@ a CPU where the grid allows: fewer candidates in smaller cells). One program per
 to count its partners of higher index, then to write them at its offset in the
 prefix sum of the counts. The pairs come out sorted by their first atom, in the
 same order in every run, with no atomic adds and no host read but the total.
+A cell too small for the grid, with every edge over the cutoff, is searched
+without one: each atom against every atom of higher index (a GPU).
 """
 from typing import Optional
 
@@ -68,6 +70,63 @@ def _grid_pairs(pos_ptr, box_ptr, cell_ptr, atoms_ptr, start_ptr, count_ptr, off
                 tl.store(shift_ptr + 3 * at + 1, -iy, mask=put)
                 tl.store(shift_ptr + 3 * at + 2, -iz, mask=put)
             count += tl.sum(hit.to(tl.int32), 0)
+    if not WRITE:
+        tl.store(count_ptr + i, count)
+
+
+@triton.jit
+def _small_cell_pairs(pos_ptr, box_ptr, count_ptr, offset_ptr, i_ptr, k_ptr, shift_ptr, N, cap,
+                      WRITE: tl.constexpr, BLOCK: tl.constexpr):
+    """:func:`_grid_pairs` for a cell with every edge over the cutoff and no room for a grid: atom ``i`` against
+    every atom of higher index, in the minimum image and, on each axis, the image on the far side (any other
+    image lies a whole edge away)."""
+    i = tl.program_id(0)
+    lx = tl.load(box_ptr + 0)
+    ly = tl.load(box_ptr + 1)
+    lz = tl.load(box_ptr + 2)
+    cut2 = tl.load(box_ptr + 3)
+    px = tl.load(pos_ptr + 3 * i + 0)
+    py = tl.load(pos_ptr + 3 * i + 1)
+    pz = tl.load(pos_ptr + 3 * i + 2)
+    offs = tl.arange(0, BLOCK)
+    base = tl.load(offset_ptr + i)
+    count = tl.sum(tl.zeros([BLOCK], dtype=tl.int32), 0)
+    # a while loop: its bound depends on the program (Triton's interpreter runs no such range)
+    k0 = i + 1
+    while k0 < N:
+        k = k0 + offs
+        m = k < N
+        dx = tl.load(pos_ptr + 3 * k + 0, mask=m, other=0.0) - px
+        dy = tl.load(pos_ptr + 3 * k + 1, mask=m, other=0.0) - py
+        dz = tl.load(pos_ptr + 3 * k + 2, mask=m, other=0.0) - pz
+        ix = tl.floor(dx / lx + 0.5)
+        iy = tl.floor(dy / ly + 0.5)
+        iz = tl.floor(dz / lz + 0.5)
+        dx = dx - ix * lx
+        dy = dy - iy * ly
+        dz = dz - iz * lz
+        # the lattice step to the image on the far side of each axis
+        ax = tl.where(dx > 0, -1.0, 1.0)
+        ay = tl.where(dy > 0, -1.0, 1.0)
+        az = tl.where(dz > 0, -1.0, 1.0)
+        for c in tl.static_range(8):
+            bx = (c // 4) % 2
+            by = (c // 2) % 2
+            bz = c % 2
+            ex = dx + ax * lx * bx
+            ey = dy + ay * ly * by
+            ez = dz + az * lz * bz
+            hit = m & (ex * ex + ey * ey + ez * ez <= cut2)
+            if WRITE:
+                at = base + count + tl.cumsum(hit.to(tl.int32), 0) - 1
+                put = hit & (at < cap)
+                tl.store(i_ptr + at, tl.zeros([BLOCK], dtype=tl.int64) + i, mask=put)
+                tl.store(k_ptr + at, k.to(tl.int64), mask=put)
+                tl.store(shift_ptr + 3 * at + 0, ax * bx - ix, mask=put)
+                tl.store(shift_ptr + 3 * at + 1, ay * by - iy, mask=put)
+                tl.store(shift_ptr + 3 * at + 2, az * bz - iz, mask=put)
+            count += tl.sum(hit.to(tl.int32), 0)
+        k0 += BLOCK
     if not WRITE:
         tl.store(count_ptr + i, count)
 
@@ -364,8 +423,11 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capaci
         Neighbor cutoff radius.
     lengths : Tensor
         The edges of the orthorhombic cell ``(3,)``.
-    shape : tuple of int
-        The cells per axis, from :func:`grid_shape` with ``span``.
+    shape : tuple of int or None
+        The cells per axis, from :func:`grid_shape` with ``span``; ``None`` searches
+        without a grid, every atom against those of higher index (a cell too small
+        for one, every edge over ``cutoff``; positions on a GPU, or on the CPU under
+        Triton's interpreter).
     capacity : int, optional
         Write the pairs into buffers of this many entries, without reading their number
         on the host: the entries past it repeat the first pair, and their number comes
@@ -388,6 +450,11 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capaci
     lengths = lengths.to(device=device, dtype=pos.dtype)
     # the edges and the squared cutoff, read by the kernel in the positions' precision
     box = torch.cat([lengths, torch.full((1,), float(cutoff) ** 2, dtype=pos.dtype, device=device)])
+    counts = torch.empty(N, dtype=torch.int32, device=device)
+    if shape is None:
+        args, sizes, block = (pos, box), (N,), GRID_BLOCK
+        run = lambda *a, **k: _small_cell_pairs[(N,)](*a, **k)  # noqa: E731
+        return _two_passes(run, args, sizes, block, counts, N, capacity, index_dtype, shift_dtype)
     dims = torch.tensor(shape, device=device)
     frac = pos / lengths
     cell = ((frac - torch.floor(frac)) * dims).to(torch.int64).clamp_max(dims - 1)
@@ -399,14 +466,20 @@ def grid_pairs(pos: Tensor, cutoff: float, lengths: Tensor, shape: tuple, capaci
     start = torch.zeros(per_cell.shape[0] + 1, dtype=torch.int32, device=device)
     start[1:] = torch.cumsum(per_cell, 0)
     cell = cell.to(torch.int32).contiguous()
-    counts = torch.empty(N, dtype=torch.int32, device=device)
     args = (pos, box, cell, atoms, start)
-    sizes = shape
     if pos.is_cuda:
         run, block = (lambda *a, **k: _grid_pairs[(N,)](*a, **k)), GRID_BLOCK
     else:
         from xnn.common import cpu_kernels
         run, block = (lambda *a, **k: cpu_kernels.launch(_grid_pairs, (N,), *a, SPAN=span, **k)), 1
+    return _two_passes(run, args, shape, block, counts, N, capacity, index_dtype, shift_dtype)
+
+
+def _two_passes(run, args: tuple, sizes: tuple, block: int, counts: Tensor, N: int, capacity: Optional[int],
+                index_dtype: torch.dtype, shift_dtype: torch.dtype) -> tuple:
+    """The two passes of a search kernel ``run`` (the counts per atom, then the pairs at their offsets) and the
+    outputs of :func:`grid_pairs`."""
+    device = counts.device
     if N:
         run(*args, counts, counts, counts, counts, counts, *sizes, 0, WRITE=False, BLOCK=block, num_warps=GRID_WARPS)
     offset = torch.zeros(N + 1, dtype=torch.int64, device=device)

@@ -256,7 +256,7 @@ def half_edges(data: AtomicGraph, excl_index: Tensor, n: int, module) -> tuple:
         each pair is not excluded ``(P,)`` and the integer image shifts
         ``(P, 3)`` (``None`` without a cell).
     """
-    N, B = data.num_nodes, data.num_graphs
+    B = data.num_graphs
     src, dst = data.edge_index[0], data.edge_index[1]
     once = (src <= dst).nonzero()[:, 0]
     src, dst = src.index_select(0, once), dst.index_select(0, once)
@@ -264,20 +264,46 @@ def half_edges(data: AtomicGraph, excl_index: Tensor, n: int, module) -> tuple:
     vec = pair_vectors(data, src, dst, shift)
     r2 = (vec * vec).sum(1)
     half = torch.where(src == dst, 0.5, 1.0).to(r2.dtype)
-    if excl_index.shape[1] > 0:
-        cache = module.__dict__.setdefault("_exclusion_keys", {})
-        ck = (B, N, str(excl_index.device))
-        if ck not in cache:
-            ex = (excl_index.unsqueeze(1) + (torch.arange(B, device=excl_index.device) * n).view(1, B, 1)
-                  ).reshape(2, -1)
-            cache[ck] = torch.sort(torch.minimum(ex[0], ex[1]) * N + torch.maximum(ex[0], ex[1])).values
-        keys = cache[ck]
-        key = src * N + dst
-        at = torch.searchsorted(keys, key).clamp_(max=keys.shape[0] - 1)
-        included = keys.index_select(0, at) != key
-    else:
-        included = torch.ones_like(r2, dtype=torch.bool)
+    included = ~excluded_pairs(src, dst, excl_index, n, B, module)
     return src, dst, vec, r2, half, included, shift
+
+
+def excluded_pairs(i: Tensor, k: Tensor, excl_index: Tensor, n: int, B: int, module) -> Tensor:
+    """Whether each pair ``(i, k)`` of a batch of ``B`` copies of a topology of ``n`` atoms is one of its
+    excluded pairs ``excl_index`` ``(2, E)`` (in either order), looked up in their sorted keys (made once per
+    batch size and device, cached on ``module``).
+
+    Parameters
+    ----------
+    i, k : Tensor
+        Atom indices of the batch ``(P,)``.
+    excl_index : Tensor
+        The excluded pairs ``(2, E)`` of one structure.
+    n : int
+        Atoms per structure.
+    B : int
+        Structures in the batch.
+    module : torch.nn.Module
+        The model holding the cache.
+
+    Returns
+    -------
+    Tensor
+        ``(P,)`` booleans.
+    """
+    if excl_index.shape[1] == 0:
+        return torch.zeros(i.shape, dtype=torch.bool, device=i.device)
+    N = n * B
+    cache = module.__dict__.setdefault("_exclusion_keys", {})
+    ck = (B, N, str(excl_index.device))
+    if ck not in cache:
+        ex = (excl_index.unsqueeze(1) + (torch.arange(B, device=excl_index.device) * n).view(1, B, 1)
+              ).reshape(2, -1)
+        cache[ck] = torch.sort(torch.minimum(ex[0], ex[1]) * N + torch.maximum(ex[0], ex[1])).values
+    keys = cache[ck]
+    key = torch.minimum(i, k) * N + torch.maximum(i, k)
+    at = torch.searchsorted(keys, key).clamp_(max=keys.shape[0] - 1)
+    return keys.index_select(0, at) == key
 
 
 def dihedral_cos(data: AtomicGraph, idx: Tensor, shifts: Optional[Tensor] = None) -> Tensor:

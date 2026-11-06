@@ -14,6 +14,9 @@ updates:
         patterns: ["*"]
     # torch is pinned to the CUDA build the GPU environments use and is
     # bumped by hand together with the e3nn / mace-torch reference versions.
+    # The cu121 index ends at 2.5.1, so torch advisories fixed in later
+    # releases stay on the development lock until that bump; installs from
+    # PyPI resolve a current torch (torch>=2.0).
     # e3nn is held at the version mace-torch pins, and nequip at the reference
     # version the NequIP comparisons use; newer releases cannot be resolved
     # together with mace-torch.

@@ -85,7 +85,7 @@ and do not make later calls faster. In Python, call the model inside
 
 Classical force fields
 ======================
-OPLS, AMBER, CHARMM, DREIDING and classical ReaxFF models export to LAMMPS's
+OPLS, AMBER, CHARMM, DREIDING, ByteFF and classical ReaxFF models export to LAMMPS's
 own styles instead of a TorchScript file. :func:`~xnn.ffnn.models.write_lammps_input`
 writes a data file with the bound topology and an input script with the
 model's parameters, trained ones included:
@@ -105,7 +105,25 @@ style and is refused. OPLS's torsion constants ``V0`` have no LAMMPS term:
 the script states their sum as an energy offset. A ReaxFF model with
 ``conventions="lammps"`` also writes its field as ``<name>.ffield`` and needs
 the atomic numbers (``atomic_numbers=z``). LAMMPS solves its charges with
-``fix qeq/reaxff`` for a neutral system.
+``fix qeq/reaxff`` for a neutral system. ByteFF writes the parameters of the
+system it is bound to. Without a cutoff, its pair cutoff covers the whole
+structure, so every pair interacts as in xnn.
+
+ByteFF-Pol
+==========
+A bound ByteFF-Pol model exports as TorchScript with the same function as the
+neural network potentials:
+
+.. code-block:: python
+
+   from xnn.common.deploy import export_torchscript_potential
+
+   export_torchscript_potential(model, cutoff=10.0, path="byteff_pol.pt")
+
+The file holds the parameters of the system the model is bound to. It
+evaluates every pair of that system and solves the induced dipoles exactly,
+so the whole system must be on one rank, with its atoms in the bound order.
+It takes molecules and clusters. Periodic cells are refused.
 
 AMOEBA and HIPPO
 ================
