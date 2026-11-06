@@ -2,9 +2,11 @@
 # transformer predicts a polarizable force field: bonded terms, Born-Mayer
 # repulsion, damped C6 dispersion, point charges, Thole-damped induced dipoles
 # and charge transfer. The released ByteFF-Pol-25 network loads with
-# ByteFFPol.from_foundation(); molecules and clusters, no cell.
+# ByteFFPol.from_foundation(). Molecules and clusters (every pair), or periodic
+# cells with all_pairs: false (Ewald sums, short-range cutoff).
 name: byteff_pol
-cutoff: 0.1              # neighbor-list radius of the data pipeline; the model forms all atom pairs itself
+cutoff: 0.1              # neighbor-list radius; with all_pairs: false, the cutoff of periodic cells
+all_pairs: true          # every pair of a structure interacts (molecules and clusters, no cell)
 structure: null          # SMILES (or list of SMILES) of the system to bind
 members: 1               # ensemble networks whose parameters are averaged
 supported_elements: [1, 3, 6, 7, 8, 9, 15, 16, 17]
@@ -19,6 +21,15 @@ wall: 1.5                # s12 of the (s12 / r)^12 wall, Angstrom (kcal/mol)^(1/
 repulsion_prefactor: 6.0 # a of a eps exp[lam (1 - r / r0)]
 charge: 0                # total charge, for bond perception from coordinates
 use_fast: auto           # compiled energy block on CUDA: auto (after 1000 calls of one shape), true, false
+ewald_tolerance: 5.0e-5  # cells: sets the Ewald coefficient and the mesh
+ewald_alpha: null        # cells: Ewald coefficient (1/Angstrom) instead
+pme_grid: null           # cells: mesh instead, e.g. [32, 32, 32]
+pme_order: 5             # cells: B-spline order of the mesh
+polar_eps: 1.0e-5        # cells: convergence of the dipole solve, rms change in Debye
+max_iter: 100            # cells: iterations of the dipole solve at most
+long_range_correction: true  # cells: add the short-range tails beyond the cutoff
+predictor: null          # cells: dipole predictor of the solve in MD (aspc, gear, previous)
+predictor_history: 6     # cells: dipole sets the predictor uses
 graph:                   # graph transformer, as for ByteFF
   atom_dim: 32
   feature_dim: 8

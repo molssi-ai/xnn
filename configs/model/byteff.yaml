@@ -14,7 +14,7 @@ coulomb_constant: 332.0637141491396   # kcal Angstrom / (mol e^2)
 fudge_qq: 0.8333333333   # 1-4 Coulomb scale
 fudge_lj: 0.5            # 1-4 Lennard-Jones scale
 charge: 0                # total charge, for bond perception from coordinates
-use_fast: auto           # fused GPU kernels for the terms; auto: with a cutoff (true, false)
+use_fast: auto           # GPU fast path: kernels with a cutoff, else a compiled block after 1000 calls (true, false)
 graph:                   # graph transformer
   atom_dim: 32           # element embedding width
   feature_dim: 8         # width of the other atom and bond embeddings
