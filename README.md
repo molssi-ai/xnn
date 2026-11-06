@@ -11,7 +11,8 @@ PyTorch interface.
 
 **x** in **xnn** refers to the neural network model architectures: **g** stands
 for graph, **d** for dense, **c** for convolutional, **ff** for classical
-force-fields, **sqm** for semi-empirical quantum mechanics, **trf** for transformers, **hyb** for hybrid models, all sharing one data object, one
+force-fields, **sqm** for semi-empirical quantum mechanics, **trf** for
+transformers, **hyb** for hybrid models, all sharing one data object, one
 trainer and one deployment path. This categorization is reflected in the package
 structure.
 
@@ -43,74 +44,58 @@ The distribution is `xnns`; the import name and the command line are `xnn`.
    YAML, argparse and Hydra interfaces, all of which fill one `Config`
    dataclass.
 
-## Load data
+## Quick start
 
-Structures are plain dictionaries (`pos`, `atomic_numbers`, optional `cell`,
-`pbc` and `energy` / `forces` / `stress` targets), any ASE-readable file, or a
-dataset from the hub:
-
-```python
-from xnn.common.data import AtomicDataset, load_dataset
-
-# From a list of structures dict
-data = AtomicDataset(structures, cutoff=5.0)
-
-# From a file (e.g., .extxyz, .cif, VASP, ...)
-data = AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
-
-# From the xnn data hub (e.g., RMD17 dataset)
-data = load_dataset("rmd17", molecule="aspirin", split="train", cutoff=5.0)
-```
-
-## Train
+One script loads data, trains a model, loads pre-trained models and fine-tunes
+one. Structures are plain dictionaries (`pos`, `atomic_numbers`, optional
+`cell`, `pbc` and `energy` / `forces` / `stress` labels), any ASE-readable
+file, or a dataset from the xnn hub:
 
 ```python
 from xnn.common.config import Config
-from xnn.common.train import Trainer
-
-# Initialize the configuration
-cfg = Config()
-
-# Set the model and data configuration
-cfg.model.name = "nequip"
-cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
-cfg.data.batch_size = 16
-
-# Train the model
-Trainer(cfg, data).fit()
-```
-
-or from the command line: `xnn train --config configs/train.yaml --set optim.epochs=50`.
-
-## Pretrained models
-
-```python
+from xnn.common.data import AtomicDataset, load_dataset
 from xnn.common.models import from_pretrained, list_models
+from xnn.common.train import Trainer
+from xnn.gnn.models import TensorNet
 
-# Foundation models, xnn models, local cache
-list_models()
+# Load data: 250 aspirin conformations of rMD17 (eV, Angstrom) from the data hub
+structures = load_dataset("rmd17", molecule="aspirin", split="train", n_train=250)
+data = AtomicDataset(structures, cutoff=5.0)
+# or from a list of dicts or a file: AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
 
-# MACE-MP / MACE-OFF, converted once and cached
-model = from_pretrained("mace-off23-small")
+# Train: a small NequIP model, checkpoints in runs/nequip (best.pt, last.pt)
+cfg = Config()
+cfg.model.name = "nequip"
+cfg.model.cutoff = cfg.data.cutoff = 5.0
+cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
+cfg.optim.epochs = 10
+cfg.output_dir = "runs/nequip"
+Trainer(cfg, data).fit()
 
-# Your own checkpoints
-model = from_pretrained("runs/exp/best.pt")
+# Pre-trained models: foundation models, your own checkpoints, the local cache
+print(list_models())
+mace = from_pretrained("mace-off23-small")                            # MACE-OFF23, converted once and cached
+tensornet = TensorNet.from_foundation("tensornet-matpes-pbe-2025.2")  # MatGL's TensorNet trained on MatPES
+mine = from_pretrained("runs/nequip/best.pt")
+
+# Fine-tune: MACE-OFF23 small with LoRA adapters, its reference energies re-estimated from the data
+ft = Config()
+ft.model.name = "mace"
+ft.model.cutoff = ft.data.cutoff = 4.5                                # the checkpoint's cutoff
+ft.model.extra = {"pretrained": "mace-off23-small", "lora": {"rank": 16},
+                  "atomic_energies": "estimated"}
+ft.optim.epochs = 10
+ft.output_dir = "runs/mace-off23-lora"
+Trainer(ft, AtomicDataset(structures, cutoff=4.5)).fit()
 ```
 
-## Fine-tune
-
-Any pretrained model continues training through the same `Trainer`: naive
-fine-tuning, LoRA, multi-head replay (with original or pseudolabelled replay
-data), layer freezing and model-aware reference-energy reestimation, all from
-the config:
-
-```yaml
-model:
-  pretrained: mace-off23-small
-  cutoff: 5.0
-  lora: {rank: 16}                      # or heads: [pt_head, Default] with data.replay_path
-  atomic_energies: estimated
-```
+- The same training runs from the command line:
+  `xnn train --config configs/train.yaml --set optim.epochs=50`.
+- Fine-tuning also covers full fine-tuning, multi-head replay
+  (`heads: [pt_head, Default]` with `data.replay_path`, original or
+  pseudolabelled replay data) and layer freezing (`optim.freeze`).
+- Converting the MACE checkpoints needs `mace-torch` once
+  (`pip install "xnns[examples]"`).
 
 ## Benchmark
 
@@ -135,7 +120,8 @@ export_to_lammps(model, cutoff=5.0, path="deployed.pt")
 ```
 
 `xnn mdi --ckpt runs/exp/best.pt` serves a model to an external MD code through
-the MolSSI Driver Interface.
+the MolSSI Driver Interface. `DomainParallel` splits one large box over the GPUs
+of a `torchrun` launch, with the same energies, forces and stress as one GPU.
 
 ## Models
 
@@ -152,7 +138,7 @@ the MolSSI Driver Interface.
 
 Each model is checked against its reference code or paper
 (`notebooks/fidelity_checks/`). SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, NequIP,
-MACE, Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP, BAMBOO, PM3, PM6, PM6-ORG and PM7 also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
+MACE, Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP, BAMBOO, PM3, PM6, PM6-ORG, PM7 and ByteFF-Pol also export to TorchScript / LAMMPS; every model deploys through ASE and the MDI
 engine.
 
 ## Examples and tests
