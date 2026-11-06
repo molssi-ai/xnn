@@ -58,12 +58,14 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import CosineCutoff, make_radial_basis
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.blocks import GatedMLP
 from xnn.common.models.constants import ExactFloat64Constants
 from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import gather_rows, make_activation, scatter_sum
 from xnn.common.models.registry import register_model
 
 _GROUPS = ("O(3)", "SO(3)")
+_READOUTS = ("mlp", "gated")
 
 #: Pairs (self pairs included) from which an interaction layer in evaluation mode
 #: recomputes its filter network in the backward pass instead of keeping its activations
@@ -424,6 +426,16 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         Only used to interpret ``atomic_energies``.
     atomic_energies : array-like or None, optional
         Per-species reference energies loaded into ``atom_ref``.
+    readout : str, optional
+        The atom-wise energy network: ``"mlp"`` (default; the activated
+        ``3F -> F`` projection, then dense layers) or ``"gated"`` (the
+        projection itself, then a :class:`~xnn.common.models.blocks.GatedMLP`).
+    readout_hidden : sequence of int or None, optional
+        Hidden widths of the energy network; by default ``(F/2,)`` for
+        ``"mlp"`` and ``(F, F, F)`` for ``"gated"``.
+    self_pairs : bool, optional
+        Whether every atom is its own neighbor (at distance 0, with no
+        direction) in the embedding and the messages, by default ``True``.
 
     Attributes
     ----------
@@ -441,8 +453,8 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         Layer norm of the ``(3 I^2, |A|^2, |S|^2)`` readout features.
     linear : torch.nn.Linear
         The ``3F -> F`` readout projection.
-    readout : torch.nn.Sequential
-        Atom-wise energy network ``F -> F/2 -> 1``.
+    readout : torch.nn.Module
+        Atom-wise energy network.
     atom_ref : torch.nn.Embedding
         Learnable per-element energy reference, initialized to zero.
     """
@@ -454,8 +466,11 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
                  trainable_rbf: bool = False, activation: str = "silu",
                  equivariance_group: str = "O(3)", n_elements: int = 128,
                  energy_shift: float = 0.0, energy_scale: float = 1.0,
-                 species=None, atomic_energies=None):
+                 species=None, atomic_energies=None, readout: str = "mlp",
+                 readout_hidden=None, self_pairs: bool = True):
         super().__init__()
+        if readout not in _READOUTS:
+            raise ValueError(f"readout must be one of {_READOUTS}, got {readout!r}")
         if equivariance_group not in _GROUPS:
             raise ValueError(f"equivariance_group must be one of {_GROUPS}, "
                              f"got {equivariance_group!r}")
@@ -475,10 +490,20 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         self.out_norm = nn.LayerNorm(3 * n_features)
         self.linear = nn.Linear(3 * n_features, n_features)
         self.act = make_activation(activation)
-        self.readout = nn.Sequential(
-            nn.Linear(n_features, n_features // 2), make_activation(activation),
-            nn.Linear(n_features // 2, 1))
-        for module in self.readout:
+        self.self_pairs = bool(self_pairs)
+        # the gated network brings its own nonlinearity: it reads the projection directly
+        self.activate_features = readout == "mlp"
+        if readout_hidden is None:
+            readout_hidden = (n_features // 2,) if readout == "mlp" else (n_features,) * 3
+        sizes = [n_features, *[int(h) for h in readout_hidden], 1]
+        if readout == "mlp":
+            layers = []
+            for a, b in zip(sizes[:-1], sizes[1:]):
+                layers += [nn.Linear(a, b), make_activation(activation)]
+            self.readout = nn.Sequential(*layers[:-1])
+        else:
+            self.readout = GatedMLP(sizes, activation)
+        for module in self.readout.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.zeros_(module.bias)
@@ -519,6 +544,11 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         from xnn.common.models.fast import resolve_use_fast
         self.use_fast = resolve_use_fast(use_fast)
         return self
+
+    def receptive_field(self) -> float:
+        """The distance (Angstrom) beyond which atoms no longer change an atom's
+        energy: one cutoff for the embedding and one per interaction."""
+        return (self.n_interactions + 1) * self.cutoff
 
     @torch.jit.unused
     def _select_fast(self, num_edges: int) -> None:
@@ -596,14 +626,16 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         """
         r = torch.linalg.norm(edge_vec, dim=-1)
         unit = edge_vec / r.clamp(min=1e-12).unsqueeze(-1)
-        # the sums over neighbors include the atom itself: one self pair per atom
-        # (r = 0, no direction, cutoff 1) appended to the pairs
-        n = atomic_numbers.shape[0]
-        loops = torch.arange(n, dtype=edge_index.dtype, device=edge_index.device)
-        src = torch.cat([edge_index[0], loops])
-        dst = torch.cat([edge_index[1], loops])
-        r = torch.cat([r, r.new_zeros((n,))])
-        unit = torch.cat([unit, unit.new_zeros((n, 3))])
+        src, dst = edge_index[0], edge_index[1]
+        if self.self_pairs:
+            # the sums over neighbors include the atom itself: one self pair per atom
+            # (r = 0, no direction, cutoff 1) appended to the pairs
+            n = atomic_numbers.shape[0]
+            loops = torch.arange(n, dtype=edge_index.dtype, device=edge_index.device)
+            src = torch.cat([src, loops])
+            dst = torch.cat([dst, loops])
+            r = torch.cat([r, r.new_zeros((n,))])
+            unit = torch.cat([unit, unit.new_zeros((n, 3))])
         cut = self.cutoff_fn(r)
         rbf = self.rbf(r)
         X = self.tensor_embedding(atomic_numbers, src, dst, cut, unit, rbf)
@@ -615,7 +647,8 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         """Invariant per-atom features ``(N, F)`` from the tensors."""
         scalar, skew, symmetric = decompose(X)
         x = torch.cat([3.0 * scalar * scalar, frobenius(skew), frobenius(symmetric)], dim=-1)
-        return self.act(self.linear(self.out_norm(x)))
+        x = self.linear(self.out_norm(x))
+        return self.act(x) if self.activate_features else x
 
     def _energy(self, x: Tensor, atomic_numbers: Tensor) -> Tensor:
         """Per-atom energies from the invariant features."""
@@ -716,6 +749,31 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
                 "node_features": x, "node_tensors": X}
 
     @classmethod
+    def from_foundation(cls, name: str = "tensornet-matpes-pbe-2025.2", dtype=None,
+                        cache_dir=None) -> "TensorNet":
+        """Load a MatGL TensorNet foundation potential (MatPES PBE or r2SCAN).
+
+        See :mod:`xnn.gnn.models.tensornet_foundation`.
+
+        Parameters
+        ----------
+        name : str, optional
+            ``"tensornet-matpes-pbe-2025.2"`` (default) or
+            ``"tensornet-matpes-r2scan-2025.2"``.
+        dtype : torch.dtype or str, optional
+            Final dtype; ``None`` keeps the checkpoint's float32.
+        cache_dir : str or pathlib.Path, optional
+            Model cache directory.
+
+        Returns
+        -------
+        TensorNet
+            The converted potential, in evaluation mode.
+        """
+        from .tensornet_foundation import from_foundation
+        return from_foundation(name, dtype=dtype, cache_dir=cache_dir)
+
+    @classmethod
     def from_config(cls, cfg) -> "TensorNet":
         """Build a :class:`TensorNet` from a configuration object.
 
@@ -723,7 +781,8 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         ``cfg.cutoff``. Everything else is read from ``cfg.extra``
         (``radial_basis``, ``trainable_rbf``, ``activation``,
         ``equivariance_group``, ``n_elements``, ``energy_shift``,
-        ``energy_scale``, ``species``, ``atomic_energies``); the reference
+        ``energy_scale``, ``species``, ``atomic_energies``, ``readout``,
+        ``readout_hidden``, ``self_pairs``); the reference
         code's key spellings are translated by
         :mod:`xnn.common.config.translate`.
 
@@ -758,4 +817,7 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
             species=species,
             atomic_energies=coerce_per_species(
                 extra.get("atomic_energies"), species or [], "atomic_energies"),
+            readout=str(extra.get("readout", "mlp")),
+            readout_hidden=extra.get("readout_hidden", None),
+            self_pairs=bool(extra.get("self_pairs", True)),
         )
