@@ -1,4 +1,5 @@
 from .ase_calculator import XNNCalculator
+from .domain import DomainParallel, DomainPlan, choose_grid
 from .graphed_eval import GraphedEvaluation
 from .lammps import LAMMPSWrapper, export_to_lammps, export_torchscript
 from .mdi_engine import MDIEngine
@@ -7,6 +8,9 @@ from .torchscript import TorchScriptPotential, build_neighbor_list_ts, export_to
 
 __all__ = [
     "XNNCalculator",
+    "DomainParallel",
+    "DomainPlan",
+    "choose_grid",
     "GraphedEvaluation",
     "export_to_lammps",
     "export_torchscript",
