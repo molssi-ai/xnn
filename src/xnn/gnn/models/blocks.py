@@ -296,10 +296,11 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
 
     @torch.jit.unused
     def _matmul(self, x: Tensor, w: Tensor, alpha: float) -> Tensor:
-        if self.training and torch.is_grad_enabled():
-            # training: the factor on the (small) matrix, so the gradients are plain
-            # products (addmm's backward multiplies each by alpha in a kernel of its
-            # own, which a force loss records and differentiates again)
+        if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
+            # a gradient will flow (forces, training): the factor on the (small) matrix,
+            # so the gradients are plain products (addmm's backward multiplies the
+            # (edges, hidden) gradient by alpha in a kernel of its own, which a force
+            # loss also records and differentiates again)
             return torch.mm(x, w * alpha if alpha != 1.0 else w)
         zero = self._zero if self._zero.dtype == x.dtype else self._zero.to(x.dtype)
         return torch.addmm(zero, x, w, beta=0, alpha=alpha)

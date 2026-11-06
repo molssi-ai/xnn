@@ -1316,13 +1316,15 @@ def dipole_field(m: Tensor, r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
     return D1[:, None] * m + (D2 * (r * m).sum(-1))[..., None] * r
 
 
-@fusable
-def mutual_field_real(mu: Tensor, r: Tensor, D1: Tensor, D2: Tensor, ik: Tensor, ki: Tensor, N: int) -> Tensor:
+def _mutual_field_real(mu: Tensor, r: Tensor, D1: Tensor, D2: Tensor, ik: Tensor, ki: Tensor, N: int) -> Tensor:
     """The real-space field of dipoles ``mu`` ``(N, 3)`` through the pair ladders,
     both directions of every pair at once: gather by ``ik = [i; k]``, scatter by
     ``ki = [k; i]``."""
     f = dipole_field(mu.index_select(0, ik).view(2, -1, 3), r, D1, D2)
     return scatter_sum(f.view(-1, 3), ki, N)
+
+
+mutual_field_real = fusable(_mutual_field_real)
 
 
 def dipole_field_tensor(r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:

@@ -100,7 +100,7 @@ from xnn.common.models.electrostatics import (
     ewald_parameters,
 )
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import GELU, gather_rows, scatter_sum, structure_sum
+from xnn.common.models.ops import GELU, gather_rows, scatter_sum, structure_sum, whole_structure_sum
 from xnn.common.models.registry import register_model
 
 from .base import GNNPotential
@@ -515,8 +515,9 @@ class AIMNet2(GNNPotential):
             Charges ``(N, C)`` whose structure sums equal ``total`` (up to the
             regularization of the weight sum).
         """
-        weight_sum = scatter_sum(weights, batch, num_graphs) + eps
-        surplus = total - scatter_sum(charges, batch, num_graphs)
+        # totals over the whole structure, also when it is split over processes
+        weight_sum = whole_structure_sum(weights, batch, num_graphs) + eps
+        surplus = total - whole_structure_sum(charges, batch, num_graphs)
         return charges + weights / weight_sum[batch] * surplus[batch]
 
     def channel_totals(self, total_charge: Tensor, spin_multiplicity: Tensor) -> Tensor:
@@ -618,6 +619,14 @@ class AIMNet2(GNNPotential):
         from xnn.common.models.fast import resolve_use_fast
         self.use_fast = resolve_use_fast(use_fast)
         return self
+
+    def receptive_field(self) -> Optional[float]:
+        """The distance (Angstrom) beyond which atoms no longer change an atom's
+        energy, apart from the charge constraint: one cutoff per pass. ``None``
+        with a Coulomb term."""
+        if self.coulomb is not None:
+            return None
+        return len(self.passes) * float(self.aev_cutoff)
 
     @torch.jit.unused
     def _select_fast(self, num_edges: int) -> None:
