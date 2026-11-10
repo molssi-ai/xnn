@@ -44,14 +44,26 @@ WARMUP_STEPS = 3
 
 class NoIndexPlanner:
     """The planner of a model whose step needs no index work beyond its edges (PhysNet): the
-    padded batch fixes the atom and edge counts only. Holds no state."""
+    padded batch fixes the atom and edge counts only.
+
+    Parameters
+    ----------
+    check : callable, optional
+        Validates the atomic numbers of each structure before it is padded (a check that reads
+        back from the GPU, which a captured step cannot), raising on invalid input; by default none.
+    """
 
     #: No plan entries.
     offsets: Dict[str, Optional[str]] = {}
     #: Whether a batch is padded by an inert structure to fixed counts.
     pads: bool = True
 
+    def __init__(self, check: Optional[Callable[[Tensor], None]] = None):
+        self.check = check
+
     def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
+        if self.check is not None:
+            self.check(data.atomic_numbers)
         return {}
 
     @staticmethod
