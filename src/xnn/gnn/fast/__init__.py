@@ -6,25 +6,27 @@ reference one; :class:`~xnn.common.models.fast.FastPathModule` explains the
 contract and ``use_fast`` the choice. :data:`AUTO_POLICY` holds the measured
 size above which ``use_fast="auto"`` takes the kernels. The fused continuous-filter
 convolution of SchNet and the fused message block of PaiNN (Triton kernels) live in
-:mod:`xnn.gnn.fast.schnet` and :mod:`xnn.gnn.fast.painn`.
+:mod:`xnn.gnn.fast.schnet` and :mod:`xnn.gnn.fast.painn`. The equivariant linear maps and
+the element self-connection of MACE have plain-PyTorch fast paths in :mod:`xnn.gnn.fast.linear`.
 """
 from xnn.common.models.fast import AutoPolicy
 
 from ._cueq import available
 from .conv import ConvTensorProduct
+from .linear import EquivariantLinear, SpeciesTensorProduct
 
-#: Edge counts above which ``use_fast="auto"`` uses the kernels. From the MD-step
-#: crossover of the kernels' fixed per-step cost (about 26-38 ms on an A100,
-#: 14-21 ms on an H200 and L40S) with the reference's cost per edge, measured
-#: for the production water model, MACE-OFF23 small/medium and MACE-MP-0
-#: medium: the lighter the model, the later the crossover (float32 A100:
-#: 19k edges for MP-0 medium, 90k for the light water models), and the
-#: thresholds sit between the two. In float64 the reference is slower and the
-#: kernels win earlier; on an L40S (weak float64) always.
+#: Edge counts above which ``use_fast="auto"`` uses the kernels. The kernels
+#: carry a fixed per-step cost and the reference a cost per edge, so the
+#: crossover moves with the model's width: early for foundation-size models,
+#: late for light ones. The thresholds sit near the wide models' crossover,
+#: since the reference's loss past it grows with the system while the kernels'
+#: loss below a light model's crossover stays a fixed fraction of a step. In
+#: float64 the reference is slower and the kernels win earlier; on an L40S
+#: (weak float64) always.
 AUTO_POLICY = AutoPolicy(
-    min_edges={"A100": 50_000, "H200": 60_000, "H100": 60_000, "L40S": 30_000,
+    min_edges={"A100": 15_000, "B200": 40_000, "H200": 60_000, "H100": 60_000, "L40S": 30_000,
                "T4": 6_000, "V100": 30_000, "A30": 20_000},
-    min_edges_float64={"A100": 25_000, "H200": 30_000, "H100": 30_000, "L40S": 0,
+    min_edges_float64={"A100": 10_000, "B200": 30_000, "H200": 30_000, "H100": 30_000, "L40S": 0,
                        "T4": 2_000, "V100": 12_000, "A30": 8_000},
     default_min_edges=50_000,
     default_min_edges_float64=25_000,
@@ -32,12 +34,10 @@ AUTO_POLICY = AutoPolicy(
 
 #: The same for MACE in training mode (a step with a force loss): the kernels
 #: pay off earlier than in evaluation, as the backward of a training step
-#: repeats the work the fixed cost is spread over (float32 A100: slower at 20k
-#: edges for the lightest model, faster for the medium one; float64 faster
-#: from about 10k).
+#: repeats the work the fixed cost is spread over.
 AUTO_POLICY_TRAINING = AutoPolicy(
-    min_edges={"A100": 30_000, "T4": 5_000, "V100": 20_000, "A30": 8_000},
-    min_edges_float64={"A100": 15_000, "T4": 1_000, "V100": 6_000, "A30": 6_000},
+    min_edges={"A100": 10_000, "B200": 30_000, "T4": 5_000, "V100": 20_000, "A30": 8_000},
+    min_edges_float64={"A100": 10_000, "B200": 25_000, "T4": 1_000, "V100": 6_000, "A30": 6_000},
     default_min_edges=50_000,
     default_min_edges_float64=25_000,
 )
@@ -54,4 +54,4 @@ NEQUIP_AUTO_POLICY = AutoPolicy(
 NEQUIP_AUTO_POLICY_TRAINING = NEQUIP_AUTO_POLICY
 
 __all__ = ["AUTO_POLICY", "AUTO_POLICY_TRAINING", "NEQUIP_AUTO_POLICY", "NEQUIP_AUTO_POLICY_TRAINING",
-           "ConvTensorProduct", "available"]
+           "ConvTensorProduct", "EquivariantLinear", "SpeciesTensorProduct", "available"]
