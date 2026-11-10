@@ -100,7 +100,14 @@ from xnn.common.models.electrostatics import (
     ewald_parameters,
 )
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import GELU, gather_rows, scatter_sum, structure_sum, whole_structure_sum
+from xnn.common.models.ops import (
+    GELU,
+    gather_rows,
+    refresh_ghosts,
+    scatter_sum,
+    structure_sum,
+    whole_structure_sum,
+)
 from xnn.common.models.registry import register_model
 
 from .base import GNNPotential
@@ -380,6 +387,7 @@ class AIMNet2(GNNPotential):
     # one readout head = the energy MLP and the reference energies (the charge
     # passes stay shared; see MultiHead)
     head_modules = ("readout", "atom_ref")
+    refreshes_ghosts = True
 
     def __init__(
         self,
@@ -776,8 +784,9 @@ class AIMNet2(GNNPotential):
                     q_pre = dq
                 else:
                     q_pre = q + dq
-                q = self.equilibrate(q_pre, f.square(), totals, batch, num_graphs)
-                a = a + da.view(num_nodes, n_feat, n_rbf)
+                # the next pass reads the neighbors' features and charges
+                q = refresh_ghosts(self.equilibrate(q_pre, f.square(), totals, batch, num_graphs))
+                a = refresh_ghosts(a + da.view(num_nodes, n_feat, n_rbf))
         assert q is not None
         charges = q.sum(-1)
 

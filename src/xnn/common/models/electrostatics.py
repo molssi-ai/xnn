@@ -22,8 +22,8 @@ cutoff ``r_c`` and a target relative accuracy ``eps`` the splitting parameter
 is ``alpha = sqrt(-ln eps) / r_c`` (the screened pair term is ``eps`` of its
 bare value at the cutoff) and the reciprocal cutoff ``k_c = 2 alpha sqrt(-ln
 eps)`` (the Gaussian factor of the reciprocal sum is ``eps`` at ``k_c``), the
-balance of Kolafa and Perram that the reference AIMNet2 calculator and
-``nvalchemiops`` use as well; xnn fixes ``r_c`` to the model's neighbor-list
+balance of Kolafa and Perram that the reference AIMNet2 calculator uses as
+well; xnn fixes ``r_c`` to the model's neighbor-list
 radius instead of choosing it per structure, so the graph the data pipeline
 builds is the one the sum needs.
 

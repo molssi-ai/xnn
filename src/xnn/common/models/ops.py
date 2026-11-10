@@ -8,6 +8,7 @@ live on :class:`~xnn.common.models.base.InteratomicPotential` (``aggregate_energ
 from __future__ import annotations
 
 import math
+import threading
 
 import torch
 from torch import Tensor, nn
@@ -524,17 +525,51 @@ def structure_sums(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     return out.index_add(1, index, src.to(torch.float64))
 
 
-# the reduction of an active domain decomposition (see xnn.common.deploy.DomainParallel),
-# set only for the duration of its forward
-_DOMAIN_REDUCTION: list = [None]
+# the hooks of an active domain decomposition (see xnn.common.deploy.DomainParallel), set
+# for the duration of its forward in the thread that runs it: ``reduction`` sums per-atom rows
+# over the owned atoms of every process, ``refresh`` replaces the rows of the ghost atoms by
+# their owners' values
+_DOMAIN = threading.local()
 
 
 @torch.jit.unused
 def _domain_reduction(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
-    reduce = _DOMAIN_REDUCTION[0]
+    reduce = getattr(_DOMAIN, "reduction", None)
     if reduce is None:
         return scatter_sum(src, index, dim_size)
     return reduce(src, index, dim_size)
+
+
+@torch.jit.unused
+def _domain_refresh(x: Tensor) -> Tensor:
+    refresh = getattr(_DOMAIN, "refresh", None)
+    return x if refresh is None else refresh(x)
+
+
+def refresh_ghosts(x: Tensor) -> Tensor:
+    """Per-atom rows with the ghost atoms' rows replaced by their owners' values.
+
+    Under :class:`~xnn.common.deploy.DomainParallel` with ``halo="layer"`` a
+    process holds its own atoms and copies (ghosts) of the atoms within one
+    cutoff of them. A model that sets
+    :attr:`~xnn.common.models.base.InteratomicPotential.refreshes_ghosts`
+    calls this on its node features before every layer that reads its
+    neighbors' features, so the ghosts carry the values their owners computed
+    and one cutoff of ghosts is enough. Differentiable: the gradients of the
+    ghost rows return to their owners. ``x`` unchanged outside a domain
+    decomposition and in scripted code.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Per-atom rows ``(N, *feature_dims)``, the process's own atoms first.
+
+    Returns
+    -------
+    torch.Tensor
+        ``x`` with its ghost rows refreshed, same shape.
+    """
+    return x if torch.jit.is_scripting() else _domain_refresh(x)
 
 
 def whole_structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:

@@ -49,7 +49,7 @@ from torch.nn import functional as F
 from xnn.common.data import AtomicGraph
 from xnn.common.models.constants import register_constant, restore_exact
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import refresh_ghosts, scatter_sum
 from xnn.common.models.registry import register_model
 
 from ..fast import ConvTensorProduct, _cueq
@@ -1405,6 +1405,7 @@ class MACE(EquivariantGNN):
     # one readout head = the per-layer readouts, the reference energies and
     # the interaction-energy scale/shift (see MultiHead)
     head_modules = ("readouts", "atom_ref", "scale_shift")
+    refreshes_ghosts = True
 
     pair_repulsion: Final[bool]
 
@@ -1566,9 +1567,13 @@ class MACE(EquivariantGNN):
 
         node_feats = self.node_embedding(node_attrs)
         feats_list: List[Tensor] = []
+        first = True
         for interaction, product, readout in zip(
             self.interactions, self.products, self.readouts
         ):
+            if not first:
+                node_feats = refresh_ghosts(node_feats)
+            first = False
             node_feats, sc = interaction(
                 node_attrs, node_feats, edge_sh, edge_radial, edge_index
             )
