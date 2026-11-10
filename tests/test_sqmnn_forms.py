@@ -210,6 +210,40 @@ def test_tape_operations_match_their_torch_form():
         TORCH.where(torch.tensor([True]), 1.0, 2.0)
 
 
+def test_hydrogen_bonds_at_a_straight_angle():
+    """At an exactly straight O-H...O angle the H4 and PM7 hydrogen bonds, in both forms, have the central
+    differences of their energy as gradient and the bent angles' limit as Hessian."""
+    z = [8, 1, 8, 1, 1, 1]
+
+    def dimer(bend):
+        return torch.tensor([[0.0, 0, 0], [0.97, bend, 0], [2.9, 0, 0], [3.2, 0.7, 0.55], [-0.3, 0.9, 0.1],
+                             [3.2, -0.75, 0.5]], dtype=torch.float64)
+    tables = cr.correction_tables(torch.device("cpu"))
+    v = torch.tensor(np.random.default_rng(3).normal(size=(6, 3)))
+    terms = [lambda p: cr.h4_hbond(z, p, tables), lambda p: cr.h4_energy(TORCH, z, p, tables),
+             lambda p: cr.pm7_hbond(z, p, tables), lambda p: cr.pm7_hbond_energy(TORCH, z, p, tables)]
+    for f in terms:
+        derivs = []
+        for bend in (0.0, 1e-7, -1e-7):
+            p = dimer(bend).requires_grad_(True)
+            g, = torch.autograd.grad(f(p).sum(), p, create_graph=True)
+            hv, = torch.autograd.grad((g * v).sum(), p)
+            derivs.append((g.detach(), hv))
+        (g, hv), (_, hv_up), (_, hv_down) = derivs
+        hv_bent = 0.5 * (hv_up + hv_down)              # the bend's first-order change cancels
+        assert torch.isfinite(g).all() and torch.isfinite(hv).all()
+        x, h = dimer(0.0), 1e-5
+        fd = torch.zeros_like(x)
+        for i in range(6):
+            for k in range(3):
+                xp, xm = x.clone(), x.clone()
+                xp[i, k] += h
+                xm[i, k] -= h
+                fd[i, k] = (f(xp).sum() - f(xm).sum()) / (2.0 * h)
+        assert torch.allclose(g, fd, rtol=0, atol=1e-7)
+        assert torch.allclose(hv, hv_bent, rtol=1e-9, atol=1e-9)
+
+
 @pytest.mark.parametrize("cls,z,pos,mult", [
     (PM3, FORMAMIDE[1], FORMAMIDE[0], 1.0),
     (PM6ORG, FORMAMIDE[1] + WATER[1], np.vstack([FORMAMIDE[0], WATER[0] + [3.0, 0.5, 0.2]]), 1.0),

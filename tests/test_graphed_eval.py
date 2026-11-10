@@ -33,9 +33,37 @@ def test_a_model_without_an_index_planner_is_rejected():
         GraphedEvaluation(ForceStressOutput(SchNet()))
 
 
+def _aimnet2(coulomb=None, n_rbf=8):
+    pytest.importorskip("e3nn")
+    from xnn.gnn.models.aimnet2 import AIMNet2
+    torch.manual_seed(2)
+    return AIMNet2([1, 6, 7, 8], cutoff=3.5, n_features=4, n_rbf=n_rbf, hidden=[[16, 12], [16, 12], [16, 12, 12]],
+                   aim_size=10, readout_hidden=[8], n_vector_combinations=3, coulomb=coulomb)
+
+
+def test_aimnet2_checks_its_species_in_the_planner_and_needs_a_capturable_coulomb():
+    """AIMNet2's planner rejects elements outside its species before the padding; the all-pairs and lattice
+    Coulomb sums and the reference shell convolutions size their work on the host and are refused."""
+    planner = _aimnet2().index_planner()
+    good = structure_to_graph(_molecule(6, 0), 3.5)
+    assert planner(good) == {}
+    bad = structure_to_graph({"pos": _molecule(3, 1)["pos"], "atomic_numbers": [8, 1, 9]}, 3.5)
+    with pytest.raises(ValueError, match=r"elements \[9\]"):
+        planner(bad)
+    assert _aimnet2("dsf").index_planner() is not None
+    with pytest.raises(ValueError, match="coulomb"):
+        GraphedEvaluation(ForceStressOutput(_aimnet2("simple")))
+    with pytest.raises(ValueError, match="n_rbf"):
+        _aimnet2(n_rbf=6).index_planner()
+    with pytest.raises(ValueError, match="use_fast"):
+        _aimnet2().set_use_fast(False).index_planner()
+
+
 def _model(name):
     if name == "physnet":
         return _physnet()
+    if name.startswith("aimnet2"):
+        return _aimnet2("dsf" if name == "aimnet2-dsf" else None)
     if name == "mace":
         pytest.importorskip("e3nn")
         from test_trainer_cuda_graph import _small as small
@@ -45,7 +73,8 @@ def _model(name):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr", "mace"])
+@pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr", "mace",
+                                  "aimnet2", "aimnet2-dsf"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_replays_equal_ordinary_evaluations(name, dtype):
     """Energies and forces (charges and dipoles of PhysNet) along a sequence of inputs (the steps of a

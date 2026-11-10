@@ -162,3 +162,30 @@ def test_the_stepper_refuses_a_cell_shorter_than_its_list():
          "cell": torch.eye(3, dtype=torch.float64) * L, "pbc": torch.ones(3, dtype=torch.bool)}
     with pytest.raises(ValueError, match="width"):
         ClassicalStepper(model)(s)
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32], ids=["f64", "f32"])
+def test_blocks_without_an_active_pair_keep_the_stress(dtype):
+    """Whole blocks of pairs the kernel skips (each pair once, ``i < k``: here every ``i > k`` direction first)
+    add nothing to the cell gradient: energy, forces and stress are the eager terms'."""
+    name, cls, lib, top1, z1, pos1, kw = SYSTEMS[0]
+    n1, n_side, cutoff = len(z1), 2, 8.0
+    pos, L = _box(pos1, n_side, 9.0)
+    model = cls(lib, _replicate(top1, n_side ** 3, n1), cutoff=cutoff, **kw).to(device="cuda", dtype=dtype).eval()
+    s = {"pos": torch.tensor(pos), "atomic_numbers": torch.tensor(list(z1) * n_side ** 3),
+         "cell": torch.eye(3, dtype=torch.float64) * L, "pbc": torch.ones(3, dtype=torch.bool)}
+    g = structure_to_graph(s, cutoff, device="cuda")
+    g.compute_dtype = dtype
+    order = torch.argsort((g.edge_index[0] < g.edge_index[1]).to(torch.int8), stable=True)
+    g.edge_index, g.cell_shifts = g.edge_index[:, order], g.cell_shifts[order]
+    assert int((g.edge_index[0] > g.edge_index[1]).sum()) >= 4 * 128
+    results = []
+    for fast in (False, True):
+        model.use_fast = fast
+        out = ForceStressOutput(model, compute_stress=True)(g)
+        results.append({k: out[k].detach().double() for k in ("energy", "forces", "stress")})
+    torch.cuda.synchronize()
+    rtol = 1e-11 if dtype == torch.float64 else 2e-5
+    for key in ("energy", "forces", "stress"):
+        a, b = results[0][key], results[1][key]
+        assert float((a - b).abs().max()) <= rtol * float(a.abs().max()), (key, float((a - b).abs().max()))

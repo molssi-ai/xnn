@@ -551,6 +551,24 @@ def test_d4_pytorch_direct_path_matches_the_reference(s9, tail, monkeypatch):
     assert len(calls) == len(graphs)
 
 
+@pytest.mark.parametrize("periodic", [False, True])
+def test_d4_pytorch_direct_path_float32_charges(periodic, monkeypatch):
+    """In float32 the direct path refines its EEQ solves with float64 residuals, as the reference does: the
+    charges and forces of 192 atoms agree with the float32 reference to its round-off (the plain float32 solve
+    drifts by 1e-4 e)."""
+    from xnn.common.models.dispersion_fast import d4_direct
+    calls = []
+    original = d4_direct.d4_direct
+    monkeypatch.setattr(d4_direct, "d4_direct", lambda *a: calls.append(1) or original(*a))
+    model = _model("d4", dtype=torch.float32, device="cpu", s9=0.0)
+    s = _water(4, periodic)
+    s = {k: (torch.tensor(v, dtype=torch.float32) if k in ("pos", "cell") else v) for k, v in s.items()}
+    ref, out = _pair(model, structure_to_graph(s, model.model.cutoff))
+    assert float((out["eeq_charges"] - ref["eeq_charges"]).abs().max()) < 2e-6
+    assert _rel(out["forces"], ref["forces"]) < 2e-5
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("solver", ["lu", "cg"])
 def test_d4_pytorch_direct_path_large_eeq_regime(solver, monkeypatch):
     """The direct path in the large EEQ regime (matrix-free system, its adjoint solve, the derivative of its

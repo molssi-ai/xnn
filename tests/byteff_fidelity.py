@@ -20,6 +20,7 @@ the global default dtype, which is set before each run; its ensemble is evaluate
 averaged parameters; it cannot evaluate a lone atom, which is skipped.
 """
 import contextlib
+import io
 import sys
 import tempfile
 import warnings
@@ -453,6 +454,7 @@ class _Topology:
         self.topology = app.Topology()
         chain = self.topology.addChain()
         self.box = box
+        self._molecules = [(name, n) for name, _, n in species]
         for name, mol, n in species:
             for _ in range(n):
                 res = self.topology.addResidue(name, chain)
@@ -499,8 +501,9 @@ def openmm_box(model, mols, pos, L: float, cutoff: float) -> dict:
     orig = openmmtool.GromacsTopFile
     openmmtool.GromacsTopFile = lambda *a, **k: topology
     try:
-        _, system = openmmtool.generate_byteffpol_system("box.top", params, unit_cell=[L / 10.0] * 3,
-                                                         cutoff=cutoff / 10.0)
+        with contextlib.redirect_stdout(io.StringIO()):         # it prints the energy expression
+            _, system = openmmtool.generate_byteffpol_system("box.top", params, unit_cell=[L / 10.0] * 3,
+                                                             cutoff=cutoff / 10.0)
     finally:
         openmmtool.GromacsTopFile = orig
     out = {}

@@ -691,6 +691,65 @@ def test_force_loss_parameter_gradients_through_the_kernels_match_the_reference(
         assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-8, atol=1e-10), key
 
 
+def _relative(a, b):
+    return float((a - b).abs().max() / b.abs().max())
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("training", [False, True], ids=["evaluation", "training"])
+@pytest.mark.parametrize("window", [{}, {"vdw_taper": 6.0, "taper": 6.0}], ids=["switched", "taper_at_cutoff"])
+def test_switched_second_derivatives_through_the_kernels_match_the_reference(cls, device, training, window):
+    """With explicit cutoffs the short-range terms are switched, or cut sharply with the taper at the cutoff: a
+    force loss has the reference's gradient with respect to the positions through the kernels."""
+    lib = "amoeba-water-2003" if cls is Amoeba else "hippo-water-2021"
+    options = dict(cutoff=6.3, ewald_cutoff=6.0, vdw_cutoff=6.0, repulsion_cutoff=6.0, chgtrn_cutoff=6.0,
+                   dispersion_cutoff=6.0, taper=5.4, polar_eps=1e-12)
+    options.update(window)
+    pos = BOX[:24] - BOX[:24].mean(0)
+    weights = torch.tensor(np.random.default_rng(8).normal(size=(24, 3)), device=device)
+    results = []
+    for use_fast in (False, True):
+        model = cls(lib, _topology(8), use_fast=use_fast, **options).to(device).train(training)
+        g = _graph(pos, cell=None).to(device)
+        g.pos.requires_grad_(True)
+        energy = model(g)["energy"].sum()
+        forces = -torch.autograd.grad(energy, g.pos, create_graph=True)[0]
+        second = torch.autograd.grad(energy + (forces * weights).sum(), g.pos)[0]
+        results.append((forces.detach(), second))
+    for a, b in zip(results[1], results[0]):
+        assert bool(torch.isfinite(a).all()) and _relative(a, b) < 1e-9
+
+
+@pytest.mark.parametrize("device", _KERNEL_DEVICES)
+@pytest.mark.parametrize("cls", [Amoeba, Hippo])
+@pytest.mark.parametrize("stress", [False, True], ids=["positions", "strain"])
+def test_periodic_second_derivatives_in_evaluation_match_the_reference(cls, device, stress):
+    """In evaluation the fast path of a cell runs the mesh on kernels; a second derivative (a force loss, or with
+    the strain the stress too) has the reference's gradients, the mesh then differentiated through its stencils."""
+    weights = torch.tensor(np.random.default_rng(12).normal(size=BOX.shape), device=device)
+    results = []
+    for use_fast in (False, True):
+        model = _box(cls, use_fast=use_fast, polar_eps=1e-12, pme_grid=24, dpme_grid=24).to(device).eval()
+        g = _graph(BOX).to(device)
+        pos = g.pos.detach().clone().requires_grad_(True)
+        inputs = [pos]
+        g.pos = pos
+        if stress:
+            strain = torch.zeros(1, 3, 3, dtype=pos.dtype, device=device, requires_grad=True)
+            sym = 0.5 * (strain + strain.transpose(-1, -2))
+            g.pos = pos + pos @ sym[0]
+            g.cell = g.cell + torch.einsum("bij,bjk->bik", g.cell, sym)
+            inputs.append(strain)
+        energy = model(g)["energy"].sum()
+        first = torch.autograd.grad(energy, inputs, create_graph=True)
+        loss = (first[0] * weights).sum() + (first[1].sum() if stress else 0.0)
+        second = torch.autograd.grad(loss, inputs)
+        results.append([x.detach() for x in first] + list(second))
+    for a, b in zip(results[1], results[0]):
+        assert _relative(a, b) < 1e-8
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernels run on a GPU")
 def test_auto_takes_the_kernels_in_both_modes():
     """``use_fast="auto"`` follows the measured crossovers of evaluation and of training on a GPU."""
@@ -706,7 +765,7 @@ def test_auto_takes_the_kernels_in_both_modes():
 @pytest.mark.parametrize("periodic", [True, False])
 def test_training_through_the_kernels_matches_the_reference(cls, periodic):
     """In training mode ``use_fast=True`` takes the pair kernels (the mesh and the solver's products stay
-    eager): an energy and force loss gives the parameters the reference's gradients."""
+    eager): an energy and force loss gives the parameters and the positions the reference's gradients."""
     cell = CELL if periodic else None
     pos = BOX if periodic else BOX[:24] - BOX[:24].mean(0)
     weights = torch.tensor(np.random.default_rng(10).normal(size=pos.shape), device="cuda")
@@ -724,6 +783,7 @@ def test_training_through_the_kernels_matches_the_reference(cls, periodic):
         forces = -torch.autograd.grad(energy, g.pos, create_graph=True)[0]
         (energy + (forces * weights).sum()).backward()
         grads.append({k: v.grad.clone() for k, v in model.ff.params.items() if v.grad is not None})
+        grads[-1]["positions"] = g.pos.grad.clone()
     assert grads[0].keys() == grads[1].keys() and grads[0]
     for key in grads[0]:
         assert torch.allclose(grads[1][key], grads[0][key], rtol=1e-8, atol=1e-9), key

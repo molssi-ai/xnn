@@ -405,26 +405,32 @@ def test_mdi_engine_serves_a_bound_model(tmp_path, name):
     assert engine.energy * HARTREE_TO_EV == pytest.approx(float(direct[0]), rel=1e-10, abs=1e-12)
 
 
-def test_pol_compiled_block_matches_reference(monkeypatch):
-    """The compiled ByteFF-Pol energy block gives the eager block's energies, forces and training gradients."""
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))])
+def test_pol_compiled_block_matches_reference(monkeypatch, device):
+    """The compiled ByteFF-Pol energy block gives the eager block's energies, forces and training gradients, for
+    a batch of two conformations (the twice-differentiable stages of a batch once went wrong on the GPU)."""
     if sys.version_info >= (3, 13):
         pytest.skip("torch.compile needs Python < 3.13")
     import xnn.common.models.compiled as cm
     monkeypatch.setattr(cm, "supported", lambda device, dtype: dtype in (torch.float32, torch.float64))
-    mols = [_mol("O"), _mol("[Li+]")]
+    mols = [_mol("O"), _mol("[Li+]"), _mol("FS(=O)(=O)[N-]S(=O)(=O)F")]
     torch.manual_seed(1)
-    model = ByteFFPol(mols, **SMALL_POL)
-    pos = np.concatenate([_coords(mols[0])[0], np.array([[0.0, 0.0, 2.2]])])
-    pos = pos + np.random.default_rng(0).normal(0.0, 0.03, pos.shape)
+    model = ByteFFPol(mols, **SMALL_POL).to(device)
+    rng = np.random.default_rng(0)
+    fsi = _coords(mols[2])[0]
+    base = np.concatenate([_coords(mols[0])[0], np.array([[0.0, 0.0, 2.2]]), fsi - fsi.mean(0) + [0.0, 0.0, 6.0]])
+    confs = [base + rng.normal(0.0, 0.03, base.shape) for _ in range(2)]
     z = _z(mols)
     results = []
     for fast in (False, True):
         model.set_use_fast(fast)
         model.eval()
-        out = ForceStressOutput(model)(_graphs(z, [pos], model))
+        out = ForceStressOutput(model)(_graphs(z, confs, model).to(device))
         model.train()
         model.zero_grad()
-        tr = ForceStressOutput(model).train()(_graphs(z, [pos], model))
+        tr = ForceStressOutput(model).train()(_graphs(z, confs, model).to(device))
         (tr["energy"].pow(2).sum() + tr["forces"].pow(2).sum()).backward()
         results.append((out, [p.grad.clone() for p in model.parameters() if p.grad is not None]))
     (ref, g_ref), (got, g_got) = results
@@ -769,7 +775,10 @@ def test_byteff_pol_torchscript_export(tmp_path):
     pos = pos + np.random.default_rng(2).normal(0.0, 0.03, pos.shape)
     z = _z(mols)
     want = ForceStressOutput(model).eval()(_graphs(z, [pos], model))
+    # exported while the default dtype is float32: the export takes the model's float64 from its tables
+    torch.set_default_dtype(torch.float32)
     path = export_torchscript_potential(model, 6.0, str(tmp_path / "byteff_pol.pt"))
+    torch.set_default_dtype(torch.float64)
     scripted = torch.jit.load(path)
     got = scripted(torch.tensor(pos), torch.tensor(z))
     assert torch.allclose(got["energy"], want["energy"].detach(), rtol=1e-12, atol=1e-12)
@@ -807,3 +816,4 @@ def test_byteff_pol_torchscript_export_of_a_cell(tmp_path, device):
         scripted(s["pos"], s["atomic_numbers"])
     with pytest.raises(Exception, match="twice the cutoff"):
         scripted(s["pos"], s["atomic_numbers"], torch.eye(3, device=device) * 1.5 * model.cutoff, s["pbc"])
+

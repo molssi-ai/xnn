@@ -370,3 +370,55 @@ def test_auto_crossover_per_mode(monkeypatch):
                 ForceStressOutput(model.train(training)).train(training)(_batch("cuda", torch.float64))
             expect = policy != ("AUTO_POLICY_TRAINING" if training else "AUTO_POLICY")
             assert all(m.fast_active == expect for m in _convs(model)), (training, policy)
+
+
+# determinism: the signals are summed in a fixed order, so float32 runs repeat bitwise
+
+def _molecules(count=3, n=12):
+    graphs = []
+    for seed in range(count):
+        rng = np.random.default_rng(seed)
+        pos = []
+        while len(pos) < n:
+            p = rng.uniform(0, 4.0, 3)
+            if all(np.linalg.norm(p - q) > 0.9 for q in pos):
+                pos.append(p)
+        s = {"pos": np.array(pos), "atomic_numbers": rng.choice([1, 1, 6, 8], size=n)}
+        graphs.append(structure_to_graph(s, 10.0))
+    return collate(graphs)
+
+
+def test_spherical_grid_sums_in_a_fixed_order():
+    """The signals equal those of shuffled edges to round-off, repeat bitwise (no atomic additions) and are
+    twice differentiable in the edge vectors."""
+    from xnn.cnn.featurizers import SphericalGrid
+    device = "cuda" if CUDA else "cpu"
+    feat = SphericalGrid(SPECIES, cutoff=10.0, radius=0.4, bandwidth=4).to(device)
+    g = _molecules().to(device)
+    z, ei, vec = g.atomic_numbers, g.edge_index, g.edge_vectors().detach()
+    ref = feat.potential(z, ei, vec)
+    assert all(torch.equal(feat.potential(z, ei, vec), ref) for _ in range(3))
+    perm = torch.randperm(ei.shape[1], generator=torch.Generator().manual_seed(0)).to(device)
+    assert _rel(feat.potential(z, ei[:, perm], vec[perm]), ref) < 1e-13
+    small = structure_to_graph(_structure(4, 1), 10.0).to(device)
+    feat = SphericalGrid(SPECIES, cutoff=10.0, radius=0.4, bandwidth=2).to(device)
+    v = small.edge_vectors().detach().clone().requires_grad_()
+
+    def signals(x):
+        return feat.potential(small.atomic_numbers, small.edge_index, x)
+    assert gradcheck(signals, (v,))
+    assert gradgradcheck(signals, (v,))
+
+
+@pytest.mark.skipif(not CUDA, reason="needs a CUDA device")
+@pytest.mark.parametrize("use_fast", [False, True])
+def test_float32_runs_repeat_bitwise(use_fast):
+    """Repeated float32 evaluations give bitwise the same atomic features on either path."""
+    _needs_triton()
+    model = _model(normalization="batch").to("cuda", torch.float32).set_use_fast(use_fast).eval()
+    batch = _molecules().to("cuda")
+    batch.pos = batch.pos.float()
+    with torch.no_grad():
+        runs = [model(batch)["node_features"] for _ in range(4)]
+    assert all(m.fast_active == use_fast for m in _convs(model))
+    assert all(torch.equal(r, runs[0]) for r in runs[1:])

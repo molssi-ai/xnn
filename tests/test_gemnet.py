@@ -863,7 +863,7 @@ def test_fidelity_vs_reference_pretrained():
     assert _fidelity("pretrained") < 1e-3
 
 
-def _check_neighbor_sums(kernels, device):
+def _check_neighbor_sums(kernels, device, fast_mode=False):
     """The fused neighbor sums against the dense sum, and every first and second derivative."""
     gen = torch.Generator().manual_seed(7)
     n_rows, n_items, n_out, a, f = 6, 17, 5, 3, 4
@@ -882,8 +882,8 @@ def _check_neighbor_sums(kernels, device):
         expect = torch.zeros(n_out, a, f, dtype=torch.float64, device=device).index_add_(
             0, out_idx, s[:, :, None] * x[in_idx][:, None, :])
         assert torch.allclose(fn(x, s), expect, rtol=0, atol=1e-13)
-    assert torch.autograd.gradcheck(fn, (x, s))
-    assert torch.autograd.gradgradcheck(fn, (x, s))
+    assert torch.autograd.gradcheck(fn, (x, s), fast_mode=fast_mode)
+    assert torch.autograd.gradgradcheck(fn, (x, s), fast_mode=fast_mode)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
@@ -900,7 +900,7 @@ def test_fast_neighbor_sums_gradients_interpreted():
         pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
     pytest.importorskip("triton")
     from xnn.gnn.fast import gemnet_kernels
-    _check_neighbor_sums(gemnet_kernels, "cpu")
+    _check_neighbor_sums(gemnet_kernels, "cpu", fast_mode=True)
 
 
 def test_fast_support_needs_cuda():
