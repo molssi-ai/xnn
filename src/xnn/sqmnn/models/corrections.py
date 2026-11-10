@@ -27,7 +27,7 @@ import torch
 from torch import Tensor
 
 from ..common import elements as el
-from .tape import TorchOps, host_term
+from .tape import TorchOps, host_term, safe_acos
 
 # Jurecka-type dispersion of PM7: C6 (J nm^6 / mol), van der Waals radii (pm) and
 # Slater-Kirkwood effective electron numbers
@@ -349,7 +349,7 @@ def _angle(pos: Tensor, i: int, j: int, k: int) -> Tensor:
     d2jk = (pos[j] - pos[k]).pow(2).sum()
     d2ik = (pos[i] - pos[k]).pow(2).sum()
     c = 0.5 * (d2ij + d2jk - d2ik) / torch.sqrt(d2ij * d2jk)
-    return torch.acos(c.clamp(-1.0, 1.0))
+    return safe_acos(c.clamp(-1.0, 1.0))
 
 
 def _sin2_dihedral(pos: Tensor, i: int, j: int, k: int, l: int) -> Tensor:
@@ -718,7 +718,7 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     shifts, s_c, oo = ops.array(t["shifts"], pos), ops.array(t["s_c"], pos), ops.array(t["oo"], pos)
     last = ops.bools([False, True], pos)
     A, H, B = ahb[:, 0], ahb[:, 1], ahb[:, 2]
-    cos_hb = -ops.cos(ops.angle(pos, A, H, B))
+    cos_hb = -ops.cos_angle(pos, A, H, B)
     keep = ops.value(cos_hb) > 0.0
     center, r1, r2, r3 = atoms[..., 0], atoms[..., 1], atoms[..., 2], atoms[..., 3]           # (R, 2)
     tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
