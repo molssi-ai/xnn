@@ -54,6 +54,7 @@ from xnn.common.models.registry import register_model
 
 from ..fast import ConvTensorProduct, _cueq
 from ..fast import symmetric_contraction as _fast_sc
+from ..fast.linear import EquivariantLinear, SpeciesTensorProduct
 from ..featurizers import DISTANCE_TRANSFORMS
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as GATES
@@ -644,8 +645,8 @@ class _EquivariantProductBasis(nn.Module):
         self.symmetric_contractions = SymmetricContraction(
             node_feats_irreps, target_irreps, correlation, num_elements
         )
-        self.linear = o3.Linear(target_irreps, target_irreps,
-                                internal_weights=True, shared_weights=True)
+        self.linear = EquivariantLinear(target_irreps, target_irreps,
+                                        internal_weights=True, shared_weights=True)
 
     def forward(self, node_feats: Tensor, sc: Optional[Tensor], node_attrs: Tensor) -> Tensor:
         """Apply the symmetric contraction, linear map, and optional residual.
@@ -768,8 +769,8 @@ class _InteractionBase(nn.Module):
         the output ``linear`` map, and the ``reshape`` module. Sets
         ``irreps_out`` to ``target_irreps``.
         """
-        self.linear_up = o3.Linear(self.node_feats_irreps, self.node_feats_irreps,
-                                   internal_weights=True, shared_weights=True)
+        self.linear_up = EquivariantLinear(self.node_feats_irreps, self.node_feats_irreps,
+                                           internal_weights=True, shared_weights=True)
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             self.node_feats_irreps, self.edge_attrs_irreps, self.target_irreps
         )
@@ -782,8 +783,8 @@ class _InteractionBase(nn.Module):
             F.silu,
         )
         self.irreps_out = self.target_irreps
-        self.linear = o3.Linear(irreps_mid, self.irreps_out,
-                                internal_weights=True, shared_weights=True)
+        self.linear = EquivariantLinear(irreps_mid, self.irreps_out,
+                                        internal_weights=True, shared_weights=True)
         self.reshape = _ReshapeIrreps(self.irreps_out)
         self.message_block = "auto"
 
@@ -800,6 +801,24 @@ class _InteractionBase(nn.Module):
         radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         return self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
                                  weights_mapped=w_scale is not None)
+
+    @torch.jit.unused
+    def _output_fast(self, pooled: Tensor, scale: float, divisor: Optional[Tensor],
+                     node_attrs: Optional[Tensor]) -> Optional[Tensor]:
+        """The block's reshaped output from the fast linear maps, ``None`` when they are off: the
+        linear map (``scale`` folded into it, then ``divisor``) and, given ``node_attrs``, the
+        self-connection, both written component-major, so that the ``(N, mul, dim)`` output is a
+        view of the layout the symmetric contraction's kernel reads."""
+        if not (isinstance(self.linear, EquivariantLinear) and self.linear.fast_active
+                and len({mul for mul, _ in self.irreps_out}) == 1
+                and (node_attrs is None or self.skip_tp.fast_active)):
+            return None
+        out = self.linear.scaled_ir_mul(pooled, scale)
+        if divisor is not None:
+            out = out / divisor
+        if node_attrs is not None:
+            out = self.skip_tp.ir_mul(out, node_attrs)
+        return out.view(out.shape[0], -1, self.irreps_out[0].mul).transpose(1, 2)
 
     @torch.jit.unused
     def _message_block_size(self, edge_feats: Tensor) -> int:
@@ -826,7 +845,8 @@ class _InteractionBase(nn.Module):
     def _messages_blocked(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor,
                           edge_index: Tensor, n_atoms: int, block: int) -> Tensor:
         """The message pass in blocks of edges, each block's weights recomputed in the backward,
-        so that the weights of all edges are never held at once."""
+        so that the weights of all edges are never held at once. In training mode the blocks keep
+        their weights: a recomputed block does not survive the second backward of a force loss."""
         from torch.utils.checkpoint import checkpoint
 
         def part(f: Tensor, a: Tensor, e: Tensor, idx: Tensor) -> Tensor:
@@ -835,11 +855,11 @@ class _InteractionBase(nn.Module):
             return self.conv_tp.conv(f, a, w, idx, n_atoms, weights_mapped=w_scale is not None)
 
         out: Optional[Tensor] = None
-        grad = torch.is_grad_enabled()
+        recompute = torch.is_grad_enabled() and not self.training
         for e0 in range(0, int(edge_feats.shape[0]), block):
             args = (feats, edge_attrs[e0:e0 + block], edge_feats[e0:e0 + block],
                     edge_index[:, e0:e0 + block])
-            y = checkpoint(part, *args, use_reentrant=False) if grad else part(*args)
+            y = checkpoint(part, *args, use_reentrant=False) if recompute else part(*args)
             out = y if out is None else out + y
         return out
 
@@ -855,7 +875,7 @@ class RealAgnosticInteractionBlock(_InteractionBase):
 
     def _setup(self):
         """Build the skip tensor product acting on the output message."""
-        self.skip_tp = o3.FullyConnectedTensorProduct(
+        self.skip_tp = SpeciesTensorProduct(
             self.irreps_out, self.node_attrs_irreps, self.irreps_out
         )
 
@@ -885,6 +905,10 @@ class RealAgnosticInteractionBlock(_InteractionBase):
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
         pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0 / self.avg_num_neighbors, None, node_attrs)
+            if fused is not None:
+                return fused, None
         pooled = self.linear(pooled) / self.avg_num_neighbors
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -902,7 +926,7 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
 
     def _setup(self):
         """Build the skip tensor product acting on the input node features."""
-        self.skip_tp = o3.FullyConnectedTensorProduct(
+        self.skip_tp = SpeciesTensorProduct(
             self.node_feats_irreps, self.node_attrs_irreps, self.hidden_irreps
         )
 
@@ -935,6 +959,10 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
         pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0 / self.avg_num_neighbors, None, None)
+            if fused is not None:
+                return fused, residual
         pooled = self.linear(pooled) / self.avg_num_neighbors
         return self.reshape(pooled), residual
 
@@ -984,6 +1012,10 @@ class RealAgnosticDensityInteractionBlock(RealAgnosticInteractionBlock):
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
         pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0, density + 1.0, node_attrs)
+            if fused is not None:
+                return fused, None
         pooled = self.linear(pooled) / (density + 1.0)
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -1033,6 +1065,10 @@ class RealAgnosticDensityResidualInteractionBlock(RealAgnosticResidualInteractio
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
         pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0, density + 1.0, None)
+            if fused is not None:
+                return fused, residual
         pooled = self.linear(pooled) / (density + 1.0)
         return self.reshape(pooled), residual
 

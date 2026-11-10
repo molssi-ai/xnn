@@ -223,6 +223,15 @@ class ShellConvolution(FastPathModule, nn.Module):
         return torch.cat([scalar.flatten(1), norms.flatten(1)], dim=-1)
 
 
+def check_species(z_to_index: Tensor, species: Sequence[int], z: Tensor) -> None:
+    """Raise a ``ValueError`` for atomic numbers ``z`` outside ``species`` (``z_to_index`` maps an
+    atomic number to its species index, -1 outside)."""
+    index = z_to_index.to(z.device)[z]
+    if bool((index < 0).any()):
+        missing = sorted(set(z[index < 0].tolist()))
+        raise ValueError(f"elements {missing} are not among the model's species {list(species)}")
+
+
 def neighbor_matrix(edge_index: Tensor, num_nodes: int) -> Tuple[Tensor, Tensor]:
     """The edges of every center as rows of a padded matrix: ``(nb_edge, nb_src)``.
 
@@ -596,6 +605,24 @@ class AIMNet2(GNNPotential):
         return node
 
     @torch.jit.unused
+    def index_planner(self):
+        """The planner of a captured evaluation or training step: AIMNet2 needs nothing beyond its
+        edges (:class:`~xnn.common.train.graphed.NoIndexPlanner`), and the planner checks the elements
+        the captured step cannot read back. The step must run without host reads: on the fused shell
+        convolutions (a power-of-two ``n_rbf`` and ``use_fast`` not ``False``; the reference sizes its
+        neighbor matrix on the host), with ``coulomb`` ``None`` or ``"dsf"`` (the all-pairs and lattice
+        sums size their work on the host)."""
+        import functools
+
+        from xnn.common.train.graphed import NoIndexPlanner
+        if self.coulomb not in (None, "dsf"):
+            raise ValueError(f"a captured AIMNet2 step needs coulomb=None or 'dsf', not {self.coulomb!r}")
+        if self.n_rbf & (self.n_rbf - 1) or self.use_fast is False:
+            raise ValueError("a captured AIMNet2 step runs the fused shell convolutions, which need a "
+                             f"power-of-two n_rbf (not {self.n_rbf}) and use_fast True or 'auto'")
+        return NoIndexPlanner(check=functools.partial(check_species, self.z_to_index.cpu(), list(self.species)))
+
+    @torch.jit.unused
     def set_use_fast(self, use_fast) -> "AIMNet2":
         """Choose the implementation of the shell convolutions.
 
@@ -629,8 +656,9 @@ class AIMNet2(GNNPotential):
         return len(self.passes) * float(self.aev_cutoff)
 
     @torch.jit.unused
-    def _select_fast(self, num_edges: int) -> None:
-        """Switch the fused shell convolutions on or off for one evaluation."""
+    def _select_fast(self, num_edges: int, capturing: bool = False) -> None:
+        """Switch the fused shell convolutions on or off for one evaluation (on under ``"auto"`` in a
+        captured one, as the reference sizes its neighbor matrix on the host)."""
         from xnn.common.models.fast import fast_modules, select
         from xnn.gnn.fast.aimnet2 import AUTO_POLICY, AUTO_POLICY_TRAINING
         blocks = self.__dict__.get("_fast_blocks")
@@ -639,7 +667,8 @@ class AIMNet2(GNNPotential):
             self.__dict__["_fast_blocks"] = blocks
         like = self.embedding.weight
         policy = AUTO_POLICY_TRAINING if self.training else AUTO_POLICY
-        select(blocks, self.use_fast, policy, like.device, like.dtype, num_edges)
+        use_fast = True if capturing and self.use_fast == "auto" else self.use_fast
+        select(blocks, use_fast, policy, like.device, like.dtype, num_edges)
 
     @torch.jit.unused
     def _shell_sums_fast(self, nodes: Tensor, gsv: Tensor, edge_index: Tensor,
@@ -652,7 +681,8 @@ class AIMNet2(GNNPotential):
 
     def _evaluate(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
                   pos: Tensor, cell: Optional[Tensor], pbc: Optional[Tensor], batch: Tensor,
-                  num_graphs: int, totals: Tensor, checked: bool = False) -> Dict[str, Tensor]:
+                  num_graphs: int, totals: Tensor, checked: bool = False,
+                  capturing: bool = False) -> Dict[str, Tensor]:
         """The network and the electrostatics on raw tensors (scriptable).
 
         Parameters
@@ -678,6 +708,11 @@ class AIMNet2(GNNPotential):
         checked : bool, optional
             The caller has checked the elements against the species already
             (one host synchronization fewer), by default ``False``.
+        capturing : bool, optional
+            The evaluation is recorded as a CUDA graph: every edge enters the
+            local environment, with the envelope (and a mask in the short-range
+            Coulomb term) zeroing those past the Gaussian-basis cutoff, as
+            selecting them would read their number back. By default ``False``.
 
         Returns
         -------
@@ -694,7 +729,7 @@ class AIMNet2(GNNPotential):
         # the local environment: edges within the Gaussian-basis cutoff (the
         # graph may reach further for the long-range Coulomb sum)
         r_all = torch.linalg.norm(edge_vec, dim=-1)
-        if self.cutoff > self.aev_cutoff:
+        if self.cutoff > self.aev_cutoff and not capturing:
             local = r_all < self.aev_cutoff
             edge_local, vec_local, r = edge_index[:, local], edge_vec[local], r_all[local]
         else:
@@ -754,6 +789,8 @@ class AIMNet2(GNNPotential):
             # out under the envelope and add the full (or truncated) sum
             pair = (0.5 * self.coulomb_constant * self.sr_envelope(r)
                     * gather_rows(charges, src) * gather_rows(charges, dst) / r)
+            if capturing and self.cutoff > self.aev_cutoff:
+                pair = pair * (r < self.aev_cutoff)      # the local environment's edges only
             node_coulomb = -scatter_sum(pair.to(torch.float64), dst, num_nodes)
             node_coulomb = node_coulomb + self._coulomb_long_range(
                 charges, pos, cell, pbc, batch, num_graphs, edge_index, r_all)
@@ -846,17 +883,16 @@ class AIMNet2(GNNPotential):
             or a partially periodic structure with ``"ewald"`` / ``"pme"``.
         """
         z = data.atomic_numbers
-        index = self.z_to_index[z]
-        if bool((index < 0).any()):
-            missing = sorted(set(z[index < 0].tolist()))
-            raise ValueError(f"elements {missing} are not among the model's species "
-                             f"{self.species}")
+        capturing = z.is_cuda and torch.cuda.is_current_stream_capturing()
+        # a captured evaluation cannot read the check back: its planner runs it before the replay
+        if not capturing:
+            check_species(self.z_to_index, list(self.species), z)
         num_graphs, batch = data.num_graphs, data.batch
         dtype = self.embedding.weight.dtype
         totals = self._channel_totals(data, dtype)                           # (B, C)
-        self._select_fast(int(data.edge_index.shape[1]))
+        self._select_fast(int(data.edge_index.shape[1]), capturing)
         out = self._evaluate(z, data.edge_index, data.edge_vectors(), data.pos, data.cell,
-                             data.pbc, batch, num_graphs, totals, checked=True)
+                             data.pbc, batch, num_graphs, totals, checked=True, capturing=capturing)
         charges = out["charges"]
         result = {
             "node_energy": out["node_energy"],
