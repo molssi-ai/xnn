@@ -140,6 +140,10 @@ Changelog = "https://github.com/molssi-ai/xnn/releases"
 [project.scripts]
 xnn = "xnn.common.cli:main"
 
+# MLPotential("xnn", model=...) in openmm-ml (OpenMM simulations and ML/MM)
+[project.entry-points."openmmml.potentials"]
+xnn = "xnn.common.deploy.openmm_force:XNNPotentialImplFactory"
+
 [tool.setuptools.dynamic]
 version = { attr = "xnn.__version__" }
 

@@ -65,7 +65,8 @@ from xnn.gnn.models import TensorNet
 # Load data: 250 aspirin conformations of rMD17 (eV, Angstrom) from the data hub
 structures = load_dataset("rmd17", molecule="aspirin", split="train", n_train=250)
 data = AtomicDataset(structures, cutoff=5.0)
-# or from a list of dicts or a file: AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
+# or from a list of dicts or a file: 
+# AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
 
 # Train: a small NequIP model, checkpoints in runs/nequip (best.pt, last.pt)
 cfg = Config()
@@ -111,6 +112,8 @@ export_to_lammps(from_pretrained("runs/mace-off23-lora/best.pt", wrap=False), cu
 - Score pre-trained checkpoints on one dataset (energy / force / stress MAE, MSE
   or RMSE, per atom or as atomization energies), tabulated per model and written
   to CSV, JSON or Markdown with `xnn benchmark --config configs/benchmark.yaml`
+- `MLPotential("xnn", model="runs/mace-off23-lora/best.pt")` runs the model in
+  OpenMM (openmm-ml), alone or as the ML part of an ML/MM system.
 - `xnn mdi --ckpt runs/mace-off23-lora/best.pt` serves a model to an external MD
   code through the MolSSI Driver Interface.
 - `DomainParallel` splits one large box over the GPUs of a `torchrun` launch,
@@ -159,7 +162,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.25.0},
+  version = {0.26.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```
