@@ -695,13 +695,14 @@ class TorchScriptPotential(nn.Module):
         self.cutoff = float(cutoff)
         self.core_cutoff = min(core_cutoff, self.cutoff) if core_cutoff > 0 else self.cutoff
         # zero-element buffer used only to read back the module's working
-        # dtype; seeded from a real parameter (not the ambient default dtype,
-        # which need not match the trained weights) and thereafter follows
+        # dtype; seeded from a real parameter, or a floating buffer for a core
+        # that keeps its tables as buffers only (not the ambient default dtype,
+        # which need not match the trained weights), and thereafter follows
         # .float() / .double() / .to() like any other buffer
         param_dtype = torch.get_default_dtype()
-        for param in self.parameters():
-            if param.is_floating_point():
-                param_dtype = param.dtype
+        for tensor in list(self.parameters()) + list(self.buffers()):
+            if tensor.is_floating_point():
+                param_dtype = tensor.dtype
                 break
         self.register_buffer("_dtype_probe",
                              torch.zeros(0, dtype=param_dtype))
