@@ -150,16 +150,35 @@ One structure on several GPUs
 
    dist.init_process_group("nccl")
    torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
-   dp = DomainParallel(model.cuda().eval())
+   dp = DomainParallel(model.cuda().eval(), skin=1.0)
    out = dp(graph.cuda())          # energy, forces and stress on every process
 
 - :class:`~xnn.common.deploy.DomainParallel` cuts the box into one sub-domain per GPU.
-- Each GPU evaluates its own atoms plus copies of their neighbors out to the
-  model's receptive field. The results equal a single-GPU evaluation.
+  The results equal a single-GPU evaluation.
+- Each GPU evaluates its own atoms plus copies of their neighbors (ghosts).
+  MACE, TensorNet and AIMNet2 need one cutoff of ghosts: the ghosts' features
+  are refreshed from their owners before every layer (``halo="layer"``).
+  Other models take ghosts out to their receptive field (``halo="field"``).
+- Each GPU computes the forces of its own atoms. Only the energy and the
+  virial are summed over the GPUs.
+- A plan (owners, ghosts, neighbor list) is reused while the atoms have moved
+  less than the ``skin`` allows.
 - The memory per GPU falls with the number of GPUs, so a box too large for one
   GPU fits on several.
 - Models with long-range terms (Coulomb sums, LES, D4) are refused.
 - AIMNet2 works without its Coulomb term.
+
+When each GPU keeps only its own atoms, the forces are not gathered:
+
+.. code-block:: python
+
+   plan = dp.plan(graph)                        # once, from the whole structure
+   pos, vel = graph.pos[plan.owned], vel[plan.owned]
+   for step in range(n_steps):
+       if not dp.holds(plan, pos):
+           plan, pos, vel = dp.reshard(plan, pos, vel)
+       out = dp.evaluate(plan, pos)             # forces of the owned atoms
+       ...                                      # move the owned atoms
 
 Which model deploys how
 =======================
