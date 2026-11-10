@@ -78,3 +78,40 @@ def test_replaced_layer_runs_as_written():
     assert torch.allclose(net(x), expect, rtol=0, atol=1e-13)
     assert torch.allclose(net(x, index, scale), _mapped(expect, index, scale), rtol=0, atol=1e-13)
     assert torch.allclose(net(x, None, scale[:4]), expect * scale[:4], rtol=0, atol=1e-13)
+
+
+def test_fast_support_conditions(monkeypatch):
+    """The fused hidden layers need CUDA, float32, Triton and three SiLU hidden layers of at most 128
+    features of e3nn's layers."""
+    import sys
+    cuda = torch.device("cuda")
+    pytest.importorskip("triton")
+    net = RadialNet([10, 64, 64, 128, 40], torch.nn.functional.silu)
+    assert net.fast_supported(cuda, torch.float32)
+    assert not net.fast_supported(torch.device("cpu"), torch.float32)
+    assert not net.fast_supported(cuda, torch.float64)
+    assert not RadialNet([10, 64, 64, 40], torch.nn.functional.silu).fast_supported(cuda, torch.float32)
+    assert not RadialNet([10, 64, 129, 64, 40], torch.nn.functional.silu).fast_supported(cuda, torch.float32)
+    assert not RadialNet([10, 64, 64, 64, 40], torch.tanh).fast_supported(cuda, torch.float32)
+    replaced = RadialNet([10, 64, 64, 64, 40], torch.nn.functional.silu)
+    replaced.layer1 = torch.nn.Linear(64, 64)
+    assert not replaced.fast_supported(cuda, torch.float32)
+    monkeypatch.setitem(sys.modules, "triton", None)
+    assert not net.fast_supported(cuda, torch.float32)
+
+
+def test_fused_hidden_layers_receive_the_folded_matrices(monkeypatch):
+    """The fused call gets each hidden matrix with its folded factor: three SiLU layers of those
+    matrices give the hidden layers' values."""
+    pytest.importorskip("triton")
+    import xnn.gnn.fast.radial_kernels as radial_kernels
+
+    def silu_layers(x, a1, a2, a3):
+        silu = torch.nn.functional.silu
+        return silu(silu(silu(x @ a1) @ a2) @ a3)
+
+    monkeypatch.setattr(radial_kernels, "fused_hidden", silu_layers)
+    torch.manual_seed(1)
+    net = RadialNet([10, 16, 12, 8, 6], torch.nn.functional.silu, variance_in=2.0)
+    x = torch.randn(9, 10)
+    assert torch.allclose(net._hidden_fused(x), net._hidden(x), rtol=0, atol=1e-14)

@@ -185,6 +185,92 @@ def test_refusals():
         DomainParallel(model)(other, plan)
 
 
+def test_model_dtype_from_buffers():
+    """A model without floating parameters takes its dtype from its buffers, and has none without either."""
+    from xnn.common.deploy.domain import _model_dtype
+    buffered = torch.nn.Module()
+    buffered.register_buffer("index", torch.arange(3))
+    assert _model_dtype(buffered) is None
+    buffered.register_buffer("scale", torch.ones(2, dtype=torch.float32))
+    assert _model_dtype(buffered) == torch.float32
+
+
+def test_a_neighbor_across_a_cut_axis_is_refused(monkeypatch):
+    """A neighbor list that reaches across a cut axis through the box's periodicity is an error."""
+    from xnn.common.deploy import domain
+    original = domain.build_neighbor_list
+
+    def across(*args, **kwargs):
+        edge_index, cell_shifts = original(*args, **kwargs)
+        cell_shifts = cell_shifts.clone()
+        cell_shifts[0, 0] = 1
+        return edge_index, cell_shifts
+
+    monkeypatch.setattr(domain, "build_neighbor_list", across)
+    model = _mace()
+    graph = structure_to_graph(_structure(), model.cutoff)
+    with pytest.raises(RuntimeError, match="cut axis"):
+        DomainParallel(model, grid=(2, 1, 1)).plan(graph, rank=0, world_size=2)
+
+
+def _launch(monkeypatch, world):
+    """A distributed launch of ``world`` processes as seen by rank 0."""
+    import torch.distributed as dist
+    if not dist.is_available():
+        pytest.skip("torch.distributed is not available")
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: world)
+    return dist
+
+
+def test_forward_sums_over_the_processes_of_a_launch(monkeypatch):
+    """In a launch of two processes, rank 0 plans its own sub-domain and the all-reduce of its packed
+    terms with the other process's gives the whole-box energy, forces and stress."""
+    model = _mace()
+    ref, graph = _reference(model, _structure())
+    dist = _launch(monkeypatch, 2)
+    dp = DomainParallel(model, grid=(2, 1, 1))
+    assert dp.plan(graph).rank == 0
+    energy, g_pos, g_strain = dp.local_terms(graph, dp.plan(graph, rank=1))
+    other = torch.cat([energy.reshape(1), g_strain.reshape(9), g_pos.reshape(-1)])
+    reduced = []
+
+    def all_reduce(total, group=None):
+        reduced.append(group)
+        total.add_(other)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    out = dp(graph)
+    assert reduced == [None]
+    assert float(out["energy"]) == pytest.approx(float(ref["energy"]), rel=1e-11)
+    assert torch.allclose(out["forces"], ref["forces"], atol=1e-10)
+    assert torch.allclose(out["stress"], ref["stress"], atol=1e-11)
+
+
+def test_whole_structure_sums_go_through_the_differentiable_all_reduce(monkeypatch):
+    """AIMNet2's charge constraint sums over a launch with the autograd all-reduce; with every atom on
+    rank 0 (the other process owns none and adds zeros) the results are the single-process ones."""
+    import torch.distributed.nn.functional as functional
+    model = _aimnet2()
+    s = {**_structure(periodic=False, species=(1, 6, 7, 8)), "total_charge": 1.0}
+    ref, graph = _reference(model, s)
+    dist = _launch(monkeypatch, 2)
+    sums, reduced = [], []
+
+    def differentiable(part, group=None):
+        sums.append(group)
+        return part + torch.zeros_like(part)
+
+    monkeypatch.setattr(functional, "all_reduce", differentiable)
+    monkeypatch.setattr(dist, "all_reduce", lambda total, group=None: reduced.append(group))
+    dp = DomainParallel(model)
+    out = dp(graph, dp.plan(graph, rank=0, world_size=1))
+    assert len(sums) >= 2 and len(reduced) == 1
+    assert float(out["energy"]) == pytest.approx(float(ref["energy"]), rel=1e-12)
+    assert torch.allclose(out["forces"], ref["forces"], atol=1e-11)
+
+
 _SCRIPT = """
 import numpy as np
 import torch

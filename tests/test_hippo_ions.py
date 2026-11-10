@@ -331,8 +331,14 @@ def test_library_files_keep_the_ion_terms(tmp_path):
 
 
 def test_ion_terms_need_hippo_single_atoms_and_no_lammps(tmp_path):
-    """The ion terms are HIPPO's, for single-atom ions, and LAMMPS's AMOEBA package has none of them."""
+    """The ion terms are HIPPO's, for single-atom ions of the library's classes, and LAMMPS's AMOEBA package has
+    none of them."""
     from xnn.ffnn.models import Amoeba
+    for table, key, row in (("ionct", "NA-K", {"a": 1.0, "b": 1.0}), ("mbct", "K", {"x": 0.1})):
+        unknown = _library()
+        getattr(unknown, table)[key] = row
+        with pytest.raises(KeyError, match="no atom type"):
+            Hippo(unknown, _topology(5), cutoff=30.0)
     amoeba = builtin_amoeba("amoeba-water-2003")
     amoeba.mbct["OW"] = {"x": 0.1}
     with pytest.raises(ValueError, match="terms of HIPPO"):

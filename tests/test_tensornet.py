@@ -1013,6 +1013,84 @@ def test_matgl_checkpoint_refusals(tmp_path):
         tf.from_foundation("tensornet-unknown")
 
 
+def test_matgl_directory_detection(tmp_path):
+    """Either file of a MatGL TensorNet directory is detected; an unreadable or foreign model.json is not."""
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path)
+    assert tf._is_matgl_dir(tmp_path / "model.json") and tf._is_matgl_dir(tmp_path / "state.pt")
+    (tmp_path / "model.json").write_text("{not json")
+    assert not tf._is_matgl_dir(tmp_path)
+    (tmp_path / "model.json").write_text('{"kwargs": {}}')
+    assert not tf._is_matgl_dir(tmp_path)
+
+
+def test_matgl_checkpoint_refusals_name_every_unconverted_piece(tmp_path):
+    """Another model class, every unconverted option at once, a per-structure energy offset (also in a
+    wrapped state dict) and a missing weight are refused."""
+    import json
+
+    from xnn.gnn.models import tensornet_foundation as tf
+    sd = _matgl_directory(tmp_path)
+    text = (tmp_path / "model.json").read_text()
+
+    meta = json.loads(text)
+    meta["kwargs"]["model"]["@class"] = "M3GNet"
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError, match="M3GNet, not a TensorNet"):
+        tf.convert_directory(tmp_path / "model.json")
+
+    meta = json.loads(text)
+    meta["kwargs"]["model"]["init_args"].update(is_intensive=True, include_state=True, ntargets=2,
+                                                activation_type="tanh")
+    meta["kwargs"]["calc_repuls"] = True
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError) as err:
+        tf.convert_directory(tmp_path)
+    for piece in ("intensive target", "state features", "several targets", "repulsion term", "activation tanh"):
+        assert piece in str(err.value)
+
+    (tmp_path / "model.json").write_text(text)
+    torch.save({"state_dict": {**sd, "data_mean": torch.tensor(0.5)}}, tmp_path / "state.pt")
+    with pytest.raises(NotImplementedError, match="energy offset"):
+        tf.convert_directory(tmp_path)
+
+    torch.save({k: v for k, v in sd.items() if k != "model.layers.1.linears_tensor.5.weight"},
+               tmp_path / "state.pt")
+    with pytest.raises(KeyError, match="layers.1.linears_tensor.5.weight"):
+        tf.convert_directory(tmp_path / "state.pt")
+
+
+def test_matgl_checkpoint_loads_through_the_hub_and_the_foundation_cache(tmp_path):
+    """A local MatGL directory loads with from_pretrained, and a registered model already in the cache
+    loads with TensorNet.from_foundation in the asked dtype: the weights of the direct conversion."""
+    from xnn.common.models import from_pretrained
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path / "ckpt")
+    direct, _ = tf.convert_directory(tmp_path / "ckpt")
+    hub = from_pretrained(tmp_path / "ckpt", wrap=False, cache_dir=tmp_path / "cache")
+    assert isinstance(hub, TensorNet)
+    _same_converted_weights(hub, direct)
+
+    name = "tensornet-matpes-r2scan-2025.2"
+    _, revision = tf.FOUNDATION_MODELS[name]
+    folder = tmp_path / "models" / "matgl" / name / revision
+    _matgl_directory(folder, seed=3)
+    model = TensorNet.from_foundation(name, dtype="float64", cache_dir=tmp_path / "models")
+    assert not model.training and model.tensor_embedding.emb.weight.dtype == torch.float64
+    _same_converted_weights(model, tf.convert_directory(folder, torch.float64)[0])
+
+
+def _same_converted_weights(model, ref, species=(1, 6, 8, 14)):
+    """Every converted parameter equal; of the embedding, the rows of the checkpoint's elements (the
+    others keep their initial values)."""
+    theirs = dict(model.named_parameters())
+    for name, p in ref.named_parameters():
+        a, b = theirs[name].double(), p.double()
+        if name == "tensor_embedding.emb.weight":
+            a, b = a[list(species)], b[list(species)]
+        assert torch.equal(a, b), name
+
+
 def _matgl_fidelity(dtype):
     path = os.environ.get("MATGL_TENSORNET_PATH")
     if not path:

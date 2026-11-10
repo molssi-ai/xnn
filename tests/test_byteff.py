@@ -817,3 +817,84 @@ def test_byteff_pol_torchscript_export_of_a_cell(tmp_path, device):
     with pytest.raises(Exception, match="twice the cutoff"):
         scripted(s["pos"], s["atomic_numbers"], torch.eye(3, device=device) * 1.5 * model.cutoff, s["pbc"])
 
+
+
+def test_byteff_pol_export_core_of_a_cluster_eager():
+    """The un-scripted cluster export core gives the reference energy and charges; it refuses other atoms, a
+    cell, an unbound model and a model with a cutoff."""
+    from xnn.hybnn.models.byteff_export import ByteFFPolCellExport, ByteFFPolExport
+    mols = [_mol("O"), _mol("[Li+]")]
+    torch.manual_seed(1)
+    model = ByteFFPol(mols, **SMALL_POL).eval()
+    pos = np.concatenate([_coords(mols[0])[0], np.array([[0.0, 0.0, 2.2]])])
+    z = _z(mols)
+    g = _graphs(z, [pos], model)
+    want = model(g)
+    core = model.export_core()
+    assert isinstance(core, ByteFFPolExport)
+    zt, p = torch.tensor(z), torch.tensor(pos)
+    args = (g.edge_index, g.edge_vectors(), p, torch.zeros(3, 3), torch.zeros(3, dtype=torch.bool), 0.0, 1.0)
+    features, node, charges = core.node_features_energy_charges(zt, *args)
+    assert features.shape == (len(z), 0)
+    assert float(node.sum()) == pytest.approx(float(want["energy"][0]), rel=1e-12, abs=1e-12)
+    assert torch.equal(charges, want["charges"].detach())
+    with pytest.raises(RuntimeError, match="bound"):
+        core.node_features_energy_charges(zt.flip(0), *args)
+    with pytest.raises(RuntimeError, match="cells"):
+        core.node_features_energy_charges(zt, *args[:4], torch.ones(3, dtype=torch.bool), 0.0, 1.0)
+    with pytest.raises(ValueError, match="bind"):
+        ByteFFPolExport(ByteFFPol(None, **SMALL_POL))
+    with pytest.raises(ValueError, match="bind"):
+        ByteFFPolCellExport(ByteFFPol(None, **SMALL_POL))
+    with pytest.raises(ValueError, match="ByteFFPolExport"):
+        ByteFFPolCellExport(model)
+
+
+def _ion_box():
+    """Four Li+ and four Cl- on a 2 x 2 x 2 grid in a cubic cell of 9 Angstrom, cutoff 4.4 (no excluded pairs)."""
+    mols = [_mol("[Li+]") if k % 2 == 0 else _mol("[Cl-]") for k in range(8)]
+    rng = np.random.default_rng(1)
+    pos = np.stack([4.5 * (np.array([k % 2, (k // 2) % 2, k // 4]) + 0.5) + 0.3 * rng.standard_normal(3)
+                    for k in range(8)])
+    torch.manual_seed(2)
+    return ByteFFPol(mols, **SMALL_POL, cutoff=4.4, polar_eps=1e-11, max_iter=500), pos, _z(mols), 9.0
+
+
+@pytest.mark.parametrize("system", ["waters", "ions"])
+def test_byteff_pol_export_core_of_a_cell_eager(system):
+    """The un-scripted cell export core gives the reference energy, forces and charges of a periodic cell; it
+    refuses other atoms, a molecule, a narrow cell and a model that takes every pair; a fixed mesh is kept and
+    the mesh rule rounds up to sizes with factors of at most 7."""
+    from xnn.hybnn.models.byteff import _fft_size
+    from xnn.hybnn.models.byteff_export import ByteFFPolCellExport, ByteFFPolExport
+    model, pos, z, L = _pol_box() if system == "waters" else _ion_box()
+    model = model.eval()
+    g = _box_graph(model, pos, z, L)
+    want = ForceStressOutput(model).eval()(g)
+    core = model.export_core()
+    assert isinstance(core, ByteFFPolCellExport)
+    zt, cell, pbc = torch.tensor(z), torch.eye(3) * L, torch.ones(3, dtype=torch.bool)
+    p = torch.tensor(pos, requires_grad=True)
+    src, dst = g.edge_index
+    vec = p.index_select(0, dst) - p.index_select(0, src) + g.cell_shifts.to(p.dtype) @ cell
+    features, node, charges = core.node_features_energy_charges(zt, g.edge_index, vec, p, cell, pbc, 0.0, 1.0)
+    assert features.shape == (len(z), 0)
+    assert float(node.sum()) == pytest.approx(float(want["energy"][0]), rel=1e-11, abs=1e-11)
+    forces = -torch.autograd.grad(node.sum(), p)[0]
+    scale = float(want["forces"].abs().max())
+    assert torch.allclose(forces, want["forces"].detach(), rtol=1e-8, atol=1e-9 * scale)
+    assert torch.equal(charges, want["charges"].detach())
+    with torch.no_grad():
+        with pytest.raises(RuntimeError, match="bound"):
+            core.node_features_energy_charges(zt.flip(0), g.edge_index, vec, p, cell, pbc, 0.0, 1.0)
+        with pytest.raises(RuntimeError, match="periodic"):
+            core.node_features_energy_charges(zt, g.edge_index, vec, p, cell, ~pbc, 0.0, 1.0)
+        with pytest.raises(RuntimeError, match="twice the cutoff"):
+            core.node_features_energy_charges(zt, g.edge_index, vec, p, torch.eye(3) * 1.5 * model.cutoff, pbc,
+                                              0.0, 1.0)
+    if system == "waters":
+        with pytest.raises(ValueError, match="ByteFFPolCellExport"):
+            ByteFFPolExport(ByteFFPol([_mol("O")], **SMALL_POL, cutoff=4.4))
+        fixed, _, _, _ = _pol_box(pme_grid=[20, 24, 28])
+        assert ByteFFPolCellExport(fixed)._mesh(cell, torch.float64) == [20, 24, 28]
+    assert [_fft_size(n) for n in (6, 11, 13, 17, 97)] == [6, 12, 14, 18, 98]

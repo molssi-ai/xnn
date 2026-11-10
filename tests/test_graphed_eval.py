@@ -1,10 +1,13 @@
 """Captured evaluations (xnn.common.deploy.GraphedEvaluation): the replayed results equal ordinary ones."""
+import types
+
 import numpy as np
 import pytest
 import torch
 
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.deploy import GraphedEvaluation
+from xnn.common.deploy import graphed_eval as graphed_eval_module
 from xnn.common.models import ForceStressOutput
 
 
@@ -165,3 +168,108 @@ def test_the_trial_times_both_evaluations():
     for k in range(4):
         graphed(structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda"))
     assert graphed.mode in ("replay", "eager")
+
+
+def _cpu_graphed(monkeypatch, **options):
+    """A captured evaluation of a float64 PhysNet on the CPU, with CUDA's synchronization and cache release
+    recorded instead of run."""
+    model = _physnet().double().eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped, **options)
+    calls = {"synchronize": 0, "empty_cache": 0}
+
+    def synchronize(*args, **kwargs):
+        calls["synchronize"] += 1
+
+    def empty_cache():
+        calls["empty_cache"] += 1
+
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
+    graphs = [structure_to_graph(_molecule(8, 0, k), model.cutoff) for k in range(4)]
+    for g in graphs:
+        g.pos = g.pos.double()
+    return wrapped, graphed, graphs, calls
+
+
+def _stand_in_replay(graphed, replays):
+    """A replay that evaluates ordinarily and counts as captured after the warmup."""
+    def replayed(graph):
+        replays.append(graph)
+        graphed.steps += 1
+        if graphed.steps > graphed.warmup:
+            graphed.graph = "captured"
+        return graphed._ordinary(graph)
+    return replayed
+
+
+def _same(out, ref):
+    return all(torch.allclose(out[k], ref[k].detach(), rtol=0, atol=1e-12) for k in ("energy", "forces"))
+
+
+@pytest.mark.parametrize("ordinary_time, expected", [(2.0, "replay"), (0.5, "eager")])
+def test_the_trial_picks_the_faster_by_the_clock(monkeypatch, ordinary_time, expected):
+    """The trial times the replays and the ordinary evaluations between synchronizations and keeps the
+    faster; ordinary evaluations out of memory keep the replays and release the cache."""
+    wrapped, graphed, graphs, calls = _cpu_graphed(monkeypatch, trial=3)
+    clock = [0.0]
+    monkeypatch.setattr(graphed_eval_module, "time", types.SimpleNamespace(perf_counter=lambda: clock[0]))
+    runs = {"replay": 0, "ordinary": 0}
+
+    def replayed(graph):
+        runs["replay"] += 1
+        clock[0] += 1.0
+
+    def ordinary(graph):
+        runs["ordinary"] += 1
+        clock[0] += ordinary_time
+        return graphed_eval_module.GraphedEvaluation._ordinary(graphed, graph)
+
+    monkeypatch.setattr(graphed, "_replayed", replayed)
+    monkeypatch.setattr(graphed, "_ordinary", ordinary)
+    assert graphed._choose(graphs[0]) == expected
+    assert runs == {"replay": 3, "ordinary": 3} and calls["synchronize"] == 4
+
+    def out_of_memory(graph):
+        raise torch.OutOfMemoryError("out of memory")
+
+    monkeypatch.setattr(graphed, "_ordinary", out_of_memory)
+    assert graphed._choose(graphs[0]) == "replay" and calls["empty_cache"] == 1
+
+
+@pytest.mark.parametrize("trial, winner", [(0, None), (3, "replay"), (3, "eager")])
+def test_the_mode_follows_the_first_capture(monkeypatch, trial, winner):
+    """No mode before the capture; then replays without a trial, or the trial's winner, an ordinary winner
+    releasing the graph and evaluating ordinarily from then on. The results are the ordinary ones."""
+    wrapped, graphed, graphs, calls = _cpu_graphed(monkeypatch, trial=trial, warmup=2)
+    replays = []
+    monkeypatch.setattr(graphed, "_replayed", _stand_in_replay(graphed, replays))
+    monkeypatch.setattr(graphed, "_choose", lambda graph: winner)
+    for k, g in enumerate(graphs):
+        assert _same(graphed(g), wrapped(g))
+        if k < 2:
+            assert graphed.mode is None
+    expected = "replay" if trial == 0 else winner
+    assert graphed.mode == expected
+    if expected == "eager":
+        assert graphed.graph is None and graphed.static is None and graphed.inputs == {}
+        assert len(replays) == 3 and calls["empty_cache"] == 1
+    else:
+        assert graphed.graph == "captured" and len(replays) == 4 and calls["empty_cache"] == 0
+
+
+def test_a_replay_out_of_memory_falls_back_to_ordinary_evaluations(monkeypatch):
+    """A replay out of memory releases the graph and evaluates this input and the later ones ordinarily."""
+    wrapped, graphed, graphs, calls = _cpu_graphed(monkeypatch)
+    replays = []
+
+    def out_of_memory(graph):
+        replays.append(graph)
+        raise torch.OutOfMemoryError("out of memory")
+
+    monkeypatch.setattr(graphed, "_replayed", out_of_memory)
+    graphed.graph, graphed.out = "captured", {}
+    for g in graphs[:2]:
+        assert _same(graphed(g), wrapped(g))
+    assert graphed.mode == "eager" and graphed.graph is None and graphed.out is None
+    assert len(replays) == 1 and calls["empty_cache"] == 1

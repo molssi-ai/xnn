@@ -168,6 +168,55 @@ def test_message_blocks_setting():
         set_message_blocks(model, "sometimes")
 
 
+def test_message_blocks_auto_size_from_free_memory(monkeypatch):
+    """"auto" on a GPU: one pass while the weights of all edges fit four times into the free memory
+    (unused plus reserved but unallocated), else blocks of a sixteenth of it, at least MIN_MESSAGE_BLOCK
+    edges; training mode stays a single pass."""
+    import xnn.gnn.models.mace as mm
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    numel = block.conv_tp.weight_numel
+
+    class Edges:
+        """The attributes the sizing reads of float32 edge features on a GPU."""
+        is_cuda = True
+        device = torch.device("cuda")
+
+        def __init__(self, n):
+            self.shape = (n, 8)
+
+        def element_size(self):
+            return 4
+
+    unused = {"bytes": 0}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (unused["bytes"], 1 << 40))
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3000)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 1000)
+    n = 10 ** 8
+    unused["bytes"] = 4 * n * numel * 4 - 2000
+    assert block._message_block_size(Edges(n)) == 0
+    unused["bytes"] = 2 * n * numel * 4 - 2000
+    assert block._message_block_size(Edges(n)) == n // 8 > mm.MIN_MESSAGE_BLOCK
+    unused["bytes"] = 0
+    assert block._message_block_size(Edges(n)) == mm.MIN_MESSAGE_BLOCK
+    assert block.train()._message_block_size(Edges(n)) == 0
+
+
+def test_select_fast_defaults_to_the_parameters():
+    """Without a tensor to go by, the fast blocks are chosen for the device and dtype of the
+    parameters: the linear maps on, the CUDA-only radial kernels off on a CPU."""
+    from xnn.common.models.fast import fast_modules
+    from xnn.gnn.fast.linear import EquivariantLinear
+    from xnn.gnn.models.blocks import RadialNet
+    model = _build(T=1).set_use_fast(True)
+    model._select_fast(10)
+    blocks = fast_modules(model)
+    assert any(isinstance(m, EquivariantLinear) and m.fast_active for m in blocks)
+    assert all(not m.fast_active for m in blocks if isinstance(m, RadialNet))
+    model.set_use_fast(False)._select_fast(10)
+    assert not any(m.fast_active for m in blocks)
+
+
 def _derivatives(module, inputs, weight, *args):
     """Output, first derivatives with respect to the input and the weight, and the weight
     gradient of a loss on the input derivative."""
@@ -222,8 +271,30 @@ def test_equivariant_linear_fast_equals_reference():
             assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
 
 
+def test_equivariant_linear_bias_paths_and_external_parameters():
+    """Bias paths stay out of the fast plan (a map with biases is not eligible) and give e3nn's values;
+    without internal weights the weights and the biases must be passed."""
+    from xnn.gnn.fast.linear import EquivariantLinear
+    torch.manual_seed(0)
+    lin = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    with torch.no_grad():
+        lin.bias.normal_()
+    ref = o3.Linear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    ref.load_state_dict(lin.state_dict())
+    assert not lin.fast_eligible and len(lin.__dict__["_plan"].paths) == 2
+    x = torch.randn(5, lin.irreps_in.dim)
+    assert torch.allclose(lin(x), ref(x), rtol=0, atol=1e-14)
+    external = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", internal_weights=False, biases=True)
+    with pytest.raises(RuntimeError, match="Weights must be provided"):
+        external(x)
+    with pytest.raises(RuntimeError, match="Biases must be provided"):
+        external(x, lin.weight)
+    assert torch.allclose(external(x, lin.weight, lin.bias), ref(x), rtol=0, atol=1e-14)
+
+
 @pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
-                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"}])
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"},
+                                    {"interaction_first": "RealAgnosticInteractionBlock"}])
 def test_plain_fast_paths_equal_reference_in_mace(blocks):
     """With the linear maps and self-connections on their fast paths, MACE gives the reference's
     energy, forces, stress and the parameter gradient of a force loss."""
