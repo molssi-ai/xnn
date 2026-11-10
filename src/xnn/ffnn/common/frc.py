@@ -518,6 +518,17 @@ SECTION_SCHEMA: dict[str, dict] = {
     "charge_transfer": {"n_atoms": 1, "symmetry": "none", "type": "transfer",
                         "constants": [("eps", "kcal/mol", float),
                                       ("alpha", "1/Å", float)]},
+    # the terms of ions: the charge transfer from a partner class into the ion (directional, the ion
+    # first), the many-body charge transfer per ion and a pair correction of the ion with a partner
+    "ion_charge_transfer": {"n_atoms": 2, "symmetry": "none", "type": "transfer",
+                            "constants": [("A", "kcal/mol", float),
+                                          ("B", "1/Å", float)]},
+    "ion_many_body_charge_transfer": {"n_atoms": 1, "symmetry": "none", "type": "transfer",
+                                      "constants": [("x", "", float)]},
+    "ion_pair_correction": {"n_atoms": 2, "symmetry": "none", "type": "pair",
+                            "constants": [("A", "kcal/mol", float),
+                                          ("C", "kcal/mol*Å^6", float),
+                                          ("beta", "1/Å", float)]},
     "pauli_repulsion": {"n_atoms": 1, "symmetry": "none", "type": "repulsion",
                         "constants": [("K", "kcal/mol*Å", float),
                                       ("alpha", "1/Å", float),

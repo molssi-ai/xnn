@@ -83,3 +83,19 @@ def test_the_ladder_tangents_are_the_next_members(which, members):
         want = R * d[k + 1]
         scale = want.abs().max()
         assert float((t[k] - want).abs().max() / scale) < 1e-11, k
+
+
+def test_the_generated_tangents_are_those_of_the_current_kernels():
+    """``amoeba_tangents`` is what the generator makes of the current kernels (compared as syntax trees)."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "tools" / "generate_amoeba_derivatives.py"
+    if not path.exists():
+        pytest.skip("the generator is not in this tree")
+    spec = importlib.util.spec_from_file_location("generate_amoeba_derivatives", path)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    text = gen.generate(gen.REQUESTS, gen.KERNELS, gen.REVERSE, gen.REVERSE_TANGENTS)
+    shipped = (path.parents[1] / "src" / "xnn" / "ffnn" / "models" / "amoeba_tangents.py").read_text()
+    assert ast.dump(ast.parse(text)) == ast.dump(ast.parse(shipped))

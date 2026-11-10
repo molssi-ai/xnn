@@ -22,6 +22,20 @@ def test_gather_and_scatter_on_the_cpu():
     assert ops._compiling() is False
 
 
+def test_whole_structure_sum_under_a_domain_reduction(monkeypatch):
+    """The eager sum takes an active domain reduction; without one, and in scripted code, it is the plain
+    per-structure sum."""
+    gen = torch.Generator().manual_seed(1)
+    src = torch.randn(6, 2, dtype=torch.float64, generator=gen)
+    index = torch.tensor([0, 0, 1, 1, 1, 0])
+    plain = ops.scatter_sum(src, index, 2)
+    assert torch.equal(ops.whole_structure_sum(src, index, 2), plain)
+    monkeypatch.setattr(ops, "_DOMAIN_REDUCTION", [lambda s, i, n: 2.0 * ops.scatter_sum(s, i, n)])
+    assert torch.equal(ops.whole_structure_sum(src, index, 2), 2.0 * plain)
+    monkeypatch.setattr(torch.jit, "is_scripting", lambda: True)
+    assert torch.equal(ops.whole_structure_sum(src, index, 2), plain)
+
+
 def test_triplets_of_an_empty_graph():
     """A graph without atoms has no triplets."""
     first, second, center = ops.build_triplets(torch.zeros(2, 0, dtype=torch.long), 0)

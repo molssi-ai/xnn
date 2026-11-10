@@ -77,7 +77,9 @@ pair overrides), ``atomic_multipole`` (keyed by the atom type and its three
 frame-defining types, dipoles in e bohr and quadrupoles in e bohr^2),
 ``polarizability`` (with the polarization-group types), and for HIPPO
 ``charge_penetration``, ``charge_transfer``, ``pauli_repulsion``,
-``damped_dispersion``, ``bond_charge_flux`` and ``angle_charge_flux``; the
+``damped_dispersion``, ``bond_charge_flux`` and ``angle_charge_flux``, and
+for the terms of ions ``ion_charge_transfer``,
+``ion_many_body_charge_transfer`` and ``ion_pair_correction``; the
 force-field definition (anharmonic coefficients, combining rules, scale
 factors) sits in ``#metadata`` and the atom classes in ``#equivalence``. The
 same libraries read from and write to Tinker ``.prm`` files

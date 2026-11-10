@@ -12,6 +12,7 @@ correct, conservative forces for free and the code lives in exactly one place.
 from __future__ import annotations
 
 from abc import abstractmethod
+from typing import Optional
 
 import torch
 from torch import nn
@@ -135,6 +136,21 @@ class InteratomicPotential(nn.Module):
             raise TypeError(f"{source!r} holds a {type(core_model(model)).__name__}, "
                             f"not a {cls.__name__}")
         return model
+
+    def receptive_field(self) -> Optional[float]:
+        """The distance beyond which atoms no longer change an atom's energy.
+
+        Read by :class:`~xnn.common.deploy.DomainParallel` to size the shell of
+        neighbor copies every process evaluates. Models whose energy has terms
+        without such a bound (long-range electrostatics, all-pair sums) return
+        ``None``.
+
+        Returns
+        -------
+        float or None
+            The radius in Angstrom, or ``None`` when unknown or unbounded.
+        """
+        return None
 
     def aggregate_energy(self, node_energy: torch.Tensor,
                          data: AtomicGraph) -> torch.Tensor:

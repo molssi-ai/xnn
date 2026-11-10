@@ -120,10 +120,13 @@ neural network potentials:
 
    export_torchscript_potential(model, cutoff=10.0, path="byteff_pol.pt")
 
-The file holds the parameters of the system the model is bound to. It
-evaluates every pair of that system and solves the induced dipoles exactly,
-so the whole system must be on one rank, with its atoms in the bound order.
-It takes molecules and clusters. Periodic cells are refused.
+The file holds the parameters of the system the model is bound to, so the
+whole system must be on one rank, with its atoms in the bound order. A model
+without a cutoff evaluates molecules and clusters, every pair at once. A
+model with a cutoff evaluates periodic cells at least twice the cutoff wide.
+It takes its pairs from the neighbor list, sums the charges and induced
+dipoles by particle mesh Ewald on the model's mesh for each cell, and solves
+the dipoles as the model does.
 
 AMOEBA and HIPPO
 ================

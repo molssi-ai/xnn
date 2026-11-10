@@ -25,6 +25,7 @@ _PROVIDERS: dict[str, tuple[str, tuple[str, ...]]] = {
     "mace-torch": ("xnn.gnn.models.mace_foundation", (".model",)),
     "aimnet2": ("xnn.gnn.models.aimnet2_foundation", (".safetensors",)),
     "byteff2": ("xnn.hybnn.models.byteff_foundation", ()),
+    "matgl": ("xnn.gnn.models.tensornet_foundation", ()),
 }
 
 

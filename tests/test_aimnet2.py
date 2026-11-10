@@ -195,6 +195,22 @@ def test_dsf_on_a_cell_matches_the_isolated_molecule_and_gives_stress():
                      - (out_d["energy"] - out_d["energy_coulomb"]))) < 1e-9
 
 
+def test_captured_evaluation_masks_the_far_edges():
+    """A captured evaluation (every edge of the Coulomb graph in the local environment, the far ones
+    masked) gives the energies and charges of the selected local edges."""
+    model = _build(coulomb="dsf", lr_cutoff=6.0).eval()
+    pos = np.random.default_rng(4).uniform(0.0, 1.0, (10, 3)) * [8.0, 3.0, 3.0]
+    g = structure_to_graph({"pos": pos, "atomic_numbers": [8, 1, 1, 6, 7, 1, 6, 8, 1, 1],
+                            "total_charge": -1.0}, 6.0)
+    vec = g.edge_vectors()
+    assert model.cutoff > model.aev_cutoff and bool((vec.norm(dim=1) > model.aev_cutoff).any())
+    totals = model._channel_totals(g, torch.float64)
+    args = (g.atomic_numbers, g.edge_index, vec, g.pos, g.cell, g.pbc, g.batch, g.num_graphs, totals)
+    selected, captured = (model._evaluate(*args, capturing=c) for c in (False, True))
+    for key in ("node_energy", "node_coulomb", "charges", "node_features"):
+        assert torch.allclose(captured[key], selected[key], rtol=0, atol=1e-12), key
+
+
 def test_simple_coulomb_rejects_periodic_structures():
     model = _build()
     with pytest.raises(ValueError, match="dsf"):

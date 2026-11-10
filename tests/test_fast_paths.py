@@ -24,7 +24,13 @@ from xnn.common.models import (  # noqa: E402
     build_model,
     fast,  # noqa: E402
 )
-from xnn.gnn.fast import AUTO_POLICY, ConvTensorProduct, available  # noqa: E402
+from xnn.gnn.fast import (  # noqa: E402
+    AUTO_POLICY,
+    ConvTensorProduct,
+    EquivariantLinear,
+    SpeciesTensorProduct,
+    available,
+)
 from xnn.gnn.models.blocks import tp_out_irreps_with_instructions  # noqa: E402
 from xnn.gnn.models.mace import SymmetricContraction  # noqa: E402
 
@@ -82,10 +88,10 @@ def test_resolve_use_fast():
 def test_auto_policy_thresholds(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "NVIDIA A100-SXM4-80GB")
     cuda = torch.device("cuda")
-    assert AUTO_POLICY.threshold(cuda, torch.float32) == 50_000
-    assert AUTO_POLICY.threshold(cuda, torch.float64) == 25_000
-    assert not AUTO_POLICY.decide(cuda, torch.float32, 49_999)
-    assert AUTO_POLICY.decide(cuda, torch.float32, 50_000)
+    assert AUTO_POLICY.threshold(cuda, torch.float32) == 15_000
+    assert AUTO_POLICY.threshold(cuda, torch.float64) == 10_000
+    assert not AUTO_POLICY.decide(cuda, torch.float32, 14_999)
+    assert AUTO_POLICY.decide(cuda, torch.float32, 15_000)
     assert not AUTO_POLICY.decide(torch.device("cpu"), torch.float32, 10**9)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "Some Future GPU")
     assert AUTO_POLICY.threshold(cuda, torch.float32) == AUTO_POLICY.default_min_edges
@@ -136,8 +142,10 @@ def test_cpu_fast_request_runs_reference(build):
     ref = model(copy.copy(g))
     fast.set_use_fast(model, True)
     out = model(copy.copy(g))
-    assert not any(m.fast_active for m in fast.fast_modules(core))
-    # the same code path; only the threaded scatter's summation order can differ
+    # no kernel runs on the CPU; the linear maps' fast path is plain PyTorch and runs anywhere
+    plain = (EquivariantLinear, SpeciesTensorProduct)
+    assert not any(m.fast_active for m in fast.fast_modules(core) if not isinstance(m, plain))
+    # the same numbers; only the summation order can differ
     for key in ("energy", "forces", "stress"):
         assert torch.allclose(ref[key], out[key], rtol=0, atol=1e-12)
 

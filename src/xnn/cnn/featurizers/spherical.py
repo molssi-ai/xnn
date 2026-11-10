@@ -136,13 +136,28 @@ class SphericalGrid(Featurizer):
         charge = (atomic_numbers[dst] * atomic_numbers[src]).to(dtype)
         if self.envelope is not None:
             charge = charge * self.envelope(torch.linalg.norm(rel, dim=-1))
-        target = dst * n_ch + channel[src]
-        block = max(1, POINT_BLOCK // points.shape[0])
-        for e0 in range(0, rel.shape[0], block):
-            r = rel[e0:e0 + block]
-            dist = torch.linalg.norm(points[None, :, :] - r[:, None, :], dim=-1)   # (e, P)
-            val = charge[e0:e0 + block, None] / dist ** self.exponent
-            grid = grid.index_add(0, target[e0:e0 + block], val)
+        # every signal sums its neighbors in one fixed order, so that the grid is the same in every run (the
+        # atomic additions of a scatter on a GPU would not be, and a ReLU downstream turns those round-off
+        # differences into different forces): the edges sorted by signal, padded to the longest signal
+        # (a padding slot is a neighbor of charge zero) and summed along the padding
+        n_pts, n_edges = points.shape[0], rel.shape[0]
+        target_sorted, order = torch.sort(dst * n_ch + channel[src], stable=True)
+        rows, counts = torch.unique_consecutive(target_sorted, return_counts=True)
+        n_rows = rows.shape[0]
+        width = int(counts.max()) if n_rows > 0 else 0
+        rank = (torch.arange(n_edges, device=device)
+                - torch.repeat_interleave(torch.cumsum(counts, 0) - counts, counts))
+        slots = torch.full((n_rows * width,), n_edges, dtype=torch.long, device=device)
+        slots[torch.repeat_interleave(torch.arange(n_rows, device=device), counts) * width + rank] = order
+        rel_ext = torch.cat([rel, rel.new_zeros(1, 3)])
+        charge_ext = torch.cat([charge, charge.new_zeros(1)])
+        block = max(1, POINT_BLOCK // max(1, width * n_pts))
+        for r0 in range(0, n_rows, block):
+            idx = slots[r0 * width:(r0 + block) * width]
+            r = rel_ext.index_select(0, idx)
+            dist = torch.linalg.norm(points[None, :, :] - r[:, None, :], dim=-1)   # (rows x width, P)
+            val = charge_ext.index_select(0, idx)[:, None] / dist ** self.exponent
+            grid = grid.index_copy(0, rows[r0:r0 + block], val.view(-1, width, n_pts).sum(1))
         return grid.view(n_atoms, n_ch, s, s)
 
     def forward(self, data: AtomicGraph) -> Tensor:

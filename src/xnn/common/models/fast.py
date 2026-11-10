@@ -249,6 +249,13 @@ def separate_shapes():
         return contextlib.nullcontext()
 
 
+def _dense(grads: tuple) -> tuple:
+    """Incoming gradients as dense tensors. Autograd hands on views, such as the zero-stride expansion of
+    a sum's gradient, and the compiled derivative stages are specialized to their inputs' strides; the GPU code
+    inductor (torch 2.11) generated for such an expanded gradient of a batch gave wrong derivatives."""
+    return tuple(g.contiguous() if isinstance(g, torch.Tensor) else g for g in grads)
+
+
 def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
                                  n_constants: int = 0, dynamic: bool = True,
                                  options: Optional[dict] = None) -> Callable[..., Any]:
@@ -330,7 +337,8 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
         def backward(ctx, *cotangents):
             saved = ctx.saved_tensors
             with separate_shapes():
-                g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:], *cotangents)
+                g_inputs, g_grads = second_c(*saved[:n_inputs], *ctx.consts, *saved[n_inputs:],
+                                             *_dense(cotangents))
             return (*g_inputs, *([None] * n_constants), *g_grads)
 
     class Stage(torch.autograd.Function):
@@ -343,7 +351,7 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
 
         @staticmethod
         def backward(ctx, *grads):
-            g = Grad.apply(*ctx.saved_tensors, *ctx.consts, *grads)
+            g = Grad.apply(*ctx.saved_tensors, *ctx.consts, *_dense(grads))
             return (*g, *([None] * n_constants))
 
     def apply(*xs):

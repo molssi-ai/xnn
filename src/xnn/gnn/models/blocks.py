@@ -18,6 +18,8 @@ from e3nn.math import normalize2mom
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from xnn.common.models.fast import FastPathModule
+
 
 def shifted_softplus(x: Tensor) -> Tensor:
     """Shifted softplus ``log(0.5 e^x + 0.5)`` (NequIP's ``ShiftedSoftPlus``)."""
@@ -218,7 +220,7 @@ class ScalarActivation(nn.Module):
 RECOMPUTE_MIN_EDGES = 1_000_000
 
 
-class RadialNet(e3nn_nn.FullyConnectedNet):
+class RadialNet(e3nn_nn.FullyConnectedNet, FastPathModule):
     """Per-edge radial network that can recompute its hidden layers in the backward.
 
     An :class:`e3nn.nn.FullyConnectedNet` (same parameters and ``state_dict``
@@ -227,6 +229,11 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
     size, are kept for the backward pass; with recomputation only the last hidden
     output is kept and the hidden layers run again in the backward, giving the
     same values. TorchScript always keeps the activations.
+
+    On the fast path (evaluation mode, float32 on CUDA, three hidden SiLU layers of at
+    most 128 features) the hidden layers run as one Triton kernel per tile of edges
+    whose backward recomputes them (:mod:`xnn.gnn.fast.radial_kernels`); training
+    mode takes the layers as written.
 
     With ``out_index`` and ``out_scale`` it returns the output columns
     ``out_index`` times ``out_scale``, mapping the last layer's matrix once
@@ -246,6 +253,7 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
     def __init__(self, hs, act=None, variance_in=1, variance_out=1, out_act=False):
         super().__init__(hs, act, variance_in, variance_out, out_act)
         self.recompute = "auto"
+        self.fast_active = False
         # the (ignored) input of the matrix products that carry a scalar factor
         self.register_buffer("_zero", torch.zeros(()), persistent=False)
 
@@ -268,6 +276,24 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
                 x = x.index_select(1, out_index)
             x = x * out_scale
         return x
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """Whether the fused hidden layers can run there (see the class notes)."""
+        if device.type != "cuda" or dtype != torch.float32:
+            return False
+        try:
+            import triton  # noqa: F401
+        except ImportError:
+            return False
+        plan = self._plan()
+        return (plan is not None and len(plan[0]) == 3
+                and all(act is F.silu and layer.weight.shape[1] <= 128 for layer, _, act, _ in plan[0]))
+
+    @torch.jit.unused
+    def _hidden_fused(self, x: Tensor) -> Tensor:
+        from xnn.gnn.fast.radial_kernels import fused_hidden
+        a = [self._weight(layer, adapted) * factor for layer, adapted, _, factor in self._plan()[0]]
+        return fused_hidden(x, *a)
 
     @torch.jit.unused
     def _recomputes(self, x: Tensor) -> bool:
@@ -296,10 +322,11 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
 
     @torch.jit.unused
     def _matmul(self, x: Tensor, w: Tensor, alpha: float) -> Tensor:
-        if self.training and torch.is_grad_enabled():
-            # training: the factor on the (small) matrix, so the gradients are plain
-            # products (addmm's backward multiplies each by alpha in a kernel of its
-            # own, which a force loss records and differentiates again)
+        if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
+            # a gradient will flow (forces, training): the factor on the (small) matrix,
+            # so the gradients are plain products (addmm's backward multiplies the
+            # (edges, hidden) gradient by alpha in a kernel of its own, which a force
+            # loss also records and differentiates again)
             return torch.mm(x, w * alpha if alpha != 1.0 else w)
         zero = self._zero if self._zero.dtype == x.dtype else self._zero.to(x.dtype)
         return torch.addmm(zero, x, w, beta=0, alpha=alpha)
@@ -362,7 +389,9 @@ class RadialNet(e3nn_nn.FullyConnectedNet):
             return x
         lead = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
-        if self._recomputes(x):
+        if self.fast_active and not self.training and x.is_cuda and x.dtype == torch.float32:
+            h = self._hidden_fused(x)
+        elif self._recomputes(x):
             from torch.utils.checkpoint import checkpoint
             h = checkpoint(self._hidden, x, use_reentrant=False)
         else:

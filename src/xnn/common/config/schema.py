@@ -350,7 +350,7 @@ class TrainerConfig:
     early_stopping_min_delta: float = 0.0
     early_stopping_threshold: Optional[float] = None   # stop once better than this
     progress_bar: bool = False
-    cuda_graph: bool = False           # one CUDA graph per step (DimeNet(++), GemNet, PhysNet, SpookyNet)
+    cuda_graph: bool = False           # one CUDA graph per step (DimeNet(++), GemNet, PhysNet, SpookyNet, MACE)
 
     def validate(self) -> None:
         """Normalize the list options and reject unknown names."""

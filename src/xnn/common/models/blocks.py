@@ -109,3 +109,28 @@ class MLP(nn.Module):
             if i < last or self.activate_last:
                 x = self.act(x)
         return x
+
+
+class GatedMLP(nn.Module):
+    """A dense stack multiplied by a sigmoid gate of the same input (Chen and Ong, M3GNet 2022).
+
+    ``out = mlp(x) * sigmoid(gate(x))``: two stacks of the same sizes, the
+    activation between consecutive layers, the gate's last layer through a
+    sigmoid.
+
+    Parameters
+    ----------
+    sizes : sequence of int
+        Feature sizes from the input to the output, at least two.
+    activation : str or torch.nn.Module, optional
+        Activation between the layers (see
+        :func:`~xnn.common.models.ops.make_activation`), by default ``"silu"``.
+    """
+
+    def __init__(self, sizes: Sequence[int], activation="silu"):
+        super().__init__()
+        self.mlp = MLP(sizes, activation)
+        self.gate = MLP(sizes, activation)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.mlp(x) * torch.sigmoid(self.gate(x))

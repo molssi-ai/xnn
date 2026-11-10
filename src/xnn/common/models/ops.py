@@ -524,6 +524,48 @@ def structure_sums(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
     return out.index_add(1, index, src.to(torch.float64))
 
 
+# the reduction of an active domain decomposition (see xnn.common.deploy.DomainParallel),
+# set only for the duration of its forward
+_DOMAIN_REDUCTION: list = [None]
+
+
+@torch.jit.unused
+def _domain_reduction(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
+    reduce = _DOMAIN_REDUCTION[0]
+    if reduce is None:
+        return scatter_sum(src, index, dim_size)
+    return reduce(src, index, dim_size)
+
+
+def whole_structure_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
+    """:func:`scatter_sum` of per-atom rows into per-structure totals over every atom
+    of a structure, also when the structure is split over several processes.
+
+    Under :class:`~xnn.common.deploy.DomainParallel` a process holds only part of
+    the structure (its own atoms plus copies of their neighbors): the total is
+    then summed over the owned atoms of every process, differentiably. Models
+    whose energy depends on such a total (a charge constraint) call this instead
+    of :func:`scatter_sum`. Scripted code takes the plain sum.
+
+    Parameters
+    ----------
+    src : torch.Tensor
+        Per-atom values ``(N, *feature_dims)``.
+    index : torch.Tensor
+        Structure index of every atom ``(N,)``.
+    dim_size : int
+        Number of structures.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-structure totals ``(dim_size, *feature_dims)``.
+    """
+    if torch.jit.is_scripting():
+        return scatter_sum(src, index, dim_size)
+    return _domain_reduction(src, index, dim_size)
+
+
 #: Standard atomic weights (u) by atomic number, Z = 0 to 99 (the ASE table),
 #: for :func:`center_of_mass`.
 ATOMIC_MASSES = [

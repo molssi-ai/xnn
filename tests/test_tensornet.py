@@ -139,7 +139,7 @@ def _reference(model, Z, pos, total_charge=0.0):
     def pairs(i):
         for j in range(N):
             dist = 0.0 if i == j else float((pos[i] - pos[j]).norm())
-            if i != j and dist >= rc:
+            if i != j and dist >= rc or i == j and not model.self_pairs:
                 continue
             unit = (pos[i] - pos[j]) / dist if i != j else torch.zeros(3)
             yield j, dist, (1.0 if i == j else fcut(dist)), unit
@@ -220,9 +220,20 @@ def _reference(model, Z, pos, total_charge=0.0):
     for i in range(N):
         I, A, S = split(tensors[i])
         x = torch.cat([3 * I * I, norm2(A), norm2(S)])
-        x = _silu(_lin(model.linear, _layer_norm(model.out_norm, x)))
-        feats.append(x)
-        e = _lin(model.readout[2], _silu(_lin(model.readout[0], x)))[0]
+        x = _lin(model.linear, _layer_norm(model.out_norm, x))
+        if model.activate_features:
+            x = _silu(x)
+            feats.append(x)
+            e = _lin(model.readout[2], _silu(_lin(model.readout[0], x)))[0]
+        else:
+            feats.append(x)
+            h, g = x, x
+            last = len(model.readout.mlp.layers) - 1
+            for k, (a, b) in enumerate(zip(model.readout.mlp.layers, model.readout.gate.layers)):
+                h, g = _lin(a, h), _lin(b, g)
+                if k < last:
+                    h, g = _silu(h), _silu(g)
+            e = (h * torch.sigmoid(g))[0]
         energies.append(float(model.energy_scale) * e + float(model.energy_shift)
                         + model.atom_ref.weight[Z[i], 0])
     return {"node_energy": torch.stack(energies), "node_features": torch.stack(feats),
@@ -241,6 +252,78 @@ def test_forward_matches_paper_equations(group, n_interactions):
     assert torch.allclose(out["node_energy"], ref["node_energy"], atol=1e-12)
     assert torch.allclose(out["node_features"], ref["node_features"], atol=1e-12)
     assert torch.allclose(out["node_tensors"], ref["node_tensors"], atol=1e-12)
+
+
+@pytest.mark.parametrize("options", [
+    {"radial_basis": "smooth_bessel", "n_rbf": 3},
+    {"readout": "gated"},
+    {"self_pairs": False},
+    {"radial_basis": "smooth_bessel", "n_rbf": 3, "readout": "gated", "self_pairs": False,
+     "readout_hidden": [8, 6]},
+])
+def test_options_match_paper_equations(options):
+    """The smooth spherical Bessel basis, the gated readout and the pair lists without self
+    pairs give the per-atom loop of the equations."""
+    model = _small(**options).eval()
+    with torch.no_grad():
+        for p in model.readout.parameters():
+            p.add_(0.1 * torch.randn_like(p))
+    s = _structure(7, seed=3)
+    out = model(structure_to_graph(s, 4.5))
+    ref = _reference(model, s["atomic_numbers"], s["pos"])
+    assert torch.allclose(out["node_energy"], ref["node_energy"], atol=1e-11)
+    assert torch.allclose(out["node_features"], ref["node_features"], atol=1e-11)
+
+
+def test_self_pairs_change_the_model():
+    """Without self pairs an atom no longer sees itself: the energies differ."""
+    g = _graph(n=6, seed=4)
+    e_with = _small(self_pairs=True)(g)["energy"]
+    e_without = _small(self_pairs=False)(g)["energy"]
+    assert not torch.allclose(e_with, e_without)
+
+
+def test_smooth_bessel_basis():
+    """The basis is the paper's recursion, vanishes with its slope at the cutoff and keeps exact
+    float64 coefficients through a float32 build."""
+    from xnn.common.featurizers import SmoothBesselRBF
+    rc, n_rbf = 4.5, 4
+    basis = SmoothBesselRBF(n_rbf, rc)
+    r = torch.linspace(0.0, rc, 41, dtype=torch.float64, requires_grad=True)
+
+    def j0(x):
+        return torch.where(x == 0, torch.ones_like(x), torch.sin(x) / torch.where(x == 0, 1.0, x))
+
+    f = [(-1) ** n * math.sqrt(2) * math.pi / rc ** 1.5 * (n + 1) * (n + 2)
+         / math.sqrt((n + 1) ** 2 + (n + 2) ** 2)
+         * (j0((n + 1) * math.pi * r / rc) + j0((n + 2) * math.pi * r / rc)) for n in range(n_rbf)]
+    g, d = [f[0]], 1.0
+    for n in range(1, n_rbf):
+        e = n ** 2 * (n + 2) ** 2 / (4 * (n + 1) ** 4 + 1)
+        d_new = 1 - e / d
+        g.append((f[n] + math.sqrt(e / d) * g[-1]) / math.sqrt(d_new))
+        d = d_new
+    values = basis(r)
+    assert torch.allclose(values, torch.stack(g, -1), rtol=0, atol=1e-13)
+    slope = torch.autograd.grad(values[-1].sum(), r)[0][-1]
+    assert values[-1].abs().max() < 1e-12 and abs(float(slope)) < 1e-10
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        model = _small(radial_basis="smooth_bessel", n_rbf=3)
+    finally:
+        torch.set_default_dtype(old)
+    model = model.double()
+    exact = SmoothBesselRBF(3, model.cutoff).coefficients
+    assert torch.equal(model.rbf.coefficients, exact)
+
+
+def test_default_readout_keeps_its_parameter_names():
+    """The default readout is still the indexed dense stack (state dicts load unchanged)."""
+    keys = {k for k in _small().state_dict() if k.startswith("readout.")}
+    assert keys == {"readout.0.weight", "readout.0.bias", "readout.2.weight", "readout.2.bias"}
+    with pytest.raises(ValueError):
+        TensorNet(n_features=8, readout="set2set")
 
 
 def test_total_charge_enters_the_products():
@@ -393,10 +476,12 @@ def test_float32_forward_matches_float64():
 
 # deployment
 
-def test_scriptable_and_lammps_export(tmp_path):
+@pytest.mark.parametrize("options", [{}, {"radial_basis": "smooth_bessel", "n_rbf": 3, "readout": "gated",
+                                         "self_pairs": False}])
+def test_scriptable_and_lammps_export(tmp_path, options):
     from xnn.common.deploy import export_to_lammps
 
-    model = _small().eval()
+    model = _small(**options).eval()
     g = _graph(n=6, periodic=True)
     scripted = torch.jit.script(model)
     d = (scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
@@ -630,10 +715,12 @@ def _fast_batch(dtype, device="cuda"):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("group", ["O(3)", "SO(3)"])
-def test_fast_path_parity(dtype, group):
+@pytest.mark.parametrize("self_pairs", [True, False])
+def test_fast_path_parity(dtype, group, self_pairs):
     """The fused layers give the reference energies, forces and stress."""
     pytest.importorskip("triton")
-    model = _small(n_features=32, n_rbf=8, equivariance_group=group).to("cuda", dtype).eval()
+    model = _small(n_features=32, n_rbf=8, equivariance_group=group,
+                   self_pairs=self_pairs).to("cuda", dtype).eval()
     wrapped = ForceStressOutput(model, compute_stress=True).eval()
     keys = ("energy", "forces", "stress")
     out = {}
@@ -830,3 +917,196 @@ def test_filter_networks_recompute(monkeypatch):
     set_recompute_radial(model.eval(), False)
     run()
     assert not calls
+
+
+def _matgl_directory(path, units=8, n_layers=2, elements=("H", "C", "O", "Si"), seed=0):
+    """A MatGL TensorNet checkpoint directory with random weights."""
+    import json
+    gen = torch.Generator().manual_seed(seed)
+
+    def rand(*shape):
+        return torch.randn(*shape, generator=gen, dtype=torch.float32)
+
+    F, n_rbf = units, 3
+    sd = {"data_mean": torch.tensor(0.0), "data_std": torch.tensor(2.5),
+          "element_refs.property_offset": rand(len(elements)).double(),
+          "model.bond_expansion.rbf.cutoff": torch.tensor(4.0),
+          "model.tensor_embedding.emb.weight": rand(len(elements), F),
+          "model.tensor_embedding.emb2.weight": rand(F, 2 * F), "model.tensor_embedding.emb2.bias": rand(F),
+          "model.tensor_embedding.init_norm.weight": rand(F), "model.tensor_embedding.init_norm.bias": rand(F),
+          "model.out_norm.weight": rand(3 * F), "model.out_norm.bias": rand(3 * F),
+          "model.linear.weight": rand(F, 3 * F), "model.linear.bias": rand(F)}
+    for k in (1, 2, 3):
+        sd[f"model.tensor_embedding.distance_proj{k}.weight"] = rand(F, n_rbf)
+        sd[f"model.tensor_embedding.distance_proj{k}.bias"] = rand(F)
+    for k in range(3):
+        sd[f"model.tensor_embedding.linears_tensor.{k}.weight"] = rand(F, F)
+    for k, (a, b) in enumerate([(F, 2 * F), (2 * F, 3 * F)]):
+        sd[f"model.tensor_embedding.linears_scalar.{k}.weight"] = rand(b, a)
+        sd[f"model.tensor_embedding.linears_scalar.{k}.bias"] = rand(b)
+    for layer in range(n_layers):
+        for k, (a, b) in enumerate([(n_rbf, F), (F, 2 * F), (2 * F, 3 * F)]):
+            sd[f"model.layers.{layer}.linears_scalar.{k}.weight"] = rand(b, a)
+            sd[f"model.layers.{layer}.linears_scalar.{k}.bias"] = rand(b)
+        for k in range(6):
+            sd[f"model.layers.{layer}.linears_tensor.{k}.weight"] = rand(F, F)
+    for branch in ("layers", "gates"):
+        for k, (a, b) in enumerate([(F, F), (F, F), (F, F), (F, 1)]):
+            sd[f"model.final_layer.gated.{branch}.{2 * k}.weight"] = rand(b, a)
+            sd[f"model.final_layer.gated.{branch}.{2 * k}.bias"] = rand(b)
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save(sd, path / "state.pt")
+    args = {"element_types": list(elements), "units": F, "nblocks": n_layers, "num_rbf": 32, "max_n": n_rbf,
+            "max_l": 3, "rbf_type": "SphericalBessel", "use_smooth": True, "activation_type": "swish",
+            "cutoff": 4.0, "equivariance_invariance_group": "O(3)", "is_intensive": False,
+            "include_state": False, "ntargets": 1}
+    meta = {"@class": "Potential", "kwargs": {"model": {"@class": "TensorNet", "init_args": args},
+                                              "calc_repuls": False}}
+    (path / "model.json").write_text(json.dumps(meta))
+    return sd
+
+
+def test_matgl_checkpoint_converts(tmp_path):
+    """A MatGL TensorNet directory converts weight for weight: embedding rows by Z, the gated
+    network's dense layers, the energy scale and the element references."""
+    from xnn.common.models.hub.formats import detect_format
+    from xnn.gnn.models import tensornet_foundation as tf
+    sd = _matgl_directory(tmp_path / "ckpt")
+    assert tf._is_matgl_dir(tmp_path / "ckpt") and detect_format(tmp_path / "ckpt") == "matgl"
+    assert not tf._is_matgl_dir(tmp_path)
+    model, cfg = tf.convert_directory(tmp_path / "ckpt")
+    assert model.self_pairs is False and not model.activate_features
+    assert cfg.model.extra["radial_basis"] == "smooth_bessel" and model.cutoff == 4.0
+    emb = model.tensor_embedding.emb.weight
+    for row, z in enumerate((1, 6, 8, 14)):
+        assert torch.equal(emb[z], sd["model.tensor_embedding.emb.weight"][row].to(emb.dtype))
+        assert float(model.atom_ref.weight[z, 0]) == pytest.approx(float(sd["element_refs.property_offset"][row]))
+    assert torch.equal(model.readout.gate.layers[2].weight,
+                       sd["model.final_layer.gated.gates.4.weight"].to(emb.dtype))
+    assert torch.equal(model.layers[1].linears_tensor[5].weight,
+                       sd["model.layers.1.linears_tensor.5.weight"].to(emb.dtype))
+    assert float(model.energy_scale) == pytest.approx(2.5)
+    # the 3F filter outputs: part k of feature f is MatGL's row 3 f + k, xnn's row k F + f
+    theirs = sd["model.layers.0.linears_scalar.2.weight"]
+    ours = model.layers[0].linears_scalar[2].weight
+    assert torch.equal(ours[2 * 8 + 5], theirs[3 * 5 + 2].to(ours.dtype))
+    model = model.double()
+    rebuilt = build_model(cfg.model).double()
+    rebuilt.load_state_dict(model.state_dict())
+    g = _graph(n=8, cutoff=4.0, seed=5, periodic=True)
+    g.atomic_numbers = torch.tensor([1, 6, 8, 14, 1, 6, 8, 14])
+    assert torch.allclose(rebuilt(g)["energy"], model(g)["energy"])
+
+
+def test_matgl_checkpoint_refusals(tmp_path):
+    """Architectures outside the converted ones are refused."""
+    import json
+
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path)
+    meta = json.loads((tmp_path / "model.json").read_text())
+    meta["kwargs"]["model"]["init_args"]["rbf_type"] = "Gaussian"
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError, match="radial basis"):
+        tf.convert_directory(tmp_path)
+    with pytest.raises(KeyError):
+        tf.from_foundation("tensornet-unknown")
+
+
+def test_matgl_directory_detection(tmp_path):
+    """Either file of a MatGL TensorNet directory is detected; an unreadable or foreign model.json is not."""
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path)
+    assert tf._is_matgl_dir(tmp_path / "model.json") and tf._is_matgl_dir(tmp_path / "state.pt")
+    (tmp_path / "model.json").write_text("{not json")
+    assert not tf._is_matgl_dir(tmp_path)
+    (tmp_path / "model.json").write_text('{"kwargs": {}}')
+    assert not tf._is_matgl_dir(tmp_path)
+
+
+def test_matgl_checkpoint_refusals_name_every_unconverted_piece(tmp_path):
+    """Another model class, every unconverted option at once, a per-structure energy offset (also in a
+    wrapped state dict) and a missing weight are refused."""
+    import json
+
+    from xnn.gnn.models import tensornet_foundation as tf
+    sd = _matgl_directory(tmp_path)
+    text = (tmp_path / "model.json").read_text()
+
+    meta = json.loads(text)
+    meta["kwargs"]["model"]["@class"] = "M3GNet"
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError, match="M3GNet, not a TensorNet"):
+        tf.convert_directory(tmp_path / "model.json")
+
+    meta = json.loads(text)
+    meta["kwargs"]["model"]["init_args"].update(is_intensive=True, include_state=True, ntargets=2,
+                                                activation_type="tanh")
+    meta["kwargs"]["calc_repuls"] = True
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    with pytest.raises(NotImplementedError) as err:
+        tf.convert_directory(tmp_path)
+    for piece in ("intensive target", "state features", "several targets", "repulsion term", "activation tanh"):
+        assert piece in str(err.value)
+
+    (tmp_path / "model.json").write_text(text)
+    torch.save({"state_dict": {**sd, "data_mean": torch.tensor(0.5)}}, tmp_path / "state.pt")
+    with pytest.raises(NotImplementedError, match="energy offset"):
+        tf.convert_directory(tmp_path)
+
+    torch.save({k: v for k, v in sd.items() if k != "model.layers.1.linears_tensor.5.weight"},
+               tmp_path / "state.pt")
+    with pytest.raises(KeyError, match="layers.1.linears_tensor.5.weight"):
+        tf.convert_directory(tmp_path / "state.pt")
+
+
+def test_matgl_checkpoint_loads_through_the_hub_and_the_foundation_cache(tmp_path):
+    """A local MatGL directory loads with from_pretrained, and a registered model already in the cache
+    loads with TensorNet.from_foundation in the asked dtype: the weights of the direct conversion."""
+    from xnn.common.models import from_pretrained
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path / "ckpt")
+    direct, _ = tf.convert_directory(tmp_path / "ckpt")
+    hub = from_pretrained(tmp_path / "ckpt", wrap=False, cache_dir=tmp_path / "cache")
+    assert isinstance(hub, TensorNet)
+    _same_converted_weights(hub, direct)
+
+    name = "tensornet-matpes-r2scan-2025.2"
+    _, revision = tf.FOUNDATION_MODELS[name]
+    folder = tmp_path / "models" / "matgl" / name / revision
+    _matgl_directory(folder, seed=3)
+    model = TensorNet.from_foundation(name, dtype="float64", cache_dir=tmp_path / "models")
+    assert not model.training and model.tensor_embedding.emb.weight.dtype == torch.float64
+    _same_converted_weights(model, tf.convert_directory(folder, torch.float64)[0])
+
+
+def _same_converted_weights(model, ref, species=(1, 6, 8, 14)):
+    """Every converted parameter equal; of the embedding, the rows of the checkpoint's elements (the
+    others keep their initial values)."""
+    theirs = dict(model.named_parameters())
+    for name, p in ref.named_parameters():
+        a, b = theirs[name].double(), p.double()
+        if name == "tensor_embedding.emb.weight":
+            a, b = a[list(species)], b[list(species)]
+        assert torch.equal(a, b), name
+
+
+def _matgl_fidelity(dtype):
+    path = os.environ.get("MATGL_TENSORNET_PATH")
+    if not path:
+        pytest.skip("set MATGL_TENSORNET_PATH to a MatGL TensorNet directory (model.json, state.pt)")
+    pytest.importorskip("matgl")
+    import subprocess
+    import sys
+    script = os.path.join(os.path.dirname(__file__), "tensornet_matgl_fidelity.py")
+    res = subprocess.run([sys.executable, script, path, dtype], capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    return float(res.stdout.strip().splitlines()[-1])
+
+
+def test_fidelity_vs_matgl_float64():
+    assert _matgl_fidelity("float64") < 1e-10
+
+
+def test_fidelity_vs_matgl_float32():
+    assert _matgl_fidelity("float32") < 1e-4

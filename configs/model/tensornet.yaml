@@ -7,7 +7,17 @@ n_features: 128
 n_interactions: 2
 n_rbf: 32
 extra:
+  radial_basis: expnorm         # expnorm | gaussian | bessel | smooth_bessel
+  trainable_rbf: false          # learn the basis parameters
+  activation: silu
   equivariance_group: O(3)      # SO(3) distinguishes enantiomers
-  # trainable_rbf: true
+  n_elements: 128               # embedding rows, indexed by Z
+  energy_shift: 0.0             # per-atom energy standardization
+  energy_scale: 1.0
+  readout: mlp                  # mlp | gated (gated MLP on the feature projection)
+  readout_hidden: null          # hidden widths; null: [F/2] for mlp, [F, F, F] for gated
+  self_pairs: true              # every atom is its own neighbor
   # species: [1, 6, 8]
   # atomic_energies: average    # per-element reference energies from the training set
+# The MatGL MatPES models (TensorNet.from_foundation) use:
+#   cutoff: 5.0, n_rbf: 3, radial_basis: smooth_bessel, readout: gated, self_pairs: false

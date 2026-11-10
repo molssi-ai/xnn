@@ -141,7 +141,7 @@ Captured steps and fast paths
 =============================
 Models with a fast path train through it when ``use_fast`` takes it (see
 :ref:`howto-fast-paths`). ``trainer.cuda_graph: true`` replays each training
-step as one CUDA graph for DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet.
+step as one CUDA graph for DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE.
 It needs one GPU and a single head, pads every batch to fixed sizes and drops
 the last, smaller batch of each epoch.
 

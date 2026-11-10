@@ -128,6 +128,231 @@ def test_periodic_stress():
     assert out["stress"].shape == (1, 3, 3)
 
 
+@pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"}])
+def test_blocked_message_pass_equals_one_pass(blocks):
+    """The message pass in blocks of edges (each recomputed in the backward) gives the single
+    pass's energy, forces, stress and the parameter gradient of a force loss."""
+    from xnn.gnn.models.mace import set_message_blocks
+    torch.manual_seed(0)
+    model = _build(T=2, **blocks)
+    out = {}
+    for block in ("off", 37):
+        g = _graph(n=12, periodic=True)  # the stress wrapper strains the graph it is given
+        set_message_blocks(model, block)
+        model.zero_grad()
+        model.train()
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        loss = res["energy"].sum() + (res["forces"] ** 2).sum()
+        loss.backward()
+        grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+        out[block] = (res["energy"].detach(), res["forces"].detach(), res["stress"].detach(), grads)
+    assert g.edge_index.shape[1] > 3 * 37
+    for a, b in zip(out["off"], out[37]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+
+
+def test_message_blocks_setting():
+    """"auto" stays a single pass on the CPU; a block as large as the edges is a single pass;
+    other values are refused."""
+    from xnn.gnn.models.mace import set_message_blocks
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    feats = torch.zeros(500, 8)
+    assert block._message_block_size(feats) == 0
+    set_message_blocks(model, 1000)
+    assert block.message_block == "1000" and block._message_block_size(feats) == 0
+    set_message_blocks(model, 100)
+    assert block._message_block_size(feats) == 100
+    with pytest.raises(ValueError):
+        set_message_blocks(model, "sometimes")
+
+
+def test_message_blocks_auto_size_from_free_memory(monkeypatch):
+    """"auto" on a GPU: one pass while the weights of all edges fit four times into the free memory
+    (unused plus reserved but unallocated), else blocks of a sixteenth of it, at least MIN_MESSAGE_BLOCK
+    edges; training mode stays a single pass."""
+    import xnn.gnn.models.mace as mm
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    numel = block.conv_tp.weight_numel
+
+    class Edges:
+        """The attributes the sizing reads of float32 edge features on a GPU."""
+        is_cuda = True
+        device = torch.device("cuda")
+
+        def __init__(self, n):
+            self.shape = (n, 8)
+
+        def element_size(self):
+            return 4
+
+    unused = {"bytes": 0}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (unused["bytes"], 1 << 40))
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3000)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 1000)
+    n = 10 ** 8
+    unused["bytes"] = 4 * n * numel * 4 - 2000
+    assert block._message_block_size(Edges(n)) == 0
+    unused["bytes"] = 2 * n * numel * 4 - 2000
+    assert block._message_block_size(Edges(n)) == n // 8 > mm.MIN_MESSAGE_BLOCK
+    unused["bytes"] = 0
+    assert block._message_block_size(Edges(n)) == mm.MIN_MESSAGE_BLOCK
+    assert block.train()._message_block_size(Edges(n)) == 0
+
+
+def test_select_fast_defaults_to_the_parameters():
+    """Without a tensor to go by, the fast blocks are chosen for the device and dtype of the
+    parameters: the linear maps on, the CUDA-only radial kernels off on a CPU."""
+    from xnn.common.models.fast import fast_modules
+    from xnn.gnn.fast.linear import EquivariantLinear
+    from xnn.gnn.models.blocks import RadialNet
+    model = _build(T=1).set_use_fast(True)
+    model._select_fast(10)
+    blocks = fast_modules(model)
+    assert any(isinstance(m, EquivariantLinear) and m.fast_active for m in blocks)
+    assert all(not m.fast_active for m in blocks if isinstance(m, RadialNet))
+    model.set_use_fast(False)._select_fast(10)
+    assert not any(m.fast_active for m in blocks)
+
+
+def _derivatives(module, inputs, weight, *args):
+    """Output, first derivatives with respect to the input and the weight, and the weight
+    gradient of a loss on the input derivative."""
+    out = module(*args)
+    gx, gw = torch.autograd.grad((out * out.detach().cos()).sum(), (inputs, weight), create_graph=True)
+    ggw, = torch.autograd.grad((gx ** 2).sum(), weight)
+    return out, gx, gw, ggw
+
+
+@pytest.mark.parametrize("species", [[2, 0, 4, 2, 2, 0, 4, 4, 0, 2, 4], [3] * 7])
+def test_species_tensor_product_fast_equals_reference(species):
+    """The element-grouped self-connection equals the product with the one-hot elements, with the
+    same first and second derivatives; a gradient to the elements takes the reference."""
+    from xnn.gnn.fast.linear import SpeciesTensorProduct
+    torch.manual_seed(0)
+    tp = SpeciesTensorProduct("4x0e+3x1o+2x2e+2x1o", "5x0e", "3x0e+2x1o+2x2e+1x3o")
+    y = torch.nn.functional.one_hot(torch.tensor(species), 5).double()
+    x = torch.randn(len(species), tp.irreps_in1.dim, requires_grad=True)
+    res = {}
+    for fast in (False, True):
+        tp.fast_active = fast
+        res[fast] = _derivatives(tp, x, tp.weight, x, y)
+    for a, b in zip(res[False], res[True]):
+        assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
+    plan = tp.__dict__["_plan"]
+    x_ir = plan.to_ir_mul(x.detach(), [(m, ir.dim) for m, ir in tp.irreps_in1])
+    ref = plan.to_ir_mul(res[False][0].detach(), [(m, ir.dim) for m, ir in tp.irreps_out])
+    for attrs in (y, y.clone().requires_grad_(True)):
+        assert torch.allclose(tp.ir_mul(x_ir, attrs), ref, rtol=1e-12, atol=1e-12)
+    y.requires_grad_(True)
+    gy = []
+    for fast in (False, True):
+        tp.fast_active = fast
+        gy.append(torch.autograd.grad(tp(x, y).sum(), y)[0])
+    assert torch.allclose(gy[0], gy[1], rtol=1e-12, atol=1e-12)
+
+
+def test_equivariant_linear_fast_equals_reference():
+    """The split-once linear map equals e3nn's, with the same first and second derivatives, for
+    its own weight and for a weight passed in (as a LoRA adapter does)."""
+    from xnn.gnn.fast.linear import EquivariantLinear
+    torch.manual_seed(0)
+    lin = EquivariantLinear("4x0e+3x1o+2x2e+2x1o", "3x0e+2x1o+1x3o")
+    x = torch.randn(9, lin.irreps_in.dim, requires_grad=True)
+    external = (1.5 * lin.weight.detach() + 0.1).requires_grad_(True)
+    for weight, args in ((lin.weight, (x,)), (external, (x, external))):
+        res = {}
+        for fast in (False, True):
+            lin.fast_active = fast
+            res[fast] = _derivatives(lin, x, weight, *args)
+        for a, b in zip(res[False], res[True]):
+            assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+def test_equivariant_linear_bias_paths_and_external_parameters():
+    """Bias paths stay out of the fast plan (a map with biases is not eligible) and give e3nn's values;
+    without internal weights the weights and the biases must be passed."""
+    from xnn.gnn.fast.linear import EquivariantLinear
+    torch.manual_seed(0)
+    lin = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    with torch.no_grad():
+        lin.bias.normal_()
+    ref = o3.Linear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    ref.load_state_dict(lin.state_dict())
+    assert not lin.fast_eligible and len(lin.__dict__["_plan"].paths) == 2
+    x = torch.randn(5, lin.irreps_in.dim)
+    assert torch.allclose(lin(x), ref(x), rtol=0, atol=1e-14)
+    external = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", internal_weights=False, biases=True)
+    with pytest.raises(RuntimeError, match="Weights must be provided"):
+        external(x)
+    with pytest.raises(RuntimeError, match="Biases must be provided"):
+        external(x, lin.weight)
+    assert torch.allclose(external(x, lin.weight, lin.bias), ref(x), rtol=0, atol=1e-14)
+
+
+@pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"},
+                                    {"interaction_first": "RealAgnosticInteractionBlock"}])
+def test_plain_fast_paths_equal_reference_in_mace(blocks):
+    """With the linear maps and self-connections on their fast paths, MACE gives the reference's
+    energy, forces, stress and the parameter gradient of a force loss."""
+    from xnn.gnn.fast.linear import EquivariantLinear, SpeciesTensorProduct
+    torch.manual_seed(0)
+    model = _build(T=2, **blocks)
+    out = {}
+    for fast in (False, True):
+        g = _graph(n=12, periodic=True)  # the stress wrapper strains the graph it is given
+        model.set_use_fast(fast)
+        model.zero_grad()
+        model.train()
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        loss = res["energy"].sum() + (res["forces"] ** 2).sum()
+        loss.backward()
+        grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+        out[fast] = (res["energy"].detach(), res["forces"].detach(), res["stress"].detach(), grads)
+        active = [m.fast_active for m in model.modules()
+                  if isinstance(m, (EquivariantLinear, SpeciesTensorProduct))]
+        assert len(active) == 8 and all(a == fast for a in active)
+    for a, b in zip(out[False], out[True]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+
+
+def test_fused_radial_hidden_layers_equal_the_layers():
+    """The fused hidden layers of the radial network give the layers' values, input gradient (kernel),
+    weight gradients and second derivatives with respect to the input (PyTorch backward)."""
+    import os
+    if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
+        pytest.skip("needs CUDA or Triton's interpreter")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.radial_kernels import fused_hidden
+    from xnn.gnn.models.blocks import RadialNet
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(0)
+    net = RadialNet([10, 64, 64, 64, 40], torch.nn.functional.silu).to(dev, torch.float32)
+    hidden = net._plan()[0]
+    weights = [layer.weight for layer, _, _, _ in hidden]
+    x = torch.randn(150, 10, device=dev, dtype=torch.float32, requires_grad=True)
+
+    def both():
+        return net._hidden(x), fused_hidden(x, *[layer.weight * f for layer, _, _, f in hidden])
+
+    ref, out = both()
+    assert torch.allclose(out, ref, rtol=1e-5, atol=1e-6)
+    g = torch.randn_like(out)
+    gx = [torch.autograd.grad(h, x, g)[0] for h in both()]
+    assert torch.allclose(gx[0], gx[1], rtol=1e-4, atol=1e-5)
+    grads = [torch.autograd.grad(h, [x, *weights], g) for h in both()]
+    for a, b in zip(*grads):
+        assert torch.allclose(a, b, rtol=1e-4, atol=1e-5)
+    second = []
+    for h in both():
+        d, = torch.autograd.grad(h, x, g, create_graph=True)
+        second.append(torch.autograd.grad((d ** 2).sum(), x)[0])
+    assert torch.allclose(second[0], second[1], rtol=1e-4, atol=1e-5)
+
+
 def test_pair_repulsion_runs():
     pytest.importorskip("ase")
     model = ForceStressOutput(_build(T=1, max_L=0, max_ell=2, pair_repulsion=True))

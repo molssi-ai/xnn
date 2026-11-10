@@ -2965,6 +2965,7 @@ def _cell_grad_t_000000111(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz, gx_t,
     """Tangent of ``_cell_grad`` along the arguments gx, gy, gz."""
     c = tl.load(bat_ptr + a, mask=m, other=0).to(tl.int64) * 9
     c0 = tl.min(tl.where(m, c, 2147483647), 0)
+    live = c0 != 2147483647
     same = m & (c == c0)
     other = m & (c != c0)
     si = tl.load(s_ptr + e * 3 + 0, mask=m, other=0.0).to(tl.float64)
@@ -2974,9 +2975,9 @@ def _cell_grad_t_000000111(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz, gx_t,
     vy_t = si * gy_t
     vz = si * gz
     vz_t = si * gz_t
-    tl.atomic_add(gcell_ptr + c0 + 3 * 0, tl.sum(tl.where(same, vx, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 0 + 1, tl.sum(tl.where(same, vy, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 0 + 2, tl.sum(tl.where(same, vz, 0.0), 0), sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 0, tl.sum(tl.where(same, vx, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 0 + 1, tl.sum(tl.where(same, vy, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 0 + 2, tl.sum(tl.where(same, vz, 0.0), 0), mask=live, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 0, vx, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 0 + 1, vy, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 0 + 2, vz, mask=other, sem='relaxed')
@@ -2987,9 +2988,9 @@ def _cell_grad_t_000000111(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz, gx_t,
     vy_t = si * gy_t
     vz = si * gz
     vz_t = si * gz_t
-    tl.atomic_add(gcell_ptr + c0 + 3 * 1, tl.sum(tl.where(same, vx, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 1 + 1, tl.sum(tl.where(same, vy, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 1 + 2, tl.sum(tl.where(same, vz, 0.0), 0), sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 1, tl.sum(tl.where(same, vx, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 1 + 1, tl.sum(tl.where(same, vy, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 1 + 2, tl.sum(tl.where(same, vz, 0.0), 0), mask=live, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 1, vx, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 1 + 1, vy, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 1 + 2, vz, mask=other, sem='relaxed')
@@ -3000,9 +3001,9 @@ def _cell_grad_t_000000111(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz, gx_t,
     vy_t = si * gy_t
     vz = si * gz
     vz_t = si * gz_t
-    tl.atomic_add(gcell_ptr + c0 + 3 * 2, tl.sum(tl.where(same, vx, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 2 + 1, tl.sum(tl.where(same, vy, 0.0), 0), sem='relaxed')
-    tl.atomic_add(gcell_ptr + c0 + 3 * 2 + 2, tl.sum(tl.where(same, vz, 0.0), 0), sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 2, tl.sum(tl.where(same, vx, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 2 + 1, tl.sum(tl.where(same, vy, 0.0), 0), mask=live, sem='relaxed')
+    tl.atomic_add(gcell_ptr + c0 + 3 * 2 + 2, tl.sum(tl.where(same, vz, 0.0), 0), mask=live, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 2, vx, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 2 + 1, vy, mask=other, sem='relaxed')
     tl.atomic_add(gcell_ptr + c + 3 * 2 + 2, vz, mask=other, sem='relaxed')

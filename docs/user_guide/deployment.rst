@@ -4,13 +4,15 @@
 Deployment
 **********
 
-A trained model can be served three ways. All three require the same inputs: a
-checkpoint, a model directory, a model hub name, a URL or a DOI. The three
+A trained model can be served four ways. All four take the same inputs: a
+checkpoint, a model directory, a model hub name, a URL or a DOI. The
 deployment channels are:
 
 - **ASE calculator**, which enables molecular dynamics, relaxations and analysis in Python,
 - **TorchScript file**, which is compatible with LAMMPS and other engines, with
-  no xnn installed, and 
+  no xnn installed,
+- **OpenMM force**, for OpenMM simulations, alone or as the ML part of an
+  ML/MM system, and
 - **MDI engine** which works with any MD driver that can communicate with the
   `MolSSI Driver Interface <https://github.com/MolSSI-MDI/MDI_Library>`_.
 
@@ -30,7 +32,7 @@ and dipole for models that can predict them:
 The net charge and spin multiplicity can come from ``atoms.info`` entries in an
 ASE ``*.xyz`` file. See the :ref:`howto-ase` guide for more information. On a
 GPU, ``cuda_graph=True`` replays each evaluation as one CUDA graph for
-DimeNet, DimeNet++, GemNet, PhysNet and SpookyNet, which is faster for small structures (see
+DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE, which is faster for small structures (see
 :ref:`howto-fast-paths`).
 
 TorchScript
@@ -65,6 +67,31 @@ the engine's own neighbor list instead, as the ``pair_nequip`` /
   domain-decomposed pair style.
 
 For more technical details and options, see the :ref:`howto-lammps`.
+
+OpenMM
+======
+
+.. code-block:: python
+
+   from openmmml import MLPotential
+
+   potential = MLPotential("xnn", model="mace-off23-small")       # or a checkpoint, or a model object
+   system = potential.createSystem(topology)                      # every atom with the model
+   mixed = potential.createMixedSystem(topology, mm_system, ligand_atoms)   # ML/MM
+
+- Installing xnn registers the ``"xnn"`` potential with
+  `openmm-ml <https://github.com/openmm/openmm-ml>`_.
+- OpenMM needs ``pip install openmm openmmtorch openmmml``.
+- The openmmtorch wheels need the CUDA build of torch they were built with
+  (torch 2.9 for openmmtorch 1.5). Conda-forge installs a matching pair.
+- In a mixed system, xnn models the selected atoms and the force field models
+  the rest.
+- Optional arguments: ``total_charge``, ``spin_multiplicity``, ``cutoff`` and
+  ``dtype``.
+- Without openmm-ml, :func:`~xnn.common.deploy.create_torch_force` returns the
+  force itself.
+- The force builds its neighbor list over all atom pairs. Keep the xnn region to
+  a few thousand atoms.
 
 MDI engine
 ==========
@@ -131,12 +158,13 @@ One structure on several GPUs
   model's receptive field. The results equal a single-GPU evaluation.
 - The memory per GPU falls with the number of GPUs, so a box too large for one
   GPU fits on several.
-- Models with long-range terms (Coulomb sums, LES, D4) are refused. AIMNet2
-  without its Coulomb term is supported: its charge constraint sums over all GPUs.
+- Models with long-range terms (Coulomb sums, LES, D4) are refused.
+- AIMNet2 works without its Coulomb term.
 
 Which model deploys how
 =======================
 - **ASE and MDI**: every model is supported, with or without a D3 / D4 term.
+- **OpenMM**: the models of the TorchScript export below.
 - **TorchScript / LAMMPS**: SchNet, DimeNet, GemNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2,
   SpookyNet, BAMBOO, NequIP, MACE, Allegro, CACE, AIMNet2, ANI, PhysNet and
   HDNNP, with or without a D3 / D4 term, and PM3 / PM6 / PM6-ORG / PM7.

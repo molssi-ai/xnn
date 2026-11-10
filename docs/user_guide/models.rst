@@ -282,15 +282,13 @@ structure enters the products.
      species: [1, 6, 8]
      atomic_energies: {1: -13.6, 6: -1029.9, 8: -2042.8}
 
-Other options are also available:
+Other options:
 
-- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (the smooth
-  spherical Bessel basis of `Kocer et al., AIP Adv. 10, 015021 (2020)
-  <https://doi.org/10.1063/1.5111045>`_), with ``trainable_rbf``;
-- ``activation`` and ``energy_shift`` / ``energy_scale``;
-- ``readout``: mlp (the default) or gated (a gated MLP on the feature
-  projection), with ``readout_hidden`` for its widths;
-- ``self_pairs``: whether every atom is its own neighbor (the default) or not.
+- ``radial_basis``: expnorm, gaussian, bessel or smooth_bessel (`Kocer et al.,
+  AIP Adv. 10, 015021 (2020) <https://doi.org/10.1063/1.5111045>`_).
+- ``trainable_rbf``, ``activation``, ``energy_shift`` and ``energy_scale``.
+- ``readout``: mlp (default) or gated. ``readout_hidden`` sets its widths.
+- ``self_pairs``: whether each atom is its own neighbor (default ``true``).
 
 The MatGL TensorNet foundation potentials trained on MatPES load with one call:
 
@@ -822,6 +820,27 @@ cell the term is tapered by the switch of the repulsion.
 ``configs/model/amoeba.yaml`` and ``configs/model/hippo.yaml`` list every
 option with its default.
 
+Ions
+----
+A HIPPO library can give single-atom ions three terms of their own, each a
+table keyed by the ion's atom class:
+
+- ``ionct``: the charge transfer from a partner class into the ion,
+  ``-A exp(-B R)``. It replaces HIPPO's charge transfer of every pair with
+  the ion. A partner class without a row transfers no charge to it.
+- ``mbct``: the many-body charge transfer of the ion, from a charge
+  equilibration with one hardness ratio ``x`` per ion class. Each further
+  ligand gains less, so the term grows with the number of ligands and
+  saturates. ``forward`` reports it as ``e_mbct``.
+- ``ionpair``: a pair correction ``A exp(-beta R) - C f6(beta R) / R^6``
+  with Tang-Toennies damping, added to the repulsion and the dispersion.
+
+All three take the switch of the charge transfer. In a Tinker ``.prm`` file
+they are the keywords ``ionct``, ``mbct`` and ``ionpair``, with the scale of
+the ligand weights ``mbct-c0`` (kcal/mol). They train as the groups
+``ionct``, ``mbct`` and ``ionpair``. LAMMPS has no counterpart, so such a
+library has no LAMMPS export.
+
 Molecules
 ---------
 For a molecule or cluster, every pair within ``cutoff`` interacts in full, so
@@ -937,6 +956,12 @@ is off by default.
 - Long outer steps move the atoms further between pair lists. A skin of
   about 1.5 Angstrom rebuilds them less often.
 
+A plan keeps its meshes while the cell changes. An evaluation without a plan
+picks the meshes for its own cell, so once a box grows past a mesh size the
+two energies differ by the mesh discretization. For constant pressure, set
+``pme_grid`` and ``dpme_grid``: the steps then equal fresh evaluations at
+every volume.
+
 Training and files
 ------------------
 ``trainable`` names the parameter groups to refit: the valence tables
@@ -944,7 +969,8 @@ Training and files
 ``pitors``, ``tortor``), ``vdw``, the multipoles (``charge``, ``dipole``,
 ``quadrupole``), ``polarizability``, ``thole``, the HIPPO groups
 (``chgpen``, ``chgtrn``, ``repulsion``, ``dispersion``, ``exchpol``,
-``cflux``) and ``atom_ref``. While the multipoles train, every molecule keeps
+``cflux``), the ion terms (``ionct``, ``mbct``, ``ionpair``) and
+``atom_ref``. While the multipoles train, every molecule keeps
 its total charge (``conserve_charge``), the components the library leaves
 zero by symmetry stay zero (``symmetry_mask``), and the quadrupoles stay
 symmetric and traceless. ``export_library`` writes the multipoles the model

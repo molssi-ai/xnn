@@ -40,6 +40,17 @@ from .d3_direct import (
 )
 from .d3_direct import dense_applies as _dense_applies
 
+
+def _eeq_solve(lu: Tensor, piv: Tensor, full: Tensor, rhs: Tensor) -> Tensor:
+    """A solve of the EEQ system ``full`` (factor ``lu, piv``) as the reference makes it: the LU solution in float64,
+    and in float32 the solution refined with float64 residuals (:func:`~xnn.common.models.eeq.lu_solve_implicit`),
+    without which the charges of a few hundred atoms drift by 1e-4 e. The system is symmetric, so the adjoint
+    solves take the same factor."""
+    if full.dtype == torch.float32:
+        from ..eeq import lu_solve_implicit
+        return lu_solve_implicit(lu, piv, full, rhs, 1)
+    return torch.linalg.lu_solve(lu, piv, rhs)
+
 #: Most atoms of a molecule for the dense path (every pair and triangle of atoms in one compiled call).
 DENSE_ATOMS = 2048
 _TORCH = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
@@ -208,8 +219,8 @@ def d4_direct(term, data):
         full[m, :m] = 1.0
         lu, piv = torch.linalg.lu_factor(full)
         rhs = torch.cat([x[members], qtot[g].reshape(1)]).unsqueeze(1)
-        q[members] = torch.linalg.lu_solve(lu, piv, rhs)[:m, 0]
-        systems.append((g, members, periodic, "dense", (lu, piv, leaves + (a_graph,) if periodic else None)))
+        q[members] = _eeq_solve(lu, piv, full, rhs)[:m, 0]
+        systems.append((g, members, periodic, "dense", (lu, piv, full, leaves + (a_graph,) if periodic else None)))
     neutral = float(term.s9) != 0.0
     alpha, dacn, daq, alpha0, dalpha0 = _alpha(term, z, cn, q, neutral)
     # two-body sum: every directed edge gives half its pair energy to its center
@@ -282,8 +293,8 @@ def d4_direct(term, data):
             with torch.no_grad():
                 lam, _ = system.solve_augmented(gq[members], gq.new_zeros(()), "adjoint")
         else:
-            lu, piv, leaves = payload
-            lam = torch.linalg.lu_solve(lu, piv, torch.cat([gq[members], gq.new_zeros(1)]).unsqueeze(1))[:m, 0]
+            lu, piv, full, leaves = payload
+            lam = _eeq_solve(lu, piv, full, torch.cat([gq[members], gq.new_zeros(1)]).unsqueeze(1))[:m, 0]
         c = cn_eeq[members]
         sc = torch.sqrt(c + term.eeq_cn_reg)
         graw[members] = lam * term.eeq_kcnchi[z[members]] * (1.0 / sc - c / (2.0 * sc ** 3)) * dcap[members]
@@ -437,7 +448,7 @@ def _dense_terms(st: _Setting, pos: Tensor, edge_index: Tensor, z: Tensor, upper
             .index_put((own, own), eeq_eta[z] + math.sqrt(2.0 / math.pi) / eeq_rad[z])
             .index_put((own, n + batch), torch.ones_like(x)).index_put((n + batch, own), torch.ones_like(x)))
     lu, piv = torch.linalg.lu_factor(full)
-    q = torch.linalg.lu_solve(lu, piv, torch.cat([x, qtot.to(dt)])[:, None])[:n, 0]
+    q = _eeq_solve(lu, piv, full, torch.cat([x, qtot.to(dt)])[:, None])[:n, 0]
     alpha, dacn, daq, alpha0, dalpha0 = _alpha_of(refcn, ngw, nref, zeff, hardness, refq, refalpha, st.wf, st.ga,
                                                   st.gc, st.max_ngw, z, cn, q, st.s9 != 0.0)
     # two-body: the energy, its slope in the distance (h) and in each atom's polarizabilities
@@ -487,7 +498,7 @@ def _dense_terms(st: _Setting, pos: Tensor, edge_index: Tensor, z: Tensor, upper
         p3 = torch.where(in3, 0.5 * tri / torch.where(in3, c6n, torch.ones_like(c6n)), zero)
         gcn = gcn.index_add(0, i, p3 * dc6i).index_add(0, j, p3 * dc6j)
     # the charges: adjoint solve, the EEQ coordination numbers and the Coulomb matrix (dE = -lambda^T dA q)
-    lam = torch.linalg.lu_solve(lu, piv, torch.cat([gq, gq.new_zeros(num_graphs)])[:, None])[:n, 0]
+    lam = _eeq_solve(lu, piv, full, torch.cat([gq, gq.new_zeros(num_graphs)])[:, None])[:n, 0]
     graw = lam * eeq_kcnchi[z] * (1.0 / sc - cn_eeq / (2.0 * sc ** 3)) * dcap
     da = (2.0 * gam / math.sqrt(math.pi) * torch.exp(-gam * gam * r2) - erf_r / r) / r
     h = h - torch.where(same, (lam[i] * q[j] + lam[j] * q[i]) * da, zero)

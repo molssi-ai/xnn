@@ -190,7 +190,7 @@ def test_fast_support_needs_cuda():
     assert not supported(torch.device("cpu"), torch.float64)
 
 
-def _check_fast_contract(device):
+def _check_fast_contract(device, fast_mode=False):
     from e3nn import o3
 
     from xnn.gnn.fast.allegro_kernels import contract
@@ -211,8 +211,8 @@ def _check_fast_contract(device):
     with torch.no_grad():
         expect = torch.einsum("kij,ri,rj->rk", tp._w3j, x, y)
         assert torch.allclose(f(x, y), expect, rtol=0, atol=1e-13)
-    assert torch.autograd.gradcheck(f, (x, y))
-    assert torch.autograd.gradgradcheck(f, (x, y))
+    assert torch.autograd.gradcheck(f, (x, y), fast_mode=fast_mode)
+    assert torch.autograd.gradgradcheck(f, (x, y), fast_mode=fast_mode)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
@@ -227,7 +227,7 @@ def test_fast_contract_gradients_interpreted():
     if os.environ.get("TRITON_INTERPRET") != "1":
         pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
     pytest.importorskip("triton")
-    _check_fast_contract("cpu")
+    _check_fast_contract("cpu", fast_mode=True)
 
 
 def test_fast_contract_unused_components_interpreted():

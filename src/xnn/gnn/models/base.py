@@ -16,6 +16,8 @@ of one family lives in a shared module of that family).
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 from e3nn import o3
 from torch import Tensor, nn
@@ -196,8 +198,11 @@ class EquivariantGNN(GNNPotential):
         return self
 
     @torch.jit.unused
-    def _select_fast(self, num_edges: int, like: Tensor) -> None:
-        """Switch the fast-path blocks on or off for one evaluation."""
+    def _select_fast(self, num_edges: int, like: Optional[Tensor] = None) -> None:
+        """Switch the fast-path blocks on or off for one evaluation on tensors on the device and
+        in the dtype of ``like`` (by default the model's parameters)."""
+        if like is None:
+            like = self.atom_ref.weight
         import xnn.gnn.fast as fast
         from xnn.common.models.fast import fast_modules, select
         blocks = self.__dict__.get("_fast_blocks")

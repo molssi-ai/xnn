@@ -30,7 +30,17 @@ from xnn.common import cpu_kernels
 from xnn.common.models.csr import compressed, narrow_keys
 
 from . import amoeba_ladders as lad
-from .amoeba_ewald import mesh_irfftn, mesh_rfftn
+from .amoeba_ewald import (
+    _first_stencils,
+    _mesh_sizes,
+    _second_stencils,
+    _stencil_coefficients,
+    _stencil_potential,
+    mesh_convolve,
+    mesh_irfftn,
+    mesh_layout,
+    mesh_rfftn,
+)
 from .geometry import TINY
 
 # the per-atom parameter table: one row per atom, these columns
@@ -176,11 +186,13 @@ def _ewald6(R, inv, a, inv_sqrt_pi):
 
 @triton.jit
 def _switch(R, taper, cutoff):
-    """The quintic switch, one below the taper and zero beyond the cutoff."""
-    x = (R - taper) / (cutoff - taper)
-    x = tl.minimum(tl.maximum(x, 0.0), 1.0)
+    """The quintic switch, one below the taper and zero beyond the cutoff; a step at the cutoff when
+    the taper is not below it (``switching``)."""
+    width = cutoff - taper
+    u = (R - taper) / tl.where(width > 0.0, width, 1.0)
+    x = tl.minimum(tl.maximum(u, 0.0), 1.0)
     x3 = x * x * x
-    return 1.0 - x3 * (10.0 - 15.0 * x + 6.0 * x * x)
+    return tl.where(width > 0.0, 1.0 - x3 * (10.0 - 15.0 * x + 6.0 * x * x), tl.where(R < cutoff, 1.0, 0.0))
 
 
 @triton.jit
@@ -778,12 +790,14 @@ def _field_adjoint(gx, gy, gz, C1, dx, dy, dz, qxx, qxy, qxz, qyy, qyz, qzz, rx,
 
 @triton.jit
 def _switch_derivative(R, taper, cutoff):
-    """``d S / d R`` of the quintic switch."""
-    x = (R - taper) / (cutoff - taper)
-    inside = (x > 0.0) & (x < 1.0)
-    x = tl.minimum(tl.maximum(x, 0.0), 1.0)
+    """``d S / d R`` of the quintic switch (zero for a step)."""
+    width = cutoff - taper
+    w = tl.where(width > 0.0, width, 1.0)
+    u = (R - taper) / w
+    inside = (u > 0.0) & (u < 1.0) & (width > 0.0)
+    x = tl.minimum(tl.maximum(u, 0.0), 1.0)
     y = 1.0 - x
-    return tl.where(inside, -30.0 * x * x * y * y / (cutoff - taper), 0.0 * R)
+    return tl.where(inside, -30.0 * x * x * y * y / w, 0.0 * R)
 
 
 @triton.jit
@@ -3229,14 +3243,57 @@ def adjoint(grid_a: Tensor, coef_a: Tensor, order_a: int, grid_b: Tensor, coef_b
     return gu
 
 
+def _mesh_eager(u: Tensor, sources: tuple, influence: Tensor, batch: Tensor, mesh: list, groups: int, order: int,
+                deriv: int, P: int, jac: Optional[Tensor] = None):
+    """The mesh pass of :class:`MeshConvolution` (``jac`` ``None``: the fractional components ``(c0, c1, c2)``,
+    the ``(N, 10)`` output) or of :class:`MeshConvolutionCartesian` (Cartesian ``(q, d, Q)`` with the
+    structures' Jacobians ``jac``: the potential, its gradient and its Hessian) in differentiable eager
+    operations on the ``(N, p^3)`` stencils of the reference: the gradients of a second derivative."""
+    w, dw, d2w, flat, _ = mesh_layout(u, _mesh_sizes(mesh, u.dtype, u.device), batch, mesh, P)
+    st = _first_stencils(w, dw)
+    if max(order, deriv) >= 2:
+        st.update(_second_stencils(w, dw, d2w))
+    if jac is not None:
+        q, d, Q = sources
+        jn = jac.index_select(0, batch)
+        # the spread kernel symmetrizes the quadrupoles
+        Qs = None if (Q is None or order < 2) else 0.5 * (Q + Q.transpose(1, 2))
+        coeff = _stencil_coefficients(q, d if order >= 1 else None, Qs, jn, st)
+        phi, dphi, hess = _stencil_potential(mesh_convolve(coeff, flat, influence, groups, mesh), jn, st, deriv >= 2)
+        return (phi, dphi if deriv >= 1 else torch.zeros_like(dphi),
+                hess if deriv >= 2 else phi.new_zeros(phi.shape[0], 3, 3))
+    c0, c1, c2 = sources
+    coeff = c0[:, None] * st["0"]
+    if order >= 1:
+        coeff = coeff + c1[:, 0:1] * st["0_"] + c1[:, 1:2] * st["1_"] + c1[:, 2:3] * st["2_"]
+    if order >= 2:
+        for j, key in enumerate(("00", "11", "22", "01", "02", "12")):
+            coeff = coeff + c2[:, j:j + 1] * st[key]
+    at = mesh_convolve(coeff, flat, influence, groups, mesh)
+    keys = ("0",) + (("0_", "1_", "2_") if deriv >= 1 else ()) + (("00", "11", "22", "01", "02", "12") if deriv >= 2
+                                                                  else ())
+    out = torch.stack([(at * st[key]).sum(-1) for key in keys], 1)
+    return torch.nn.functional.pad(out, (0, 10 - len(keys)))
+
+
+def _twice(ctx, inputs: tuple, outputs, grad_outputs, rest: int) -> tuple:
+    """The gradients of the inputs a mesh function needs, through its eager pass ``outputs`` (graphs kept)."""
+    wanted = [x for x, need in zip(inputs, ctx.needs_input_grad) if need]
+    pairs = [(y, g) for y, g in zip(outputs, grad_outputs) if y.requires_grad]
+    found = iter(torch.autograd.grad([y for y, _ in pairs], wanted, [g for _, g in pairs], create_graph=True,
+                                     allow_unused=True))
+    return tuple(next(found) if need else None for need in ctx.needs_input_grad[:len(inputs)]) + (None,) * rest
+
+
 class MeshConvolution(torch.autograd.Function):
     """The mesh potential of multipole sources at the atoms that carry them, differentiable
-    once with respect to the scaled coordinates, the components and the influence function.
+    with respect to the scaled coordinates, the components and the influence function.
 
     ``out = gather(irfftn(rfftn(spread(c)) * influence), deriv)``. The backward spreads the
     incoming gradient as a source set, convolves it to the adjoint potential ``psi``, and reads
     the gradient of the sources off ``psi`` and the gradient of the coordinates off both grids
-    with one adjoint kernel: a second convolution, no autograd through the splines.
+    with one adjoint kernel: a second convolution, no autograd through the splines. A backward
+    that keeps its graph (a second derivative) runs the eager stencils of the reference instead.
     """
 
     @staticmethod
@@ -3246,15 +3303,17 @@ class MeshConvolution(torch.autograd.Function):
         spectrum = mesh_rfftn(grid)
         pot = mesh_irfftn(spectrum * influence, (k1, k2, k3))
         out = gather(pot, w, start, batch, mesh, deriv)
-        ctx.save_for_backward(c0, c1, c2, influence, w, start, batch, spectrum, pot)
+        ctx.save_for_backward(u, c0, c1, c2, influence, w, start, batch, spectrum, pot)
         ctx.mesh, ctx.groups, ctx.order, ctx.deriv = list(mesh), int(groups), int(order), int(deriv)
         return out
 
     @staticmethod
-    @once_differentiable
     def backward(ctx, g_out):
-        c0, c1, c2, influence, w, start, batch, spectrum, pot = ctx.saved_tensors
+        u, c0, c1, c2, influence, w, start, batch, spectrum, pot = ctx.saved_tensors
         mesh, order, deriv = ctx.mesh, ctx.order, ctx.deriv
+        if torch.is_grad_enabled():
+            out = _mesh_eager(u, (c0, c1, c2), influence, batch, mesh, ctx.groups, order, deriv, int(w.shape[-1]))
+            return _twice(ctx, (u, c0, c1, c2, influence), (out,), (g_out,), 7)
         k1, k2, k3 = mesh
         g_out = g_out.contiguous()
         g_grid = spread(g_out[:, 0].contiguous(), g_out[:, 1:4].contiguous(), g_out[:, 4:10].contiguous(), w, start,
@@ -3701,7 +3760,8 @@ def adjoint_cartesian(grid_a: Tensor, set_a: tuple, order_a: int, grid_b: Tensor
 class MeshConvolutionCartesian(torch.autograd.Function):
     """:class:`MeshConvolution` on Cartesian multipoles ``q``, ``d``, ``Q`` with the Jacobians of the
     structures applied inside the kernels; returns the potential, its gradient and its Hessian at the
-    atoms. The Jacobians are constants (no cell gradient): the fractional function serves the stress."""
+    atoms. The Jacobians are constants (no cell gradient): the fractional function serves the stress.
+    A backward that keeps its graph runs the eager stencils of the reference, as there."""
 
     @staticmethod
     def forward(ctx, u, q, d, Q, jac, batch, influence, w, start, mesh, groups, order, deriv):
@@ -3710,19 +3770,23 @@ class MeshConvolutionCartesian(torch.autograd.Function):
         spectrum = mesh_rfftn(grid)
         pot = mesh_irfftn(spectrum * influence, (k1, k2, k3))
         phi, grad, hess = gather_cartesian(pot, jac, w, start, batch, mesh, deriv)
-        ctx.save_for_backward(q, d if d is not None else q, Q if Q is not None else q, jac, batch, influence, w, start,
-                              spectrum, pot)
+        ctx.save_for_backward(u, q, d if d is not None else q, Q if Q is not None else q, jac, batch, influence, w,
+                              start, spectrum, pot)
         ctx.mesh, ctx.groups, ctx.order, ctx.deriv = list(mesh), int(groups), int(order), int(deriv)
         ctx.has = (d is not None, Q is not None)
         return phi, grad, hess
 
     @staticmethod
-    @once_differentiable
     def backward(ctx, g_phi, g_grad, g_hess):
-        q, d, Q, jac, batch, influence, w, start, spectrum, pot = ctx.saved_tensors
+        u, q, d, Q, jac, batch, influence, w, start, spectrum, pot = ctx.saved_tensors
         mesh, order, deriv = ctx.mesh, ctx.order, ctx.deriv
         k1, k2, k3 = mesh
         has_d, has_Q = ctx.has
+        if torch.is_grad_enabled():
+            sources = (q, d if has_d else None, Q.reshape(-1, 3, 3) if has_Q else None)
+            out = _mesh_eager(u, sources, influence, batch, mesh, ctx.groups, order, deriv, int(w.shape[-1]), jac)
+            g_out = tuple(torch.zeros_like(x) if g is None else g for g, x in zip((g_phi, g_grad, g_hess), out))
+            return _twice(ctx, (u, q, d, Q, jac, batch, influence), out, g_out, 6)
         # the spread kernel symmetrizes its quadrupole sources: the Hessian gradient goes in as it is
         g_set = (g_phi.contiguous(), g_grad if deriv >= 1 else None, g_hess if deriv >= 2 else None)
         g_grid = spread_cartesian(g_set[0], g_set[1], g_set[2], jac, w, start, batch, mesh, ctx.groups, deriv)

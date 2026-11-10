@@ -527,6 +527,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    D4 dispersion, block by block: reproducing the reference `dftd4` with `xnn` <nb/fidelity_checks/common/d4/d4_verification>
    D3 dispersion, block by block: reproducing the reference `simple-dftd3` with `xnn` <nb/fidelity_checks/common/d3/d3_verification>
    BAMBOO fidelity check: `xnn` vs the original `bytedance/bamboo`, block by block <nb/fidelity_checks/hybnn/bamboo/bamboo_verification>
+   ByteFF and ByteFF-Pol fidelity check: `xnn` vs byteff2 and its patched OpenMM <nb/fidelity_checks/hybnn/byteff/byteff_verification>
    OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/ffnn/opls/opls_verification>
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
    AMBER (ff94): verifying the `xnn` implementation against LAMMPS, AmberTools and the 1995 paper <nb/fidelity_checks/ffnn/amber/amber_verification>
@@ -546,6 +547,30 @@ gradients and timings.
    :caption: Parity checks
 
    MACE and NequIP on cuEquivariance: parity with the reference <nb/parity_checks/gnn/mace/mace_cueq_parity>
+   NequIP fast path: parity with the reference <nb/parity_checks/gnn/nequip/nequip_parity>
+   Allegro fast path: parity with the reference <nb/parity_checks/gnn/allegro/allegro_parity>
+   CACE fast path: parity with the reference <nb/parity_checks/gnn/cace/cace_parity>
+   AIMNet2 fast path: parity with the reference <nb/parity_checks/gnn/aimnet2/aimnet2_parity>
    Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>
+   LES fast path: parity with the reference <nb/parity_checks/common/les/les_parity>
+   PM3, PM6, PM6-ORG and PM7 fast path: parity with the reference <nb/parity_checks/sqmnn/nddo/nddo_parity>
    SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
    PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>
+   DimeNet and DimeNet++ fast path: parity with the reference <nb/parity_checks/gnn/dimenet/dimenet_parity>
+   GemNet fast path: parity with the reference <nb/parity_checks/gnn/gemnet/gemnet_parity>
+   TensorNet fast path: parity with the reference <nb/parity_checks/gnn/tensornet/tensornet_parity>
+   ANI fast path: parity with the reference <nb/parity_checks/dnn/ani/ani_parity>
+   PhysNet fast path: parity with the reference <nb/parity_checks/dnn/physnet/physnet_parity>
+   HDNNP fast paths: parity with the reference (GPU and CPU) <nb/parity_checks/dnn/hdnnp/hdnnp_parity>
+   SE(3) steerable CNN and 3D CNN fast path: parity with the reference <nb/parity_checks/cnn/se3cnn/se3cnn_parity>
+   Spherical CNN fast path: parity with the reference <nb/parity_checks/cnn/s2cnn/s2cnn_parity>
+   OPLS, AMBER, CHARMM and DREIDING fast paths: parity with the reference <nb/parity_checks/ffnn/classical/classical_parity>
+   ReaxFF and ReaxFF-nn fast paths: parity with the reference <nb/parity_checks/ffnn/reaxff/reaxff_parity>
+   AMOEBA fast paths: parity with the reference <nb/parity_checks/ffnn/amoeba/amoeba_parity>
+   HIPPO fast paths: parity with the reference <nb/parity_checks/ffnn/hippo/hippo_parity>
+   ET fast path: parity with the reference <nb/parity_checks/trfnn/et/et_parity>
+   Equiformer fast path: parity with the reference <nb/parity_checks/trfnn/equiformer/equiformer_parity>
+   EquiformerV2 fast path: parity with the reference <nb/parity_checks/trfnn/equiformer_v2/equiformer_v2_parity>
+   BAMBOO fast path: parity with the reference <nb/parity_checks/hybnn/bamboo/bamboo_parity>
+   SpookyNet fast paths: parity with the reference <nb/parity_checks/hybnn/spookynet/spookynet_parity>
+   ByteFF and ByteFF-Pol fast paths and export: parity with the reference <nb/parity_checks/hybnn/byteff/byteff_parity>

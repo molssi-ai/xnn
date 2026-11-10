@@ -54,6 +54,7 @@ from xnn.common.models.registry import register_model
 
 from ..fast import ConvTensorProduct, _cueq
 from ..fast import symmetric_contraction as _fast_sc
+from ..fast.linear import EquivariantLinear, SpeciesTensorProduct
 from ..featurizers import DISTANCE_TRANSFORMS
 from .base import EquivariantGNN
 from .blocks import SCALAR_ACTIVATIONS as GATES
@@ -644,8 +645,8 @@ class _EquivariantProductBasis(nn.Module):
         self.symmetric_contractions = SymmetricContraction(
             node_feats_irreps, target_irreps, correlation, num_elements
         )
-        self.linear = o3.Linear(target_irreps, target_irreps,
-                                internal_weights=True, shared_weights=True)
+        self.linear = EquivariantLinear(target_irreps, target_irreps,
+                                        internal_weights=True, shared_weights=True)
 
     def forward(self, node_feats: Tensor, sc: Optional[Tensor], node_attrs: Tensor) -> Tensor:
         """Apply the symmetric contraction, linear map, and optional residual.
@@ -670,6 +671,45 @@ class _EquivariantProductBasis(nn.Module):
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
         return self.linear(node_feats)
+
+
+#: The "auto" message pass goes in blocks of edges when the per-edge weights of all edges, times
+#: this, exceed the free GPU memory (the weights, their gradient and the radial network's layers).
+MESSAGE_BLOCK_HEADROOM = 4
+#: A block's weights take this fraction (1 / share) of the free memory.
+MESSAGE_BLOCK_SHARE = 16
+#: The smallest block, in edges.
+MIN_MESSAGE_BLOCK = 1 << 16
+
+
+def set_message_blocks(model: nn.Module, block="auto") -> nn.Module:
+    """Choose how the MACE interactions of ``model`` run their message pass.
+
+    In blocks of edges, the per-edge weights of the radial network exist for one
+    block at a time, and each block is evaluated again in the backward pass: the
+    largest structure that fits on a GPU grows by the size of those weights,
+    at the cost of a second forward pass over the edges. The results equal the
+    single pass up to the order of the node sums.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Any model; every MACE interaction in it is set.
+    block : int or str
+        ``"auto"`` (default): in evaluation on a GPU, blocks only when the weights
+        of all edges would not fit in the free memory; ``"off"``: never; an
+        integer: blocks of that many edges.
+
+    Returns
+    -------
+    torch.nn.Module
+        ``model``.
+    """
+    value = str(block) if block in ("auto", "off") else str(int(block))
+    for module in model.modules():
+        if isinstance(module, _InteractionBase):
+            module.message_block = value
+    return model
 
 
 class _InteractionBase(nn.Module):
@@ -704,6 +744,7 @@ class _InteractionBase(nn.Module):
     """
 
     avg_num_neighbors: float
+    message_block: str
 
     def __init__(self, node_attrs_irreps, node_feats_irreps, edge_attrs_irreps,
                  edge_feats_irreps, target_irreps, hidden_irreps, avg_num_neighbors,
@@ -728,8 +769,8 @@ class _InteractionBase(nn.Module):
         the output ``linear`` map, and the ``reshape`` module. Sets
         ``irreps_out`` to ``target_irreps``.
         """
-        self.linear_up = o3.Linear(self.node_feats_irreps, self.node_feats_irreps,
-                                   internal_weights=True, shared_weights=True)
+        self.linear_up = EquivariantLinear(self.node_feats_irreps, self.node_feats_irreps,
+                                           internal_weights=True, shared_weights=True)
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             self.node_feats_irreps, self.edge_attrs_irreps, self.target_irreps
         )
@@ -742,9 +783,85 @@ class _InteractionBase(nn.Module):
             F.silu,
         )
         self.irreps_out = self.target_irreps
-        self.linear = o3.Linear(irreps_mid, self.irreps_out,
-                                internal_weights=True, shared_weights=True)
+        self.linear = EquivariantLinear(irreps_mid, self.irreps_out,
+                                        internal_weights=True, shared_weights=True)
         self.reshape = _ReshapeIrreps(self.irreps_out)
+        self.message_block = "auto"
+
+    def _messages(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor, edge_index: Tensor,
+                  n_atoms: int) -> Tensor:
+        """The convolution's node sums, with the per-edge weights of the radial network (on the
+        fast path in the kernel's column order); in blocks of edges where
+        :func:`set_message_blocks` or the free memory asks for it."""
+        if not torch.jit.is_scripting():
+            block = self._message_block_size(edge_feats)
+            if block > 0:
+                return self._messages_blocked(feats, edge_attrs, edge_feats, edge_index, n_atoms, block)
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
+        return self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                 weights_mapped=w_scale is not None)
+
+    @torch.jit.unused
+    def _output_fast(self, pooled: Tensor, scale: float, divisor: Optional[Tensor],
+                     node_attrs: Optional[Tensor]) -> Optional[Tensor]:
+        """The block's reshaped output from the fast linear maps, ``None`` when they are off: the
+        linear map (``scale`` folded into it, then ``divisor``) and, given ``node_attrs``, the
+        self-connection, both written component-major, so that the ``(N, mul, dim)`` output is a
+        view of the layout the symmetric contraction's kernel reads."""
+        if not (isinstance(self.linear, EquivariantLinear) and self.linear.fast_active
+                and len({mul for mul, _ in self.irreps_out}) == 1
+                and (node_attrs is None or self.skip_tp.fast_active)):
+            return None
+        out = self.linear.scaled_ir_mul(pooled, scale)
+        if divisor is not None:
+            out = out / divisor
+        if node_attrs is not None:
+            out = self.skip_tp.ir_mul(out, node_attrs)
+        return out.view(out.shape[0], -1, self.irreps_out[0].mul).transpose(1, 2)
+
+    @torch.jit.unused
+    def _message_block_size(self, edge_feats: Tensor) -> int:
+        """Edges per block of the message pass, ``0`` for one pass over all edges."""
+        setting = self.message_block
+        n_edges = int(edge_feats.shape[0])
+        if setting == "off":
+            return 0
+        if setting != "auto":
+            size = int(setting)
+            return size if size < n_edges else 0
+        if self.training or not edge_feats.is_cuda:
+            return 0
+        weights = n_edges * self.conv_tp.weight_numel * edge_feats.element_size()
+        device = edge_feats.device
+        free = (torch.cuda.mem_get_info(device)[0] + torch.cuda.memory_reserved(device)
+                - torch.cuda.memory_allocated(device))
+        if weights * MESSAGE_BLOCK_HEADROOM <= free:
+            return 0
+        return max(MIN_MESSAGE_BLOCK, int(free / (MESSAGE_BLOCK_SHARE * self.conv_tp.weight_numel
+                                                  * edge_feats.element_size())))
+
+    @torch.jit.unused
+    def _messages_blocked(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor,
+                          edge_index: Tensor, n_atoms: int, block: int) -> Tensor:
+        """The message pass in blocks of edges, each block's weights recomputed in the backward,
+        so that the weights of all edges are never held at once. In training mode the blocks keep
+        their weights: a recomputed block does not survive the second backward of a force loss."""
+        from torch.utils.checkpoint import checkpoint
+
+        def part(f: Tensor, a: Tensor, e: Tensor, idx: Tensor) -> Tensor:
+            w_index, w_scale = self.conv_tp.weight_map(e)
+            w = self.conv_tp_weights(e, w_index, w_scale)
+            return self.conv_tp.conv(f, a, w, idx, n_atoms, weights_mapped=w_scale is not None)
+
+        out: Optional[Tensor] = None
+        recompute = torch.is_grad_enabled() and not self.training
+        for e0 in range(0, int(edge_feats.shape[0]), block):
+            args = (feats, edge_attrs[e0:e0 + block], edge_feats[e0:e0 + block],
+                    edge_index[:, e0:e0 + block])
+            y = checkpoint(part, *args, use_reentrant=False) if recompute else part(*args)
+            out = y if out is None else out + y
+        return out
 
 
 class RealAgnosticInteractionBlock(_InteractionBase):
@@ -758,7 +875,7 @@ class RealAgnosticInteractionBlock(_InteractionBase):
 
     def _setup(self):
         """Build the skip tensor product acting on the output message."""
-        self.skip_tp = o3.FullyConnectedTensorProduct(
+        self.skip_tp = SpeciesTensorProduct(
             self.irreps_out, self.node_attrs_irreps, self.irreps_out
         )
 
@@ -787,11 +904,11 @@ class RealAgnosticInteractionBlock(_InteractionBase):
         """
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
-        # per-edge TP weights; on the fast path in the kernel's column order
-        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
-        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
-                                   weights_mapped=w_scale is not None)
+        pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0 / self.avg_num_neighbors, None, node_attrs)
+            if fused is not None:
+                return fused, None
         pooled = self.linear(pooled) / self.avg_num_neighbors
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -809,7 +926,7 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
 
     def _setup(self):
         """Build the skip tensor product acting on the input node features."""
-        self.skip_tp = o3.FullyConnectedTensorProduct(
+        self.skip_tp = SpeciesTensorProduct(
             self.node_feats_irreps, self.node_attrs_irreps, self.hidden_irreps
         )
 
@@ -841,11 +958,11 @@ class RealAgnosticResidualInteractionBlock(_InteractionBase):
         # product basis to add downstream
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
-        # per-edge TP weights; on the fast path in the kernel's column order
-        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
-        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
-                                   weights_mapped=w_scale is not None)
+        pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0 / self.avg_num_neighbors, None, None)
+            if fused is not None:
+                return fused, residual
         pooled = self.linear(pooled) / self.avg_num_neighbors
         return self.reshape(pooled), residual
 
@@ -892,13 +1009,13 @@ class RealAgnosticDensityInteractionBlock(RealAgnosticInteractionBlock):
         """
         n_atoms = node_feats.shape[0]
         feats = self.linear_up(node_feats)
-        # per-edge TP weights; on the fast path in the kernel's column order
-        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
-        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
-                                   weights_mapped=w_scale is not None)
+        pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0, density + 1.0, node_attrs)
+            if fused is not None:
+                return fused, None
         pooled = self.linear(pooled) / (density + 1.0)
         # the self-connection acts on the aggregated message here, not the input
         pooled = self.skip_tp(pooled, node_attrs)
@@ -945,13 +1062,13 @@ class RealAgnosticDensityResidualInteractionBlock(RealAgnosticResidualInteractio
         n_atoms = node_feats.shape[0]
         residual = self.skip_tp(node_feats, node_attrs)
         feats = self.linear_up(node_feats)
-        # per-edge TP weights; on the fast path in the kernel's column order
-        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
-        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         density = scatter_sum(torch.tanh(self.density_fn(edge_feats) ** 2),
                               edge_index[1], n_atoms)
-        pooled = self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
-                                   weights_mapped=w_scale is not None)
+        pooled = self._messages(feats, edge_attrs, edge_feats, edge_index, n_atoms)
+        if not torch.jit.is_scripting():
+            fused = self._output_fast(pooled, 1.0, density + 1.0, None)
+            if fused is not None:
+                return fused, residual
         pooled = self.linear(pooled) / (density + 1.0)
         return self.reshape(pooled), residual
 
@@ -1473,6 +1590,17 @@ class MACE(EquivariantGNN):
         :meth:`node_features_energy`; the deploy wrappers call this)."""
         out = self.node_features_energy(atomic_numbers, edge_index, edge_vec)
         return out[1]
+
+    def index_planner(self):
+        """The planner of a captured evaluation or training step: MACE needs nothing beyond its
+        edges (:class:`~xnn.common.train.graphed.NoIndexPlanner`)."""
+        from xnn.common.train.graphed import NoIndexPlanner
+        return NoIndexPlanner()
+
+    def receptive_field(self) -> float:
+        """The distance (Angstrom) beyond which atoms no longer change an atom's
+        energy: one cutoff per interaction."""
+        return len(self.interactions) * float(self.cutoff)
 
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> dict[str, Tensor]:

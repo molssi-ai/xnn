@@ -14,14 +14,17 @@ synchronization inside the evaluation, as the captured training step of
   is captured again; a model bound to one system (its planner's ``pads`` false) is replayed on the
   batch as it comes, and captured again when the counts change.
 
-The replay runs the same reference code as an ordinary evaluation, so the results agree with it to
-round-off.
+The replay runs the same code as an ordinary evaluation, so the results agree with it to round-off.
+On large structures the launches are a small part of an evaluation and the padding costs more than
+they do: after each capture a few replays are timed against ordinary evaluations, and the faster
+is kept (the graph and its memory are released when the ordinary evaluation wins).
 """
 from __future__ import annotations
 
 import copy
 import dataclasses
 import math
+import time
 from typing import Dict, Optional
 
 import torch
@@ -48,6 +51,9 @@ class GraphedEvaluation:
         Absolute headroom added to the counts, by default 64.
     warmup : int, optional
         Ordinary evaluations before the capture, by default 2.
+    trial : int, optional
+        Replays and ordinary evaluations timed against each other after a capture, by default
+        3; the faster is used until the input outgrows the counts. ``0`` always replays.
 
     Raises
     ------
@@ -55,8 +61,10 @@ class GraphedEvaluation:
         If the model has no index planner.
     """
 
-    def __init__(self, model: nn.Module, margin: float = 1.05, slack: int = 64, warmup: int = 2):
+    def __init__(self, model: nn.Module, margin: float = 1.05, slack: int = 64, warmup: int = 2,
+                 trial: int = 3):
         self.model = model
+        self.trial = int(trial)
         self.planner = index_planner(model)
         if self.planner is None:
             raise ValueError("a captured evaluation needs a model with index_planner() "
@@ -74,6 +82,8 @@ class GraphedEvaluation:
         self.inputs: Dict[str, Tensor] = {}
         self.out: Optional[Dict[str, Tensor]] = None
         self.steps = 0
+        # "replay" or "eager" once the trial after a capture has run
+        self.mode: Optional[str] = None
 
     def _fits(self, n: int, e: int, b: int, sizes: Dict[str, int]) -> bool:
         cap = self.cap
@@ -140,6 +150,33 @@ class GraphedEvaluation:
             if t is not None:
                 setattr(self.static, f.name, t)
 
+    def _ordinary(self, graph: AtomicGraph) -> Dict[str, Tensor]:
+        """An ordinary evaluation of ``graph`` (no padding, no graph)."""
+        out = self.model(graph)
+        return {k: v.detach() for k, v in out.items() if isinstance(v, Tensor)}
+
+    def _choose(self, graph: AtomicGraph) -> str:
+        """Time ``trial`` replays against as many ordinary evaluations of ``graph``."""
+        def timed(run):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(self.trial):
+                run(graph)
+            torch.cuda.synchronize()
+            return time.perf_counter() - t0
+        t_replay = timed(self._replayed)
+        try:
+            t_ordinary = timed(self._ordinary)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            return "replay"
+        return "replay" if t_replay <= t_ordinary else "eager"
+
+    def _release(self) -> None:
+        """Drop the graph and its static inputs (and with them its memory pool)."""
+        self.graph, self.static, self.inputs, self.out = None, None, {}, None
+        torch.cuda.empty_cache()
+
     def __call__(self, graph: AtomicGraph) -> Dict[str, Tensor]:
         """The model's outputs for ``graph`` (one structure or a batch), without the padding.
 
@@ -154,6 +191,23 @@ class GraphedEvaluation:
             The outputs of ``model(graph)``, per atom for the real atoms and per structure for the
             real structures (copies: the next call overwrites the captured ones).
         """
+        if self.mode == "eager":
+            return self._ordinary(graph)
+        try:
+            out = self._replayed(graph)
+        except torch.OutOfMemoryError:
+            # the graph's memory pool comes on top of an ordinary evaluation's: evaluate ordinarily
+            self._release()
+            self.mode = "eager"
+            return self._ordinary(graph)
+        if self.graph is not None and self.mode is None:
+            self.mode = "replay" if self.trial <= 0 else self._choose(graph)
+            if self.mode == "eager":
+                self._release()
+        return out
+
+    def _replayed(self, graph: AtomicGraph) -> Dict[str, Tensor]:
+        """The evaluation of ``graph`` padded, through the captured graph once it is recorded."""
         n, b = graph.num_nodes, graph.num_graphs
         self._load(self._pad(graph))
         device = self.static.pos.device

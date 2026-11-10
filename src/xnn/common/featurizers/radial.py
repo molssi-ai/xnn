@@ -1,6 +1,7 @@
 """Radial basis expansions shared across families: the Gaussian basis of SchNet and the
 equivariant GNN edge embedding, the exponential-normal basis of the TorchMD-Net models
-(ET, TensorNet) and BAMBOO, and the Bessel basis of NequIP, MACE, DimeNet and the Equiformers."""
+(ET, TensorNet) and BAMBOO, the Bessel basis of NequIP, MACE, DimeNet and the Equiformers, and
+the smooth spherical Bessel basis of Kocer, Mason and Erturk."""
 from __future__ import annotations
 
 import math
@@ -267,8 +268,81 @@ class BesselRBF(nn.Module):
         return self.norm * torch.sin(self.freqs * r / self.cutoff) / r
 
 
+def smooth_bessel_coefficients(n_rbf: int, cutoff: float) -> Tensor:
+    """The smooth spherical Bessel functions as combinations of ``sinc(k r / cutoff)``.
+
+    Kocer, Mason and Erturk (AIP Adv. 10, 015021, 2020) sum two neighboring
+    zeroth-order spherical Bessel functions,
+    ``f_n(r) = a_n [j0((n+1) pi r / rc) + j0((n+2) pi r / rc)]`` with
+    ``a_n = (-1)^n sqrt(2) pi (n+1) (n+2) / (rc^1.5 sqrt((n+1)^2 + (n+2)^2))``,
+    so that each vanishes with its first derivative at ``rc``, and
+    orthogonalize them: ``g_0 = f_0`` and
+    ``g_n = (f_n + sqrt(e_n / d_(n-1)) g_(n-1)) / sqrt(d_n)``, with
+    ``e_n = n^2 (n+2)^2 / (4 (n+1)^4 + 1)``, ``d_0 = 1`` and
+    ``d_n = 1 - e_n / d_(n-1)``. Here ``j0(k pi r / rc) = sinc(k r / rc)``.
+
+    Parameters
+    ----------
+    n_rbf : int
+        Number of functions ``g_0 ... g_(n_rbf - 1)``.
+    cutoff : float
+        The cutoff radius ``rc``.
+
+    Returns
+    -------
+    Tensor
+        Float64 coefficients ``(n_rbf, n_rbf + 1)``: ``g_n(r)`` is the sum over
+        ``k`` of the entry ``[n, k - 1]`` times ``sinc(k r / rc)``, ``k = 1 ... n_rbf + 1``.
+    """
+    f = torch.zeros(n_rbf, n_rbf + 1, dtype=torch.float64)
+    for n in range(n_rbf):
+        a = ((-1) ** n * math.sqrt(2.0) * math.pi / cutoff ** 1.5 * (n + 1) * (n + 2)
+             / math.sqrt((n + 1) ** 2 + (n + 2) ** 2))
+        f[n, n] = f[n, n + 1] = a
+    g = torch.zeros_like(f)
+    d_previous = 1.0
+    for n in range(n_rbf):
+        if n == 0:
+            g[0] = f[0]
+            continue
+        e = n ** 2 * (n + 2) ** 2 / (4.0 * (n + 1) ** 4 + 1.0)
+        d = 1.0 - e / d_previous
+        g[n] = (f[n] + math.sqrt(e / d_previous) * g[n - 1]) / math.sqrt(d)
+        d_previous = d
+    return g
+
+
+class SmoothBesselRBF(nn.Module):
+    """Smooth spherical Bessel radial basis (Kocer, Mason and Erturk 2020).
+
+    ``n_rbf`` orthogonal combinations of zeroth-order spherical Bessel
+    functions that vanish smoothly at ``cutoff`` (see
+    :func:`smooth_bessel_coefficients`); no envelope is applied. The
+    coefficients stay exact in float64 through casts and loads.
+
+    Parameters
+    ----------
+    n_rbf : int, optional
+        Number of basis functions, by default 3.
+    cutoff : float, optional
+        The cutoff radius, by default 5.0.
+    """
+
+    def __init__(self, n_rbf: int = 3, cutoff: float = 5.0):
+        super().__init__()
+        from ..models.constants import register_constant
+        self.n_rbf = int(n_rbf)
+        self.cutoff = float(cutoff)
+        register_constant(self, "coefficients", smooth_bessel_coefficients(self.n_rbf, self.cutoff))
+
+    def forward(self, r: Tensor) -> Tensor:
+        """Expand distances ``(...)`` into the basis ``(..., n_rbf)``."""
+        k = torch.arange(1, self.n_rbf + 2, dtype=r.dtype, device=r.device)
+        return torch.sinc(r.unsqueeze(-1) * k / self.cutoff) @ self.coefficients.t()
+
+
 #: The radial bases a model with a choice of basis can draw from (:func:`make_radial_basis`).
-RADIAL_BASES = ("gaussian", "bessel", "expnorm")
+RADIAL_BASES = ("gaussian", "bessel", "expnorm", "smooth_bessel")
 
 
 def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool = False, *,
@@ -285,8 +359,10 @@ def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool = Fa
         ``[0, cutoff]``, the center spacing as width unless ``gamma`` is
         given; the centers stay exact in float64 through casts and loads),
         ``"bessel"`` (:class:`BesselRBF`, ``prefactor * sin(n pi r / cutoff) / r``)
-        or ``"expnorm"`` (:class:`ExpNormalSmearing`, Gaussians in
-        ``exp(-r)`` with their own cosine envelope).
+        ``"expnorm"`` (:class:`ExpNormalSmearing`, Gaussians in
+        ``exp(-r)`` with their own cosine envelope) or ``"smooth_bessel"``
+        (:class:`SmoothBesselRBF`, orthogonal spherical Bessel combinations that
+        vanish smoothly at the cutoff).
     n_rbf : int
         Number of basis functions.
     cutoff : float
@@ -312,7 +388,7 @@ def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool = Fa
     if name not in RADIAL_BASES:
         raise ValueError(f"radial_basis must be one of {RADIAL_BASES}, got {name!r}")
     from ..config.options import warn_ignored
-    given = {"trainable": trainable and name == "gaussian",
+    given = {"trainable": trainable and name in ("gaussian", "smooth_bessel"),
              "gamma": gamma is not None and name != "gaussian",
              "prefactor": prefactor is not None and name != "bessel"}
     warn_ignored(f"radial basis {name!r}", [k for k, ignored in given.items() if ignored])
@@ -325,4 +401,6 @@ def make_radial_basis(name: str, n_rbf: int, cutoff: float, trainable: bool = Fa
         return basis
     if name == "bessel":
         return BesselRBF(n_rbf, cutoff, trainable=trainable, prefactor=prefactor)
+    if name == "smooth_bessel":
+        return SmoothBesselRBF(n_rbf, cutoff)
     return ExpNormalSmearing(n_rbf, cutoff, trainable=trainable)

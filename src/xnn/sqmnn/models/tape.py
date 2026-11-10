@@ -172,23 +172,40 @@ class _TapeOps:
         return v.tape.op(out, lambda g: v._acc((g / out)[..., None] * v.v))
 
     @classmethod
-    def angle(cls, pos: Node, i, j, k) -> Node:
-        """Angles ``i-j-k``: ``acos`` of the cosine from the three squared distances (clamped to [-1, 1])."""
+    def _cosine(cls, pos: Node, i, j, k):
+        """The cosines of the angles ``i-j-k`` from the three squared distances, and the function adding the
+        gradient of the positions from that of the cosines."""
         x = pos.v
         pi, pj, pk = x[i], x[j], x[k]
         dij, djk, dik = pi - pj, pj - pk, pi - pk
         a, b, d = (dij * dij).sum(-1), (djk * djk).sum(-1), (dik * dik).sum(-1)
         s = np.sqrt(a * b)
         c = 0.5 * (a + b - d) / s
-        cc = np.clip(c, -1.0, 1.0)
 
-        def back(g):
-            with np.errstate(divide="ignore", invalid="ignore"):
-                gc = np.where((c >= -1.0) & (c <= 1.0), -g / np.sqrt(1.0 - cc * cc), 0.0)
+        def back(gc):
             ga, gb, gd = gc * (0.5 / s - c / (2.0 * a)), gc * (0.5 / s - c / (2.0 * b)), -gc * 0.5 / s
             ta, tb, td = (2.0 * ga)[..., None] * dij, (2.0 * gb)[..., None] * djk, (2.0 * gd)[..., None] * dik
             cls._scatter(pos, (i, j, j, k, i, k), (ta, -ta, tb, -tb, td, -td))
-        return pos.tape.op(np.arccos(cc), back)
+        return c, back
+
+    @classmethod
+    def cos_angle(cls, pos: Node, i, j, k) -> Node:
+        """Cosines of the angles ``i-j-k`` from the three squared distances (clamped to [-1, 1], the derivatives
+        those of the formula)."""
+        c, back = cls._cosine(pos, i, j, k)
+        return pos.tape.op(np.clip(c, -1.0, 1.0), back)
+
+    @classmethod
+    def angle(cls, pos: Node, i, j, k) -> Node:
+        """Angles ``i-j-k``: ``acos`` of the cosine from the three squared distances (clamped to [-1, 1]); a
+        zero derivative at 0 and pi, where it is infinite."""
+        c, back = cls._cosine(pos, i, j, k)
+        cc = np.clip(c, -1.0, 1.0)
+
+        def grad(g):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                back(np.where(np.abs(c) < 1.0, -g / np.sqrt(1.0 - cc * cc), 0.0))
+        return pos.tape.op(np.arccos(cc), grad)
 
     @classmethod
     def dihedral(cls, pos: Node, i, j, k, l) -> Node:
@@ -345,6 +362,13 @@ class _TapeOps:
         return np.nonzero(mask)[0]
 
 
+def safe_acos(c: Tensor) -> Tensor:
+    """``acos`` of cosines in [-1, 1] with a zero derivative at -1 and 1, where it is infinite (a straight
+    angle has no direction to move in, and the terms flat there would give 0 * inf)."""
+    inside = c.detach().abs() < 1.0
+    return torch.where(inside, torch.acos(torch.where(inside, c, torch.zeros_like(c))), torch.acos(c.detach()))
+
+
 class TorchOps:
     """The same operations on PyTorch tensors (masks and indices are tensors); a TorchScript class, so that the
     terms written against it compile."""
@@ -380,13 +404,19 @@ class TorchOps:
         pi = 3.141592653589793
         return torch.where(a < 0, -pi - a, pi - a)
 
-    def angle(self, pos: Tensor, i: Tensor, j: Tensor, k: Tensor) -> Tensor:
-        """Angles ``i-j-k``: ``acos`` of the cosine from the three squared distances (clamped to [-1, 1])."""
+    def cos_angle(self, pos: Tensor, i: Tensor, j: Tensor, k: Tensor) -> Tensor:
+        """Cosines of the angles ``i-j-k`` from the three squared distances (clamped to [-1, 1])."""
         pi_, pj, pk = pos[i], pos[j], pos[k]
         dij, djk, dik = pi_ - pj, pj - pk, pi_ - pk
         a, b, d = (dij * dij).sum(-1), (djk * djk).sum(-1), (dik * dik).sum(-1)
         c = 0.5 * (a + b - d) / torch.sqrt(a * b)
-        return torch.acos(c.clamp(-1.0, 1.0))
+        # rounding can put a straight angle's cosine past -1: the value is clamped, the derivatives are the formula's
+        return c + (c.clamp(-1.0, 1.0) - c).detach()
+
+    def angle(self, pos: Tensor, i: Tensor, j: Tensor, k: Tensor) -> Tensor:
+        """Angles ``i-j-k``: ``acos`` of the cosine from the three squared distances (clamped to [-1, 1]); a
+        zero derivative at 0 and pi, where it is infinite."""
+        return safe_acos(self.cos_angle(pos, i, j, k))
 
     def dihedral(self, pos: Tensor, i: Tensor, j: Tensor, k: Tensor, l: Tensor) -> Tensor:
         """Dihedrals ``i-j-k-l`` in ``[0, 2 pi)`` from the projections on the ``j-k`` axis; 0 for projections

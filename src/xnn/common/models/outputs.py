@@ -155,9 +155,14 @@ class ForceStressOutput(nn.Module):
             strain = torch.zeros((data.num_graphs, 3, 3), dtype=data.pos.dtype,
                                  device=data.pos.device, requires_grad=True)
             sym = 0.5 * (strain + strain.transpose(-1, -2))
-            # displace positions and cell by the strain of their structure
-            data.pos = data.pos + torch.einsum(
-                "ni,nij->nj", data.pos, sym[data.batch])
+            # displace positions and cell by the strain of their structure; one structure needs
+            # no gather, and a batch gathers with index_select (an advanced-index gather sorts
+            # every atom's index in its backward and adds them all into the same entries)
+            if data.num_graphs == 1:
+                data.pos = data.pos + data.pos @ sym[0]
+            else:
+                data.pos = data.pos + torch.einsum(
+                    "ni,nij->nj", data.pos, sym.index_select(0, data.batch))
             data.cell = data.cell + torch.einsum("bij,bjk->bik", data.cell, sym)
 
         if self.compute_forces:

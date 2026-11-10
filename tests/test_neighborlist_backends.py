@@ -39,6 +39,15 @@ def water_like(n=60, seed=0):
     return torch.rand((n, 3), generator=g, dtype=torch.float64) * L, torch.eye(3, dtype=torch.float64) * L
 
 
+def test_edges_grouped_by_sender():
+    """The cell list's edges come in sender order, each edge with its own shift."""
+    pos, cell = water_like(200)
+    pbc = torch.ones(3, dtype=torch.bool)
+    edge_index, shifts = build_neighbor_list(pos, 6.0, cell, pbc)
+    assert bool((edge_index[0][1:] >= edge_index[0][:-1]).all())
+    assert edge_set(edge_index, shifts) == edge_set(*reference(pos, 6.0, cell, pbc))
+
+
 @pytest.mark.parametrize("cutoff", [3.0, 6.0])
 def test_periodic_matches_the_reference(cutoff):
     pos, cell = water_like()
