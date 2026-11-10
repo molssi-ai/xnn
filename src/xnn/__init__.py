@@ -42,6 +42,6 @@ from . import (  # noqa: F401
            trfnn,
 )
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 __all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybnn", "sqmnn", "trfnn",
            "__version__"]
