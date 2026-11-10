@@ -126,7 +126,9 @@ def polarization_system(pos: Tensor, q: Tensor, alpha: Tensor, damp: Tensor, sca
     d1 = (1.0 - ex) * off
     d2 = torch.clamp(1.0 - (1.0 + u) * ex, min=floor) * off
     inv3 = 1.0 / (r * r2)
-    field = -((scale * d1 * inv3) * q.unsqueeze(-2)).unsqueeze(-1).mul(d).sum(-2)
+    # a contraction over the second atom: inductor's GPU kernels for the derivatives of the broadcast product
+    # summed over that axis are wrong for batches of more than one structure (torch 2.11), the einsum's are not
+    field = -torch.einsum("bij,bijk->bik", (scale * d1 * inv3) * q.unsqueeze(-2), d)
     inv5 = inv3 / r2
     tensor = (r2 * d1 * inv5).unsqueeze(-1).unsqueeze(-1) * torch.eye(3, dtype=pos.dtype, device=pos.device) \
         - (3.0 * d2 * inv5).unsqueeze(-1).unsqueeze(-1) * d.unsqueeze(-1) * d.unsqueeze(-2)

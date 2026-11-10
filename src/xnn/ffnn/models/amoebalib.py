@@ -65,6 +65,9 @@ DEFAULT_SETTINGS = {
     "rep-12-scale": 0.0, "rep-13-scale": 0.0, "rep-14-scale": 1.0, "rep-15-scale": 1.0,
     "disp-12-scale": 0.0, "disp-13-scale": 0.0, "disp-14-scale": 1.0, "disp-15-scale": 1.0,
 }
+# settings of the ion terms, read and written only by libraries that have them: the c0 of the
+# many-body charge transfer's ligand weights (kcal/mol)
+ION_SETTINGS = {"mbct-c0": 0.229 / 4.184}
 _FLAG_SETTINGS = ("d-equals-p",)
 _TEXT_SETTINGS = ("forcefield", "opbendtype", "vdwtype", "radiusrule", "radiustype",
                   "radiussize", "epsilonrule", "polarization")
@@ -149,6 +152,19 @@ class AmoebaLibrary:
         polarization of Chung *et al.* (2022): the spring constant ``k``, the
         orbital size ``q`` and exponent ``zeta`` of the overlap, and the use
         flag (a pair takes part when either of its classes is used).
+    ionct : dict[str, dict]
+        ``"ion-partner" -> {"a", "b"}`` (kcal/mol, 1/Angstrom): the charge
+        transfer from the partner class into the ion class,
+        ``-a exp(-b R)``, which replaces HIPPO's charge transfer of every pair
+        with the ion (a pair without a row has none).
+    mbct : dict[str, dict]
+        ``ion -> {"x"}``: the many-body charge transfer of the ion, the ratio
+        of its hardness to its partners' (``mbct-c0`` setting: the scale of
+        the ligand weights, kcal/mol).
+    ionpair : dict[str, dict]
+        ``"ion-partner" -> {"a", "c", "beta"}`` (kcal/mol, kcal/mol
+        Angstrom^6, 1/Angstrom): a pair correction
+        ``a exp(-beta R) - c f6(beta R) / R^6`` with Tang-Toennies damping.
     bndcflux : dict[str, dict]
         ``"A-B" -> {"j"}``: the bond charge flux, in e/Angstrom, moved from
         A to B per unit stretch of the key as stored.
@@ -181,6 +197,9 @@ class AmoebaLibrary:
     repulsion: dict = field(default_factory=dict)
     dispersion: dict = field(default_factory=dict)
     exchpol: dict = field(default_factory=dict)
+    ionct: dict = field(default_factory=dict)
+    mbct: dict = field(default_factory=dict)
+    ionpair: dict = field(default_factory=dict)
     bndcflux: dict = field(default_factory=dict)
     angcflux: dict = field(default_factory=dict)
     settings: dict = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
@@ -213,7 +232,7 @@ class AmoebaLibrary:
 
     def setting(self, key: str):
         """A force-field setting, with the Tinker default when unset."""
-        return self.settings.get(key, DEFAULT_SETTINGS.get(key))
+        return self.settings.get(key, DEFAULT_SETTINGS.get(key, ION_SETTINGS.get(key)))
 
     def scale(self, term: str, sep: int) -> float:
         """The scale factor of ``term`` (``"vdw"``, ``"mpole"``, ``"polar"``,
@@ -341,6 +360,7 @@ _SETTING_DESCRIPTIONS = {
     "delta-halgren": "Buffering constant delta of the 14-7 form",
     "gamma-halgren": "Buffering constant gamma of the 14-7 form",
     "dielectric": "Dielectric constant", "polarization": "Induced dipole model (MUTUAL or DIRECT)",
+    "mbct-c0": "Scale of the ligand weights of the many-body charge transfer (kcal/mol)",
     "d-equals-p": "Use one set of induced dipoles for energy and gradient (HIPPO)",
 }
 
@@ -369,7 +389,9 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
     lib.references = [r.text for r in ff.references_used()]
     settings = dict(DEFAULT_SETTINGS)
     for key, value in lib.metadata.items():
-        if key in DEFAULT_SETTINGS:
+        if key in ION_SETTINGS:
+            settings[key] = float(value)
+        elif key in DEFAULT_SETTINGS:
             if key in _FLAG_SETTINGS:
                 settings[key] = str(value).strip().lower() in ("1", "true", "yes", "1.0")
             elif key in _TEXT_SETTINGS:
@@ -383,7 +405,8 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
              "torsion_fourier", "pi_torsion", "torsion_torsion", "buffered_14-7",
              "buffered_14-7_pair", "atomic_multipole", "polarizability",
              "charge_penetration", "charge_transfer", "pauli_repulsion",
-             "damped_dispersion", "exchange_polarization", "bond_charge_flux", "angle_charge_flux"}
+             "damped_dispersion", "exchange_polarization", "bond_charge_flux", "angle_charge_flux",
+             "ion_charge_transfer", "ion_many_body_charge_transfer", "ion_pair_correction"}
     unsupported = {k: len(v) for k, v in ff.sections.items() if k not in known}
     if unsupported:
         if strict:
@@ -473,6 +496,13 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
     for key, row in ff.rows("exchange_polarization").items():
         lib.exchpol[key[0]] = {"spring": float(row.values["spring"]), "size": float(row.values["size"]),
                                "damp": float(row.values["damp"]), "use": float(row.values["use"]) != 0.0}
+    for key, row in ff.rows("ion_charge_transfer").items():
+        lib.ionct[key_of(key)] = {"a": float(row.values["A"]), "b": float(row.values["B"])}
+    for key, row in ff.rows("ion_many_body_charge_transfer").items():
+        lib.mbct[key[0]] = {"x": float(row.values["x"])}
+    for key, row in ff.rows("ion_pair_correction").items():
+        lib.ionpair[key_of(key)] = {"a": float(row.values["A"]), "c": float(row.values["C"]),
+                                    "beta": float(row.values["beta"])}
     for key, row in ff.rows("bond_charge_flux").items():
         lib.bndcflux[key_of(key)] = {"j": float(row.values["J"])}
     for key, row in ff.rows("angle_charge_flux").items():
@@ -512,8 +542,12 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
         if key in _FLAG_SETTINGS:
             value = "true" if value else "false"
         meta_rows.append(((key,), {"Value": value, "Description": _SETTING_DESCRIPTIONS.get(key, "")}))
+    if lib.mbct:
+        for key, default in ION_SETTINGS.items():
+            meta_rows.append(((key,), {"Value": lib.settings.get(key, default),
+                                       "Description": _SETTING_DESCRIPTIONS.get(key, "")}))
     for key, value in lib.metadata.items():
-        if key not in DEFAULT_SETTINGS and key not in ("ff_form", "charges"):
+        if key not in DEFAULT_SETTINGS and key not in ION_SETTINGS and key not in ("ff_form", "charges"):
             meta_rows.append(((key,), {"Value": value, "Description": ""}))
 
     def thetas(v):
@@ -644,6 +678,27 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
             sections.append(make_section(kind, label, ["I"], cols,
                                          [((c,), {k: float(x) for k, x in conv(v).items()}) for c, v in table.items()],
                                          version=version))
+    if lib.ionct:
+        sections.append(make_section(
+            "ion_charge_transfer", label, ["Ion", "J"], ["A", "B"],
+            [(_split_key(k), {"A": float(v["a"]), "B": float(v["b"])}) for k, v in lib.ionct.items()],
+            version=version,
+            annotations=["E = -A exp(-B R) on every pair of the ion with an atom of class J, the charge moving "
+                         "from J into the ion; it replaces HIPPO's charge transfer of every pair with the ion"]))
+    if lib.mbct:
+        sections.append(make_section(
+            "ion_many_body_charge_transfer", label, ["Ion"], ["x"],
+            [((c,), {"x": float(v["x"])}) for c, v in lib.mbct.items()], version=version,
+            annotations=["E = x [(1 + x) S2 / (1 + x n_eff) - sum_j c_j] per ion, c_j the ion's charge transfer "
+                         "with molecule j, w_j = c_j / (c_j + mbct-c0), n_eff = sum_j w_j,",
+                         "S2 = sum_j c_j + sum_(j != k) w_j w_k sqrt(c_j c_k)"]))
+    if lib.ionpair:
+        sections.append(make_section(
+            "ion_pair_correction", label, ["Ion", "J"], ["A", "C", "beta"],
+            [(_split_key(k), {"A": float(v["a"]), "C": float(v["c"]), "beta": float(v["beta"])})
+             for k, v in lib.ionpair.items()], version=version,
+            annotations=["E = A exp(-beta R) - C f6(beta R) / R^6, f6(x) = 1 - exp(-x) sum_(k <= 6) x^k / k!, "
+                         "on every pair of the ion with an atom of class J"]))
     if lib.bndcflux:
         sections.append(make_section(
             "bond_charge_flux", label, ["I", "J"], ["J"],
@@ -776,6 +831,9 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
         if not w:
             continue
         kw = w[0].lower()
+        if kw in ION_SETTINGS:
+            settings[kw] = float(w[1])
+            continue
         if kw in DEFAULT_SETTINGS:
             if kw in _FLAG_SETTINGS:
                 settings[kw] = True
@@ -878,6 +936,14 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
             # class, spring constant, size, damping exponent, whether the class is damped
             lib.exchpol[w[1]] = {"spring": float(w[2]), "size": float(w[3]), "damp": float(w[4]),
                                  "use": len(w) < 6 or int(float(w[5])) != 0}
+        elif kw == "ionct":
+            # ion class, partner class, A (kcal/mol), B (1/Angstrom)
+            lib.ionct[_fmt_key(w[1:3])] = {"a": float(w[3]), "b": float(w[4])}
+        elif kw == "mbct":
+            lib.mbct[w[1]] = {"x": float(w[2])}
+        elif kw == "ionpair":
+            # ion class, partner class, A (kcal/mol), C (kcal/mol Angstrom^6), beta (1/Angstrom)
+            lib.ionpair[_fmt_key(w[1:3])] = {"a": float(w[3]), "c": float(w[4]), "beta": float(w[5])}
         elif kw == "bndcflux":
             key, flipped = _canonical(w[1:3], "like_bond")
             j = float(w[3])
@@ -1163,6 +1229,20 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
             out += _banner(title)
             for c, v in table.items():
                 out.append(f"{kw:<10} {classes[c]:7d} {'':>7} {fmt(v)}")
+    if lib.ionct or lib.mbct or lib.ionpair:
+        out += [*_banner("Ion Charge Transfer Parameters")]
+        if lib.mbct:
+            out.append(f"mbct-c0 {float(lib.setting('mbct-c0')):14.8f}")
+        for k, v in lib.ionct.items():
+            a, b = _split_key(k)
+            out.append(f"ionct {classes[a]:9d} {classes[b]:4d} {'':>4} {v['a']:14.8f} {v['b']:14.8f}")
+        for c, v in lib.mbct.items():
+            out.append(f"mbct {classes[c]:10d} {'':>9} {v['x']:14.8f}")
+        for k, v in lib.ionpair.items():
+            a, b = _split_key(k)
+            out.append(f"ionpair {classes[a]:7d} {classes[b]:4d} {'':>3} {v['a']:14.8f} {v['c']:14.8f} "
+                       f"{v['beta']:14.8f}")
+        out.append("")
     if lib.bndcflux or lib.angcflux:
         out += [*_banner("Charge Flux Parameters")]
         for k, v in lib.bndcflux.items():

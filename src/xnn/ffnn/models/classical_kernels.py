@@ -382,6 +382,8 @@ def _cell_grad(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz):
     structure in one add per entry, other lanes one by one (float64 ``g``)."""
     c = tl.load(bat_ptr + a, mask=m, other=0).to(tl.int64) * 9
     c0 = tl.min(tl.where(m, c, 2147483647), 0)
+    # a block without an active lane has no cell: its sums (zero) must not go to the sentinel address
+    live = c0 != 2147483647
     same = m & (c == c0)
     other = m & (c != c0)
     for i in tl.static_range(3):
@@ -389,9 +391,9 @@ def _cell_grad(gcell_ptr, bat_ptr, s_ptr, a, e, m, gx, gy, gz):
         vx = si * gx
         vy = si * gy
         vz = si * gz
-        tl.atomic_add(gcell_ptr + c0 + 3 * i, tl.sum(tl.where(same, vx, 0.0), 0), sem="relaxed")
-        tl.atomic_add(gcell_ptr + c0 + 3 * i + 1, tl.sum(tl.where(same, vy, 0.0), 0), sem="relaxed")
-        tl.atomic_add(gcell_ptr + c0 + 3 * i + 2, tl.sum(tl.where(same, vz, 0.0), 0), sem="relaxed")
+        tl.atomic_add(gcell_ptr + c0 + 3 * i, tl.sum(tl.where(same, vx, 0.0), 0), mask=live, sem="relaxed")
+        tl.atomic_add(gcell_ptr + c0 + 3 * i + 1, tl.sum(tl.where(same, vy, 0.0), 0), mask=live, sem="relaxed")
+        tl.atomic_add(gcell_ptr + c0 + 3 * i + 2, tl.sum(tl.where(same, vz, 0.0), 0), mask=live, sem="relaxed")
         tl.atomic_add(gcell_ptr + c + 3 * i, vx, mask=other, sem="relaxed")
         tl.atomic_add(gcell_ptr + c + 3 * i + 1, vy, mask=other, sem="relaxed")
         tl.atomic_add(gcell_ptr + c + 3 * i + 2, vz, mask=other, sem="relaxed")

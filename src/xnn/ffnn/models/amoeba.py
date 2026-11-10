@@ -131,7 +131,7 @@ _ZONLY_SWITCH = math.sqrt(0.5)
 # trainable parameter groups of the force field, and the model-level ones
 _GROUPS = ("vdw", "bond", "angle", "strbnd", "urey", "opbend", "torsion", "pitors", "tortor",
            "charge", "dipole", "quadrupole", "polarizability", "thole", "chgpen", "chgtrn",
-           "repulsion", "dispersion", "exchpol", "cflux")
+           "repulsion", "dispersion", "exchpol", "cflux", "ionct", "mbct", "ionpair")
 _MODEL_GROUPS = ("atom_ref",)
 
 
@@ -962,6 +962,84 @@ def exchange_polarization_tensor(r_vec: Tensor, R: Tensor, i_: Tensor, k_: Tenso
     return K.view(N, 3, 3)
 
 
+def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor, N: int, B: int, params,
+              ionct_index: Tensor, ionpair_index: Tensor, mbct_index: Tensor, mbct_atom: Tensor, mbct_slot: Tensor,
+              molecule: Tensor, n_molecules: int, c0: float, with_ct: bool = True,
+              with_pair: bool = True) -> dict:
+    """The terms of single-atom ions per atom, from the pairs ``i_``, ``k_`` at the distances ``R``
+    with ``weight`` (zero drops a pair), every pair taken both ways, the ion first.
+
+    * ``ct``: the charge transfer from a partner class into an ion class, ``-A exp(-B R)``
+      (``ionct``, parameters ``ionct_a``, ``ionct_b``);
+    * ``rep`` and ``disp``: the two parts of the pair correction ``A exp(-beta R) - C f6(beta R) /
+      R^6``, ``f6`` the Tang-Toennies damping (``ionpair``);
+    * ``mbct``: the many-body charge transfer of every ion with an ``x`` (``mbct``), on the ion. With
+      ``c_j`` the size of its charge transfer with molecule ``j``, ``w_j = c_j / (c_j + c0)``,
+      ``n = sum_j w_j`` and ``S2 = sum_j c_j + sum_(j != k) w_j w_k sqrt(c_j c_k)``, it is
+      ``x [(1 + x) S2 / (1 + x n) - sum_j c_j]``: the charge equilibration of an ion with one
+      hardness, ``x`` the ratio of its hardness to its ligands', less the pairwise sum.
+
+    The pair energies go half to each atom. The batch holds ``B`` structures of ``N / B`` atoms;
+    ``mbct_atom`` lists the ions of the many-body term in one structure, ``mbct_slot`` gives every
+    atom of a structure its place among them (-1 for the others) and ``molecule`` its molecule, one
+    of ``n_molecules``. ``with_ct`` and ``with_pair`` say whether the library has rows of the two
+    pair terms.
+    """
+    dtype, device = R.dtype, R.device
+    zero = torch.zeros(N, dtype=dtype, device=device)
+    none = torch.zeros_like(R)
+    out = {"ct": zero, "rep": zero, "disp": zero, "mbct": zero}
+    n = N // B
+    n_ions = int(mbct_atom.shape[0])
+    many = with_ct and n_ions > 0
+    if many:
+        # the charge transfer of every (ion, molecule) of the batch, summed over the molecule's atoms
+        summed = torch.zeros(B * n_ions * n_molecules, dtype=dtype, device=device)
+        atom = torch.arange(N, device=device)
+        structure = atom // n
+        slot, mol = mbct_slot.index_select(0, atom - structure * n), molecule.index_select(0, atom - structure * n)
+    for a, b in ((i_, k_), (k_, i_)):
+        ca, cb = cls_idx[a], cls_idx[b]
+        if with_ct:
+            row = ionct_index[ca, cb]
+            on = row >= 0
+            r = row.clamp_min(0)
+            e = torch.where(on, -params["ionct_a"][r] * torch.exp(-params["ionct_b"][r] * R), none) * weight
+            out["ct"] = out["ct"] + scatter_sum(0.5 * e, a, N) + scatter_sum(0.5 * e, b, N)
+            if many:
+                s = slot[a]
+                key = (structure[a] * n_ions + s.clamp_min(0)) * n_molecules + mol[b]
+                summed = summed.index_add(0, key, torch.where(s >= 0, e, none))
+        if with_pair:
+            row = ionpair_index[ca, cb]
+            on = row >= 0
+            r = row.clamp_min(0)
+            # the pairs without a row (the padding of a plan among them) take a harmless distance
+            Rs = torch.where(on & (R.detach() > 0.1), R, torch.ones_like(R))
+            x = params["ionpair_beta"][r] * Rs
+            term, series = torch.ones_like(x), torch.ones_like(x)
+            for k in range(1, 7):
+                term = term * x / k
+                series = series + term
+            f6 = 1.0 - torch.exp(-x) * series
+            e_rep = torch.where(on, params["ionpair_a"][r] * torch.exp(-x), none) * weight
+            e_disp = torch.where(on, -params["ionpair_c"][r] * f6 / Rs ** 6, none) * weight
+            out["rep"] = out["rep"] + scatter_sum(0.5 * e_rep, a, N) + scatter_sum(0.5 * e_rep, b, N)
+            out["disp"] = out["disp"] + scatter_sum(0.5 * e_disp, a, N) + scatter_sum(0.5 * e_disp, b, N)
+    if many:
+        c = (-summed).clamp_min(0.0).view(B * n_ions, n_molecules)
+        w = c / (c + c0)
+        live = c.detach() > 0
+        root = torch.where(live, torch.sqrt(torch.where(live, c, torch.ones_like(c))), torch.zeros_like(c))
+        total, n_eff = c.sum(1), w.sum(1)
+        cross = (w * root).sum(1)
+        S2 = total + cross * cross - (w * w * c).sum(1)
+        atoms = mbct_atom.repeat(B) + torch.arange(B, device=device).repeat_interleave(n_ions) * n
+        x = params["mbct_x"][mbct_index[cls_idx[atoms]]]
+        out["mbct"] = zero.index_add(0, atoms, x * ((1.0 + x) * S2 / (1.0 + x * n_eff) - total))
+    return out
+
+
 def _kernels():
     """The fused pair kernels (imported on first use: they need Triton)."""
     from . import amoeba_kernels
@@ -1422,7 +1500,8 @@ class AmoebaForceField(nn.Module):
         ``"pitors"``, ``"tortor"``, ``"charge"``, ``"dipole"``,
         ``"quadrupole"``, ``"polarizability"``, ``"thole"``, ``"chgpen"``,
         ``"chgtrn"``, ``"repulsion"``, ``"dispersion"``, ``"exchpol"``,
-        ``"cflux"``; ``"all"`` unfreezes every group.
+        ``"cflux"``, ``"ionct"``, ``"mbct"``, ``"ionpair"``; ``"all"``
+        unfreezes every group.
     symmetry_mask : bool, optional
         Keep the dipole and quadrupole components that the library leaves
         zero (by the symmetry of the local frame) at zero while they train,
@@ -1616,6 +1695,39 @@ class AmoebaForceField(nn.Module):
                              persistent=False)
         self.has_exchpol = bool(lib.exchpol)
         self.has_penetration = has_pen
+        # the terms of ions: the charge transfer from a partner class into an ion class and the pair
+        # correction, one row per (ion, partner) class pair (index tables -1 where none), and the
+        # many-body charge transfer per ion class
+        unknown = [k for k in (*lib.ionct, *lib.ionpair) if any(c not in self._class_index for c in k.split("-"))]
+        unknown += [c for c in lib.mbct if c not in self._class_index]
+        if unknown:
+            raise KeyError(f"ion terms of classes the library has no atom type of: {unknown}")
+        self.ionct_keys = list(lib.ionct)
+        make("ionct_a", [lib.ionct[k]["a"] for k in self.ionct_keys] or [0.0], "ionct", scale=KCAL_TO_EV)
+        make("ionct_b", [lib.ionct[k]["b"] for k in self.ionct_keys] or [0.0], "ionct")
+        self.ionpair_keys = list(lib.ionpair)
+        make("ionpair_a", [lib.ionpair[k]["a"] for k in self.ionpair_keys] or [0.0], "ionpair", scale=KCAL_TO_EV)
+        make("ionpair_c", [lib.ionpair[k]["c"] for k in self.ionpair_keys] or [0.0], "ionpair", scale=KCAL_TO_EV)
+        make("ionpair_beta", [lib.ionpair[k]["beta"] for k in self.ionpair_keys] or [0.0], "ionpair")
+        for name, keys in (("ionct_index", self.ionct_keys), ("ionpair_index", self.ionpair_keys)):
+            idx = torch.full((nc, nc), -1, dtype=torch.long)
+            for m, key in enumerate(keys):
+                a, b = key.split("-")
+                idx[self._class_index[a], self._class_index[b]] = m
+            self.register_buffer(name, idx, persistent=False)
+        self.mbct_keys = list(lib.mbct)
+        make("mbct_x", [lib.mbct[c]["x"] for c in self.mbct_keys] or [0.0], "mbct")
+        mbct_idx = [-1] * nc
+        for m, c in enumerate(self.mbct_keys):
+            mbct_idx[self._class_index[c]] = m
+        self.register_buffer("mbct_index", torch.tensor(mbct_idx, dtype=torch.long), persistent=False)
+        self.mbct_c0 = float(lib.setting("mbct-c0")) * KCAL_TO_EV
+        # an ion class with charge-transfer rows takes no HIPPO charge transfer: its class parameters
+        # enter the pair terms as zero (both of a pair's pieces then vanish)
+        ion_ct = {k.split("-")[0] for k in self.ionct_keys}
+        self.register_buffer("chgtrn_keep", torch.tensor([0.0 if c in ion_ct else 1.0 for c in self.class_names],
+                                                         dtype=dtype), persistent=False)
+        self.has_ion_terms = bool(lib.ionct or lib.mbct or lib.ionpair)
         # charge flux
         self.bndcflux_keys = list(lib.bndcflux)
         make("bndcflux_j", [lib.bndcflux[k]["j"] for k in self.bndcflux_keys] or [0.0], "cflux")
@@ -1739,6 +1851,13 @@ class AmoebaForceField(nn.Module):
             if c in lib.exchpol:
                 lib.exchpol[c] = {"spring": float(P["expol_spring"][i]), "size": float(P["expol_size"][i]),
                                   "damp": float(P["expol_damp"][i]), "use": lib.exchpol[c]["use"]}
+        for m, k in enumerate(self.ionct_keys):
+            lib.ionct[k] = {"a": float(P["ionct_a"][m]) / KCAL_TO_EV, "b": float(P["ionct_b"][m])}
+        for m, k in enumerate(self.ionpair_keys):
+            lib.ionpair[k] = {"a": float(P["ionpair_a"][m]) / KCAL_TO_EV, "c": float(P["ionpair_c"][m]) / KCAL_TO_EV,
+                              "beta": float(P["ionpair_beta"][m])}
+        for m, c in enumerate(self.mbct_keys):
+            lib.mbct[c] = {"x": float(P["mbct_x"][m])}
         for m, k in enumerate(self.vdw_pair_keys):
             lib.vdw_pair_types[k] = {"rmin": float(P["vdw_pair_rmin"][m]),
                                      "eps": float(P["vdw_pair_eps"][m]) / KCAL_TO_EV}
@@ -1939,9 +2058,9 @@ class Amoeba(InteratomicPotential):
         kernels. The pair kernels are differentiable twice (their generated
         tangents and parameter adjoints, :mod:`.amoeba_tangents`), so force
         losses and parameter gradients train through them; in training the
-        mesh and the solver's products run eager. A second derivative of a
-        periodic cell in evaluation mode (a Hessian) needs
-        ``use_fast=False``: the mesh kernels are differentiable once. When
+        mesh and the solver's products run eager. In evaluation mode the
+        mesh runs on kernels too, and a second derivative (a Hessian) takes
+        the gradient of their backward pass through the eager stencils. When
         forces follow, AMOEBA's fast implementation solves the dipoles of
         the direct and the polar field together, one set of iterations for
         both (Tinker's scheme), so its dipoles and forces agree with the
@@ -2153,6 +2272,8 @@ class Amoeba(InteratomicPotential):
         """Resolve the topology against the force field into index buffers."""
         self.topology = top
         ff = self.ff
+        if ff.has_ion_terms and self.nonbonded != "hippo":
+            raise ValueError("the ion terms (ionct, mbct, ionpair) are terms of HIPPO")
         lib = ff.library
         n = top.n_atoms
         dtype = torch.get_default_dtype()
@@ -2538,6 +2659,22 @@ class Amoeba(InteratomicPotential):
         buf("top_type", t_idx, (-1,))
         buf("top_class", [ff.type_class[i] for i in t_idx], (-1,))
         self.register_buffer("top_z", ff.type_z[self.top_type].clone())
+
+        # the terms of ions: every atom's molecule (its connected component, numbered from zero) and
+        # every ion's slot among the ions of the many-body charge transfer (-1 for the other atoms)
+        molecules = {r: m for m, r in enumerate(dict.fromkeys(component))}
+        buf("top_molecule", [molecules[component[i]] for i in range(n)], (-1,))
+        self.n_molecules = len(molecules)
+        ions = {k.split("-")[0] for k in (*ff.ionct_keys, *ff.ionpair_keys)} | set(ff.mbct_keys)
+        slots, self.n_mbct = [], 0
+        for i in range(n):
+            c = ff.class_names[ff.type_class[t_idx[i]]]
+            if c in ions and neighbors[i]:
+                raise ValueError(f"atom {i} of the ion class {c} is bonded: the ion terms take single-atom ions")
+            slots.append(self.n_mbct if c in ff.mbct_keys else -1)
+            self.n_mbct += c in ff.mbct_keys
+        buf("top_mbct_slot", slots, (-1,))
+        buf("top_mbct_atom", [i for i in range(n) if slots[i] >= 0], (-1,))
         self.n_bonded_sites = n
 
     @staticmethod
@@ -3614,6 +3751,22 @@ class Amoeba(InteratomicPotential):
         return ew is None and n <= _DENSE_ATOMS and B * (3 * n) ** 2 <= _DENSE_ENTRIES
 
     # Ewald sums of periodic cells
+    def _warn_other_meshes(self, layout: dict) -> None:
+        """Warn once when an evaluation off a plan picks other meshes for its cell than the model's steps use:
+        the energies then differ by the meshes' discretization (constant-pressure runs fix the meshes with
+        ``pme_grid`` and ``dpme_grid``)."""
+        steps = self.__dict__.get("_step_meshes")
+        if not steps or self.__dict__.get("_warned_meshes"):
+            return
+        for _, g, dg, _ in layout["structures"]:
+            if (tuple(g), tuple(dg)) not in steps:
+                self.__dict__["_warned_meshes"] = True
+                warnings.warn(f"this evaluation picked the meshes {list(g)} / {list(dg)} for its cell, while the "
+                              f"model's steps keep {[list(m) for m in sorted(steps)[0]]} from their plan: the "
+                              "energies differ by the mesh discretization. Set pme_grid and dpme_grid to keep "
+                              "one mesh at every volume", stacklevel=3)
+                return
+
     def _ewald_layout(self, data: AtomicGraph, dtype: torch.dtype) -> Optional[dict]:
         """The host decisions of the Ewald sums of a batch: which structures are
         cells, their meshes and slab axes, the cutoffs and coefficients; ``None``
@@ -3667,10 +3820,15 @@ class Amoeba(InteratomicPotential):
         dtype, device = R.dtype, R.device
         if plan is not None and plan.replaying():
             layout = plan.ewald
+            if layout is not None:
+                # the meshes the model's steps use, which a plan keeps while its cell changes
+                self.__dict__["_step_meshes"] = {(tuple(g), tuple(dg)) for _, g, dg, _ in layout["structures"]}
         else:
             layout = self._ewald_layout(data, dtype)
             if plan is not None:
                 plan.ewald = layout
+            elif layout is not None:
+                self._warn_other_meshes(layout)
         if layout is None:
             return None
         rc, rc_d = layout["rc"], layout["rc_d"]
@@ -3745,7 +3903,7 @@ class Amoeba(InteratomicPotential):
         in_kernels = self._pair_kernels_active(R)
         return {"periodic": periodic, "mesh_self": self.mesh_self, "pair_periodic": pair_periodic,
                 "structures": structures, "cells": cells, "pos": data.pos.to(dtype),
-                # the mesh kernels are differentiable once: training takes the eager mesh
+                # training takes the eager mesh (a force loss differentiates it twice)
                 "groups": grouped(2), "dgroups": grouped(3), "plans": {}, "kernels": kernels and not self.training,
                 "alpha_e": consts["alpha_e"], "alpha_p": consts["alpha_p"], "alpha_d": consts["alpha_d"],
                 "per": consts.get("per", pair_periodic.to(dtype)), "rc": rc, "rc_d": rc_d,
@@ -4154,6 +4312,13 @@ class Hippo(Amoeba):
     pairwise charge transfer, with the charge flux of the library applied to
     the monopoles. ``forward`` reports ``e_multipole``, ``e_polar``,
     ``e_repulsion``, ``e_dispersion`` and ``e_chgtrn``.
+
+    A library with terms of single-atom ions (``ionct``, ``ionpair`` and
+    ``mbct`` of :class:`~xnn.ffnn.models.amoebalib.AmoebaLibrary`, see
+    :func:`ion_terms`) gives those ions the charge transfer from their
+    partners in place of the pairwise one, adds their pair correction to
+    ``e_repulsion`` and ``e_dispersion``, and reports their many-body charge
+    transfer as ``e_mbct``.
     """
 
     nonbonded = "hippo"
@@ -4174,7 +4339,8 @@ class Hippo(Amoeba):
         for key, name in (("core", "chgpen_core"), ("zeta", "chgpen_alpha"), ("rep_k", "rep_k"),
                           ("rep_alpha", "rep_alpha"), ("rep_valence", "rep_valence"), ("disp_alpha", "disp_alpha"),
                           ("disp_c6", "disp_c6"), ("chgtrn_eps", "chgtrn_eps"), ("chgtrn_alpha", "chgtrn_alpha")):
-            params[key + "_i"], params[key + "_k"] = _take(P[name], ci), _take(P[name], ck)
+            table = self._class_table(name)
+            params[key + "_i"], params[key + "_k"] = _take(table, ci), _take(table, ck)
         switches = {"repulsion": self._switch(R, per, self.repulsion_cutoff, None),
                     "dispersion": None if ew is not None else self._switch(R, per, self.dispersion_cutoff, None),
                     "chgtrn": self._switch(R, per, self.chgtrn_cutoff, None)}
@@ -4195,6 +4361,8 @@ class Hippo(Amoeba):
         terms["e_repulsion"] = pb["e_rep_node"]
         terms["e_dispersion"] = e_dnode
         terms["e_chgtrn"] = pb["e_ct_node"]
+        self._add_ion_terms(terms, i_, k_, r_vec, scales, cls_idx, N, B, None if ew is None else ew["pair_periodic"],
+                            plan)
 
         mu = torch.zeros_like(d)
         if polar:
@@ -4227,7 +4395,7 @@ class Hippo(Amoeba):
         # the per-atom parameter table, made once per plan, and the scalars
         params = None if plan is None else plan.kernel_params
         if params is None or params.dtype != dtype or params.device != device:
-            cols = [P[name][cls_idx] for name in km.PARAMS[:9]]
+            cols = [self._class_table(name)[cls_idx] for name in km.PARAMS[:9]]
             if self.ff.has_exchpol:
                 cols += [P[name][cls_idx] for name in km.PARAMS[9:]] + [self.ff.expol_use[cls_idx].to(dtype)]
             else:
@@ -4282,6 +4450,7 @@ class Hippo(Amoeba):
             e_mp = e_mp + self._reciprocal_energy(data, ew, q, d, Q) * COULOMB
             e_disp = e_disp + self._reciprocal_dispersion(data, ew, P["disp_c6"][cls_idx])
         terms = {"e_multipole": e_mp, "e_repulsion": e_rep, "e_dispersion": e_disp, "e_chgtrn": e_ct}
+        self._add_ion_terms(terms, i_, k_, r_vec, scales, cls_idx, N, B, per_bool, plan)
         mu = torch.zeros_like(d)
         if polar:
             alpha = P["polarizability"][typ_idx]
@@ -4299,6 +4468,40 @@ class Hippo(Amoeba):
             extra = {"e_mpole_pair": e_pair[:, 0], "e_rep_pair": e_pair[:, 1], "e_disp_pair": e_pair[:, 2],
                      "e_ct_pair": e_pair[:, 3]}
         return {"terms": terms, "induced": mu, "extra": extra}
+
+    def _class_table(self, name: str) -> Tensor:
+        """A per-class parameter of the pair terms; the charge transfer of an ion class with rows of its own
+        (``ionct``) enters them as zero."""
+        table = self.ff.params[name]
+        if name.startswith("chgtrn") and self.ff.ionct_keys:
+            table = table * self.ff.chgtrn_keep
+        return table
+
+    def _add_ion_terms(self, terms: dict, i_: Tensor, k_: Tensor, r_vec: Tensor, scales: Tensor, cls_idx: Tensor,
+                       N: int, B: int, per: Optional[Tensor], plan: Optional[StepPlan]) -> None:
+        """Add the terms of ions (:func:`ion_terms`) to the per-atom ``terms``: the charge transfer into
+        the ions to ``e_chgtrn``, their pair correction to ``e_repulsion`` and ``e_dispersion`` and the
+        many-body charge transfer as ``e_mbct``. Every pair within the cutoff (and valid on a plan)
+        takes the scale factor of the multipoles and the switch of the charge transfer."""
+        ff = self.ff
+        if not ff.has_ion_terms:
+            return
+        # the distances with their derivatives (the pair kernels' distances carry none)
+        R = torch.sqrt((r_vec * r_vec).sum(1) + TINY)
+        weight = scales[:, 1] * (R.detach() < self.cutoff).to(R.dtype)
+        if plan is not None and plan.valid is not None:
+            weight = weight * plan.valid
+        switch = self._switch(R, per, self.chgtrn_cutoff, None)
+        if switch is not None:
+            weight = weight * switch
+        ions = ion_terms(i_, k_, R, weight, cls_idx, N, B, ff.params, ff.ionct_index, ff.ionpair_index,
+                         ff.mbct_index, self.top_mbct_atom, self.top_mbct_slot, self.top_molecule, self.n_molecules,
+                         ff.mbct_c0, bool(ff.ionct_keys), bool(ff.ionpair_keys))
+        terms["e_chgtrn"] = terms["e_chgtrn"] + ions["ct"]
+        terms["e_repulsion"] = terms["e_repulsion"] + ions["rep"]
+        terms["e_dispersion"] = terms["e_dispersion"] + ions["disp"]
+        if ff.mbct_keys:
+            terms["e_mbct"] = ions["mbct"]
 
 
 # the periodic and solver options of the constructor, also read by from_config

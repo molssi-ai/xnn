@@ -1351,13 +1351,14 @@ def _energy_t_111111111111111111111111111111(A, dix, diy, diz, qixx, qixy, qixz,
 @triton.jit
 def _switch_t_100(R, taper, cutoff, R_t):
     """Tangent of ``_switch`` along the arguments R."""
-    x = (R - taper) / (cutoff - taper)
-    x_t = R_t / (cutoff - taper)
-    x = tl.minimum(tl.maximum(x, 0.0), 1.0)
-    x_t = tl.where(tl.maximum(x, 0.0) < 1.0, tl.where(x > 0.0, x_t, tl.where(0.0 > x, 0.0, 0.5 * (x_t + 0.0))), tl.where(1.0 < tl.maximum(x, 0.0), 0.0, 0.5 * (tl.where(x > 0.0, x_t, tl.where(0.0 > x, 0.0, 0.5 * (x_t + 0.0))) + 0.0)))
+    width = cutoff - taper
+    u = (R - taper) / tl.where(width > 0.0, width, 1.0)
+    u_t = R_t / tl.where(width > 0.0, width, 1.0)
+    x = tl.minimum(tl.maximum(u, 0.0), 1.0)
+    x_t = tl.where(tl.maximum(u, 0.0) < 1.0, tl.where(u > 0.0, u_t, tl.where(0.0 > u, 0.0, 0.5 * (u_t + 0.0))), tl.where(1.0 < tl.maximum(u, 0.0), 0.0, 0.5 * (tl.where(u > 0.0, u_t, tl.where(0.0 > u, 0.0, 0.5 * (u_t + 0.0))) + 0.0)))
     x3 = x * x * x
     x3_t = (x_t * x + x * x_t) * x + x * x * x_t
-    return (1.0 - x3 * (10.0 - 15.0 * x + 6.0 * x * x), -(x3_t * (10.0 - 15.0 * x + 6.0 * x * x) + x3 * (-(15.0 * x_t) + (6.0 * x_t * x + 6.0 * x * x_t))))
+    return (tl.where(width > 0.0, 1.0 - x3 * (10.0 - 15.0 * x + 6.0 * x * x), tl.where(R < cutoff, 1.0, 0.0)), tl.where(width > 0.0, -(x3_t * (10.0 - 15.0 * x + 6.0 * x * x) + x3 * (-(15.0 * x_t) + (6.0 * x_t * x + 6.0 * x * x_t))), 0.0))
 
 
 @triton.jit
@@ -1592,8 +1593,8 @@ def _pairs_forward_t(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q
             if SW_REP == 1:
                 sw = tl.where(per > 0.0, sw, 1.0)
                 sw_t = tl.where(per > 0.0, sw_t, 0.0)
-            e_rep = e_rep * sw
             e_rep_t = e_rep_t * sw + e_rep * sw_t
+            e_rep = e_rep * sw
             sw_rep = sw
             sw_rep_t = sw_t
         else:
@@ -1622,8 +1623,8 @@ def _pairs_forward_t(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q
             if SW_DISP == 1:
                 sw = tl.where(per > 0.0, sw, 1.0)
                 sw_t = tl.where(per > 0.0, sw_t, 0.0)
-            e_disp = e_disp * sw
             e_disp_t = e_disp_t * sw + e_disp * sw_t
+            e_disp = e_disp * sw
         eps_i = tl.load(pi + 7, mask=m, other=0.0)
         eps_k = tl.load(pk + 7, mask=m, other=0.0)
         eta_i = tl.load(pi + 8, mask=m, other=0.0)
@@ -1639,8 +1640,8 @@ def _pairs_forward_t(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, keepd_ptr, per_ptr, q
             if SW_CT == 1:
                 sw = tl.where(per > 0.0, sw, 1.0)
                 sw_t = tl.where(per > 0.0, sw_t, 0.0)
-            e_ct = e_ct * sw
             e_ct_t = e_ct_t * sw + e_ct * sw_t
+            e_ct = e_ct * sw
     if GROUP != 2:
         if WRITE_PAIRS:
             tl.store(epair_ptr + e * 4, e_mp, mask=m)
@@ -1932,14 +1933,16 @@ def _energy_adjoint_t_011111111111111111111111111111(gE, dix, diy, diz, qixx, qi
 @triton.jit
 def _switch_derivative_t_100(R, taper, cutoff, R_t):
     """Tangent of ``_switch_derivative`` along the arguments R."""
-    x = (R - taper) / (cutoff - taper)
-    x_t = R_t / (cutoff - taper)
-    inside = (x > 0.0) & (x < 1.0)
-    x = tl.minimum(tl.maximum(x, 0.0), 1.0)
-    x_t = tl.where(tl.maximum(x, 0.0) < 1.0, tl.where(x > 0.0, x_t, tl.where(0.0 > x, 0.0, 0.5 * (x_t + 0.0))), tl.where(1.0 < tl.maximum(x, 0.0), 0.0, 0.5 * (tl.where(x > 0.0, x_t, tl.where(0.0 > x, 0.0, 0.5 * (x_t + 0.0))) + 0.0)))
+    width = cutoff - taper
+    w = tl.where(width > 0.0, width, 1.0)
+    u = (R - taper) / w
+    u_t = R_t / w
+    inside = (u > 0.0) & (u < 1.0) & (width > 0.0)
+    x = tl.minimum(tl.maximum(u, 0.0), 1.0)
+    x_t = tl.where(tl.maximum(u, 0.0) < 1.0, tl.where(u > 0.0, u_t, tl.where(0.0 > u, 0.0, 0.5 * (u_t + 0.0))), tl.where(1.0 < tl.maximum(u, 0.0), 0.0, 0.5 * (tl.where(u > 0.0, u_t, tl.where(0.0 > u, 0.0, 0.5 * (u_t + 0.0))) + 0.0)))
     y = 1.0 - x
     y_t = -x_t
-    return (tl.where(inside, -30.0 * x * x * y * y / (cutoff - taper), 0.0 * R), tl.where(inside, (((-30.0 * x_t * x + -30.0 * x * x_t) * y + -30.0 * x * x * y_t) * y + -30.0 * x * x * y * y_t) / (cutoff - taper), 0.0))
+    return (tl.where(inside, -30.0 * x * x * y * y / w, 0.0 * R), tl.where(inside, (((-30.0 * x_t * x + -30.0 * x * x_t) * y + -30.0 * x * x * y_t) * y + -30.0 * x * x * y * y_t) / w, 0.0))
 
 
 @triton.jit
@@ -3151,8 +3154,8 @@ def _amoeba_forward_t(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, per_ptr, q_ptr, d_pt
             if SW_VDW == 1:
                 sw = tl.where(per > 0.0, sw, 1.0)
                 sw_t = tl.where(per > 0.0, sw_t, 0.0)
-            e_vdw = e_vdw * sw
             e_vdw_t = e_vdw_t * sw + e_vdw * sw_t
+            e_vdw = e_vdw * sw
         e_vdw = e_vdw.to(dtype)
         e_vdw_t = e_vdw_t.to(dtype)
         if WRITE_PAIRS:
@@ -3346,8 +3349,8 @@ def _amoeba_backward_t(i_ptr, k_ptr, r_ptr, s_ptr, keep_ptr, per_ptr, q_ptr, d_p
                 sw_t = tl.where(per > 0.0, sw_t, 0.0)
                 dsw = tl.where(per > 0.0, dsw, 0.0)
                 dsw_t = tl.where(per > 0.0, dsw_t, 0.0)
-            de_vdw = de_vdw * sw + e_vdw * dsw
             de_vdw_t = de_vdw_t * sw + de_vdw * sw_t + (e_vdw_t * dsw + e_vdw * dsw_t)
+            de_vdw = de_vdw * sw + e_vdw * dsw
         gv = g_vdw * tl.load(s_ptr + e * 8, mask=m, other=0.0).to(tl.float64) * de_vdw / rv
         gv_t = g_vdw * tl.load(s_ptr + e * 8, mask=m, other=0.0).to(tl.float64) * de_vdw_t / rv - g_vdw * tl.load(s_ptr + e * 8, mask=m, other=0.0).to(tl.float64) * de_vdw / rv * rv_t / rv
         gvx = (gv * vx).to(dtype)
@@ -8923,18 +8926,19 @@ def _thole_r_011110(R, ai, ak, ti, tk, sc_ptr, out0_b, out1_b, out2_b, out3_b):
 def _switch_r_100(R, taper, cutoff, out0_b):
     """Adjoint of ``_switch``: the output adjoints in, those of the varied arguments out."""
     R_b = R * 0.0
-    x__1 = (R - taper) / (cutoff - taper)
-    x__1_b = x__1 * 0.0
-    x__2 = tl.minimum(tl.maximum(x__1, 0.0), 1.0)
-    x__2_b = x__2 * 0.0
-    x3__3 = x__2 * x__2 * x__2
-    x3__3_b = x3__3 * 0.0
+    width__1 = cutoff - taper
+    u__2 = (R - taper) / tl.where(width__1 > 0.0, width__1, 1.0)
+    u__2_b = u__2 * 0.0
+    x__3 = tl.minimum(tl.maximum(u__2, 0.0), 1.0)
+    x__3_b = x__3 * 0.0
+    x3__4 = x__3 * x__3 * x__3
+    x3__4_b = x3__4 * 0.0
     pass
-    x3__3_b = x3__3_b + (-(out0_b * (10.0 - 15.0 * x__2 + 6.0 * x__2 * x__2))).to(x3__3.dtype)
-    x__2_b = x__2_b + (-(x3__3 * (-(15.0 * out0_b) + (6.0 * out0_b * x__2 + 6.0 * x__2 * out0_b)))).to(x__2.dtype)
-    x__2_b = x__2_b + ((x3__3_b * x__2 + x__2 * x3__3_b) * x__2 + x__2 * x__2 * x3__3_b).to(x__2.dtype)
-    x__1_b = x__1_b + tl.where(tl.maximum(x__1, 0.0) < 1.0, tl.where(x__1 > 0.0, x__2_b, tl.where(0.0 > x__1, 0.0, 0.5 * (x__2_b + 0.0))), tl.where(1.0 < tl.maximum(x__1, 0.0), 0.0, 0.5 * (tl.where(x__1 > 0.0, x__2_b, tl.where(0.0 > x__1, 0.0, 0.5 * (x__2_b + 0.0))) + 0.0))).to(x__1.dtype)
-    R_b = R_b + (x__1_b / (cutoff - taper)).to(R.dtype)
+    x3__4_b = x3__4_b + tl.where(width__1 > 0.0, -(out0_b * (10.0 - 15.0 * x__3 + 6.0 * x__3 * x__3)), 0.0).to(x3__4.dtype)
+    x__3_b = x__3_b + tl.where(width__1 > 0.0, -(x3__4 * (-(15.0 * out0_b) + (6.0 * out0_b * x__3 + 6.0 * x__3 * out0_b))), 0.0).to(x__3.dtype)
+    x__3_b = x__3_b + ((x3__4_b * x__3 + x__3 * x3__4_b) * x__3 + x__3 * x__3 * x3__4_b).to(x__3.dtype)
+    u__2_b = u__2_b + tl.where(tl.maximum(u__2, 0.0) < 1.0, tl.where(u__2 > 0.0, x__3_b, tl.where(0.0 > u__2, 0.0, 0.5 * (x__3_b + 0.0))), tl.where(1.0 < tl.maximum(u__2, 0.0), 0.0, 0.5 * (tl.where(u__2 > 0.0, x__3_b, tl.where(0.0 > u__2, 0.0, 0.5 * (x__3_b + 0.0))) + 0.0))).to(u__2.dtype)
+    R_b = R_b + (u__2_b / tl.where(width__1 > 0.0, width__1, 1.0)).to(R.dtype)
     return R_b
 
 
@@ -18476,29 +18480,30 @@ def _switch_r_100_t_1001(R, taper, cutoff, out0_b, R_t, out0_b_t):
     """Tangent of ``_switch_r_100`` along the arguments R, out0_b."""
     R_b = R * 0.0
     R_b_t = R_b * 0.0
-    x__1 = (R - taper) / (cutoff - taper)
-    x__1_t = R_t / (cutoff - taper)
-    x__1_b = x__1 * 0.0
-    x__1_b_t = x__1_b * 0.0
-    x__2 = tl.minimum(tl.maximum(x__1, 0.0), 1.0)
-    x__2_t = tl.where(tl.maximum(x__1, 0.0) < 1.0, tl.where(x__1 > 0.0, x__1_t, tl.where(0.0 > x__1, 0.0, 0.5 * (x__1_t + 0.0))), tl.where(1.0 < tl.maximum(x__1, 0.0), 0.0, 0.5 * (tl.where(x__1 > 0.0, x__1_t, tl.where(0.0 > x__1, 0.0, 0.5 * (x__1_t + 0.0))) + 0.0)))
-    x__2_b = x__2 * 0.0
-    x__2_b_t = x__2_b * 0.0
-    x3__3 = x__2 * x__2 * x__2
-    x3__3_t = (x__2_t * x__2 + x__2 * x__2_t) * x__2 + x__2 * x__2 * x__2_t
-    x3__3_b = x3__3 * 0.0
-    x3__3_b_t = x3__3_b * 0.0
+    width__1 = cutoff - taper
+    u__2 = (R - taper) / tl.where(width__1 > 0.0, width__1, 1.0)
+    u__2_t = R_t / tl.where(width__1 > 0.0, width__1, 1.0)
+    u__2_b = u__2 * 0.0
+    u__2_b_t = u__2_b * 0.0
+    x__3 = tl.minimum(tl.maximum(u__2, 0.0), 1.0)
+    x__3_t = tl.where(tl.maximum(u__2, 0.0) < 1.0, tl.where(u__2 > 0.0, u__2_t, tl.where(0.0 > u__2, 0.0, 0.5 * (u__2_t + 0.0))), tl.where(1.0 < tl.maximum(u__2, 0.0), 0.0, 0.5 * (tl.where(u__2 > 0.0, u__2_t, tl.where(0.0 > u__2, 0.0, 0.5 * (u__2_t + 0.0))) + 0.0)))
+    x__3_b = x__3 * 0.0
+    x__3_b_t = x__3_b * 0.0
+    x3__4 = x__3 * x__3 * x__3
+    x3__4_t = (x__3_t * x__3 + x__3 * x__3_t) * x__3 + x__3 * x__3 * x__3_t
+    x3__4_b = x3__4 * 0.0
+    x3__4_b_t = x3__4_b * 0.0
     pass
-    x3__3_b = x3__3_b + (-(out0_b * (10.0 - 15.0 * x__2 + 6.0 * x__2 * x__2))).to(x3__3.dtype)
-    x3__3_b_t = x3__3_b_t + (-(out0_b_t * (10.0 - 15.0 * x__2 + 6.0 * x__2 * x__2) + out0_b * (-(15.0 * x__2_t) + (6.0 * x__2_t * x__2 + 6.0 * x__2 * x__2_t)))).to(x3__3.dtype)
-    x__2_b = x__2_b + (-(x3__3 * (-(15.0 * out0_b) + (6.0 * out0_b * x__2 + 6.0 * x__2 * out0_b)))).to(x__2.dtype)
-    x__2_b_t = x__2_b_t + (-(x3__3_t * (-(15.0 * out0_b) + (6.0 * out0_b * x__2 + 6.0 * x__2 * out0_b)) + x3__3 * (-(15.0 * out0_b_t) + (6.0 * out0_b_t * x__2 + 6.0 * out0_b * x__2_t + (6.0 * x__2_t * out0_b + 6.0 * x__2 * out0_b_t))))).to(x__2.dtype)
-    x__2_b = x__2_b + ((x3__3_b * x__2 + x__2 * x3__3_b) * x__2 + x__2 * x__2 * x3__3_b).to(x__2.dtype)
-    x__2_b_t = x__2_b_t + ((x3__3_b_t * x__2 + x3__3_b * x__2_t + (x__2_t * x3__3_b + x__2 * x3__3_b_t)) * x__2 + (x3__3_b * x__2 + x__2 * x3__3_b) * x__2_t + ((x__2_t * x__2 + x__2 * x__2_t) * x3__3_b + x__2 * x__2 * x3__3_b_t)).to(x__2.dtype)
-    x__1_b = x__1_b + tl.where(tl.maximum(x__1, 0.0) < 1.0, tl.where(x__1 > 0.0, x__2_b, tl.where(0.0 > x__1, 0.0, 0.5 * (x__2_b + 0.0))), tl.where(1.0 < tl.maximum(x__1, 0.0), 0.0, 0.5 * (tl.where(x__1 > 0.0, x__2_b, tl.where(0.0 > x__1, 0.0, 0.5 * (x__2_b + 0.0))) + 0.0))).to(x__1.dtype)
-    x__1_b_t = x__1_b_t + tl.where(tl.maximum(x__1, 0.0) < 1.0, tl.where(x__1 > 0.0, x__2_b_t, tl.where(0.0 > x__1, 0.0, 0.5 * x__2_b_t)), tl.where(1.0 < tl.maximum(x__1, 0.0), 0.0, 0.5 * tl.where(x__1 > 0.0, x__2_b_t, tl.where(0.0 > x__1, 0.0, 0.5 * x__2_b_t)))).to(x__1.dtype)
-    R_b = R_b + (x__1_b / (cutoff - taper)).to(R.dtype)
-    R_b_t = R_b_t + (x__1_b_t / (cutoff - taper)).to(R.dtype)
+    x3__4_b = x3__4_b + tl.where(width__1 > 0.0, -(out0_b * (10.0 - 15.0 * x__3 + 6.0 * x__3 * x__3)), 0.0).to(x3__4.dtype)
+    x3__4_b_t = x3__4_b_t + tl.where(width__1 > 0.0, -(out0_b_t * (10.0 - 15.0 * x__3 + 6.0 * x__3 * x__3) + out0_b * (-(15.0 * x__3_t) + (6.0 * x__3_t * x__3 + 6.0 * x__3 * x__3_t))), 0.0).to(x3__4.dtype)
+    x__3_b = x__3_b + tl.where(width__1 > 0.0, -(x3__4 * (-(15.0 * out0_b) + (6.0 * out0_b * x__3 + 6.0 * x__3 * out0_b))), 0.0).to(x__3.dtype)
+    x__3_b_t = x__3_b_t + tl.where(width__1 > 0.0, -(x3__4_t * (-(15.0 * out0_b) + (6.0 * out0_b * x__3 + 6.0 * x__3 * out0_b)) + x3__4 * (-(15.0 * out0_b_t) + (6.0 * out0_b_t * x__3 + 6.0 * out0_b * x__3_t + (6.0 * x__3_t * out0_b + 6.0 * x__3 * out0_b_t)))), 0.0).to(x__3.dtype)
+    x__3_b = x__3_b + ((x3__4_b * x__3 + x__3 * x3__4_b) * x__3 + x__3 * x__3 * x3__4_b).to(x__3.dtype)
+    x__3_b_t = x__3_b_t + ((x3__4_b_t * x__3 + x3__4_b * x__3_t + (x__3_t * x3__4_b + x__3 * x3__4_b_t)) * x__3 + (x3__4_b * x__3 + x__3 * x3__4_b) * x__3_t + ((x__3_t * x__3 + x__3 * x__3_t) * x3__4_b + x__3 * x__3 * x3__4_b_t)).to(x__3.dtype)
+    u__2_b = u__2_b + tl.where(tl.maximum(u__2, 0.0) < 1.0, tl.where(u__2 > 0.0, x__3_b, tl.where(0.0 > u__2, 0.0, 0.5 * (x__3_b + 0.0))), tl.where(1.0 < tl.maximum(u__2, 0.0), 0.0, 0.5 * (tl.where(u__2 > 0.0, x__3_b, tl.where(0.0 > u__2, 0.0, 0.5 * (x__3_b + 0.0))) + 0.0))).to(u__2.dtype)
+    u__2_b_t = u__2_b_t + tl.where(tl.maximum(u__2, 0.0) < 1.0, tl.where(u__2 > 0.0, x__3_b_t, tl.where(0.0 > u__2, 0.0, 0.5 * x__3_b_t)), tl.where(1.0 < tl.maximum(u__2, 0.0), 0.0, 0.5 * tl.where(u__2 > 0.0, x__3_b_t, tl.where(0.0 > u__2, 0.0, 0.5 * x__3_b_t)))).to(u__2.dtype)
+    R_b = R_b + (u__2_b / tl.where(width__1 > 0.0, width__1, 1.0)).to(R.dtype)
+    R_b_t = R_b_t + (u__2_b_t / tl.where(width__1 > 0.0, width__1, 1.0)).to(R.dtype)
     return (R_b, R_b_t)
 
 

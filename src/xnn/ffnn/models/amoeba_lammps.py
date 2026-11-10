@@ -10,6 +10,7 @@ The LAMMPS package differs from the model in two places, both handled here: it h
 angle charge flux of a library are left out, with a warning, so LAMMPS evaluates the model without them), and its
 HIPPO repulsion takes the size parameter ``K / 8`` of the one of Tinker 8 and the 2021 paper (the Slater
 normalisation folded into ``K``). It also rejects the argument-less ``d-equals-p`` keyword, which is not written.
+A library with the terms of ions (``ionct``, ``mbct``, ``ionpair``) has no LAMMPS counterpart and is refused.
 """
 import copy
 import warnings
@@ -127,6 +128,8 @@ def write_lammps_amoeba_input(model, pos, cell=None, directory: Union[str, Path]
     cell = None if cell is None else np.asarray(cell.detach().cpu() if hasattr(cell, "detach") else cell,
                                                  float).reshape(3, 3)
     lib = copy.deepcopy(core.export_library())
+    if lib.ionct or lib.mbct or lib.ionpair:
+        raise ValueError("LAMMPS's AMOEBA package has none of the ion terms (ionct, mbct, ionpair) of this library")
     hippo = lib.model == "hippo"
     if lib.bndcflux or lib.angcflux:
         warnings.warn("LAMMPS's AMOEBA package has no charge flux: the library's bond and angle charge flux "
