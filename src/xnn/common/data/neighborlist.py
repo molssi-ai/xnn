@@ -204,8 +204,11 @@ def _vesin_neighbor_list(pos, cutoff, cell, pbc, self_interaction, full_list=Tru
             # CPU cell list gives the same edges (milliseconds for 10^4-10^5 atoms)
             _warn_cpu_fallback(pos.shape[0], cutoff)
             i, j, shifts = compute(pos.detach().cpu(), box.detach().cpu())
-    edge_index = torch.stack([i, j], dim=0).to(device)
-    return edge_index, shifts.to(torch.long).to(device)
+    # the cell list emits edges cell by cell; grouped by sender in atom order, the gathers
+    # and scatters of message passing read and write neighboring rows
+    order = torch.argsort(i.to(torch.int32), stable=True)
+    edge_index = torch.stack([i[order], j[order]], dim=0).to(device)
+    return edge_index, shifts[order].to(torch.long).to(device)
 
 
 _CPU_FALLBACK_WARNED = False
