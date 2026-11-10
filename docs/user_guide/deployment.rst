@@ -82,6 +82,8 @@ OpenMM
 - Installing xnn registers the ``"xnn"`` potential with
   `openmm-ml <https://github.com/openmm/openmm-ml>`_.
 - OpenMM needs ``pip install openmm openmmtorch openmmml``.
+- The openmmtorch wheels need the CUDA build of torch they were built with
+  (torch 2.9 for openmmtorch 1.5). Conda-forge installs a matching pair.
 - In a mixed system, xnn models the selected atoms and the force field models
   the rest.
 - Optional arguments: ``total_charge``, ``spin_multiplicity``, ``cutoff`` and
