@@ -45,6 +45,15 @@ _COMPILED: dict = {}
 _ALL_ARGUMENTS = tuple(int(v) for v in triton.__version__.split(".")[:2]) >= (3, 3)
 
 
+def _launch_hooks(compiled):
+    """The launch enter and exit hooks Triton passes to a compiled kernel's launcher: the runtime knobs'
+    (Triton 3.4 on) or the compiled kernel's."""
+    knobs = getattr(triton, "knobs", None)
+    if knobs is None:
+        return compiled.launch_enter_hook, compiled.launch_exit_hook
+    return knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook
+
+
 def _specialization(arg, constexpr: bool):
     """What Triton compiles a kernel argument into: the value of a constexpr, the dtype and 16-byte
     alignment of a tensor, whether an integer is 1, divisible by 16 or beyond 32 bits."""
@@ -77,8 +86,7 @@ def _go(kernel, grid: Tuple[int, int], *args) -> None:
         args = tuple(a for a, c in zip(args, constexpr) if not c)
     stream = torch.cuda.current_stream(args[0].device).cuda_stream
     compiled.run(grid[0], grid[1], 1, stream, compiled.function, compiled.packed_metadata,
-                 compiled.launch_metadata(grid, stream, *args), compiled.launch_enter_hook,
-                 compiled.launch_exit_hook, *args)
+                 compiled.launch_metadata(grid, stream, *args), *_launch_hooks(compiled), *args)
 
 
 #: Which arguments of a kernel are constexprs.
