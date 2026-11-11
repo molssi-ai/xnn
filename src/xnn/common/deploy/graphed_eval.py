@@ -50,7 +50,8 @@ class GraphedEvaluation:
     slack : int, optional
         Absolute headroom added to the counts, by default 64.
     warmup : int, optional
-        Ordinary evaluations before the capture, by default 2.
+        Ordinary evaluations before the capture, by default 2. They and the capture run with
+        TorchScript fusion off, so that no TorchScript block compiles a kernel while it is recorded.
     trial : int, optional
         Replays and ordinary evaluations timed against each other after a capture, by default
         3; the faster is used until the input outgrows the counts. ``0`` always replays.
@@ -216,12 +217,14 @@ class GraphedEvaluation:
         elif self.steps < self.warmup:
             side = torch.cuda.Stream(device)
             side.wait_stream(torch.cuda.current_stream(device))
-            with torch.cuda.stream(side):
+            with torch.cuda.stream(side), torch.jit.fuser("none"):
                 self.out = self.model(self.static)
             torch.cuda.current_stream(device).wait_stream(side)
         else:
             self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.graph):
+            # TorchScript blocks (e3nn's spherical harmonics) compile fused kernels after their
+            # profiling runs, and a capture cannot load a kernel: they run unfused here
+            with torch.cuda.graph(self.graph), torch.jit.fuser("none"):
                 self.out = self.model(self.static)
             # recording does not run the evaluation: replay it for this input
             self.graph.replay()
