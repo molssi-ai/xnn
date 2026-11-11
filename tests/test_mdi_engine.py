@@ -163,6 +163,42 @@ def test_cli_parses_dispersion_and_charge(tmp_path, monkeypatch):
                     "dtype": torch.float64, "disp": True}
 
 
+def test_cli_passes_terms_and_mixed_precision(monkeypatch):
+    """``--terms`` reaches the engine, ``--dtype mixed`` serves float32 with the mixed-precision option."""
+    seen = []
+
+    class _Engine:
+        def run(self, mdi_options, mpi_comm=None):
+            pass
+
+    def fake(path, **kw):
+        seen.append(kw)
+        return _Engine()
+
+    monkeypatch.setattr(MDIEngine, "from_checkpoint", staticmethod(fake))
+    mdi = "-role ENGINE -name xnn -method TCP -port 1 -hostname h"
+    main(["--ckpt", "x.pt", "-mdi", mdi, "--terms", "nonbonded", "--dtype", "mixed"])
+    main(["--ckpt", "x.pt", "-mdi", mdi, "--dtype", "float64"])
+    assert (seen[0]["terms"], seen[0]["mixed_precision"], seen[0]["dtype"]) == ("nonbonded", True, torch.float32)
+    assert (seen[1]["terms"], seen[1]["mixed_precision"], seen[1]["dtype"]) == ("all", False, torch.float64)
+
+
+def test_from_checkpoint_serves_mixed_precision_in_float32(monkeypatch):
+    """``mixed_precision`` makes float32 the default dtype of the loaded model."""
+    from xnn.common.models import hub
+
+    seen = {}
+
+    def fake_load(path, dtype=None, **kw):
+        seen["dtype"] = dtype
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(hub, "load_pretrained", fake_load)
+    with pytest.raises(RuntimeError, match="stop"):
+        MDIEngine.from_checkpoint("x.pt", mixed_precision=True)
+    assert seen["dtype"] == torch.float32
+
+
 @pytest.mark.parametrize("extra", [{"long_range": True},
                                    {"dispersion": {**FAST_D4, "regime": "large", "cutoff_pair": 11.0,
                                                    "cutoff_eeq": 11.0}},

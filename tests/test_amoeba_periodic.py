@@ -1160,6 +1160,50 @@ def test_the_engine_replays_steps_by_default_only_on_a_gpu():
         assert MDIEngine(model, 6.3, device="cuda").steps is not None
 
 
+def test_the_engine_serves_term_subsets_and_mixed_precision():
+    """Engines serving the valence and the nonbonded terms add up to the whole engine (energy, forces, stress)
+    while the atoms move, one wrapping back into the cell and another moving past the skin; a subset needs step
+    plans; mixed precision turns on the model's option for a float32 model only."""
+    from xnn.common.config import from_dict
+    from xnn.common.models import build_model
+    engines = {terms: MDIEngine(ForceStressOutput(_box(Hippo), compute_stress=True), 6.3, skin=0.5, terms=terms,
+                                step_graph=True) for terms in ("all", "valence", "nonbonded")}
+    assert all(engine.steps is not None for engine in engines.values())
+    pos = BOX.copy()
+    velocity = np.random.default_rng(23).normal(scale=0.01, size=BOX.shape)
+    for step in range(4):
+        if step == 2:
+            pos[4] += CELL[1]
+        if step == 3:
+            pos[7] += 0.4
+        for engine in engines.values():
+            engine.natoms, engine.atomic_numbers = len(BOX), Z.astype(np.int64)
+            engine.cell_bohr = CELL / BOHR_TO_ANGSTROM
+            engine.coords_bohr = pos / BOHR_TO_ANGSTROM
+            engine.calculate()
+        whole, valence, rest = (engines[t] for t in ("all", "valence", "nonbonded"))
+        assert valence.energy + rest.energy == pytest.approx(whole.energy, rel=1e-10)
+        np.testing.assert_allclose(valence.forces + rest.forces, whole.forces, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(valence.stress + rest.stress, whole.stress, rtol=1e-8, atol=1e-12)
+        assert abs(valence.energy) > 0 and abs(rest.energy) > 0
+        pos = pos + velocity
+    model = ForceStressOutput(_box(Hippo), compute_stress=True)
+    with pytest.raises(ValueError, match="terms must be"):
+        MDIEngine(model, 6.3, terms="bonded")
+    with pytest.raises(ValueError, match="needs step_graph"):
+        MDIEngine(model, 6.3, terms="valence", step_graph=False)
+    with pytest.raises(ValueError, match="float32"):
+        MDIEngine(model, 6.3, mixed_precision=True)
+    mixed = MDIEngine(ForceStressOutput(_box(Hippo), compute_stress=True).float(), 6.3, mixed_precision=True)
+    assert mixed.model.model.mixed_precision and mixed.dtype == torch.float32
+    plain = ForceStressOutput(build_model(from_dict({"model": {"name": "schnet", "cutoff": 4.0, "n_interactions": 1,
+                                                               "n_rbf": 6, "n_features": 8}}).model))
+    with pytest.raises(ValueError, match="step plans"):
+        MDIEngine(plain, 4.0, terms="nonbonded")
+    with pytest.raises(ValueError, match="mixed-precision option"):
+        MDIEngine(plain.float(), 4.0, mixed_precision=True)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused path runs on a GPU")
 def test_mixed_precision_evaluates_the_ladders_in_the_working_precision():
     """``mixed_precision=True`` stays close to the float32 reference and changes nothing in float64."""

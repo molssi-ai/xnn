@@ -38,13 +38,16 @@ def test_amoeba_cluster_inputs(tmp_path):
 
 
 def test_hippo_box_inputs(tmp_path):
-    """A cell: the model's Ewald settings in the key, the repulsion size K / 8, no charge flux (with a warning),
-    no d-equals-p keyword, the plain and in-plane angles under one section banner."""
+    """A cell: the model's Ewald settings in the key, the repulsion size K / 8, the charge flux refused unless
+    dropped (with a warning), no d-equals-p keyword, the plain and in-plane angles under one section banner."""
     lib = builtin_amoeba("hippo-water-2021")
+    assert lib.bndcflux or lib.angcflux
     cell = np.diag([12.0, 12.0, 12.0])
     model = Hippo(lib, _topology(2), cutoff=6.3, ewald_cutoff=6.0, pme_grid=[24, 24, 24], dpme_grid=[16, 16, 16])
-    with pytest.warns(UserWarning, match="charge flux") if (lib.bndcflux or lib.angcflux) else _nothing():
+    with pytest.raises(ValueError, match="drop=\\('cflux',\\)"):
         write_lammps_input(model, WATER, cell=cell, directory=tmp_path, name="box")
+    with pytest.warns(UserWarning, match="charge flux"):
+        write_lammps_input(model, WATER, cell=cell, directory=tmp_path, name="box", drop=("cflux",))
     prm_text = (tmp_path / "box.prm").read_text()
     assert "d-equals-p" not in prm_text and "bndcflux" not in prm_text and "angcflux" not in prm_text
     assert prm_text.count("Angle Bending Parameters") <= 1
@@ -59,12 +62,26 @@ def test_hippo_box_inputs(tmp_path):
     assert "pair_style hippo" in text and "boundary p p p" in text and "-pbc 12.0 12.0 12.0" in text
 
 
-class _nothing:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+def test_exchange_polarization_is_refused_unless_dropped_and_numbers_are_kept(tmp_path):
+    """Exchange polarization is refused unless dropped, then left out with a warning; ``drop`` names only the terms
+    LAMMPS lacks; a library numbered by its type and class names keeps those numbers in the parameter file."""
+    lib = builtin_amoeba("hippo-water-2021")
+    lib.exchpol = {c: {"spring": 0.5, "size": 1.0, "damp": 2.0, "use": True} for c in lib.classes()}
+    model = Hippo(lib, _topology(2))
+    with pytest.raises(ValueError, match="exchange polarization"):
+        write_lammps_input(model, WATER, directory=tmp_path / "x", drop=("cflux",))
+    with pytest.warns(UserWarning, match="exchange polarization"):
+        write_lammps_input(model, WATER, directory=tmp_path / "x", name="x", drop=("cflux", "exchpol"))
+    assert "exchpol" not in (tmp_path / "x" / "x.prm").read_text()
+    with pytest.raises(ValueError, match="drop takes"):
+        write_lammps_input(model, WATER, directory=tmp_path / "x", drop="vdw")
+    (tmp_path / "numbered.prm").write_text(_load("test_amoeba").NUMBERED_PRM)
+    numbered = read_tinker_prm(tmp_path / "numbered.prm")
+    top = MolecularTopology.from_bonds(["36", "37", "37"] * 2, [(0, 1), (0, 2), (3, 4), (3, 5)])
+    write_lammps_input(Amoeba(numbered, top), WATER, directory=tmp_path / "k", name="k")
+    written = read_tinker_prm(tmp_path / "k" / "k.prm")
+    assert set(written.atom_types) == {"36", "37"} and set(written.classes()) == {"71", "72"}
+    assert (tmp_path / "k" / "k.xyz").read_text().split("\n")[1].split()[5] == "36"
 
 
 
@@ -81,7 +98,9 @@ def test_hippo_cluster_and_amoeba_triclinic_box_inputs(tmp_path):
     """A HIPPO cluster: the repulsion, dispersion and charge-transfer cutoffs at the cluster cutoff. An AMOEBA
     box with direct polarization and a taper in a triclinic cell: the van der Waals cutoff and taper, the
     direct polarization in the key, the converter's note on the cell. A HIPPO box with a taper keeps it."""
-    write_lammps_input(Hippo("hippo-water-2021", _topology(2)), WATER, directory=tmp_path / "c", name="c")
+    with pytest.warns(UserWarning, match="charge flux"):
+        write_lammps_input(Hippo("hippo-water-2021", _topology(2)), WATER, directory=tmp_path / "c", name="c",
+                           drop=("cflux",))
     key = (tmp_path / "c" / "c.key").read_text().split("\n")
     assert {f"repulsion-cutoff {CLUSTER_CUTOFF}", f"dispersion-cutoff {CLUSTER_CUTOFF}",
             f"ctrn-cutoff {CLUSTER_CUTOFF}"} <= set(key)
@@ -95,7 +114,8 @@ def test_hippo_cluster_and_amoeba_triclinic_box_inputs(tmp_path):
     model = Hippo("hippo-water-2021", _topology(2), cutoff=6.3, taper=5.4, pme_grid=[24, 24, 24],
                   dpme_grid=[16, 16, 16])
     with pytest.warns(UserWarning, match="charge flux"):
-        write_lammps_input(model, WATER, cell=np.diag([12.0, 12.0, 12.0]), directory=tmp_path / "h", name="h")
+        write_lammps_input(model, WATER, cell=np.diag([12.0, 12.0, 12.0]), directory=tmp_path / "h", name="h",
+                           drop=("cflux",))
     assert "taper 5.4" in (tmp_path / "h" / "h.key").read_text().split("\n")
 
 
