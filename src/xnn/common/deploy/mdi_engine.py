@@ -126,9 +126,9 @@ class MDIEngine:
         Read each step's status during the next step (see
         :class:`~xnn.common.deploy.step_graph.StepGraph`). ``"auto"``
         (default) follows the model (ByteFF-Pol on, AMOEBA and HIPPO off).
-        With late checks the positions of a cell are unwrapped against the
-        last step, so an atom the driver wraps back into the cell keeps its
-        pair list.
+        On a step plan the positions of a cell are unwrapped against the
+        last step either way, so an atom the driver wraps back into the cell
+        keeps its pair list.
     terms : str, optional
         The terms served, for multiple time step integrators (RESPA) in the
         driver: ``"all"`` (default), ``"valence"`` (the bonded terms) or
@@ -212,7 +212,7 @@ class MDIEngine:
                     late_checks = bool(getattr(plan_core(self.model), "late_checks", False))
                 self.steps = StepGraph(self.model, self.cutoff, skin=skin, compute_dtype=self.dtype,
                                        late_checks=late_checks)
-        # under late checks: the positions of the last step, unwrapped (angstrom)
+        # on a step plan in a cell: the positions of the last step, unwrapped (angstrom)
         self._unwrapped: np.ndarray | None = None
 
         # system state, set by driver commands (MDI atomic units)
@@ -352,10 +352,11 @@ class MDIEngine:
                    late_checks=late_checks, terms=terms, mixed_precision=mixed_precision)
 
     def _positions(self) -> np.ndarray:
-        """The positions in angstrom; under late checks in a cell, unwrapped against the last step (an atom
-        moves by much less than half a cell per step), so a step never sees an atom jump by a lattice vector."""
+        """The positions in angstrom; on a step plan in a cell, unwrapped against the last step (an atom moves
+        by much less than half a cell per step), so an atom the driver wraps back into the cell keeps the plan's
+        pair list instead of rebuilding it."""
         pos = self.coords_bohr * BOHR_TO_ANGSTROM
-        if self.steps is None or not self.steps.late_checks or self.cell_bohr is None:
+        if self.steps is None or self.cell_bohr is None:
             return pos
         last = self._unwrapped
         if last is not None and last.shape == pos.shape:

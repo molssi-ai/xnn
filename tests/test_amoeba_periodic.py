@@ -1150,6 +1150,31 @@ def test_the_engine_evaluates_steps_on_a_plan():
     assert engines[1].steps is not None
 
 
+def test_the_engine_keeps_its_pair_list_when_the_driver_wraps_atoms():
+    """Without late checks, an atom the driver wraps back into the cell (moved by a lattice vector) is unwrapped
+    against the last step: the plan keeps its pair list, and the results equal the plain engine's."""
+    engines = [MDIEngine(ForceStressOutput(_box(Hippo), compute_stress=True), 6.3, step_graph=flag, skin=0.5)
+               for flag in (False, True)]
+    assert not engines[1].steps.late_checks
+    for engine in engines:
+        engine.natoms, engine.atomic_numbers = len(BOX), Z.astype(np.int64)
+        engine.cell_bohr = CELL / BOHR_TO_ANGSTROM
+    rebuilds = []
+    for step in range(3):
+        pos = BOX + 0.01 * step
+        if step == 2:
+            pos[4] -= CELL[1]
+        for engine in engines:
+            engine.coords_bohr = pos / BOHR_TO_ANGSTROM
+            engine.calculate()
+        rebuilds.append(engines[1].steps.rebuilds)
+        plain, planned = engines
+        assert planned.energy == pytest.approx(plain.energy, rel=1e-10)
+        np.testing.assert_allclose(planned.forces, plain.forces, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(planned.stress, plain.stress, rtol=1e-8, atol=1e-12)
+    assert rebuilds[2] == rebuilds[1]
+
+
 def test_the_engine_replays_steps_by_default_only_on_a_gpu():
     """The engine's step graph is on by default only on a GPU, and its option is validated."""
     model = ForceStressOutput(_box(Amoeba), compute_stress=True)
