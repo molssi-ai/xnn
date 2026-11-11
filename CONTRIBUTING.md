@@ -123,7 +123,7 @@ git clone https://github.com/molssi-ai/xnn.git
 cd xnn
 git switch dev
 python -m venv .venv && source .venv/bin/activate     # or: uv venv && source .venv/bin/activate
-pip install "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu   # or your CUDA build
+pip install "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu   # or your CUDA build
 pip install -e ".[ase,gnn,ffnn,vesin,dev]" "e3nn==0.4.4"
 pytest -q
 ```
@@ -274,5 +274,5 @@ xnn is released under the MIT license, and contributions are accepted under it.
 
 ## Security issues
 
-Do not open a public issue for a security problem. Report it privately through
-**Security > Report a vulnerability** on the GitHub repository.
+Do not open a public issue for a security problem. [SECURITY.md](SECURITY.md) explains how to
+report it privately and which inputs xnn treats as trusted.
