@@ -104,14 +104,6 @@ Extra requirements
 ==================
 Most notebooks run with the ``examples`` extra. The exceptions are:
 
-- The ``allegro_verification`` notebook. You need to run:
-
-  .. code-block:: bash
-
-    pip install "git+https://github.com/mir-group/allegro@v0.3.0"
-
-  to get the Allegro reference code installed.
-
 - The ``cace_verification`` and ``examples/gnn/cace/*`` notebooks. You need to run:
 
   .. code-block:: bash

@@ -56,8 +56,8 @@ xnn gives you the ability to install only what you need:
 The fidelity notebooks and tests compare against reference packages, which have
 their own extra optional dependencies: ``ani`` (torchani), ``d3``
 (simple-dftd3), ``d4`` (dftd4) and ``opls`` (OpenMM). The ``examples`` extra
-pins ``mace-torch`` and ``nequip``, which pin ``e3nn==0.4.4``. xnn runs on that
-version.
+pins the MACE, NequIP and Allegro references (``mace-torch``, ``nequip`` and
+``nequip-allegro``), which pin ``e3nn==0.4.4``. xnn runs on that version.
 
 Most fast paths (:ref:`howto-fast-paths`) run Triton kernels, which ship with
 CUDA builds of PyTorch, or ``torch.compile`` (Python 3.11 or 3.12). On CPUs,
@@ -73,12 +73,16 @@ They need a CUDA 12.6 or newer PyTorch build and are installed manually:
 GPU environment with uv
 =======================
 The ``pyproject.toml`` carries a `uv <https://docs.astral.sh/uv/>`_
-configuration that reproduces the environment the example notebooks were built
-in (``torch 2.5.1+cu121``):
+configuration for a GPU development environment (``torch 2.14.1+cu126``, any
+CUDA 12 driver):
 
 .. code-block:: bash
 
    uv sync --extra all
+
+torchani 2.9.0 (the ``ani`` extra) declares ``torch<=2.13``, so pip installs
+an older torch with it. It runs on torch 2.14 as well, and the uv environment
+uses 2.14.1.
 
 Check the installation
 ======================
