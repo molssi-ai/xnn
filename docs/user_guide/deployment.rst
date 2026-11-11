@@ -113,7 +113,22 @@ step as one CUDA graph. The ``--step-graph off`` flag disables this behavior.
 For ByteFF-Pol the engine also reads each step's checks during the next step,
 so the GPU never waits (``--late-checks``, on by default for ByteFF-Pol only).
 It unwraps the positions the driver sends against the last step.
-The :ref:`cli` guide lists every option available to you. 
+
+An AMOEBA or HIPPO engine can serve part of the model, for a driver that runs
+RESPA (multiple time steps):
+
+.. code-block:: bash
+
+   xnn mdi --ckpt hippo.pt --device cuda:0 --terms nonbonded --dtype mixed \
+           -mdi "-role ENGINE -name xnn -method TCP -port 8021 -hostname localhost"
+
+- ``--terms valence`` serves the bonded terms.
+- ``--terms nonbonded`` serves everything else, ion terms included.
+- The two add up to the default ``--terms all``, forces and stress included.
+- ``--dtype mixed`` runs the model in mixed precision, which is faster. Use
+  float64 for NVE runs.
+
+The :ref:`cli` guide lists every option available to you.
 
 There are example notebooks in ``notebooks/examples/common/deploy`` which illustrate how to drive
 the engine from Python and LAMMPS deployment interfaces.

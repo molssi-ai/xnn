@@ -822,24 +822,47 @@ option with its default.
 
 Ions
 ----
-A HIPPO library can give single-atom ions three terms of their own, each a
-table keyed by the ion's atom class:
+A HIPPO library can add three terms for ions. In a Tinker ``.prm`` file they
+look like this (class numbers, kcal/mol and angstrom):
 
-- ``ionct``: the charge transfer from a partner class into the ion,
-  ``-A exp(-B R)``. It replaces HIPPO's charge transfer of every pair with
-  the ion. A partner class without a row transfers no charge to it.
-- ``mbct``: the many-body charge transfer of the ion, from a charge
-  equilibration with one hardness ratio ``x`` per ion class. Each further
-  ligand gains less, so the term grows with the number of ligands and
-  saturates. ``forward`` reports it as ``e_mbct``.
-- ``ionpair``: a pair correction ``A exp(-beta R) - C f6(beta R) / R^6``
-  with Tang-Toennies damping, added to the repulsion and the dispersion.
+.. code-block:: text
 
-All three take the switch of the charge transfer. In a Tinker ``.prm`` file
-they are the keywords ``ionct``, ``mbct`` and ``ionpair``, with the scale of
-the ligand weights ``mbct-c0`` (kcal/mol). They train as the groups
-``ionct``, ``mbct`` and ``ionpair``. LAMMPS has no counterpart, so such a
-library has no LAMMPS export.
+   mbct-form  ceq
+   ionct      101   1    700.0   3.0          # Li+ with water O
+   ionct      101   5    650.0   2.8   0.54   # Li+ with PF6- F, x of PF6-
+   mbct       101   0.14                      # many-body term of Li+
+   ionpair    101   1    500.0   300.0   3.5  # pair correction
+
+- ``ionct`` is the charge transfer from a partner into a single-atom ion,
+  ``-A exp(-B R)``. It replaces HIPPO's charge transfer for that ion. Give
+  each pair of classes one row, in one order.
+- ``mbct`` turns on the many-body charge transfer of every molecule with an
+  atom of that class. It works for single-atom ions and for polyatomic ions
+  such as PF6-. ``forward`` reports it as ``e_mbct``.
+- ``ionpair`` adds ``A exp(-beta R) - C f6(beta R) / R^6`` to the repulsion
+  and the dispersion of a single-atom ion.
+
+The many-body term corrects the pairwise charge transfer when an ion has several
+ligands. Each extra ligand gains less charge, so the term saturates. It uses the
+pair charge transfer of the ion with each ligand molecule: the ``ionct`` row if
+there is one, else HIPPO's own. For a cation-anion pair, both ions see each
+other.
+
+``x`` is the ratio of the ion's hardness to a ligand's. The ``mbct`` row sets it
+for the ion. An optional last column on an ``ionct`` row sets it for that
+partner's molecule.
+
+``mbct-form`` picks the form of the term:
+
+- ``ceq`` (default) is a charge equilibration in which no ligand gives charge
+  back to the ion.
+- ``weighted`` is the form of xnn 0.26.0, with one ``x`` per ion and the
+  setting ``mbct-c0``. A file with ``mbct-c0`` but no ``mbct-form`` warns that
+  it now gets ``ceq``. Add ``mbct-form weighted`` to keep the old model.
+
+The terms train as the groups ``ionct``, ``mbct`` (with the rows' ``x``) and
+``ionpair``. LAMMPS has no counterpart, so such a library has no LAMMPS
+export.
 
 Molecules
 ---------

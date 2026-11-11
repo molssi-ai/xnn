@@ -144,5 +144,7 @@ gives the command.
 
 LAMMPS then reproduces the model's energy, with two limits:
 
-- LAMMPS has no charge flux. The export leaves it out and warns.
+- LAMMPS has no charge flux and no exchange polarization. The export refuses
+  a library with either term. Pass ``drop=("cflux",)`` (or ``"exchpol"``)
+  to write the model without it. LAMMPS then runs a different model.
 - In a cell, the forces of LAMMPS 29Aug2024 do not match its energy.

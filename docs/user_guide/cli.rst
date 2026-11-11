@@ -70,8 +70,9 @@ dependency installed) for LAMMPS ``fix mdi/qm`` or any MDI-compatible MD driver.
 
 You can set the ``--device``, and ``--dtype`` (default: the checkpoint's), and
 use the ``--dispersion d3|d4|"{...}"`` flag to add a dispersion term to a plain
-short-range model checkpoint. See the :ref:`deployment` page for more details
-and options.
+short-range model checkpoint. AMOEBA and HIPPO also take ``--terms
+valence|nonbonded`` for RESPA drivers and ``--dtype mixed``. See the
+:ref:`deployment` page for more details and options.
 
 xnn models
 ==========
