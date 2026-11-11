@@ -890,6 +890,43 @@ def test_fused_training_interpreted(monkeypatch):
     _check_fused_training(model, g, 1e-11)
 
 
+def test_direct_launches_pass_the_launch_hooks(monkeypatch):
+    """After its first launch a compiled fused kernel is launched directly, with every argument (Triton 3.3
+    on) or the others than constexprs, and with Triton's launch hooks: the runtime knobs' (Triton 3.4 on) or
+    the compiled kernel's."""
+    pytest.importorskip("triton")
+    import types
+
+    import xnn.hybnn.fast.mlp_kernels as mk
+    calls = []
+    compiled = types.SimpleNamespace(function="fn", packed_metadata="packed", launch_enter_hook="enter",
+                                     launch_exit_hook="exit", run=lambda *a: calls.append(a),
+                                     launch_metadata=lambda grid, stream, *args: "meta")
+
+    class Kernel:
+        params = [types.SimpleNamespace(is_constexpr=c) for c in (False, False, False, True)]
+
+        def __getitem__(self, grid):
+            return lambda *args: compiled
+
+    for name, value in (("_INTERPRETED", False), ("_ALL_ARGUMENTS", True), ("_COMPILED", {}), ("_CONSTEXPR", {})):
+        monkeypatch.setattr(mk, name, value)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: types.SimpleNamespace(cuda_stream=7))
+    kernel, x = Kernel(), torch.zeros(4)
+    mk._go(kernel, (2, 3), x, 5, 0.5, 16)
+    assert calls == []
+    runtime = types.SimpleNamespace(launch_enter_hook="knob enter", launch_exit_hook="knob exit")
+    monkeypatch.setattr(mk.triton, "knobs", types.SimpleNamespace(runtime=runtime), raising=False)
+    mk._go(kernel, (2, 3), x, 5, 0.5, 16)
+    monkeypatch.delattr(mk.triton, "knobs")
+    mk._go(kernel, (2, 3), x, 5, 0.5, 16)
+    monkeypatch.setattr(mk, "_ALL_ARGUMENTS", False)
+    mk._go(kernel, (2, 3), x, 5, 0.5, 16)
+    head = (2, 3, 1, 7, "fn", "packed", "meta")
+    assert calls == [(*head, "knob enter", "knob exit", x, 5, 0.5, 16), (*head, "enter", "exit", x, 5, 0.5, 16),
+                     (*head, "enter", "exit", x, 5, 0.5)]
+
+
 def test_fast_support_needs_cuda_and_triton(monkeypatch):
     """The compiled block needs a CUDA device; the fused MLPs a CUDA device, float32 or float64, and Triton."""
     import sys

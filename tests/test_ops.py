@@ -30,7 +30,7 @@ def test_whole_structure_sum_under_a_domain_reduction(monkeypatch):
     index = torch.tensor([0, 0, 1, 1, 1, 0])
     plain = ops.scatter_sum(src, index, 2)
     assert torch.equal(ops.whole_structure_sum(src, index, 2), plain)
-    monkeypatch.setattr(ops, "_DOMAIN_REDUCTION", [lambda s, i, n: 2.0 * ops.scatter_sum(s, i, n)])
+    monkeypatch.setattr(ops._DOMAIN, "reduction", lambda s, i, n: 2.0 * ops.scatter_sum(s, i, n), raising=False)
     assert torch.equal(ops.whole_structure_sum(src, index, 2), 2.0 * plain)
     monkeypatch.setattr(torch.jit, "is_scripting", lambda: True)
     assert torch.equal(ops.whole_structure_sum(src, index, 2), plain)
