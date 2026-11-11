@@ -21,9 +21,9 @@ structure.
 ## Installation
 
 ```
-pip install xnns                  # core (torch, numpy, pyyaml)
+pip install xnns                  # Core (torch, numpy, pyyaml)
 pip install "xnns[gnn,ase]"       # + e3nn for NequIP/MACE/Allegro, + ASE calculator
-pip install -e ".[all]"           # from a clone: everything, for development
+pip install -e ".[all]"           # From a clone: everything, for development
 ```
 
 The distribution is `xnns`; the import name and the command line are `xnn`.
@@ -46,29 +46,31 @@ The distribution is `xnns`; the import name and the command line are `xnn`.
 
 ## Quick start
 
-One script loads data, trains a model, loads pre-trained models, fine-tunes
-one and deploys it. Structures are plain dictionaries (`pos`, `atomic_numbers`, optional
-`cell`, `pbc` and `energy` / `forces` / `stress` labels), any ASE-readable
-file, or a dataset from the xnn hub:
+The steps below load data, train a model, load pre-trained models, fine-tune
+one and deploy it. Each step builds on the ones before it.
+
+### Load data
 
 ```python
-from ase import Atoms, units
-from ase.md.verlet import VelocityVerlet
-
-from xnn.common.config import Config
 from xnn.common.data import AtomicDataset, load_dataset
-from xnn.common.deploy import XNNCalculator, export_to_lammps
-from xnn.common.models import from_pretrained, list_models
-from xnn.common.train import Trainer
-from xnn.gnn.models import TensorNet
 
-# Load data: 250 aspirin conformations of rMD17 (eV, Angstrom) from the data hub
+# 250 aspirin conformations of rMD17 (eV, Angstrom) from the data hub
 structures = load_dataset("rmd17", molecule="aspirin", split="train", n_train=250)
 data = AtomicDataset(structures, cutoff=5.0)
-# or from a list of dicts or a file: 
-# AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)
+```
 
-# Train: a small NequIP model, checkpoints in runs/nequip (best.pt, last.pt)
+- A structure is a plain dictionary: `pos`, `atomic_numbers`, optional `cell`
+  and `pbc`, and `energy` / `forces` / `stress` labels.
+- Any ASE-readable file works too:
+  `AtomicDataset.from_file("trajectory.extxyz", cutoff=5.0)`.
+
+### Train a model
+
+```python
+from xnn.common.config import Config
+from xnn.common.train import Trainer
+
+# A small NequIP model, checkpoints in runs/nequip (best.pt, last.pt)
 cfg = Config()
 cfg.model.name = "nequip"
 cfg.model.cutoff = cfg.data.cutoff = 5.0
@@ -76,48 +78,82 @@ cfg.model.extra = {"species": [1, 6, 8], "l_max": 2}
 cfg.optim.epochs = 10
 cfg.output_dir = "runs/nequip"
 Trainer(cfg, data).fit()
+```
 
-# Pre-trained models: foundation models, your own checkpoints, the local cache
-print(list_models())
+The same training runs from the command line:
+`xnn train --config configs/train.yaml --set optim.epochs=50`.
+
+### Use pre-trained models
+
+```python
+from xnn.common.models import from_pretrained, list_models
+from xnn.gnn.models import TensorNet
+
+print(list_models())                                                  # Foundation models and the local cache
 mace = from_pretrained("mace-off23-small")                            # MACE-OFF23, converted once and cached
 tensornet = TensorNet.from_foundation("tensornet-matpes-pbe-2025.2")  # MatGL's TensorNet trained on MatPES
-mine = from_pretrained("runs/nequip/best.pt")
+mine = from_pretrained("runs/nequip/best.pt")                         # Your own checkpoint
+```
 
-# Fine-tune: MACE-OFF23 small with LoRA adapters, its reference energies re-estimated from the data
+Score checkpoints on one dataset with
+`xnn benchmark --config configs/benchmark.yaml`. It reports energy, force and
+stress errors (MAE, MSE or RMSE, per atom or as atomization energies) per model,
+in various formats such as CSV, JSON or Markdown.
+
+### Fine-tune
+
+```python
+# MACE-OFF23 small with LoRA adapters, its reference energies re-estimated from the data
 ft = Config()
 ft.model.name = "mace"
-ft.model.cutoff = ft.data.cutoff = 4.5                                # the checkpoint's cutoff
+ft.model.cutoff = ft.data.cutoff = 4.5      # The checkpoint's cutoff
 ft.model.extra = {"pretrained": "mace-off23-small", "lora": {"rank": 16},
                   "atomic_energies": "estimated"}
 ft.optim.epochs = 10
 ft.output_dir = "runs/mace-off23-lora"
 Trainer(ft, AtomicDataset(structures, cutoff=4.5)).fit()
+```
 
-# Deploy: the fine-tuned model (LoRA updates folded in) as an ASE calculator, 20 MD steps of aspirin
+- Full fine-tuning and layer freezing (`optim.freeze`) work the same way.
+- Multi-head replay keeps the pre-trained head: `heads: [pt_head, Default]`
+  with `data.replay_path` (original or pseudolabelled replay data).
+
+### Deploy
+
+The fine-tuned model (its LoRA updates folded in) can be deployed as an ASE
+calculator and used to drive a 20-step MD simulation of aspirin:
+
+```python
+from ase import Atoms, units
+from ase.md.verlet import VelocityVerlet
+
+from xnn.common.deploy import XNNCalculator
+
 atoms = Atoms(numbers=structures[0]["atomic_numbers"], positions=structures[0]["pos"])
 atoms.calc = XNNCalculator.from_pretrained("runs/mace-off23-lora/best.pt")
 print(atoms.get_potential_energy(), atoms.get_forces().shape)
 VelocityVerlet(atoms, timestep=0.5 * units.fs).run(20)
+```
 
-# Deploy: the same model as a TorchScript file for LAMMPS (no xnn needed to run it)
+The same model can be deployed as a TorchScript file for LAMMPS (no xnn needed
+to run it):
+
+```python
+from xnn.common.deploy import export_to_lammps
+
 export_to_lammps(from_pretrained("runs/mace-off23-lora/best.pt", wrap=False), cutoff=4.5,
                  path="mace-off23-lora.pt")
 ```
 
-- The same training runs from the command line:
-  `xnn train --config configs/train.yaml --set optim.epochs=50`.
-- Fine-tuning also covers full fine-tuning, multi-head replay
-  (`heads: [pt_head, Default]` with `data.replay_path`, original or
-  pseudolabelled replay data) and layer freezing (`optim.freeze`).
-- Score pre-trained checkpoints on one dataset (energy / force / stress MAE, MSE
-  or RMSE, per atom or as atomization energies), tabulated per model and written
-  to CSV, JSON or Markdown with `xnn benchmark --config configs/benchmark.yaml`
-- `MLPotential("xnn", model="runs/mace-off23-lora/best.pt")` runs the model in
-  OpenMM (openmm-ml), alone or as the ML part of an ML/MM system.
-- `xnn mdi --ckpt runs/mace-off23-lora/best.pt` serves a model to an external MD
-  code through the MolSSI Driver Interface.
-- `DomainParallel` splits one large box over the GPUs of a `torchrun` launch,
-  with the same energies, forces and stress as one GPU.
+Other deployment routes:
+
+- OpenMM (openmm-ml): `MLPotential("xnn",
+  model="runs/mace-off23-lora/best.pt")`, adopted alone or as the ML part of an
+  ML/MM system.
+- An external MD code used through the MolSSI Driver Interface: `xnn mdi --ckpt
+  runs/mace-off23-lora/best.pt`.
+- Decompose large systems across several GPUs: `DomainParallel` splits one large
+  box over the GPUs of a `torchrun` launch
 
 ## Models
 
@@ -162,7 +198,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.26.0},
+  version = {0.27.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

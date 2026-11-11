@@ -6,16 +6,17 @@ the model's current parameters as a Tinker parameter file in the form LAMMPS tak
 with the model's cutoffs, Ewald coefficients and meshes, and the LAMMPS input script, which names the converter
 command in its header.
 
-The LAMMPS package differs from the model in two places, both handled here: it has no charge flux (the bond and
-angle charge flux of a library are left out, with a warning, so LAMMPS evaluates the model without them), and its
-HIPPO repulsion takes the size parameter ``K / 8`` of the one of Tinker 8 and the 2021 paper (the Slater
-normalisation folded into ``K``). It also rejects the argument-less ``d-equals-p`` keyword, which is not written.
-A library with the terms of ions (``ionct``, ``mbct``, ``ionpair``) has no LAMMPS counterpart and is refused.
+The LAMMPS package has no charge flux and no exchange polarization: a library with either is refused unless the
+call names it in ``drop``, which leaves it out with a warning (LAMMPS then evaluates another model). Its HIPPO
+repulsion takes the size parameter ``K / 8`` of the one of Tinker 8 and the 2021 paper (the Slater normalisation
+folded into ``K``). It also rejects the argument-less ``d-equals-p`` keyword, which is not written. A library with
+the terms of ions (``ionct``, ``mbct``, ``ionpair``) has no LAMMPS counterpart and is refused. A library whose
+type and class names are integers keeps them as the numbers of the parameter file.
 """
 import copy
 import warnings
 from pathlib import Path
-from typing import Union
+from typing import Sequence, Union
 
 import numpy as np
 
@@ -24,6 +25,8 @@ from .amoebalib import write_tinker_prm, write_tinker_xyz
 
 # the cutoff of every term for a cluster: the model sums all its pairs, LAMMPS needs finite cutoffs
 CLUSTER_CUTOFF = 50.0
+# the terms LAMMPS lacks that an export may leave out on request
+DROPPABLE = ("cflux", "exchpol")
 
 
 def _key(core, hippo: bool, cell) -> list:
@@ -92,7 +95,7 @@ def _script(name: str, hippo: bool, periodic: bool, pitors: bool, tortor: bool) 
 
 
 def write_lammps_amoeba_input(model, pos, cell=None, directory: Union[str, Path] = ".",
-                              name: str = "system") -> Path:
+                              name: str = "system", drop: Sequence[str] = ()) -> Path:
     """Write the inputs of an AMOEBA or HIPPO model for LAMMPS's AMOEBA package into ``directory``.
 
     The files are ``<name>.prm`` (the model's current parameters, see the module notes), ``<name>.xyz``
@@ -112,11 +115,21 @@ def write_lammps_amoeba_input(model, pos, cell=None, directory: Union[str, Path]
         Where the files go (created if needed).
     name : str, optional
         The stem of the file names.
+    drop : sequence of str, optional
+        Terms of the library that LAMMPS lacks and that may be left out, with
+        a warning: ``"cflux"`` (the charge flux), ``"exchpol"`` (the exchange
+        polarization). A library with one of them is refused otherwise.
 
     Returns
     -------
     Path
         The path of the input script.
+
+    Raises
+    ------
+    ValueError
+        For a library with ion terms, or with charge flux or exchange
+        polarization not in ``drop``.
     """
     from .amoeba import Amoeba
     core = getattr(model, "model", model)
@@ -131,15 +144,29 @@ def write_lammps_amoeba_input(model, pos, cell=None, directory: Union[str, Path]
     if lib.ionct or lib.mbct or lib.ionpair:
         raise ValueError("LAMMPS's AMOEBA package has none of the ion terms (ionct, mbct, ionpair) of this library")
     hippo = lib.model == "hippo"
-    if lib.bndcflux or lib.angcflux:
-        warnings.warn("LAMMPS's AMOEBA package has no charge flux: the library's bond and angle charge flux "
-                      "are not written, and LAMMPS evaluates the model without them", stacklevel=2)
-        lib.bndcflux, lib.angcflux = {}, {}
+    drop = (drop,) if isinstance(drop, str) else tuple(drop)
+    unknown = set(drop) - set(DROPPABLE)
+    if unknown:
+        raise ValueError(f"drop takes {DROPPABLE} (got {sorted(unknown)})")
+    for term, tables, what in (("cflux", ("bndcflux", "angcflux"), "charge flux"),
+                               ("exchpol", ("exchpol",), "exchange polarization")):
+        if not any(getattr(lib, t) for t in tables):
+            continue
+        if term not in drop:
+            raise ValueError(f"LAMMPS's AMOEBA package has no {what} ({term}) of this library: pass "
+                             f"drop=({term!r},) to write the model without it")
+        warnings.warn(f"the library's {what} is not written: LAMMPS evaluates the model without it", stacklevel=2)
+        for t in tables:
+            setattr(lib, t, {})
     if hippo:
         for row in lib.repulsion.values():
             row["k"] = row["k"] / 8.0
     prm = directory / f"{name}.prm"
-    maps = write_tinker_prm(lib, prm)
+    # a library numbered by its type and class names keeps those numbers
+    try:
+        maps = write_tinker_prm(lib, prm, keep_numbers=True)
+    except ValueError:
+        maps = write_tinker_prm(lib, prm)
     prm.write_text("\n".join(ln for ln in prm.read_text().splitlines() if not ln.startswith("d-equals-p")) + "\n")
     top = core.topology
     # the converter reads no lattice line: the cell goes to its -pbc option

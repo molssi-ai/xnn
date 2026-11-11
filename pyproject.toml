@@ -54,9 +54,8 @@ gnn = ["e3nn>=0.4.4"]          # for NequIP / MACE / Allegro
 # cuEquivariance, installed by hand (see docs/how_tos/fast_paths.rst):
 #     pip install cuequivariance==0.6.1 cuequivariance-torch==0.6.1 cuequivariance-ops-torch-cu12==0.6.1
 # It is not an extra: the ops package needs cuBLAS >= 12.5, i.e. a cu126+
-# torch build, which conflicts with the cu121 torch index pinned below and
-# would make the lockfile unresolvable. The kernels are NVIDIA binaries under
-# NVIDIA's license; without them every model runs its reference implementation.
+# torch build, and the kernels are NVIDIA binaries under NVIDIA's license;
+# without them every model runs its reference implementation.
 # MolSSI Driver Interface engine (xnn mdi); MPI method also needs mpi4py.
 mdi = ["pymdi>=1.4"]
 # Cell-list neighbor lists. Optional -- the built-in reference implementation is
@@ -79,17 +78,16 @@ docs = [
     "myst-nb>=1.1",            # renders the executed example notebooks
 ]
 # Everything needed to build and run the example notebooks in notebooks/examples/gnn/,
-# including the reference ACEsuit/mace and mir-group/nequip implementations the
-# notebooks are benchmarked against. The Allegro reference (mir-group/allegro
-# v0.3.0) is not on PyPI, and PyPI refuses metadata with direct URL
-# requirements, so install it separately for the Allegro fidelity notebook:
-#     pip install "git+https://github.com/mir-group/allegro@v0.3.0"
+# including the reference ACEsuit/mace, mir-group/nequip and mir-group/allegro
+# implementations the notebooks and fidelity tests compare against (Allegro
+# v0.3.0 is published as nequip-allegro).
 examples = [
     "ase>=3.22",
     "e3nn>=0.4.4",
     "h5py>=3.0",
     "mace-torch==0.3.17",
     "nequip==0.6.2",
+    "nequip-allegro==0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
@@ -123,6 +121,7 @@ all = [
     "pytest",
     "mace-torch==0.3.17",
     "nequip==0.6.2",
+    "nequip-allegro==0.3.0",
     "matplotlib>=3.8",
     "jupyter",
     "ipykernel",
@@ -207,17 +206,21 @@ ignore = [
 "__init__.py" = ["F401"]            # re-exports
 "tests/test_aimnet2.py" = ["E501"]  # reference tables kept on one line each
 
-# uv configuration -- reproduces the .venv the notebooks were created with.
+# uv configuration -- the GPU development environment.
 #
-# The host has 2x A100 with CUDA driver 12.2, so torch must use the cu121 GPU
-# wheels (the default wheels are cu13x and fail on this driver). torch is pulled
-# from the PyTorch cu121 index, which resolves torch to 2.5.1+cu121.
+# The host has 2x A100 with CUDA driver 12.2, which runs CUDA 12.x builds
+# (the default wheels are cu13x and need a newer driver). torch is pulled from
+# the PyTorch cu126 index, which resolves torch to 2.14.1+cu126 (the last
+# release with Python 3.11 wheels).
 [tool.uv]
+# torchani 2.9.0 (the ani extra) declares torch<=2.13 but runs on torch 2.14
+# (pure Python; the ANI fidelity tests pass), so the lock ignores that cap
+override-dependencies = ["torch>=2.0"]
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu121" }
+torch = { index = "pytorch-cu126" }

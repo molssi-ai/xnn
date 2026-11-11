@@ -522,7 +522,8 @@ SECTION_SCHEMA: dict[str, dict] = {
     # first), the many-body charge transfer per ion and a pair correction of the ion with a partner
     "ion_charge_transfer": {"n_atoms": 2, "symmetry": "none", "type": "transfer",
                             "constants": [("A", "kcal/mol", float),
-                                          ("B", "1/Å", float)]},
+                                          ("B", "1/Å", float),
+                                          ("x", "", float)]},
     "ion_many_body_charge_transfer": {"n_atoms": 1, "symmetry": "none", "type": "transfer",
                                       "constants": [("x", "", float)]},
     "ion_pair_correction": {"n_atoms": 2, "symmetry": "none", "type": "pair",

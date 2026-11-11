@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Install CPU-only torch
-        run: pip install "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+        run: pip install "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install xnn and docs dependencies
         run: pip install -e ".[docs,ase]" "e3nn==0.4.4"

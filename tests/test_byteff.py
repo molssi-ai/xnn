@@ -427,7 +427,7 @@ def test_pol_compiled_block_matches_reference(monkeypatch, device):
     for fast in (False, True):
         model.set_use_fast(fast)
         model.eval()
-        out = ForceStressOutput(model)(_graphs(z, confs, model).to(device))
+        out = ForceStressOutput(model).eval()(_graphs(z, confs, model).to(device))
         model.train()
         model.zero_grad()
         tr = ForceStressOutput(model).train()(_graphs(z, confs, model).to(device))

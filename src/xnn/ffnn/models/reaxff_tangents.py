@@ -5333,7 +5333,7 @@ def _bond_atom_sums_forward_rx(src_ptr, dst_ptr, bo0_ptr, bpi_ptr, bpp_ptr, del_
     pass
     pass
     kc2__28 = tl.load(gen_ptr + 6).to(DT)
-    vov3__29 = bo0__8 - dva__24 - 0.04 * (dva__24 * dva__24) * (dva__24 * dva__24)
+    vov3__29 = bo0__8 - dva__24 - dva__24 * dva__24 * (dva__24 * dva__24) / 25.0
     vov3__29_b = vov3__29 * 0.0
     on_c2__30 = carbon__21 & (tl.load(gen_ptr + 7) > 0.5) & (vov3__29 > 3.0)
     e_c2__31 = tl.where(on_c2__30, kc2__28 * (vov3__29 - 3.0) * (vov3__29 - 3.0), 0.0)
@@ -5373,7 +5373,7 @@ def _bond_atom_sums_forward_rx(src_ptr, dst_ptr, bo0_ptr, bpi_ptr, bpp_ptr, del_
     bo0__8_b = bo0__8_b + (tl.exp(-trip2__33 * (bo0__8 - 2.5) * (bo0__8 - 2.5)) * (-trip2__33 * exphu__37_b * (bo0__8 - 2.5) + -trip2__33 * (bo0__8 - 2.5) * exphu__37_b)).to(bo0__8.dtype)
     vov3__29_b = vov3__29_b + tl.where(on_c2__30, kc2__28 * e_c2__31_b * (vov3__29 - 3.0) + kc2__28 * (vov3__29 - 3.0) * e_c2__31_b, 0.0).to(vov3__29.dtype)
     bo0__8_b = bo0__8_b + vov3__29_b.to(bo0__8.dtype)
-    dva__24_b = dva__24_b + (-vov3__29_b - (0.04 * (vov3__29_b * dva__24 + dva__24 * vov3__29_b) * (dva__24 * dva__24) + 0.04 * (dva__24 * dva__24) * (vov3__29_b * dva__24 + dva__24 * vov3__29_b))).to(dva__24.dtype)
+    dva__24_b = dva__24_b + (-vov3__29_b - ((vov3__29_b * dva__24 + dva__24 * vov3__29_b) * (dva__24 * dva__24) + dva__24 * dva__24 * (vov3__29_b * dva__24 + dva__24 * vov3__29_b)) / 25.0).to(dva__24.dtype)
     _cot__46 = tl.load(g_dpil_ptr + a__3, mask=m__2, other=0.0)
     dlp_b__27_b = dlp_b__27_b + (-(light_a__19 * (light_b__20 * _cot__46)) * pis__11).to(dlp_b__27.dtype)
     dvb__25_b = dvb__25_b + (_cot__46 * pis__11).to(dvb__25.dtype)

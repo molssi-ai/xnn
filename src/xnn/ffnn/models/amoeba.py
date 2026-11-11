@@ -962,28 +962,75 @@ def exchange_polarization_tensor(r_vec: Tensor, R: Tensor, i_: Tensor, k_: Tenso
     return K.view(N, 3, 3)
 
 
+MBCT_FORMS = ("ceq", "weighted")
+
+
+def _mbct_ceq(c: Tensor, x: Tensor) -> Tensor:
+    """The many-body charge transfer of every row of ``c`` (the pair charge transfers of a centre with its
+    ligands, zero for none) by the one-directional charge equilibration with the hardness ratios ``x``: the
+    ligands active on the sorted set, the closed form on them, the pair charge transfer of the others cancelled."""
+    live = c.detach() > 0
+    safe = torch.where(live, c, torch.ones_like(c))
+    u = torch.where(live, torch.sqrt(safe * x * (1.0 + x)), torch.zeros_like(c))
+    t = torch.where(live, torch.sqrt(safe * (1.0 + x) / x), torch.zeros_like(c))
+    order = torch.argsort(t.detach(), dim=1, descending=True)
+    cs, xs, us = (v.gather(1, order) for v in (c, torch.where(live, x, torch.zeros_like(x)), u))
+    with torch.no_grad():
+        ts, ls = t.gather(1, order), live.gather(1, order)
+        theta = us.cumsum(1) / (1.0 + xs.cumsum(1))
+        count = torch.arange(1, c.shape[1] + 1, device=c.device)
+        # the active set: the first k ligands, k the largest with t_(k) > theta_k
+        k = torch.where(ls & (ts > theta), count, torch.zeros_like(count)).amax(1, keepdim=True)
+        active = count <= k
+    zero = torch.zeros_like(cs)
+    U, X = torch.where(active, us, zero).sum(1), torch.where(active, xs, zero).sum(1)
+    return (torch.where(active, -cs * xs, cs).sum(1)) + U * U / (1.0 + X)
+
+
+def _mbct_weighted(c: Tensor, x: Tensor, c0: float) -> Tensor:
+    """The many-body charge transfer of every row of ``c`` with one hardness ratio ``x`` per row and the ligand
+    weights ``c / (c + c0)``."""
+    w = c / (c + c0)
+    live = c.detach() > 0
+    root = torch.where(live, torch.sqrt(torch.where(live, c, torch.ones_like(c))), torch.zeros_like(c))
+    total, n_eff = c.sum(1), w.sum(1)
+    cross = (w * root).sum(1)
+    S2 = total + cross * cross - (w * w * c).sum(1)
+    return x * ((1.0 + x) * S2 / (1.0 + x * n_eff) - total)
+
+
 def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor, N: int, B: int, params,
               ionct_index: Tensor, ionpair_index: Tensor, mbct_index: Tensor, mbct_atom: Tensor, mbct_slot: Tensor,
-              molecule: Tensor, n_molecules: int, c0: float, with_ct: bool = True,
-              with_pair: bool = True) -> dict:
-    """The terms of single-atom ions per atom, from the pairs ``i_``, ``k_`` at the distances ``R``
-    with ``weight`` (zero drops a pair), every pair taken both ways, the ion first.
+              molecule: Tensor, n_molecules: int, form: str = "ceq", c0: float = 0.0,
+              ionct_x_set: Optional[Tensor] = None, ct_eps: Optional[Tensor] = None,
+              ct_alpha: Optional[Tensor] = None, with_ct: bool = True, with_pair: bool = True) -> dict:
+    """The terms of ions per atom, from the pairs ``i_``, ``k_`` at the distances ``R`` with ``weight``
+    (zero drops a pair).
 
     * ``ct``: the charge transfer from a partner class into an ion class, ``-A exp(-B R)``
-      (``ionct``, parameters ``ionct_a``, ``ionct_b``);
+      (``ionct``, parameters ``ionct_a``, ``ionct_b``), from the rows of both orders (a library has
+      one order of a pair of two classes, a row of a class with itself counts both ways);
     * ``rep`` and ``disp``: the two parts of the pair correction ``A exp(-beta R) - C f6(beta R) /
       R^6``, ``f6`` the Tang-Toennies damping (``ionpair``);
-    * ``mbct``: the many-body charge transfer of every ion with an ``x`` (``mbct``), on the ion. With
-      ``c_j`` the size of its charge transfer with molecule ``j``, ``w_j = c_j / (c_j + c0)``,
-      ``n = sum_j w_j`` and ``S2 = sum_j c_j + sum_(j != k) w_j w_k sqrt(c_j c_k)``, it is
-      ``x [(1 + x) S2 / (1 + x n) - sum_j c_j]``: the charge equilibration of an ion with one
-      hardness, ``x`` the ratio of its hardness to its ligands', less the pairwise sum.
+    * ``mbct``: the many-body charge transfer of every centre, a molecule holding an atom of a class with
+      an ``x`` (``mbct``), on that atom. A ligand molecule ``j`` gives the centre ``c_j``, minus the
+      charge transfer of their atom pairs: the pair's ``ionct`` row, else HIPPO's two pieces
+      ``-(eps_a exp(-alpha_b R) + eps_b exp(-alpha_a R))`` from the class tables ``ct_eps``,
+      ``ct_alpha`` (none without them). A pair of two centres enters both. ``form`` ``"ceq"`` is the
+      one-directional charge equilibration (``q_j >= 0``) with ``x_j = eta / b_j``: the ligands sorted by
+      ``t_j = sqrt(c_j (1 + x_j) / x_j)``, the active set ``A`` the first ``k`` with ``t_(k) > theta_k =
+      sum_(j <= k) u_j / (1 + sum_(j <= k) x_j)``, ``u_j = sqrt(c_j x_j (1 + x_j))``, and the term
+      ``-sum_A c_j x_j + (sum_A u_j)^2 / (1 + sum_A x_j) + sum_(not A) c_j``. ``x_j`` is the
+      ``c``-weighted mean over the ligand's pairs of the row's ``ionct_x`` (rows with ``ionct_x_set``,
+      for the centre holding the row's ion) and the centre's ``mbct_x`` otherwise. ``"weighted"`` takes
+      the centre's ``x``, ``w_j = c_j / (c_j + c0)``, ``n = sum_j w_j`` and ``S2 = sum_j c_j +
+      sum_(j != k) w_j w_k sqrt(c_j c_k)``: ``x [(1 + x) S2 / (1 + x n) - sum_j c_j]``.
 
     The pair energies go half to each atom. The batch holds ``B`` structures of ``N / B`` atoms;
-    ``mbct_atom`` lists the ions of the many-body term in one structure, ``mbct_slot`` gives every
-    atom of a structure its place among them (-1 for the others) and ``molecule`` its molecule, one
-    of ``n_molecules``. ``with_ct`` and ``with_pair`` say whether the library has rows of the two
-    pair terms.
+    ``mbct_atom`` lists the atom of every centre of one structure, ``mbct_slot`` gives every atom of a
+    structure the place of its molecule among the centres (-1 for the others) and ``molecule`` its
+    molecule, one of ``n_molecules``. ``with_ct`` and ``with_pair`` say whether the library has rows of
+    the two pair terms.
     """
     dtype, device = R.dtype, R.device
     zero = torch.zeros(N, dtype=dtype, device=device)
@@ -991,52 +1038,83 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
     out = {"ct": zero, "rep": zero, "disp": zero, "mbct": zero}
     n = N // B
     n_ions = int(mbct_atom.shape[0])
-    many = with_ct and n_ions > 0
-    if many:
-        # the charge transfer of every (ion, molecule) of the batch, summed over the molecule's atoms
-        summed = torch.zeros(B * n_ions * n_molecules, dtype=dtype, device=device)
-        atom = torch.arange(N, device=device)
-        structure = atom // n
-        slot, mol = mbct_slot.index_select(0, atom - structure * n), molecule.index_select(0, atom - structure * n)
-    for a, b in ((i_, k_), (k_, i_)):
-        ca, cb = cls_idx[a], cls_idx[b]
-        if with_ct:
-            row = ionct_index[ca, cb]
-            on = row >= 0
+    many = n_ions > 0
+    ca, cb = cls_idx[i_], cls_idx[k_]
+    # the charge transfer of every pair from its ionct rows, ion i and ion k (two pieces only for a row of a
+    # class with itself: the library has one order of every other pair)
+    e_ik, e_ki, row_ik, row_ki = none, none, None, None
+    if with_ct:
+        e_dir = []
+        for a, b in ((ca, cb), (cb, ca)):
+            row = ionct_index[a, b]
             r = row.clamp_min(0)
-            e = torch.where(on, -params["ionct_a"][r] * torch.exp(-params["ionct_b"][r] * R), none) * weight
-            out["ct"] = out["ct"] + scatter_sum(0.5 * e, a, N) + scatter_sum(0.5 * e, b, N)
-            if many:
-                s = slot[a]
-                key = (structure[a] * n_ions + s.clamp_min(0)) * n_molecules + mol[b]
-                summed = summed.index_add(0, key, torch.where(s >= 0, e, none))
-        if with_pair:
-            row = ionpair_index[ca, cb]
+            e_dir.append((torch.where(row >= 0, -params["ionct_a"][r] * torch.exp(-params["ionct_b"][r] * R), none)
+                          * weight, row))
+        (e_ik, row_ik), (e_ki, row_ki) = e_dir
+        e = e_ik + e_ki
+        out["ct"] = scatter_sum(0.5 * e, i_, N) + scatter_sum(0.5 * e, k_, N)
+    if with_pair:
+        for a, b in ((ca, cb), (cb, ca)):
+            row = ionpair_index[a, b]
             on = row >= 0
-            r = row.clamp_min(0)
+            r_ = row.clamp_min(0)
             # the pairs without a row (the padding of a plan among them) take a harmless distance
             Rs = torch.where(on & (R.detach() > 0.1), R, torch.ones_like(R))
-            x = params["ionpair_beta"][r] * Rs
+            x = params["ionpair_beta"][r_] * Rs
             term, series = torch.ones_like(x), torch.ones_like(x)
             for k in range(1, 7):
                 term = term * x / k
                 series = series + term
             f6 = 1.0 - torch.exp(-x) * series
-            e_rep = torch.where(on, params["ionpair_a"][r] * torch.exp(-x), none) * weight
-            e_disp = torch.where(on, -params["ionpair_c"][r] * f6 / Rs ** 6, none) * weight
-            out["rep"] = out["rep"] + scatter_sum(0.5 * e_rep, a, N) + scatter_sum(0.5 * e_rep, b, N)
-            out["disp"] = out["disp"] + scatter_sum(0.5 * e_disp, a, N) + scatter_sum(0.5 * e_disp, b, N)
-    if many:
-        c = (-summed).clamp_min(0.0).view(B * n_ions, n_molecules)
-        w = c / (c + c0)
-        live = c.detach() > 0
-        root = torch.where(live, torch.sqrt(torch.where(live, c, torch.ones_like(c))), torch.zeros_like(c))
-        total, n_eff = c.sum(1), w.sum(1)
-        cross = (w * root).sum(1)
-        S2 = total + cross * cross - (w * w * c).sum(1)
-        atoms = mbct_atom.repeat(B) + torch.arange(B, device=device).repeat_interleave(n_ions) * n
-        x = params["mbct_x"][mbct_index[cls_idx[atoms]]]
-        out["mbct"] = zero.index_add(0, atoms, x * ((1.0 + x) * S2 / (1.0 + x * n_eff) - total))
+            e_rep = torch.where(on, params["ionpair_a"][r_] * torch.exp(-x), none) * weight
+            e_disp = torch.where(on, -params["ionpair_c"][r_] * f6 / Rs ** 6, none) * weight
+            out["rep"] = out["rep"] + scatter_sum(0.5 * e_rep, i_, N) + scatter_sum(0.5 * e_rep, k_, N)
+            out["disp"] = out["disp"] + scatter_sum(0.5 * e_disp, i_, N) + scatter_sum(0.5 * e_disp, k_, N)
+    if not many:
+        return out
+    # the pair charge transfer of every pair: its row, else HIPPO's two pieces
+    e_pair = e_ik + e_ki
+    if ct_eps is not None:
+        eps_i, eps_k, eta_i, eta_k = ct_eps[ca], ct_eps[cb], ct_alpha[ca], ct_alpha[cb]
+        t1 = torch.where(eta_k > 0, eps_i * torch.exp(-eta_k * R), none)
+        t2 = torch.where(eta_i > 0, eps_k * torch.exp(-eta_i * R), none)
+        e_pair = e_pair - (t1 + t2) * weight
+    atoms = mbct_atom.repeat(B) + torch.arange(B, device=device).repeat_interleave(n_ions) * n
+    x_centre = params["mbct_x"][mbct_index[cls_idx[atoms]]]
+    per_row = form == "ceq" and ionct_x_set is not None and with_ct
+    atom = torch.arange(N, device=device)
+    structure = atom // n
+    slot, mol = mbct_slot.index_select(0, atom - structure * n), molecule.index_select(0, atom - structure * n)
+    # the (centre, ligand molecule) sums of the batch: the charge transfer and, per pair, its x times it
+    summed = torch.zeros(B * n_ions * n_molecules, dtype=dtype, device=device)
+    weighted = torch.zeros_like(summed)
+    for a, b, e_own, row_own in ((i_, k_, e_ik, row_ik), (k_, i_, e_ki, row_ki)):
+        s = slot[a]
+        take = (s >= 0) & (mol[b] != mol[a])
+        centre = structure[a] * n_ions + s.clamp_min(0)
+        key = centre * n_molecules + mol[b]
+        e_c = torch.where(take, e_pair, none)
+        summed = summed.index_add(0, key, e_c)
+        if per_row:
+            xc = x_centre[centre]
+            # the row whose ion is this side's atom takes its own x where it has one
+            r = row_own.clamp_min(0)
+            x_own = torch.where((row_own >= 0) & ionct_x_set[r], params["ionct_x"][r], xc)
+            e_own = torch.where(take, e_own, none)
+            weighted = weighted.index_add(0, key, e_own * x_own + (e_c - e_own) * xc)
+    c = (-summed).clamp_min(0.0).view(B * n_ions, n_molecules)
+    if form == "weighted":
+        e_mb = _mbct_weighted(c, x_centre, c0)
+    else:
+        xc = x_centre[:, None].expand(-1, n_molecules)
+        if per_row:
+            s_ = summed.view(B * n_ions, n_molecules)
+            live = s_.detach() < 0
+            x = torch.where(live, weighted.view_as(s_) / torch.where(live, s_, -torch.ones_like(s_)), xc)
+        else:
+            x = xc
+        e_mb = _mbct_ceq(c, x)
+    out["mbct"] = zero.index_add(0, atoms, e_mb)
     return out
 
 
@@ -1702,9 +1780,21 @@ class AmoebaForceField(nn.Module):
         unknown += [c for c in lib.mbct if c not in self._class_index]
         if unknown:
             raise KeyError(f"ion terms of classes the library has no atom type of: {unknown}")
+        both = [k for k in lib.ionct if k.split("-")[0] != k.split("-")[1]
+                and "-".join(reversed(k.split("-"))) in lib.ionct]
+        if both:
+            raise ValueError(f"ionct rows of both orders of a pair ({sorted(both)}): a pair takes one row, "
+                             "whose charge transfer enters the many-body term of both atoms")
         self.ionct_keys = list(lib.ionct)
         make("ionct_a", [lib.ionct[k]["a"] for k in self.ionct_keys] or [0.0], "ionct", scale=KCAL_TO_EV)
         make("ionct_b", [lib.ionct[k]["b"] for k in self.ionct_keys] or [0.0], "ionct")
+        # the hardness ratios of the rows that give their ligands one (trained with the many-body term)
+        self.ionct_has_x = [lib.ionct[k].get("x") is not None for k in self.ionct_keys]
+        if any(self.ionct_has_x):
+            make("ionct_x", [float(lib.ionct[k].get("x") or 0.0) for k in self.ionct_keys], "mbct")
+            self.register_buffer("ionct_x_set", torch.tensor(self.ionct_has_x, dtype=torch.bool), persistent=False)
+        else:
+            self.ionct_x_set = None
         self.ionpair_keys = list(lib.ionpair)
         make("ionpair_a", [lib.ionpair[k]["a"] for k in self.ionpair_keys] or [0.0], "ionpair", scale=KCAL_TO_EV)
         make("ionpair_c", [lib.ionpair[k]["c"] for k in self.ionpair_keys] or [0.0], "ionpair", scale=KCAL_TO_EV)
@@ -1722,6 +1812,15 @@ class AmoebaForceField(nn.Module):
             mbct_idx[self._class_index[c]] = m
         self.register_buffer("mbct_index", torch.tensor(mbct_idx, dtype=torch.long), persistent=False)
         self.mbct_c0 = float(lib.setting("mbct-c0")) * KCAL_TO_EV
+        self.mbct_form = str(lib.setting("mbct-form")).strip().lower()
+        if self.mbct_form not in MBCT_FORMS:
+            raise ValueError(f"mbct-form must be one of {MBCT_FORMS} (got {self.mbct_form!r})")
+        if lib.mbct and "mbct-c0" in lib.settings and "mbct-form" not in lib.settings:
+            warnings.warn("this library sets mbct-c0 but no mbct-form: its many-body charge transfer takes the "
+                          "default form 'ceq'; xnn 0.26.0 computed 'weighted' (set mbct-form weighted for that)",
+                          stacklevel=3)
+        if self.mbct_form == "weighted" and any(self.ionct_has_x):
+            raise ValueError("the x of ionct rows needs mbct-form ceq (the weighted form has one x per ion)")
         # an ion class with charge-transfer rows takes no HIPPO charge transfer: its class parameters
         # enter the pair terms as zero (both of a pair's pieces then vanish)
         ion_ct = {k.split("-")[0] for k in self.ionct_keys}
@@ -1853,6 +1952,11 @@ class AmoebaForceField(nn.Module):
                                   "damp": float(P["expol_damp"][i]), "use": lib.exchpol[c]["use"]}
         for m, k in enumerate(self.ionct_keys):
             lib.ionct[k] = {"a": float(P["ionct_a"][m]) / KCAL_TO_EV, "b": float(P["ionct_b"][m])}
+            if self.ionct_has_x[m]:
+                lib.ionct[k]["x"] = float(P["ionct_x"][m])
+        if self.mbct_keys:
+            # the form is written out, so the file means the same model under any default
+            lib.settings["mbct-form"] = self.mbct_form
         for m, k in enumerate(self.ionpair_keys):
             lib.ionpair[k] = {"a": float(P["ionpair_a"][m]) / KCAL_TO_EV, "c": float(P["ionpair_c"][m]) / KCAL_TO_EV,
                               "beta": float(P["ionpair_beta"][m])}
@@ -2665,16 +2769,24 @@ class Amoeba(InteratomicPotential):
         molecules = {r: m for m, r in enumerate(dict.fromkeys(component))}
         buf("top_molecule", [molecules[component[i]] for i in range(n)], (-1,))
         self.n_molecules = len(molecules)
-        ions = {k.split("-")[0] for k in (*ff.ionct_keys, *ff.ionpair_keys)} | set(ff.mbct_keys)
-        slots, self.n_mbct = [], 0
+        # (a centre of the many-body term is the molecule of an atom of an mbct class, an ion or a polyatomic one)
+        ions = {k.split("-")[0] for k in (*ff.ionct_keys, *ff.ionpair_keys)}
+        centres: dict = {}
         for i in range(n):
             c = ff.class_names[ff.type_class[t_idx[i]]]
             if c in ions and neighbors[i]:
-                raise ValueError(f"atom {i} of the ion class {c} is bonded: the ion terms take single-atom ions")
-            slots.append(self.n_mbct if c in ff.mbct_keys else -1)
-            self.n_mbct += c in ff.mbct_keys
-        buf("top_mbct_slot", slots, (-1,))
-        buf("top_mbct_atom", [i for i in range(n) if slots[i] >= 0], (-1,))
+                raise ValueError(f"atom {i} of the ion class {c} is bonded: the ionct and ionpair terms take "
+                                 "single-atom ions")
+            if c in ff.mbct_keys:
+                m = molecules[component[i]]
+                if m in centres:
+                    raise ValueError(f"atoms {centres[m]} and {i} of mbct classes are in one molecule: a molecule "
+                                     "is one centre of the many-body charge transfer")
+                centres[m] = i
+        order = {m: s for s, m in enumerate(centres)}
+        self.n_mbct = len(centres)
+        buf("top_mbct_slot", [order.get(molecules[component[i]], -1) for i in range(n)], (-1,))
+        buf("top_mbct_atom", list(centres.values()), (-1,))
         self.n_bonded_sites = n
 
     @staticmethod
@@ -4313,12 +4425,13 @@ class Hippo(Amoeba):
     the monopoles. ``forward`` reports ``e_multipole``, ``e_polar``,
     ``e_repulsion``, ``e_dispersion`` and ``e_chgtrn``.
 
-    A library with terms of single-atom ions (``ionct``, ``ionpair`` and
-    ``mbct`` of :class:`~xnn.ffnn.models.amoebalib.AmoebaLibrary`, see
-    :func:`ion_terms`) gives those ions the charge transfer from their
-    partners in place of the pairwise one, adds their pair correction to
-    ``e_repulsion`` and ``e_dispersion``, and reports their many-body charge
-    transfer as ``e_mbct``.
+    A library with terms of ions (``ionct``, ``ionpair`` and ``mbct`` of
+    :class:`~xnn.ffnn.models.amoebalib.AmoebaLibrary`, see
+    :func:`ion_terms`) gives single-atom ions the charge transfer from their
+    partners in place of the pairwise one and adds their pair correction to
+    ``e_repulsion`` and ``e_dispersion``. It reports the many-body charge
+    transfer of every centre (the molecule of an atom of an ``mbct`` class,
+    polyatomic ions included) as ``e_mbct``.
     """
 
     nonbonded = "hippo"
@@ -4494,9 +4607,13 @@ class Hippo(Amoeba):
         switch = self._switch(R, per, self.chgtrn_cutoff, None)
         if switch is not None:
             weight = weight * switch
+        # the centres' pairs without an ionct row take HIPPO's charge transfer
+        many = self.n_mbct > 0
         ions = ion_terms(i_, k_, R, weight, cls_idx, N, B, ff.params, ff.ionct_index, ff.ionpair_index,
                          ff.mbct_index, self.top_mbct_atom, self.top_mbct_slot, self.top_molecule, self.n_molecules,
-                         ff.mbct_c0, bool(ff.ionct_keys), bool(ff.ionpair_keys))
+                         ff.mbct_form, ff.mbct_c0, ff.ionct_x_set, self._class_table("chgtrn_eps") if many else None,
+                         self._class_table("chgtrn_alpha") if many else None, bool(ff.ionct_keys),
+                         bool(ff.ionpair_keys))
         terms["e_chgtrn"] = terms["e_chgtrn"] + ions["ct"]
         terms["e_repulsion"] = terms["e_repulsion"] + ions["rep"]
         terms["e_dispersion"] = terms["e_dispersion"] + ions["disp"]

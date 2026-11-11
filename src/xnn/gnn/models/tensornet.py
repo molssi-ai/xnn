@@ -61,7 +61,7 @@ from xnn.common.models.base import InteratomicPotential
 from xnn.common.models.blocks import GatedMLP
 from xnn.common.models.constants import ExactFloat64Constants
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import gather_rows, make_activation, scatter_sum
+from xnn.common.models.ops import gather_rows, make_activation, refresh_ghosts, scatter_sum
 from xnn.common.models.registry import register_model
 
 _GROUPS = ("O(3)", "SO(3)")
@@ -460,6 +460,7 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
     """
 
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
+    refreshes_ghosts = True
 
     def __init__(self, n_features: int = 128, n_interactions: int = 2, n_rbf: int = 32,
                  cutoff: float = 4.5, radial_basis: str = "expnorm",
@@ -640,7 +641,7 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         rbf = self.rbf(r)
         X = self.tensor_embedding(atomic_numbers, src, dst, cut, unit, rbf)
         for layer in self.layers:
-            X = layer(X, src, dst, cut, rbf, total_charge)
+            X = layer(refresh_ghosts(X), src, dst, cut, rbf, total_charge)
         return X
 
     def _features(self, X: Tensor) -> Tensor:

@@ -50,7 +50,7 @@ import torch
 
 from ..data import structure_to_graph
 from ..models.hub.checkpoint import float_dtype
-from .step_graph import StepGraph, plan_core
+from .step_graph import TERMS, StepGraph, plan_core
 
 try:
     import mdi
@@ -126,9 +126,20 @@ class MDIEngine:
         Read each step's status during the next step (see
         :class:`~xnn.common.deploy.step_graph.StepGraph`). ``"auto"``
         (default) follows the model (ByteFF-Pol on, AMOEBA and HIPPO off).
-        With late checks the positions of a cell are unwrapped against the
-        last step, so an atom the driver wraps back into the cell keeps its
-        pair list.
+        On a step plan the positions of a cell are unwrapped against the
+        last step either way, so an atom the driver wraps back into the cell
+        keeps its pair list.
+    terms : str, optional
+        The terms served, for multiple time step integrators (RESPA) in the
+        driver: ``"all"`` (default), ``"valence"`` (the bonded terms) or
+        ``"nonbonded"`` (pairs, meshes, induction and the ion terms), the
+        split of :class:`~xnn.common.deploy.step_graph.StepGraph`. Energy,
+        forces and stress are those of the subset. A subset needs a model
+        with step plans (AMOEBA, HIPPO) and evaluates on them on any device.
+    mixed_precision : bool, optional
+        Serve a float32 AMOEBA or HIPPO model with its ``mixed_precision``
+        option on (the radial ladders of the fast pair terms in float32), by
+        default ``False``.
 
     Attributes
     ----------
@@ -152,11 +163,23 @@ class MDIEngine:
     def __init__(self, model: torch.nn.Module, cutoff: float,
                  device: str = "cpu", total_charge: float = 0.0,
                  dipole_predictor: str | None = "aspc", step_graph: bool | str = "auto",
-                 skin: float = 1.0, late_checks: bool | str = "auto"):
+                 skin: float = 1.0, late_checks: bool | str = "auto", terms: str = "all",
+                 mixed_precision: bool = False):
         self.device = torch.device(device)
         self.model = model.to(self.device).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
+        if terms not in TERMS:
+            raise ValueError(f"terms must be one of {TERMS} (got {terms!r})")
+        self.terms = terms
+        if mixed_precision:
+            cores = [m for m in self.model.modules() if hasattr(m, "mixed_precision")]
+            if not cores:
+                raise ValueError("mixed precision needs a model with a mixed-precision option (AMOEBA, HIPPO)")
+            if float_dtype(self.model) != torch.float32:
+                raise ValueError("mixed precision serves a float32 model")
+            for m in cores:
+                m.mixed_precision = True
         # the engine persists over the run, so the induced dipoles of a polarizable model
         # are predicted from the last steps
         self.dipole_predictor = dipole_predictor
@@ -171,6 +194,13 @@ class MDIEngine:
             raise ValueError(f"step_graph must be True, False or 'auto' (got {step_graph!r})")
         if late_checks not in (True, False, "auto"):
             raise ValueError(f"late_checks must be True, False or 'auto' (got {late_checks!r})")
+        if terms != "all":
+            # the subsets are evaluated on a step plan
+            if plan_core(self.model) is None:
+                raise ValueError(f"terms={terms!r} needs a model with step plans (AMOEBA, HIPPO)")
+            if step_graph is False:
+                raise ValueError(f"terms={terms!r} is evaluated on step plans: it needs step_graph")
+            step_graph = True
         if step_graph == "auto":
             # replaying the step pays on a GPU at every size measured; the CPU keeps the plain step
             step_graph = self.device.type == "cuda" and plan_core(self.model) is not None
@@ -182,7 +212,7 @@ class MDIEngine:
                     late_checks = bool(getattr(plan_core(self.model), "late_checks", False))
                 self.steps = StepGraph(self.model, self.cutoff, skin=skin, compute_dtype=self.dtype,
                                        late_checks=late_checks)
-        # under late checks: the positions of the last step, unwrapped (angstrom)
+        # on a step plan in a cell: the positions of the last step, unwrapped (angstrom)
         self._unwrapped: np.ndarray | None = None
 
         # system state, set by driver commands (MDI atomic units)
@@ -217,7 +247,9 @@ class MDIEngine:
                         dipole_predictor: str | None = "aspc",
                         step_graph: bool | str = "auto",
                         skin: float = 1.0,
-                        late_checks: bool | str = "auto") -> "MDIEngine":
+                        late_checks: bool | str = "auto",
+                        terms: str = "all",
+                        mixed_precision: bool = False) -> "MDIEngine":
         """Build an engine from a checkpoint or a pre-trained model.
 
         ``path`` is anything :func:`~xnn.common.models.from_pretrained`
@@ -285,6 +317,12 @@ class MDIEngine:
             The margin of the Verlet pair list in angstrom (see the class).
         late_checks : bool or str, optional
             Read each step's status during the next step (see the class).
+        terms : str, optional
+            The terms served, ``"all"`` (default), ``"valence"`` or
+            ``"nonbonded"`` (see the class).
+        mixed_precision : bool, optional
+            Serve an AMOEBA or HIPPO model in float32 with its mixed-precision
+            option on (see the class); ``dtype`` then defaults to float32.
 
         Returns
         -------
@@ -300,6 +338,8 @@ class MDIEngine:
             includes a dispersion correction.
         """
         from ..models.hub import load_pretrained
+        if mixed_precision and dtype is None:
+            dtype = torch.float32
         loaded = load_pretrained(path, cache_dir=cache_dir, dtype=dtype,
                                  dispersion=dispersion, compute_stress=True,
                                  eeq_reuse=eeq_reuse, use_fast=use_fast, head=head)
@@ -309,13 +349,14 @@ class MDIEngine:
                     str(float_dtype(model)).replace("torch.", ""), total_charge)
         return cls(model, cutoff=cutoff, device=device, total_charge=total_charge,
                    dipole_predictor=dipole_predictor, step_graph=step_graph, skin=skin,
-                   late_checks=late_checks)
+                   late_checks=late_checks, terms=terms, mixed_precision=mixed_precision)
 
     def _positions(self) -> np.ndarray:
-        """The positions in angstrom; under late checks in a cell, unwrapped against the last step (an atom
-        moves by much less than half a cell per step), so a step never sees an atom jump by a lattice vector."""
+        """The positions in angstrom; on a step plan in a cell, unwrapped against the last step (an atom moves
+        by much less than half a cell per step), so an atom the driver wraps back into the cell keeps the plan's
+        pair list instead of rebuilding it."""
         pos = self.coords_bohr * BOHR_TO_ANGSTROM
-        if self.steps is None or not self.steps.late_checks or self.cell_bohr is None:
+        if self.steps is None or self.cell_bohr is None:
             return pos
         last = self._unwrapped
         if last is not None and last.shape == pos.shape:
@@ -370,7 +411,7 @@ class MDIEngine:
         if self.steps is not None:
             # the step plan keeps its own pair list
             t_graph = t0
-            out = self.steps(struct)
+            out = self._step(struct)
             n_edges = 2 * self.steps.plan.capacity
         else:
             graph = structure_to_graph(struct, self.cutoff, device=self.device)
@@ -415,6 +456,25 @@ class MDIEngine:
                 n, self._t_graph * ms, self._t_model * ms,
                 self._t_extract * ms, self._t_total * ms, rate, self._n_edges,
             )
+
+    def _step(self, struct: dict) -> dict:
+        """One step on the step plan, of the terms served. The valence terms alone follow the plan of the
+        last nonbonded step, so a valence engine refreshes it with a nonbonded step (discarded) when an atom
+        has moved, up to the lattice, by more than half the skin."""
+        if self.terms != "valence":
+            return self.steps(struct, terms=self.terms)
+        plan, pos = self.steps.plan, struct["pos"]
+        fresh = plan is None or plan.reference is None or plan.reference.shape != pos.shape
+        if not fresh:
+            step = pos.to(plan.reference.dtype) - plan.reference
+            cell = struct.get("cell")
+            if cell is not None:
+                cell = cell.to(step.dtype)
+                step = step - torch.round(step @ torch.linalg.inv(cell)) @ cell
+            fresh = bool((step * step).sum(-1).max() > (0.5 * plan.skin) ** 2)
+        if fresh:
+            self.steps(struct, terms="nonbonded")
+        return self.steps(struct, terms="valence")
 
     def _sync(self) -> None:
         """Wait for queued device work to finish.
@@ -603,8 +663,13 @@ def main(argv=None) -> None:
                         '-method TCP -port 8021 -hostname localhost"')
     p.add_argument("--device", default="cpu",
                    help='torch device, e.g. "cpu" or "cuda:0" (default: cpu)')
-    p.add_argument("--dtype", choices=["float32", "float64"], default=None,
-                   help="dtype to serve in (default: the checkpoint's own)")
+    p.add_argument("--dtype", choices=["float32", "float64", "mixed"], default=None,
+                   help="dtype to serve in (default: the checkpoint's own); 'mixed' serves an AMOEBA or "
+                        "HIPPO model in float32 with its mixed-precision option on")
+    p.add_argument("--terms", choices=list(TERMS), default="all",
+                   help="terms served, for RESPA in the driver: 'all' (default), 'valence' (the bonded "
+                        "terms) or 'nonbonded' (pairs, meshes, induction, ion terms); a subset needs a "
+                        "model with step plans (AMOEBA, HIPPO)")
     p.add_argument("--dispersion", default=None,
                    help="add D3/D4 dispersion to a checkpoint trained without "
                         "it: 'd4', 'd3', or a YAML mapping as in the config's "
@@ -653,7 +718,8 @@ def main(argv=None) -> None:
         from mpi4py import MPI
         mpi_comm = MPI.COMM_WORLD
 
-    dtype = getattr(torch, args.dtype) if args.dtype else None
+    mixed = args.dtype == "mixed"
+    dtype = torch.float32 if mixed else (getattr(torch, args.dtype) if args.dtype else None)
     dispersion = None
     if args.dispersion and args.no_dispersion:
         p.error("--dispersion and --no-dispersion exclude each other")
@@ -676,7 +742,8 @@ def main(argv=None) -> None:
                                                    "off": False}[args.step_graph],
                                        skin=args.skin,
                                        late_checks={"auto": "auto", "on": True,
-                                                    "off": False}[args.late_checks])
+                                                    "off": False}[args.late_checks],
+                                       terms=args.terms, mixed_precision=mixed)
     engine.run(args.mdi_options, mpi_comm=mpi_comm)
 
 

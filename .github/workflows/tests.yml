@@ -22,6 +22,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # the oldest supported torch and the current one, each with the Triton
+    # release its interpreter runs the kernels with; Codecov gets the current one
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - torch: "2.5.1"
+            triton: "3.3.1"
+            upload: false
+          - torch: "2.14.1"
+            triton: "3.8.0"
+            upload: true
     steps:
       - uses: actions/checkout@v7
 
@@ -31,13 +43,13 @@ jobs:
           cache: pip
 
       - name: Install CPU-only torch
-        run: pip install "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+        run: pip install "torch==${{ matrix.torch }}" --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install Triton for its interpreter
         # the CPU wheel of torch comes without Triton; its interpreter runs the
-        # fused kernels of the fast paths on CPU tensors in the tests (using 3.3:
-        # the 3.1 interpreter crashes in its atomic adds)
-        run: pip install "triton==3.3.1"
+        # fused kernels of the fast paths on CPU tensors in the tests (at least
+        # 3.3: the 3.1 interpreter crashes in its atomic adds)
+        run: pip install "triton==${{ matrix.triton }}"
 
       - name: Install xnn and test dependencies
         # cpu-kernels: ninja, which builds the C++ CPU kernels of the HDNNP tests
@@ -75,7 +87,7 @@ jobs:
           tests/test_dispersion_fast.py tests/test_hdnnp.py tests/test_compiled_blocks.py
 
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.upload }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -87,7 +99,7 @@ jobs:
           verbose: true
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.upload }}
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -73,6 +73,7 @@ def _pair_terms(R2, m, w_beyond, sc_ptr, q_a, d_a, eps_a, lam_a, r0_a, c6_a, cte
     wall = tl.load(sc_ptr + 6).to(dt)
     damping = tl.load(sc_ptr + 7).to(dt)
     sixth = tl.load(sc_ptr + 8).to(dt)
+    three_fifths = tl.load(sc_ptr + 9).to(dt)  # a literal 0.6 would be a float32 constant
     within = tl.where(m & (R2 < cut2), 1.0, 0.0).to(dt)
     w = within * w_beyond
     R2s = tl.where(m, R2, 1.0)
@@ -122,7 +123,7 @@ def _pair_terms(R2, m, w_beyond, sc_ptr, q_a, d_a, eps_a, lam_a, r0_a, c6_a, cte
     ex = libdevice.exp(-d)
     m3 = ex
     m5 = (1.0 + d) * ex
-    m7 = (1.0 + d + 0.6 * d * d) * ex
+    m7 = (1.0 + d + three_fifths * d * d) * ex
     inv3 = inv2 * inv
     inv5 = inv3 * inv2
     inv7 = inv5 * inv2
@@ -307,6 +308,6 @@ def pol_real_space(r: Tensor, i: Tensor, k: Tensor, beyond: Tensor, atoms: Tenso
     tuple of Tensor
         ``energies``, ``field``, ``D1``, ``D2``.
     """
-    scalars = _scalars((cutoff2, alpha, 1.0 / 1.7724538509055159, thole, ke, prefactor, wall, damping, 1.0 / 6.0),
-                       r.device)
+    scalars = _scalars((cutoff2, alpha, 1.0 / 1.7724538509055159, thole, ke, prefactor, wall, damping, 1.0 / 6.0,
+                        0.6), r.device)
     return PolRealSpace.apply(r, i.to(torch.int64), k.to(torch.int64), beyond, atoms, rows, count, scalars)

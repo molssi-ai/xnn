@@ -105,6 +105,39 @@ def test_replays_equal_ordinary_evaluations(name, dtype):
     assert captured > 0
 
 
+class _ScriptedTerm(torch.nn.Module):
+    """A model plus a per-atom energy term from a TorchScript function of the positions."""
+
+    def __init__(self, model, term):
+        super().__init__()
+        self.model, self.term, self.cutoff = model, term, model.cutoff
+
+    def forward(self, data):
+        out = dict(self.model(data))
+        atom = self.term(data.pos).sum(-1).to(out["energy"].dtype)
+        out["energy"] = out["energy"] + torch.zeros_like(out["energy"]).index_add(0, data.batch, atom)
+        return out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_a_torchscript_block_first_run_in_the_warmup_is_captured():
+    """A TorchScript block never run before the wrapper is captured and replays the ordinary results."""
+    def term(x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(x) * x + torch.exp(-x * x)
+
+    model = _ScriptedTerm(_physnet(), torch.jit.script(term)).to("cuda").eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped, trial=0)
+    graphs = [structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda") for k in range(5)]
+    outs = [graphed(g) for g in graphs]
+    assert graphed.graph is not None
+    for g, out in zip(graphs, outs):
+        ref = wrapped(g)
+        for key in ("energy", "forces"):
+            r = ref[key].detach()
+            assert (out[key] - r).abs().max() <= 1e-5 * max(float(r.abs().max()), 1.0), key
+
+
 def test_padded_inputs_give_the_ordinary_results_and_keep_their_counts():
     """On the CPU (no capture): a padded input evaluates to the ordinary energies and forces of its real
     atoms; the counts grow for a larger input or another number of structures and hold for a smaller one;

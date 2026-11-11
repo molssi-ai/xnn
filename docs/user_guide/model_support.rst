@@ -279,7 +279,8 @@ Why a cell is orange or red:
   without a switched cutoff. ReaxFF-nn has no LAMMPS route: LAMMPS has no
   style for its neural bond orders.
 - **AMOEBA and HIPPO, LAMMPS (orange).** They deploy to LAMMPS's AMOEBA
-  package, which has no charge flux and none of HIPPO's ion terms. In a cell,
+  package, which has no charge flux, no exchange polarization and none of
+  HIPPO's ion terms. In a cell,
   the forces of LAMMPS 29Aug2024 do not match its energy.
 - **SpookyNet, Fast-Path (Training) (orange).** In ordinary training steps its
   fast path is faster only on large systems. Captured training steps are

@@ -56,6 +56,12 @@ class InteratomicPotential(nn.Module):
     # attribute (no annotation), again for TorchScript. Empty = no head support.
     head_modules = ()
 
+    # Whether the model calls :func:`~xnn.common.models.ops.refresh_ghosts` on its
+    # node features before every layer that reads its neighbors' features, so that
+    # :class:`~xnn.common.deploy.DomainParallel` can give each process one cutoff of
+    # ghost atoms (``halo="layer"``) instead of the whole receptive field.
+    refreshes_ghosts = False
+
     @abstractmethod
     def forward(self, data: AtomicGraph) -> dict[str, torch.Tensor]:
         """Compute per-atom and per-structure energies for a graph.

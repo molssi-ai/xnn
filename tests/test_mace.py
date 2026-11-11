@@ -651,6 +651,31 @@ def test_from_mace_torch_multihead_slicing():
         assert (out["forces"].detach() - f_u).abs().max() < 1e-11
 
 
+@pytest.mark.parametrize("as_buffer", [False, True])
+def test_interaction_transplant_reads_the_neighbor_count_as_number_or_buffer(as_buffer):
+    """An upstream interaction block loads whether its avg_num_neighbors is a number or a buffer."""
+    import copy
+
+    from xnn.gnn.models.mace_foundation import _load_interaction
+
+    model = _build(T=1)
+    up = copy.deepcopy(model.interactions[0])
+    with torch.no_grad():
+        for p in up.parameters():
+            p.add_(torch.randn_like(p))
+    del up.avg_num_neighbors
+    if as_buffer:
+        up.register_buffer("avg_num_neighbors", torch.tensor(7.25))
+    else:
+        up.avg_num_neighbors = 7.25
+    _load_interaction(model.interactions[0], up)
+    got = model.interactions[0].state_dict()
+    want = {k: v for k, v in up.state_dict().items() if k != "avg_num_neighbors"}
+    assert got.keys() == want.keys() and all(torch.equal(got[k], want[k]) for k in want)
+    assert type(model.interactions[0].avg_num_neighbors) is float
+    assert model.interactions[0].avg_num_neighbors == 7.25
+
+
 def test_foundation_registry_and_errors():
     from xnn.common.models import list_models
     from xnn.gnn.models.mace_foundation import FOUNDATION_MODELS, _checkpoint_path

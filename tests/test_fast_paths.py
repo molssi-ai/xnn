@@ -269,7 +269,9 @@ def test_gpu_model_parity(build, dtype, built_in, tol):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", fast.FastPathPrecisionWarning)
         out = model(copy.copy(g))
-    assert all(m.fast_active for m in fast.fast_modules(core))
+    # the blocks that can run here (the fused radial MLP needs float32 and its layer shapes)
+    capable = list(fast.iter_fast_capable(core, torch.device("cuda"), dtype))
+    assert capable and all(m.fast_active for m in capable)
     for key in ("energy", "forces", "stress"):
         scale = ref[key].abs().max().clamp(min=1.0)
         assert float((out[key] - ref[key]).abs().max() / scale) < tol, key

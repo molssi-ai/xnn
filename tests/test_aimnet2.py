@@ -865,7 +865,7 @@ def test_scripted_two_channel_model_reads_the_spin_multiplicity():
     assert abs(float(singlet(g.pos, g.atomic_numbers)["energy"]) - float(eager["energy"])) > 1e-6
 
 
-# the reference package's Coulomb kernels (nvalchemiops 0.4.1, the backend of aimnet 0.2.0) on fixed
+# the Coulomb kernels the reference package calls (those of aimnet 0.2.0) on fixed
 # point charges, in eV, with xnn's parameters (alpha = sqrt(-ln eps) / r_c, the reciprocal sphere handed
 # over as explicit lattice vectors, the same mesh and spline order), both precisions; "ewald_box" is the
 # kernel with its own lattice box, "dsf" its damped shifted-force sum at alpha 0.2

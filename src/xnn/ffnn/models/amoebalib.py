@@ -65,9 +65,23 @@ DEFAULT_SETTINGS = {
     "rep-12-scale": 0.0, "rep-13-scale": 0.0, "rep-14-scale": 1.0, "rep-15-scale": 1.0,
     "disp-12-scale": 0.0, "disp-13-scale": 0.0, "disp-14-scale": 1.0, "disp-15-scale": 1.0,
 }
-# settings of the ion terms, read and written only by libraries that have them: the c0 of the
-# many-body charge transfer's ligand weights (kcal/mol)
-ION_SETTINGS = {"mbct-c0": 0.229 / 4.184}
+# settings of the ion terms, read and written only by libraries that have them: the form of the
+# many-body charge transfer and the c0 of the weighted form's ligand weights (kcal/mol)
+ION_SETTINGS = {"mbct-form": "ceq", "mbct-c0": 0.229 / 4.184}
+_ION_TEXT_SETTINGS = ("mbct-form",)
+
+
+def _ion_setting(key: str, value):
+    return str(value).strip().lower() if key in _ION_TEXT_SETTINGS else float(value)
+
+
+def _ion_settings_written(lib) -> dict:
+    """The ion settings a file of ``lib`` carries: the form, and c0 for the weighted form."""
+    form = str(lib.setting("mbct-form")).strip().lower()
+    out = {"mbct-form": form}
+    if form == "weighted":
+        out["mbct-c0"] = float(lib.setting("mbct-c0"))
+    return out
 _FLAG_SETTINGS = ("d-equals-p",)
 _TEXT_SETTINGS = ("forcefield", "opbendtype", "vdwtype", "radiusrule", "radiustype",
                   "radiussize", "epsilonrule", "polarization")
@@ -156,11 +170,18 @@ class AmoebaLibrary:
         ``"ion-partner" -> {"a", "b"}`` (kcal/mol, 1/Angstrom): the charge
         transfer from the partner class into the ion class,
         ``-a exp(-b R)``, which replaces HIPPO's charge transfer of every pair
-        with the ion (a pair without a row has none).
+        with the ion (a pair without a row has none). A pair of two classes
+        has a row of one order only. An optional ``"x"`` is the hardness
+        ratio of the partner's molecule as a ligand of the ion in the
+        many-body charge transfer (else the ion's ``x``).
     mbct : dict[str, dict]
-        ``ion -> {"x"}``: the many-body charge transfer of the ion, the ratio
-        of its hardness to its partners' (``mbct-c0`` setting: the scale of
-        the ligand weights, kcal/mol).
+        ``class -> {"x"}``: the many-body charge transfer of every molecule
+        holding an atom of the class (a single-atom ion or a polyatomic one),
+        with ``x`` the ratio of its hardness to its ligands'. The
+        ``mbct-form`` setting picks the form: ``ceq`` (default), the
+        charge equilibration of the ligands with no charge flowing back, or
+        ``weighted``, with the scale of its ligand weights in ``mbct-c0``
+        (kcal/mol).
     ionpair : dict[str, dict]
         ``"ion-partner" -> {"a", "c", "beta"}`` (kcal/mol, kcal/mol
         Angstrom^6, 1/Angstrom): a pair correction
@@ -360,7 +381,8 @@ _SETTING_DESCRIPTIONS = {
     "delta-halgren": "Buffering constant delta of the 14-7 form",
     "gamma-halgren": "Buffering constant gamma of the 14-7 form",
     "dielectric": "Dielectric constant", "polarization": "Induced dipole model (MUTUAL or DIRECT)",
-    "mbct-c0": "Scale of the ligand weights of the many-body charge transfer (kcal/mol)",
+    "mbct-form": "Form of the many-body charge transfer (ceq or weighted)",
+    "mbct-c0": "Scale of the ligand weights of the weighted many-body charge transfer (kcal/mol)",
     "d-equals-p": "Use one set of induced dipoles for energy and gradient (HIPPO)",
 }
 
@@ -390,7 +412,7 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
     settings = dict(DEFAULT_SETTINGS)
     for key, value in lib.metadata.items():
         if key in ION_SETTINGS:
-            settings[key] = float(value)
+            settings[key] = _ion_setting(key, value)
         elif key in DEFAULT_SETTINGS:
             if key in _FLAG_SETTINGS:
                 settings[key] = str(value).strip().lower() in ("1", "true", "yes", "1.0")
@@ -498,6 +520,8 @@ def from_forcefield(ff, strict: bool = True) -> AmoebaLibrary:
                                "damp": float(row.values["damp"]), "use": float(row.values["use"]) != 0.0}
     for key, row in ff.rows("ion_charge_transfer").items():
         lib.ionct[key_of(key)] = {"a": float(row.values["A"]), "b": float(row.values["B"])}
+        if row.values.get("x") not in (None, ""):
+            lib.ionct[key_of(key)]["x"] = float(row.values["x"])
     for key, row in ff.rows("ion_many_body_charge_transfer").items():
         lib.mbct[key[0]] = {"x": float(row.values["x"])}
     for key, row in ff.rows("ion_pair_correction").items():
@@ -543,9 +567,8 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
             value = "true" if value else "false"
         meta_rows.append(((key,), {"Value": value, "Description": _SETTING_DESCRIPTIONS.get(key, "")}))
     if lib.mbct:
-        for key, default in ION_SETTINGS.items():
-            meta_rows.append(((key,), {"Value": lib.settings.get(key, default),
-                                       "Description": _SETTING_DESCRIPTIONS.get(key, "")}))
+        for key, value in _ion_settings_written(lib).items():
+            meta_rows.append(((key,), {"Value": value, "Description": _SETTING_DESCRIPTIONS.get(key, "")}))
     for key, value in lib.metadata.items():
         if key not in DEFAULT_SETTINGS and key not in ION_SETTINGS and key not in ("ff_form", "charges"):
             meta_rows.append(((key,), {"Value": value, "Description": ""}))
@@ -679,18 +702,29 @@ def to_forcefield(lib: AmoebaLibrary, name: Optional[str] = None, version: str =
                                          [((c,), {k: float(x) for k, x in conv(v).items()}) for c, v in table.items()],
                                          version=version))
     if lib.ionct:
+        with_x = any(v.get("x") is not None for v in lib.ionct.values())
+
+        def ct_row(v):
+            row = {"A": float(v["a"]), "B": float(v["b"])}
+            if v.get("x") is not None:
+                row["x"] = float(v["x"])
+            return row
         sections.append(make_section(
-            "ion_charge_transfer", label, ["Ion", "J"], ["A", "B"],
-            [(_split_key(k), {"A": float(v["a"]), "B": float(v["b"])}) for k, v in lib.ionct.items()],
-            version=version,
+            "ion_charge_transfer", label, ["Ion", "J"], ["A", "B", "x"] if with_x else ["A", "B"],
+            [(_split_key(k), ct_row(v)) for k, v in lib.ionct.items()], version=version,
             annotations=["E = -A exp(-B R) on every pair of the ion with an atom of class J, the charge moving "
-                         "from J into the ion; it replaces HIPPO's charge transfer of every pair with the ion"]))
+                         "from J into the ion; it replaces HIPPO's charge transfer of every pair with the ion",
+                         "x (optional): the hardness ratio of J's molecule as a ligand of the ion in the "
+                         "many-body charge transfer (else the ion's x)"]))
     if lib.mbct:
         sections.append(make_section(
             "ion_many_body_charge_transfer", label, ["Ion"], ["x"],
             [((c,), {"x": float(v["x"])}) for c, v in lib.mbct.items()], version=version,
-            annotations=["E = x [(1 + x) S2 / (1 + x n_eff) - sum_j c_j] per ion, c_j the ion's charge transfer "
-                         "with molecule j, w_j = c_j / (c_j + mbct-c0), n_eff = sum_j w_j,",
+            annotations=["per centre (the molecule of the class), c_j its pair charge transfer with molecule j; "
+                         "mbct-form ceq: the charge equilibration of the ligands with q_j >= 0,",
+                         "x the ratio of the centre's hardness to a ligand's; mbct-form weighted: "
+                         "x [(1 + x) S2 / (1 + x n_eff) - sum_j c_j],",
+                         "w_j = c_j / (c_j + mbct-c0), n_eff = sum_j w_j, "
                          "S2 = sum_j c_j + sum_(j != k) w_j w_k sqrt(c_j c_k)"]))
     if lib.ionpair:
         sections.append(make_section(
@@ -832,7 +866,7 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
             continue
         kw = w[0].lower()
         if kw in ION_SETTINGS:
-            settings[kw] = float(w[1])
+            settings[kw] = _ion_setting(kw, w[1])
             continue
         if kw in DEFAULT_SETTINGS:
             if kw in _FLAG_SETTINGS:
@@ -937,8 +971,10 @@ def read_tinker_prm(path: Union[str, Path]) -> AmoebaLibrary:
             lib.exchpol[w[1]] = {"spring": float(w[2]), "size": float(w[3]), "damp": float(w[4]),
                                  "use": len(w) < 6 or int(float(w[5])) != 0}
         elif kw == "ionct":
-            # ion class, partner class, A (kcal/mol), B (1/Angstrom)
+            # ion class, partner class, A (kcal/mol), B (1/Angstrom), optional x of the partner as a ligand
             lib.ionct[_fmt_key(w[1:3])] = {"a": float(w[3]), "b": float(w[4])}
+            if len(w) > 5:
+                lib.ionct[_fmt_key(w[1:3])]["x"] = float(w[5])
         elif kw == "mbct":
             lib.mbct[w[1]] = {"x": float(w[2])}
         elif kw == "ionpair":
@@ -1232,10 +1268,12 @@ def write_tinker_prm(lib: AmoebaLibrary, path: Union[str, Path],
     if lib.ionct or lib.mbct or lib.ionpair:
         out += [*_banner("Ion Charge Transfer Parameters")]
         if lib.mbct:
-            out.append(f"mbct-c0 {float(lib.setting('mbct-c0')):14.8f}")
+            for key, value in _ion_settings_written(lib).items():
+                out.append(f"{key} {value}" if isinstance(value, str) else f"{key} {value:14.8f}")
         for k, v in lib.ionct.items():
             a, b = _split_key(k)
-            out.append(f"ionct {classes[a]:9d} {classes[b]:4d} {'':>4} {v['a']:14.8f} {v['b']:14.8f}")
+            x = "" if v.get("x") is None else f" {v['x']:14.8f}"
+            out.append(f"ionct {classes[a]:9d} {classes[b]:4d} {'':>4} {v['a']:14.8f} {v['b']:14.8f}{x}")
         for c, v in lib.mbct.items():
             out.append(f"mbct {classes[c]:10d} {'':>9} {v['x']:14.8f}")
         for k, v in lib.ionpair.items():

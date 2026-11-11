@@ -274,6 +274,25 @@ def _xnn_graph(Z, pos, cutoff):
                        n_atoms=torch.tensor([len(Z)]))
 
 
+def _torchani_aev(torchani, radial_cutoff, angular_cutoff, radial_eta, radial_shifts, angular_eta, zeta,
+                  angular_shifts, sections, num_species):
+    """torchani's AEVComputer in float64 with exact constants (its constructor stores them in float32)."""
+    aev = torchani.AEVComputer.from_constants(radial_cutoff, angular_cutoff, radial_eta, radial_shifts, angular_eta,
+                                              zeta, angular_shifts, sections, num_species).double()
+    exact = {(aev.radial, "eta"): [radial_eta], (aev.radial, "shifts"): radial_shifts,
+             (aev.angular, "eta"): [angular_eta], (aev.angular, "zeta"): [zeta],
+             (aev.angular, "shifts"): angular_shifts, (aev.angular, "sections"): sections}
+    for (term, name), value in exact.items():
+        getattr(term, name).copy_(torch.tensor(value, dtype=torch.float64))
+    return aev
+
+
+def _torchani_linears(member, symbol):
+    """The linear layers, input to output, of one element's network in a torchani single-member model."""
+    net = member.neural_networks[symbol]
+    return [*net.layers, net.final_layer]
+
+
 @pytest.mark.parametrize("preset,grid", [
     ("ani1x", (5.2, 3.5, [16.0], 16, [8.0], [32.0], 4, 8)),
     ("ani1", (4.6, 3.1, [16.0], 32, [8.0], [8.0], 8, 8)),
@@ -282,11 +301,8 @@ def test_torchani_aev_fidelity(preset, grid):
     """xnn AEV matches torchani.AEVComputer element-for-element."""
     torchani = pytest.importorskip("torchani")
     Rcr, Rca, EtaR, nR, EtaA, Zeta, nA, nZ = grid
-    def t(x):
-        return torch.tensor(x, dtype=torch.float64)
-    tani = torchani.AEVComputer(Rcr, Rca, t(EtaR), t(_even_shifts(Rcr, nR)),
-                                t(EtaA), t(Zeta), t(_even_shifts(Rca, nA)),
-                                t(_angle_shifts(nZ)), 4)
+    tani = _torchani_aev(torchani, Rcr, Rca, EtaR[0], _even_shifts(Rcr, nR), EtaA[0], Zeta[0],
+                         _even_shifts(Rca, nA), _angle_shifts(nZ), 4)
     aev = getattr(AEV, preset)(SPECIES)
 
     rng = np.random.default_rng(0)
@@ -295,7 +311,7 @@ def test_torchani_aev_fidelity(preset, grid):
     idx = {1: 0, 6: 1, 7: 2, 8: 3}
     x = aev(_xnn_graph(Z, pos, aev.cutoff))
     sp = torch.tensor([[idx[z] for z in Z]])
-    _, ref = tani((sp, torch.as_tensor(pos[None])))
+    ref = tani(sp, torch.as_tensor(pos[None]))
     assert torch.allclose(x, ref[0], atol=1e-10)
 
 
@@ -306,15 +322,12 @@ def test_torchani_aev_fidelity(preset, grid):
 def test_torchani_energy_force_fidelity(preset, upstream):
     """Transplanting torchani's pretrained ANI-1x/ANI-1ccx weights reproduces E and F."""
     torchani = pytest.importorskip("torchani")
-    model = getattr(torchani.models, upstream)(
-        periodic_table_index=False).double()
-    member = model.neural_networks[0]
+    member = getattr(torchani.models, upstream)(periodic_table_index=False).double()[0]
 
     xa = getattr(ANI, preset)(SPECIES)
-    nets = dict(member.named_children())
     zsym = {1: "H", 6: "C", 7: "N", 8: "O"}
     for z in SPECIES:
-        src = [l for l in nets[zsym[z]] if isinstance(l, torch.nn.Linear)]
+        src = _torchani_linears(member, zsym[z])
         dst = [l for l in xa.element_nets.nets[str(z)]
                if isinstance(l, torch.nn.Linear)]
         for s, d in zip(src, dst):
@@ -332,7 +345,7 @@ def test_torchani_energy_force_fidelity(preset, upstream):
 
     coords = torch.as_tensor(pos[None]).clone().requires_grad_(True)
     sp = torch.tensor([[idx[z] for z in Z]])
-    e = model.energy_shifter(member(model.aev_computer((sp, coords)))).energies
+    e = member((sp, coords)).energies
     f = -torch.autograd.grad(e.sum(), coords)[0][0]
 
     assert abs(out["energy"].item() - e.item()) < 1e-6
@@ -342,12 +355,8 @@ def test_torchani_energy_force_fidelity(preset, upstream):
 def test_torchani_ani2x_aev_fidelity():
     """xnn ANI-2x AEV matches torchani.AEVComputer over all seven elements."""
     torchani = pytest.importorskip("torchani")
-    def t(x):
-        return torch.tensor(x, dtype=torch.float64)
-    tani = torchani.AEVComputer(
-        5.1, 3.5, t([19.7]), t(_even_shifts(5.1, 16, start=0.8)),
-        t([12.5]), t([14.1]), t(_even_shifts(3.5, 8, start=0.8)),
-        t(_angle_shifts(4)), 7)
+    tani = _torchani_aev(torchani, 5.1, 3.5, 19.7, _even_shifts(5.1, 16, start=0.8), 12.5, 14.1,
+                         _even_shifts(3.5, 8, start=0.8), _angle_shifts(4), 7)
     aev = AEV.ani2x(ANI2X_SPECIES)
 
     rng = np.random.default_rng(0)
@@ -356,21 +365,19 @@ def test_torchani_ani2x_aev_fidelity():
     idx = {z: i for i, z in enumerate(ANI2X_SPECIES)}
     x = aev(_xnn_graph(Z, pos, aev.cutoff))
     sp = torch.tensor([[idx[z] for z in Z]])
-    _, ref = tani((sp, torch.as_tensor(pos[None])))
+    ref = tani(sp, torch.as_tensor(pos[None]))
     assert torch.allclose(x, ref[0], atol=1e-10)
 
 
 def test_torchani_ani2x_energy_force_fidelity():
     """Transplanting torchani's pretrained ANI-2x weights reproduces E and F."""
     torchani = pytest.importorskip("torchani")
-    model = torchani.models.ANI2x(periodic_table_index=False).double()
-    member = model.neural_networks[0]
+    member = torchani.models.ANI2x(periodic_table_index=False).double()[0]
 
     xa = ANI.ani2x(ANI2X_SPECIES)
-    nets = dict(member.named_children())
     zsym = {1: "H", 6: "C", 7: "N", 8: "O", 16: "S", 9: "F", 17: "Cl"}
     for z in ANI2X_SPECIES:
-        src = [l for l in nets[zsym[z]] if isinstance(l, torch.nn.Linear)]
+        src = _torchani_linears(member, zsym[z])
         dst = [l for l in xa.element_nets.nets[str(z)]
                if isinstance(l, torch.nn.Linear)]
         for s, d in zip(src, dst):
@@ -388,7 +395,7 @@ def test_torchani_ani2x_energy_force_fidelity():
 
     coords = torch.as_tensor(pos[None]).clone().requires_grad_(True)
     sp = torch.tensor([[idx[z] for z in Z]])
-    e = model.energy_shifter(member(model.aev_computer((sp, coords)))).energies
+    e = member((sp, coords)).energies
     f = -torch.autograd.grad(e.sum(), coords)[0][0]
 
     # larger absolute energies (S/Cl cores ~ -400 Ha) than ANI-1x, so the
