@@ -390,7 +390,7 @@ def _bond_atom_sums_forward(src_ptr, dst_ptr, bo0_ptr, bpi_ptr, bpp_ptr, del_ptr
     tl.atomic_add(dpil_ptr + a, (dvb - light_a * (light_b * dlp_b)) * pis, mask=m, sem="relaxed")
     # the C-C over-coordination correction
     kc2 = tl.load(gen_ptr + 6).to(DT)
-    vov3 = bo0 - dva - 0.04 * (dva * dva) * (dva * dva)
+    vov3 = bo0 - dva - (dva * dva) * (dva * dva) / 25.0  # 0.04 as a literal would be a float32 constant
     on_c2 = carbon & (tl.load(gen_ptr + 7) > 0.5) & (vov3 > 3.0)
     e_c2 = tl.where(on_c2, kc2 * (vov3 - 3.0) * (vov3 - 3.0), 0.0)
     # the terminal triple-bond stabilization, half on each atom of the bond
