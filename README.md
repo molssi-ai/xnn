@@ -198,7 +198,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.26.0},
+  version = {0.27.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```
