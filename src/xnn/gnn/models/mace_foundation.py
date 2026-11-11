@@ -252,6 +252,13 @@ def _scalar_weight(linear: o3.Linear, n_out: int) -> torch.Tensor:
 
 
 # conversion
+def _load_interaction(block: nn.Module, up_block: nn.Module) -> None:
+    """Copy an upstream interaction block into ``block``. Newer mace-torch keeps
+    ``avg_num_neighbors`` as a buffer; here it is a plain number."""
+    block.load_state_dict({k: v for k, v in up_block.state_dict().items() if k != "avg_num_neighbors"})
+    block.avg_num_neighbors = float(up_block.avg_num_neighbors)
+
+
 def _copy_symmetric_contractions(xnn_sc, up_sc, correlation: int) -> None:
     """Transplant upstream symmetric-contraction weights and CG bases.
 
@@ -447,10 +454,7 @@ def _convert_mace_torch(upstream: nn.Module, head: Optional[str] = None,
         model.node_embedding.load_state_dict(
             upstream.node_embedding.linear.state_dict())
         for i in range(T):
-            model.interactions[i].load_state_dict(
-                upstream.interactions[i].state_dict())
-            model.interactions[i].avg_num_neighbors = float(
-                upstream.interactions[i].avg_num_neighbors)
+            _load_interaction(model.interactions[i], upstream.interactions[i])
             _copy_symmetric_contractions(
                 model.products[i].symmetric_contractions,
                 upstream.products[i].symmetric_contractions, correlation[i])
