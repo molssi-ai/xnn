@@ -107,7 +107,7 @@ jobs:
         run: |
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install --quiet --upgrade pip
-          /tmp/smoke/bin/pip install --quiet "torch==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+          /tmp/smoke/bin/pip install --quiet "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/python -c "import xnn; print('xnn', xnn.__version__)"
           /tmp/smoke/bin/python -c "from xnn.ffnn.common import read_forcefield; ff = read_forcefield('oplsaa'); print('oplsaa types:', len(ff.templates))"
