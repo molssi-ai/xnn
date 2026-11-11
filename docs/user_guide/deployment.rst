@@ -109,10 +109,10 @@ model. Set the ``--eeq-reuse`` to speed up D4 in an MD run. For AMOEBA, HIPPO
 and ByteFF-Pol the engine predicts each step's induced dipoles from the last
 steps (``--dipole-predictor``, ASPC by default). On a GPU it also evaluates their
 steps on a Verlet pair list (``--skin``, 1 angstrom by default) and replays each
-step as one CUDA graph. The ``--step-graph off`` flag disables this behavior.
+step as one CUDA graph. An atom that the driver wraps back into the cell
+keeps its pair list. The ``--step-graph off`` flag disables this behavior.
 For ByteFF-Pol the engine also reads each step's checks during the next step,
 so the GPU never waits (``--late-checks``, on by default for ByteFF-Pol only).
-It unwraps the positions the driver sends against the last step.
 
 An AMOEBA or HIPPO engine can serve part of the model, for a driver that runs
 RESPA (multiple time steps):
