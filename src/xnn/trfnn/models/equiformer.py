@@ -38,7 +38,7 @@ Conventions worth knowing:
 * ``smooth_cutoff=True`` makes the energy continuous at the cutoff (not part of
   the paper): the degree-embedding messages are multiplied by a polynomial
   envelope and the attention becomes the envelope-weighted softmax of
-  :func:`~xnn.trfnn.models.blocks.segment_softmax`.
+  :func:`~xnn.common.models.ops.segment_softmax`.
 """
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies
 # the annotations that TorchScript needs to resolve.
@@ -54,11 +54,11 @@ from torch.nn import functional as F
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import BesselRBF, ExpNormalSmearing, PolynomialCutoff
 from xnn.common.models.fast import FastPathModule
-from xnn.common.models.ops import scatter_sum
+from xnn.common.models.ops import scatter_sum, segment_softmax
 from xnn.common.models.registry import register_model
 
 from .base import TransformerPotential
-from .blocks import GraphDropPath, RadialMLP, SmoothLeakyReLU, segment_softmax
+from .blocks import GraphDropPath, RadialMLP, SmoothLeakyReLU
 
 # QM9 statistics at a 5 Angstrom cutoff, the reference code's defaults
 _AVG_NUM_NODES = 18.03065905448718

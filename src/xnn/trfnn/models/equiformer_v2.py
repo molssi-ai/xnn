@@ -60,11 +60,11 @@ from xnn.common.models.constants import register_constant
 from xnn.common.models.fast import FastPathModule
 from xnn.common.models.multilinear import add_optional as _add
 from xnn.common.models.multilinear import multilinear
-from xnn.common.models.ops import gather_rows, scatter_sum
+from xnn.common.models.ops import gather_rows, scatter_sum, segment_softmax
 from xnn.common.models.registry import register_model
 
 from .base import TransformerPotential
-from .blocks import GraphDropPath, RadialMLP, SmoothLeakyReLU, segment_softmax
+from .blocks import GraphDropPath, RadialMLP, SmoothLeakyReLU
 
 # QM9 statistics at a 5 Angstrom cutoff
 _AVG_NUM_NODES = 18.03065905448718
