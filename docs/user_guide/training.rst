@@ -111,6 +111,17 @@ default. TensorBoard needs the ``tensorboard`` extra:
      loggers: [console, csv, tensorboard]
      log_every_n_steps: 0            # > 0 also logs training values every n steps
 
+The console prints every error with its unit and every loss term with the
+square of it, for example ``forces 4.5e-02 eV/A``. The units come from the
+data section and default to eV and Angstrom. They only label the numbers, so
+set them to the units your data are in:
+
+.. code-block:: yaml
+
+   data:
+     energy_unit: kcal/mol
+     length_unit: A
+
 In Python, pass ``logger=[...]`` to the trainer, or subclass
 :class:`~xnn.common.train.loggers.Logger` to send the metrics anywhere.
 
