@@ -10,7 +10,7 @@ matching what you need:
 - :mod:`xnn.common`: data pipeline and hub, featurizer base, configuration,
   model registry, hub and add-ons (LES, D3, D4), fine-tuning, training,
   benchmarking, deployment, CLI
-- :mod:`xnn.gnn`: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, NequIP, MACE,
+- :mod:`xnn.gnn`: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, MEGNet, NequIP, MACE,
   Allegro, CACE, AIMNet2, their featurizers and fast paths (NequIP, MACE and Allegro need
   ``e3nn``)
 - :mod:`xnn.cnn`: the SE(3) steerable CNN and the conventional 3D CNN over
@@ -22,6 +22,7 @@ matching what you need:
 - :mod:`xnn.trfnn`: ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 and the
   edge attention primitive
 - :mod:`xnn.hybnn`: BAMBOO, SpookyNet, ByteFF, ByteFF-Pol
+- :mod:`xnn.krnn`: GDML and sGDML, their fit, symmetry search and model files
 
 .. autosummary::
    :toctree: generated
@@ -34,3 +35,4 @@ matching what you need:
    xnn.ffnn
    xnn.trfnn
    xnn.hybnn
+   xnn.krnn

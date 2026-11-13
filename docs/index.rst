@@ -12,8 +12,8 @@ molecules and materials.
 The *x* in **xnn** stands for the architecture family: graph neural networks
 (``gnn``), dense neural networks (``dnn``), convolutional neural networks on
 voxel grids (``cnn``), classical force field neural networks (``ffnn``),
-semiempirical quantum mechanics (``sqmnn``), transformers (``trfnn``) and hybrid models
-(``hybnn``).
+semiempirical quantum mechanics (``sqmnn``), transformers (``trfnn``), hybrid models
+(``hybnn``) and kernel regression (``krnn``).
 Every model is implemented using the same PyTorch ``nn.Module`` interface. Thus,
 one data object, one trainer and one deployment path serve all model families.
 
@@ -147,7 +147,7 @@ Models at a glance
      - Models
    * - Graph neural networks (``gnn``)
      - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, GemNet, PaiNN,
-       TensorNet
+       TensorNet, MEGNet (single- and multi-fidelity property models)
    * - Dense neural networks (``dnn``)
      - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4)
    * - Convolutional neural networks (``cnn``)
@@ -160,12 +160,15 @@ Models at a glance
      - ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2
    * - Hybrid neural networks (``hybnn``)
      - BAMBOO, SpookyNet, ByteFF, ByteFF-Pol
+   * - Kernel regression (``krnn``)
+     - GDML, sGDML
    * - Add-ons for any model (``common``)
      - LES long-range electrostatics, D3 and D4 dispersion
 
 Each model matches its reference code or paper to round-off (:ref:`fidelity`);
-the MACE and AIMNet2 foundation models load through the hub. Every model trains,
-evaluates and runs under ASE deployment interface. SchNet, DimeNet, GemNet,
+the MACE and AIMNet2 foundation models load through the hub. Every potential trains,
+evaluates and runs under ASE deployment interface. MEGNet predicts a property per
+structure instead of an energy surface. SchNet, DimeNet, GemNet,
 PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
 Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP and PM3 / PM6 / PM6-ORG / PM7 also
 export to TorchScript for

@@ -15,7 +15,7 @@ contraction of MACE and NequIP (where we use `cuEquivariance
 <https://github.com/NVIDIA/cuEquivariance>`_), the equivariant linear layers,
 element self-connections and radial networks of MACE, the continuous-filter
 convolution of SchNet, the message block of PaiNN, the embedding and interaction layers of
-TensorNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
+TensorNet, the blocks and readouts of MEGNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
@@ -25,7 +25,7 @@ residual MLPs of SpookyNet in training, the
 channels-last kernels), the Fourier transforms and spectral products of the
 spherical CNN, the atomic environment vectors of ANI, the message sums of
 PhysNet, the symmetry functions of HDNNP, the attention messages of BAMBOO,
-every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
+the kernel expansion of GDML and sGDML, every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
 solve of ReaxFF and ReaxFF-nn, the pair terms, fields, induction solve and
 mesh sums of AMOEBA and HIPPO, the three-body term of D3 and D4 and the
 large-system EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA
@@ -80,6 +80,8 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.gnn.fast.painn.AUTO_POLICY_TRAINING`
 - TensorNet: :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
   :data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`
+- MEGNet: :data:`xnn.gnn.fast.megnet.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.megnet.AUTO_POLICY_TRAINING`
 - AIMNet2: :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY`,
   :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY_TRAINING`
 - GemNet: :data:`xnn.gnn.fast.gemnet.AUTO_POLICY`,
@@ -116,11 +118,14 @@ training, and store them as minimum edge counts (atom counts for LES):
   captured steps, :data:`xnn.hybnn.fast.spookynet.AUTO_POLICY_CAPTURED`
 - BAMBOO: :data:`xnn.hybnn.fast.bamboo.AUTO_POLICY`,
   :data:`xnn.hybnn.fast.bamboo.AUTO_POLICY_TRAINING`
+- GDML and sGDML: :data:`xnn.krnn.fast.sgdml.AUTO_POLICY`,
+  :data:`xnn.krnn.fast.sgdml.AUTO_POLICY_TRAINING`
 - LES: :data:`xnn.common.models.les.AUTO_POLICY`
 
-The dispersion, PaiNN and TensorNet kernels, and those of the OPLS, AMBER,
+The dispersion, PaiNN, TensorNet, GDML and sGDML kernels, and those of the OPLS, AMBER,
 CHARMM and DREIDING force fields, are faster at every system size, so
-``"auto"`` always selects them on a GPU. So are the AIMNet2 kernels, except
+``"auto"`` always selects them on a GPU. The exception is a T4, where the GDML and sGDML
+kernels win from a few structures at a time. So are the AIMNet2 kernels, except
 for training on small systems on an A30 or an L40S. The ANI kernels are faster
 at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
@@ -231,7 +236,9 @@ What to expect from fast implementations
   MACE processes the edges in blocks. Each block is recomputed in the backward
   pass in evaluation (training keeps every block). Larger structures fit, at the
   cost of a second pass over the edges.
-  :func:`~xnn.gnn.models.set_message_blocks` sets the blocks per model.
+  :func:`~xnn.gnn.models.set_message_blocks` sets the blocks per model. With
+  ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` in the environment, GPU
+  memory fragments less and somewhat larger structures fit.
 - **MACE self-connections.** The fast path groups the atoms by element and
   multiplies each group by its own weights. Grouping reads the element counts on
   the host, so a captured CUDA graph keeps the reference self-connection.
@@ -240,7 +247,7 @@ What to expect from fast implementations
   TorchScript does.
 - **Compilation.** The TensorNet fast path compiles its atom-wise steps with
   ``torch.compile`` on the first evaluation in each precision (seconds to a
-  minute). Later evaluations of any system size reuse them. SpookyNet's
+  minute). Later evaluations of any system size reuse them. MEGNet does the same. SpookyNet's
   compiled block takes about a minute the first time. The compiled blocks of
   Equiformer and EquiformerV2 also compile on their first evaluation.
 
@@ -290,7 +297,8 @@ therefore run ordinarily. SpookyNet's replay also uses its compiled block where
 a power-of-two ``n_rbf``, with ``coulomb=None`` or ``"dsf"``. Its all-pairs,
 Ewald and PME sums size their work on the host, so they cannot be captured.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any evaluation
-of a graph.
+of a graph. It leaves evaluations slower than ``max_ms`` (100 ms by default)
+uncaptured, because launches are a small part of them.
 
 Semiempirical methods
 =====================

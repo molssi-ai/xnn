@@ -46,6 +46,12 @@ the pre-processing (see the full list in :ref:`data`):
    # QM9: 130,831 molecules, U0 in eV, the 110,000 / 10,000 / 10,831 split of seed 0
    load_dataset("qm9", split="train", label="U0")
 
+   # Materials Project crystals (MEGNet): formation energies in eV/atom, 60,000 for training
+   load_dataset("mp_2018", split="train", label="formation_energy")
+
+   # Band gaps at PBE, GLLB-SC, HSE and SCAN, with the fidelity as each structure's state
+   load_dataset("multifidelity_band_gap", split="train")
+
    # Ethanol with dipoles and polarizabilities: seeded 8000 / 1000 / 1000 split
    load_dataset("ethanol_response", split="train")
 

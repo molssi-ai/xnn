@@ -22,6 +22,9 @@ dataclass object holding one structure or a batch of structures.
    graph.dipole, graph.polarizability              # (B, 3), (B, 3, 3) targets, optional
    graph.charges                                   # (N,) partial-charge targets, optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
+   graph.properties                                # (B,) or (B, k) property targets (MEGNet), optional
+   graph.state                                     # (B,) labels or (B, d) features (MEGNet), optional
+   graph.site_species, graph.site_occupancy        # (N, K) disordered sites (MEGNet), optional
    graph.weight, graph.head                        # (B,) loss weight and readout head, optional
    graph.energy_weight, graph.force_weight, graph.stress_weight   # (B,) term weights, optional
    graph.atom_force_weight                         # (N,) per-atom force weight, optional
@@ -52,6 +55,9 @@ The input format is a plain dictionary representing each **structure**:
        "charges": ...,            # (N,) partial charges, e; optional (HDNNP 3G / 4G)
        "total_charge": 0.0,       # Or "charge"; optional
        "spin_multiplicity": 1,    # Optional
+       "properties": 1.1,         # Property target, such as a band gap (MEGNet); optional
+       "state": 2,                # Global state: an integer label or a list of floats (MEGNet); optional
+       "occupancies": ...,        # One {element: fraction} per site, for disordered sites (MEGNet); optional
        "weight": 1.0,             # Per-structure loss weight, optional
        "energy_weight": 1.0,      # Or force_weight / stress_weight: one term only, optional
        "atom_force_weight": ...,  # (N,) weight of each atom's force error, optional
@@ -74,8 +80,8 @@ one batched graph structure, which the trainer can use as its ``collate_fn``:
    batch = collate([ds[0], ds[1], ds[2]])     # One AtomicGraph holding 3 structures
 
 A graph batch may mix molecules and cells, and structures with and without
-energy, force, stress, dipole or charge labels. The missing labels are masked
-out of the loss, automatically. 
+energy, force, stress, dipole, charge or property labels. The missing labels are masked
+out of the loss, automatically.
 
 Data files
 ==========
@@ -162,6 +168,22 @@ Currently, the following datasets are available:
   - Available arguments: ``label`` (``U0`` by default), ``n_train`` / ``n_val`` / ``n_test``,
     ``seed``, ``units`` (``eV`` or ``hartree``), ``exclude_uncharacterized``,
     ``return_info``.
+
+- ``mp_2018``: the 69,239 Materials Project crystals of the MEGNet paper with
+  formation energies, band gaps and, for 5830 of them, elastic moduli, as
+  ``properties`` (251 MB download).
+
+  - Available arguments: ``label`` (``formation_energy`` in eV/atom by default,
+    ``band_gap``, ``bulk_modulus``, ``shear_modulus``, or their ``log10_``
+    forms), ``n_train`` / ``n_val`` (the paper's split by default), ``seed``,
+    ``nonzero_band_gap``, ``return_info``.
+
+- ``multifidelity_band_gap``: band gaps of Materials Project crystals at PBE,
+  GLLB-SC, HSE and SCAN, the data of multi-fidelity MEGNet. Each label is one
+  structure with the fidelity as its ``state`` (791 MB download).
+
+  - Available arguments: ``fidelities``, ``train_fraction`` / ``val_fraction``
+    (0.8 / 0.1 within every fidelity), ``seed``, ``return_info``.
 
 - ``ethanol_response``: 10,000 ethanol conformations at PBE0/def2-TZVP with
   energies, forces, dipole moments and polarizability tensors. This is the data

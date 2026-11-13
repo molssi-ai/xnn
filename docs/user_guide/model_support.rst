@@ -65,6 +65,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - MEGNet
+     - |N|
+     - |N|
+     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - NequIP
      - |Y|
      - |Y|
@@ -240,6 +247,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - GDML / sGDML
+     - |Y|
+     - |N|
+     - |Y|
+     - |Y|
+     - |O|
+     - |Y|
 
 - **ASE and MDI** serve every model, with or without a D3 / D4 term (see
   :ref:`deployment`).
@@ -293,6 +307,13 @@ Why a cell is orange or red:
   parameters of the system it is bound to, for molecules, clusters and
   periodic cells.
 - **D4, Reference-Path (orange).** See the add-on terms below.
+- **MEGNet, ASE, LAMMPS and MDI (red).** MEGNet predicts one property per
+  structure, such as a band gap, rather than a potential energy. It has no
+  forces for molecular dynamics.
+- **GDML and sGDML, LAMMPS (red).** Each model serves one molecule with its atoms in a fixed order. They
+  run molecular dynamics through ASE and MDI.
+- **GDML and sGDML, Fast-Path (Training) (orange).** The models are fitted in closed form, which runs on the
+  reference implementation. The fused kernels serve the second derivatives of the energy (Hessians).
 
 Notes on individual models:
 

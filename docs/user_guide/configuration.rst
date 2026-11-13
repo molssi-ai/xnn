@@ -41,6 +41,8 @@ training configuration in YAML format, with the default values for each section.
      energy_key: energy         # Names of the targets in the file (e.g. REF_energy)
      forces_key: forces
      stress_key: stress
+     energy_unit: eV            # Units of the data, printed with the losses and errors
+     length_unit: A             # (labels only, nothing is converted)
      head: null                 # Multi-head fine-tuning: head of the training structures
      replay_path: null          # Replay structures and their head
      replay_head: pt_head
@@ -61,6 +63,7 @@ training configuration in YAML format, with the default values for each section.
      charge_weight: 0.0         # Partial-charge labels (HDNNP 3G / 4G; any model with charges)
      les_dipole_weight: 0.0     # LES latent dipole against dipole labels
      les_charge_weight: 0.0     # LES latent charges against charges labels
+     property_weight: 0.0       # Property labels per structure (MEGNet), not divided by the atom count
      huber_delta: 0.0           # > 0 clips the loss tails; per-term huber_delta_energy / _forces / _stress
      scheduler: plateau         # none / cosine / plateau
      clip_grad: 0.0             # Max gradient norm per step; 0 = off
