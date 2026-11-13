@@ -1,0 +1,39 @@
+# MEGNet (Chen et al., Chem. Mater. 2019; multi-fidelity: Nat. Comput. Sci. 2021): every option
+# at its default; the papers' choices are the commented blocks at the end.
+name: megnet
+cutoff: 4.0
+n_features: 16                    # element embedding width
+n_interactions: 3                 # MEGNet blocks
+n_rbf: 100                        # Gaussians expanding the bond lengths
+extra:
+  rbf_max: null                   # last Gaussian center; null: cutoff + 1
+  gamma: 0.5                      # Gaussian exponent, exp(-gamma (r - mu)^2)
+  state_dim: 2                    # state features, or the state embedding width
+  n_state_types: null             # integer state labels (fidelities); null: float state features
+  state_names: null               # e.g. [PBE, GLLB-SC, HSE, SCAN]
+  encoder_sizes: [64, 32]         # dense layers before every block
+  conv_sizes: [64, 64, 32]        # edge, atom and state update networks
+  readout_sizes: [32, 16]         # hidden layers of the output network
+  set2set_steps: 2                # attention steps of the Set2Set readouts
+  set2set_layers: 1               # LSTM layers of the Set2Set readouts
+  activation: ssp                 # shifted softplus; any activation name
+  dropout: 0.0
+  n_outputs: 1                    # properties per structure
+  classification: false           # sigmoid output (metal / nonmetal)
+  n_elements: 95                  # element embedding rows, indexed by atomic number
+  property_scale: 1.0             # output standardization, scale * y + shift
+  property_shift: 0.0
+  weight_init: torch              # xavier_uniform / xavier_normal / glorot_orthogonal / he_orthogonal / torch
+
+# The crystal models of the MEGNet paper:
+#   extra:
+#     gamma: 4.0                  # exp(-(r - mu)^2 / 0.5^2)
+#
+# The multi-fidelity band-gap models:
+#   cutoff: 5.0
+#   extra:
+#     gamma: 4.0
+#     state_dim: 16
+#     n_state_types: 5
+#     state_names: [PBE, GLLB-SC, SCAN, HSE, experiment]
+#     set2set_steps: 2

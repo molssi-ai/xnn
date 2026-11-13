@@ -1,0 +1,21 @@
+# Symmetrized gradient-domain machine learning (sGDML): a global, energy-conserving kernel force field
+# for one molecule in a fixed atom order. Fitted in closed form to forces (and energies for the
+# integration constant); `xnn train` runs that fit instead of epochs. Units are those of the data.
+name: sgdml                 # gdml: the same model without symmetries
+cutoff: 1.0                 # neighbor list of the data pipeline; the model reads positions only
+n_features: 0               # unused
+n_interactions: 0
+n_rbf: 0
+extra:
+  species: [C, C, O, H, H, H, H, H, H]  # one element per atom, in the order of the structures
+  sigma: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # kernel length scale; several: the best on the validation set
+  kernel_order: 2           # Matern order n + 1/2 (2: 5/2, the papers' kernel); at least 2
+  use_symmetries: true      # find the molecule's permutational symmetries from the training geometries
+  lam: 1.0e-10              # regularization of the fit
+  energy_constraint: false  # fit energies together with forces (otherwise they only set the constant)
+  use_energy: true          # set the energy constant from the training energies
+  solver: auto              # analytic (exact), cg (iterative, without the kernel matrix), auto: cg when analytic does not fit
+  solver_tol: 1.0e-4        # relative residual at which the iterative solver stops
+  # n_inducing: 100         # preconditioner size of the iterative solver (default: what max_memory holds)
+  # max_memory: 64          # GB for the solver choice and the preconditioner (default: the device's memory)
+  # model_file: m.npz       # load a model trained by the sGDML package instead
