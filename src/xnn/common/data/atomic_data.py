@@ -118,6 +118,23 @@ class AtomicGraph:
         ``(B,)``. ``None`` means the first head. Read by
         :class:`~xnn.common.finetune.MultiHead` (multi-head fine-tuning) and
         by the loss, which weights every head's terms separately.
+    properties : Tensor, optional
+        Target property per structure, of shape ``(B,)`` or ``(B, k)``: an
+        intensive value such as a band gap or a formation energy per atom.
+        Present during training of the property models (MEGNet).
+    properties_mask : Tensor, optional
+        The same as ``forces_mask`` for ``properties``.
+    state : Tensor, optional
+        Global state of every structure, read by the models with a state input
+        (MEGNet): integer labels of shape ``(B,)`` (e.g. the fidelity of the
+        data), which the model embeds, or features of shape ``(B, d)`` (e.g.
+        temperature and pressure). ``None`` means the model's default state.
+    site_species, site_occupancy : Tensor, optional
+        Disordered sites: the atomic numbers of the species on every site and
+        their occupancies, both of shape ``(N, K)``, padded with occupancy 0.
+        Read by MEGNet, whose element embedding of a site is the
+        occupancy-weighted sum of its species' embeddings. ``None`` means
+        every site holds its ``atomic_numbers`` species alone.
     energy_weight, force_weight, stress_weight : Tensor, optional
         Per-structure weight of one loss term, of shape ``(B,)``, on top of
         ``weight``; 0 drops that label of the structure. ``None`` means 1.
@@ -170,6 +187,14 @@ class AtomicGraph:
         Per-structure loss weight ``(B,)``.
     head : Tensor or None
         Readout head per structure ``(B,)``.
+    properties : Tensor or None
+        Target property ``(B,)`` or ``(B, k)``.
+    properties_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry a property label.
+    state : Tensor or None
+        Global state per structure, labels ``(B,)`` or features ``(B, d)``.
+    site_species, site_occupancy : Tensor or None
+        Species and occupancies of disordered sites, ``(N, K)``.
     energy_weight, force_weight, stress_weight : Tensor or None
         Per-structure term weights ``(B,)``.
     atom_force_weight : Tensor or None
@@ -212,6 +237,12 @@ class AtomicGraph:
     spin_multiplicity: Optional[Tensor] = None   # (B,) 2S+1; None = closed shell
     weight: Optional[Tensor] = None         # (B,) loss weight; None = all equal
     head: Optional[Tensor] = None           # (B,) readout head; None = the first
+    # intensive per-structure targets and the global state input (MEGNet)
+    properties: Optional[Tensor] = None        # (B,) or (B, k)
+    properties_mask: Optional[Tensor] = None   # (B,) bool
+    state: Optional[Tensor] = None             # (B,) long labels or (B, d) features
+    site_species: Optional[Tensor] = None      # (N, K) atomic numbers of disordered sites
+    site_occupancy: Optional[Tensor] = None    # (N, K) their occupancies, 0 = padding
     # per-structure term weights and per-atom force weights; None = 1
     energy_weight: Optional[Tensor] = None       # (B,)
     force_weight: Optional[Tensor] = None        # (B,)
@@ -316,6 +347,11 @@ class AtomicGraph:
             spin_multiplicity=rows(self.spin_multiplicity, keep),
             weight=rows(self.weight, keep),
             head=rows(self.head, keep),
+            properties=rows(self.properties, keep),
+            properties_mask=rows(self.properties_mask, keep),
+            state=rows(self.state, keep),
+            site_species=rows(self.site_species, node_keep),
+            site_occupancy=rows(self.site_occupancy, node_keep),
             energy_weight=rows(self.energy_weight, keep),
             force_weight=rows(self.force_weight, keep),
             stress_weight=rows(self.stress_weight, keep),
