@@ -11,9 +11,15 @@ the element self-connection of MACE have plain-PyTorch fast paths in :mod:`xnn.g
 """
 from xnn.common.models.fast import AutoPolicy
 
-from ._cueq import available
-from .conv import ConvTensorProduct
-from .linear import EquivariantLinear, SpeciesTensorProduct
+# the equivariant blocks need e3nn; without it the fast paths of the plain-PyTorch models
+# (SchNet, PaiNN, TensorNet, MEGNet) still import from this package
+try:
+    from ._cueq import available
+    from .conv import ConvTensorProduct
+    from .linear import EquivariantLinear, SpeciesTensorProduct
+    HAS_EQUIVARIANT = True
+except ImportError:
+    HAS_EQUIVARIANT = False
 
 #: Edge counts above which ``use_fast="auto"`` uses the kernels. The kernels
 #: carry a fixed per-step cost and the reference a cost per edge, so the
