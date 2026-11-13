@@ -18,7 +18,7 @@ scale/shifted (``E_i = sigma_Z * eps_i + E0_Z``).
 Given the same weights this reproduces the original ``nequip`` package
 (mir-group/nequip) to machine precision -- the interaction blocks even share
 the upstream parameter names (``linear_1``/``fc``/``tp``/``linear_2``/``sc``)
-so ``load_state_dict`` transplants work directly (see ``tests/test_nequip.py``
+so ``load_state_dict`` transplants work directly (see ``tests/gnn/test_nequip.py``
 and ``notebooks/fidelity_checks/gnn/nequip/nequip_verification.ipynb``).
 Only ``e3nn`` is required -- no ``nequip`` / ``torch_runstats``.
 
@@ -131,7 +131,7 @@ class _Gate(nn.Module):
     normalized activations; each gated irrep is multiplied channel-wise by its
     activated gate. This module precomputes the sorted slice layout in
     ``__init__`` and reproduces the e3nn ``Gate`` bit-for-bit (checked in
-    ``tests/test_nequip.py``). Bit equality needs the same memory layout at
+    ``tests/gnn/test_nequip.py``). Bit equality needs the same memory layout at
     the activations, not only the same maths: e3nn's ``Extract`` copies every
     group into a fresh contiguous buffer and its ``Activation`` narrows into
     that buffer, and the CPU ``silu``/``tanh`` kernels round differently on an

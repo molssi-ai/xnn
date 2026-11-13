@@ -24,7 +24,6 @@ import torch
 
 from xnn.common.config import Config, ModelConfig
 from xnn.common.data.elements import SYMBOL_TO_Z
-from xnn.common.models.hub import ModelFormat, register_format
 
 from .tensornet import TensorNet
 
@@ -40,20 +39,6 @@ FOUNDATION_MODELS = {
 
 # the gated energy network of MatGL is SiLU whatever the model activation: only SiLU models convert exactly
 _ACTIVATIONS = {"swish": "silu", "silu": "silu"}
-
-
-def _is_matgl_dir(path: Path) -> bool:
-    """Whether ``path`` is a MatGL TensorNet directory (``model.json`` and ``state.pt``)."""
-    path = Path(path)
-    if path.is_file() and path.name in ("model.json", "state.pt"):
-        path = path.parent
-    if not ((path / "model.json").is_file() and (path / "state.pt").is_file()):
-        return False
-    try:
-        meta = json.loads((path / "model.json").read_text())
-        return meta["kwargs"]["model"]["@class"] == "TensorNet"
-    except (ValueError, KeyError, TypeError):
-        return False
 
 
 def convert_directory(path: Union[str, Path], dtype=None) -> tuple:
@@ -201,12 +186,5 @@ def from_foundation(name: str = "tensornet-matpes-pbe-2025.2", dtype=None,
     model, _ = convert_directory(folder, getattr(torch, dtype) if isinstance(dtype, str) else dtype)
     return model.eval()
 
-
-def _convert_file(path: Path, head: Optional[str]):
-    """The model hub's ``matgl`` converter: directory -> (model, config)."""
-    return convert_directory(path)
-
-
-register_format(ModelFormat(name="matgl", suffixes=(), convert=_convert_file, detect=_is_matgl_dir))
 
 __all__ = ["FOUNDATION_MODELS", "convert_directory", "from_foundation"]

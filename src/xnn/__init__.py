@@ -19,6 +19,7 @@ Organized by model family, with everything shared factored into ``common``:
     sqmnn/   semiempirical quantum chemistry (PM3 / PM6 / PM6-ORG / PM7)
     trfnn/   graph transformers (ET, Equiformer, EquiformerV2) and the shared edge attention
     hybnn/   GNN + transformer potentials with a physics energy split (BAMBOO, SpookyNet)
+    krnn/    kernel-regression potentials (GDML, sGDML)
 
 Importing a family package registers its models, e.g.:
     from xnn.common.data import AtomicDataset
@@ -38,10 +39,11 @@ from . import (  # noqa: F401
            ffnn,
            gnn,  # noqa: F401
            hybnn,
+           krnn,
            sqmnn,
            trfnn,
 )
 
 __version__ = "0.27.0"
-__all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybnn", "sqmnn", "trfnn",
+__all__ = ["common", "gnn", "cnn", "dnn", "ffnn", "hybnn", "krnn", "sqmnn", "trfnn",
            "__version__"]

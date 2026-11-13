@@ -10,13 +10,13 @@ over Clebsch-Gordan paths (``correlation`` order).
 
 The CG ``U`` basis (:func:`U_matrix_real`) is bit-identical to ``mace-torch`` and
 the symmetric contraction reproduces it to ~1e-16 given the same weights
-(see ``tests/test_gnn.py``). Only ``e3nn`` is required -- no ``mace-torch``,
+(see ``tests/common/test_gnn.py``). Only ``e3nn`` is required -- no ``mace-torch``,
 ``cuequivariance`` or ``opt_einsum_fx``.
 
 The model is TorchScript-deployable: the tensor-only :meth:`MACE.node_energy`
 core compiles under ``torch.jit.script`` (used by the LAMMPS/TorchScript
 exporters in :mod:`xnn.common.deploy`) and reproduces the eager model to
-machine precision (see ``tests/test_mace.py``).
+machine precision (see ``tests/gnn/test_mace.py``).
 
 Difference from upstream MACE: ``num_interactions`` (the number of message-passing
 layers *T*) is fully flexible -- ``T = 0`` (a pure ``atom_ref``/pair-repulsion
@@ -48,12 +48,13 @@ from torch.nn import functional as F
 
 from xnn.common.data import AtomicGraph
 from xnn.common.models.constants import register_constant, restore_exact
-from xnn.common.models.fast import FastPathModule
+from xnn.common.models.fast import FastPathModule, preparing_capture
 from xnn.common.models.ops import refresh_ghosts, scatter_sum
 from xnn.common.models.registry import register_model
 
 from ..fast import ConvTensorProduct, _cueq
 from ..fast import symmetric_contraction as _fast_sc
+from ..fast.conv import edge_pairs
 from ..fast.linear import EquivariantLinear, SpeciesTensorProduct
 from ..featurizers import DISTANCE_TRANSFORMS
 from .base import EquivariantGNN
@@ -673,11 +674,25 @@ class _EquivariantProductBasis(nn.Module):
         return self.linear(node_feats)
 
 
-#: The "auto" message pass goes in blocks of edges when the per-edge weights of all edges, times
-#: this, exceed the free GPU memory (the weights, their gradient and the radial network's layers).
+#: Headroom over the memory of the unblocked message passes from an interaction on (per edge, the
+#: weights and radial layers each keeps for the backward, and the largest weight gradient): the
+#: "auto" pass runs unblocked when all edges, times this, fit in the free GPU memory.
+MESSAGE_BLOCK_MARGIN = 1.15
+#: Otherwise the pass of one interaction still runs unblocked when its per-edge weights of all
+#: edges, times this, fit in the free memory (the weights, their gradient and the radial layers).
 MESSAGE_BLOCK_HEADROOM = 4
-#: A block's weights take this fraction (1 / share) of the free memory.
+#: Else a block's weights take at most this fraction (1 / share) of the free memory: the free memory
+#: is partly cached fragments, and the backward of a block needs more than its weights.
 MESSAGE_BLOCK_SHARE = 16
+#: Edges from which MACE's eager evaluation makes the radial weights once per bond (the two
+#: directions of a bond share them), below which the pairing costs more than it saves.
+EDGE_PAIRS_MIN_EDGES = 1 << 17
+#: Numbers per edge and weight kept free on top of the one-pass need before the edges read their
+#: weights by bond (the bonds' weight gradient and the kernel's indexed backward).
+PAIR_GRADIENT = 0.5
+#: Bytes per edge kept free on the device outside PyTorch's memory pool, where the fast kernel
+#: allocates the index buffers of weights read by bond.
+PAIR_INDEX_BYTES = 64
 #: The smallest block, in edges.
 MIN_MESSAGE_BLOCK = 1 << 16
 
@@ -696,8 +711,8 @@ def set_message_blocks(model: nn.Module, block="auto") -> nn.Module:
     model : torch.nn.Module
         Any model; every MACE interaction in it is set.
     block : int or str
-        ``"auto"`` (default): in evaluation on a GPU, blocks only when the weights
-        of all edges would not fit in the free memory; ``"off"``: never; an
+        ``"auto"`` (default): in evaluation on a GPU, blocks only when the message
+        passes of all edges would not fit in the free memory; ``"off"``: never; an
         integer: blocks of that many edges.
 
     Returns
@@ -710,6 +725,16 @@ def set_message_blocks(model: nn.Module, block="auto") -> nn.Module:
         if isinstance(module, _InteractionBase):
             module.message_block = value
     return model
+
+
+def _plan_message_memory(interactions) -> None:
+    """Set on each interaction the numbers per edge that the unblocked message passes from it on
+    take: the weights and radial layers each keeps for the backward, and the largest weight gradient."""
+    later, largest = 0, 0
+    for block in reversed(list(interactions)):
+        later += block.conv_tp.weight_numel + sum(block.radial_MLP)
+        largest = max(largest, block.conv_tp.weight_numel)
+        block.message_need = later + largest
 
 
 class _InteractionBase(nn.Module):
@@ -745,6 +770,7 @@ class _InteractionBase(nn.Module):
 
     avg_num_neighbors: float
     message_block: str
+    message_need: int
 
     def __init__(self, node_attrs_irreps, node_feats_irreps, edge_attrs_irreps,
                  edge_feats_irreps, target_irreps, hidden_irreps, avg_num_neighbors,
@@ -787,16 +813,17 @@ class _InteractionBase(nn.Module):
                                         internal_weights=True, shared_weights=True)
         self.reshape = _ReshapeIrreps(self.irreps_out)
         self.message_block = "auto"
+        # numbers per edge of the unblocked message passes from this interaction on (_plan_message_memory)
+        self.message_need = 2 * self.conv_tp.weight_numel + sum(self.radial_MLP)
 
     def _messages(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor, edge_index: Tensor,
                   n_atoms: int) -> Tensor:
         """The convolution's node sums, with the per-edge weights of the radial network (on the
         fast path in the kernel's column order); in blocks of edges where
-        :func:`set_message_blocks` or the free memory asks for it."""
+        :func:`set_message_blocks` or the free memory asks for it, and once per bond where the
+        model paired the edges."""
         if not torch.jit.is_scripting():
-            block = self._message_block_size(edge_feats)
-            if block > 0:
-                return self._messages_blocked(feats, edge_attrs, edge_feats, edge_index, n_atoms, block)
+            return self._messages_eager(feats, edge_attrs, edge_feats, edge_index, n_atoms)
         w_index, w_scale = self.conv_tp.weight_map(edge_feats)
         radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
         return self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
@@ -821,8 +848,40 @@ class _InteractionBase(nn.Module):
         return out.view(out.shape[0], -1, self.irreps_out[0].mul).transpose(1, 2)
 
     @torch.jit.unused
-    def _message_block_size(self, edge_feats: Tensor) -> int:
-        """Edges per block of the message pass, ``0`` for one pass over all edges."""
+    def _messages_eager(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor, edge_index: Tensor,
+                        n_atoms: int) -> Tensor:
+        pairs = self.__dict__.get("_edge_pairs")
+        if pairs is not None and not self._pairs_fit(edge_feats):
+            pairs = None
+        block = 0 if pairs is not None else self._message_block_size(edge_feats)
+        if block > 0:
+            return self._messages_blocked(feats, edge_attrs, edge_feats, edge_index, n_atoms, block)
+        weight_index: Optional[Tensor] = None
+        if pairs is not None:
+            # the two directions of a bond have the same radial features: the radial network runs once
+            # per bond, and the kernel reads each edge's weights from its bond's row
+            rows, weight_index = pairs
+            edge_feats = edge_feats.index_select(0, rows)
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
+        radial_w = self.conv_tp_weights(edge_feats, w_index, w_scale)
+        return self.conv_tp.conv(feats, edge_attrs, radial_w, edge_index, n_atoms,
+                                 weights_mapped=w_scale is not None, weight_index=weight_index)
+
+    @torch.jit.unused
+    def _pairs_fit(self, edge_feats: Tensor) -> bool:
+        """Whether the edges read their weights by bond: inside the fast kernel, in one pass, and with
+        the kernel's index buffers (outside PyTorch's memory pool) in the device's free memory."""
+        if not self.conv_tp.indexes_weights(edge_feats):
+            return False
+        if self._message_block_size(edge_feats, PAIR_GRADIENT * self.conv_tp.weight_numel):
+            return False
+        return (not edge_feats.is_cuda
+                or torch.cuda.mem_get_info(edge_feats.device)[0] >= int(edge_feats.shape[0]) * PAIR_INDEX_BYTES)
+
+    @torch.jit.unused
+    def _message_block_size(self, edge_feats: Tensor, extra: float = 0.0) -> int:
+        """Edges per block of the message pass, ``0`` for one pass over all edges; ``extra`` numbers
+        per edge come on top of the message passes' own."""
         setting = self.message_block
         n_edges = int(edge_feats.shape[0])
         if setting == "off":
@@ -832,14 +891,15 @@ class _InteractionBase(nn.Module):
             return size if size < n_edges else 0
         if self.training or not edge_feats.is_cuda:
             return 0
-        weights = n_edges * self.conv_tp.weight_numel * edge_feats.element_size()
+        size = edge_feats.element_size()
+        weights = n_edges * self.conv_tp.weight_numel * size
         device = edge_feats.device
         free = (torch.cuda.mem_get_info(device)[0] + torch.cuda.memory_reserved(device)
                 - torch.cuda.memory_allocated(device))
-        if weights * MESSAGE_BLOCK_HEADROOM <= free:
+        if (n_edges * (self.message_need + extra) * size * MESSAGE_BLOCK_MARGIN <= free
+                or weights * MESSAGE_BLOCK_HEADROOM <= free):
             return 0
-        return max(MIN_MESSAGE_BLOCK, int(free / (MESSAGE_BLOCK_SHARE * self.conv_tp.weight_numel
-                                                  * edge_feats.element_size())))
+        return max(MIN_MESSAGE_BLOCK, int(free / (MESSAGE_BLOCK_SHARE * self.conv_tp.weight_numel * size)))
 
     @torch.jit.unused
     def _messages_blocked(self, feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor,
@@ -847,21 +907,14 @@ class _InteractionBase(nn.Module):
         """The message pass in blocks of edges, each block's weights recomputed in the backward,
         so that the weights of all edges are never held at once. In training mode the blocks keep
         their weights: a recomputed block does not survive the second backward of a force loss."""
-        from torch.utils.checkpoint import checkpoint
+        w_index, w_scale = self.conv_tp.weight_map(edge_feats)
 
-        def part(f: Tensor, a: Tensor, e: Tensor, idx: Tensor) -> Tensor:
-            w_index, w_scale = self.conv_tp.weight_map(e)
-            w = self.conv_tp_weights(e, w_index, w_scale)
-            return self.conv_tp.conv(f, a, w, idx, n_atoms, weights_mapped=w_scale is not None)
+        def weights(e: Tensor) -> Tensor:
+            return self.conv_tp_weights(e, w_index, w_scale)
 
-        out: Optional[Tensor] = None
-        recompute = torch.is_grad_enabled() and not self.training
-        for e0 in range(0, int(edge_feats.shape[0]), block):
-            args = (feats, edge_attrs[e0:e0 + block], edge_feats[e0:e0 + block],
-                    edge_index[:, e0:e0 + block])
-            y = checkpoint(part, *args, use_reentrant=False) if recompute else part(*args)
-            out = y if out is None else out + y
-        return out
+        return self.conv_tp.conv_blocks(feats, edge_attrs, edge_feats, edge_index, n_atoms, block, weights,
+                                        weights_mapped=w_scale is not None,
+                                        recompute=torch.is_grad_enabled() and not self.training)
 
 
 class RealAgnosticInteractionBlock(_InteractionBase):
@@ -1449,6 +1502,8 @@ class MACE(EquivariantGNN):
         if atomic_energies is not None:  # per-element reference energy (E0s)
             self.set_atomic_energies(atomic_energies)
         self.distance_transform = DISTANCE_TRANSFORMS[distance_transform]()
+        # the eager evaluation makes the radial weights once per bond (edge_pairs)
+        self.pair_edges = True
         self.scale_shift = _ScaleShift(scale, shift)
         if rbf_prefactor is not None and radial_type == "bessel":
             self.edge_feat.rbf.norm = float(rbf_prefactor)
@@ -1509,6 +1564,7 @@ class MACE(EquivariantGNN):
                     _NonLinearReadout(hidden_out, MLP_irreps, gate_fn) if last
                     else _LinearReadout(hid)
                 )
+        _plan_message_memory(self.interactions)
 
     @torch.jit.export
     def node_features_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
@@ -1566,6 +1622,8 @@ class MACE(EquivariantGNN):
             )
 
         node_feats = self.node_embedding(node_attrs)
+        if not torch.jit.is_scripting():
+            self._pair_edges(edge_index, edge_vec, edge_radial)
         feats_list: List[Tensor] = []
         first = True
         for interaction, product, readout in zip(
@@ -1586,7 +1644,26 @@ class MACE(EquivariantGNN):
         features = torch.cat(feats_list, dim=-1)
 
         node_energy = e0 + self.scale_shift(inter_energy)
+        if not torch.jit.is_scripting():
+            self._pair_edges(None, None, None)
         return features, node_energy
+
+    @torch.jit.unused
+    def _pair_edges(self, edge_index: Optional[Tensor], edge_vec: Optional[Tensor],
+                    edge_radial: Optional[Tensor]) -> None:
+        """Hand the interactions the bonds of these edges (:func:`~xnn.gnn.fast.conv.edge_pairs`)
+        in evaluation, when there are enough edges, every edge has its reverse, a message pass reads
+        its weights by bond (``_pairs_fit``), and no CUDA graph is being prepared (the pairing reads
+        its check on the host); with ``None``, take them back."""
+        pairs = None
+        if (edge_index is not None and edge_vec is not None and edge_radial is not None
+                and self.pair_edges and not self.training and len(self.interactions) > 0
+                and int(edge_index.shape[1]) >= EDGE_PAIRS_MIN_EDGES and not preparing_capture()
+                and not (edge_vec.is_cuda and torch.cuda.is_current_stream_capturing())
+                and any(block._pairs_fit(edge_radial) for block in self.interactions)):
+            pairs = edge_pairs(edge_index, edge_vec)
+        for block in self.interactions:
+            block.__dict__["_edge_pairs"] = pairs
 
     @torch.jit.export
     def node_energy(self, atomic_numbers: Tensor, edge_index: Tensor,
