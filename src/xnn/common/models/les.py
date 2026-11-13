@@ -18,7 +18,7 @@ symmetry weights, the ``k = 0`` and self-interaction conventions, the
 ``1/r^6`` dispersion variant of paper eq 5, and the real-space
 ``erf``-converged direct sum used for non-periodic structures), independently
 implemented and verified against the reference to machine precision in
-``tests/test_les.py``. One upstream wart is fixed rather than reproduced: the
+``tests/common/test_les.py``. One upstream wart is fixed rather than reproduced: the
 reference always builds its k-vector grid in float32, which crashes float64
 runs; here the grid follows the input dtype.
 

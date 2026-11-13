@@ -9,7 +9,7 @@ descriptor, so :class:`~xnn.dnn.models.base.DescriptorPotential` does not
 apply) and gets forces/stress from the shared
 :class:`~xnn.common.models.outputs.ForceStressOutput`. Given the same weights
 it reproduces the original TensorFlow graph to machine precision
-(``tests/test_physnet.py`` and the block-by-block notebook).
+(``tests/dnn/test_physnet.py`` and the block-by-block notebook).
 
 Architecture (paper eqs 3-15, J. Chem. Theory Comput. 15, 3678, 2019):
 

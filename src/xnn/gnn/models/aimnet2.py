@@ -76,7 +76,7 @@ background terms and the Kolafa-Perram parameter balance, the float64
 accumulation of the pair sums), so that the published checkpoints
 transplant weight for weight and reproduce the reference energies, forces
 and charges to float32 round-off, and the Ewald and PME energies to the
-requested accuracy (``tests/test_aimnet2.py``,
+requested accuracy (``tests/gnn/test_aimnet2.py``,
 ``notebooks/fidelity_checks/gnn/aimnet2/aimnet2_verification.ipynb``). One documented
 difference: the reference chooses the Ewald real-space cutoff per structure
 from the accuracy, xnn keeps it at ``lr_cutoff`` (the radius of the graph

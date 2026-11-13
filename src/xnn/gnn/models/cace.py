@@ -10,7 +10,7 @@ energy shift ``atom_ref``), reuses the shared
 CACE-specific blocks -- the tensor-product edge-type encoding, the trainable
 radial channel coupling, the Cartesian symmetrizer, and the two
 message-passing mechanisms. Given the same weights it reproduces the original
-package to machine precision (``tests/test_cace.py``), needing neither
+package to machine precision (``tests/gnn/test_cace.py``), needing neither
 spherical harmonics nor e3nn.
 
 Architecture (paper eqs 1-15, npj Comput Mater 10, 157, 2024):
