@@ -43,7 +43,7 @@ from ..data import AtomicDataset, collate
 from ..models import ForceStressOutput
 from ..models.registry import prepare_model
 from .callbacks import EarlyStopping, ModelCheckpoint, ProgressBar, monitored_value
-from .loggers import build_loggers
+from .loggers import build_loggers, metric_units
 from .losses import weighted_loss
 
 
@@ -184,7 +184,7 @@ class _EMA:
 TRIAL_STEPS = 3
 
 #: Properties scored by the error metrics (``trainer.metrics``).
-_METRIC_TARGETS = ["energy", "forces", "stress", "dipole", "polarizability", "charges",
+_METRIC_TARGETS = ["energy", "forces", "stress", "dipole", "polarizability", "charges", "properties",
                    "les_dipole", "les_charges"]
 
 
@@ -403,6 +403,10 @@ class Trainer:
         # the model exists, and the config then records the numbers
         model_cfg, markers = reference_markers(cfg.model)
         base, cfg.model = prepare_model(model_cfg)
+        # a model fitted in closed form (sGDML) takes the training structures once, without an optimizer
+        self._closed_form = callable(getattr(base, "fit_closed_form", None))
+        if self._closed_form and self.distributed:
+            raise ValueError(f"{type(base).__name__} is fitted in closed form, which runs in one process")
         # A wrapper such as the D4 dispersion correction can need a larger
         # neighbor list than the core model's cutoff that the config carries;
         # graphs are built lazily, so widening the datasets' radius here (before
@@ -423,6 +427,9 @@ class Trainer:
             self._head_weights = self._resolve_head_weights(multi)
         force_on = o.force_weight > 0 or any(w[1] > 0 for w in self._head_weights.values())
         stress_on = o.stress_weight > 0 or any(w[2] > 0 for w in self._head_weights.values())
+        if not getattr(base, "energy_output", True):
+            # a property model (MEGNet) has no energy to differentiate
+            force_on = stress_on = False
         self.model = ForceStressOutput(base, compute_forces=force_on,
                                        compute_stress=stress_on).to(self.device)
         if self.is_main:
@@ -515,16 +522,20 @@ class Trainer:
             self.train_loader = _loader(train_set, True, train_batch_sampler)
         self.val_loader = (_loader(val_set, False, val_batch_sampler)
                            if val_set is not None else None)
+        self._fit_sets = (train_set, val_set)
+        self._base = base
         self.test_loader = (_loader(test_set, False, test_batch_sampler)
                             if test_set is not None else None)
 
         self._params = [p for p in self.model.parameters() if p.requires_grad]
-        if not self._params:
+        if not self._params and not self._closed_form:
             raise ValueError("no trainable parameters: every parameter is frozen")
         name = o.optimizer.lower()
         optimizer = {"adam": torch.optim.Adam, "amsgrad": torch.optim.Adam,
                      "adamw": torch.optim.AdamW}[name]
-        if self._graph_mode:
+        if self._closed_form:
+            self.opt = None
+        elif self._graph_mode:
             # a captured step reads the learning rate from a tensor (the schedulers fill it)
             self.opt = optimizer(self._params, lr=torch.tensor(float(o.lr), device=self.device),
                                  weight_decay=o.weight_decay, amsgrad=(name == "amsgrad"),
@@ -532,9 +543,9 @@ class Trainer:
         else:
             self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay,
                                  amsgrad=(name == "amsgrad"))
-        self.sched = self._make_scheduler(o.scheduler)
+        self.sched = None if self._closed_form else self._make_scheduler(o.scheduler)
         self.ema = None
-        if o.ema_decay > 0:
+        if o.ema_decay > 0 and not self._closed_form:
             if not 0.0 < o.ema_decay < 1.0:
                 raise ValueError(f"optim.ema_decay must lie in (0, 1), got {o.ema_decay}")
             self.ema = _EMA(self.module, o.ema_decay)
@@ -542,8 +553,10 @@ class Trainer:
         self.global_step = 0
         self.should_stop = False
         self.loggers = build_loggers(t.loggers if logger is None else logger)
+        units = metric_units(cfg.data.energy_unit, cfg.data.length_unit)
         for lg in self.loggers:
             lg.setup(cfg.output_dir)
+            lg.set_units(units)
         self.monitor, self.mode = t.monitor, t.mode
         if self.val_loader is None and self.monitor.startswith("val/"):
             self.monitor = "train/" + self.monitor[len("val/"):]
@@ -835,6 +848,7 @@ class Trainer:
             charge_weight=o.charge_weight,
             les_dipole_weight=o.les_dipole_weight,
             les_charge_weight=o.les_charge_weight,
+            property_weight=o.property_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,
@@ -968,6 +982,7 @@ class Trainer:
             charge_weight=o.charge_weight,
             les_dipole_weight=o.les_dipole_weight,
             les_charge_weight=o.les_charge_weight,
+            property_weight=o.property_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,
@@ -1110,8 +1125,36 @@ class Trainer:
                 for lg in self.loggers:
                     lg.finalize(status)
 
+    def _fit_closed_form(self):
+        """Fit a closed-form model once (no epochs), then score the splits as an epoch would."""
+        self._callback("on_fit_start")
+        train_set, val_set = self._fit_sets
+        base = self._base
+        dev = self.device
+        train = [train_set[i].to(dev) for i in range(len(train_set))]
+        val = [val_set[i].to(dev) for i in range(len(val_set))] if val_set is not None else None
+        base.fit_closed_form(train, val)
+        self.model.eval()
+        tr = self._dataset_metrics(self._step(d, False) for d in self.train_loader)
+        va = (self._dataset_metrics(self._step(d, False) for d in self.val_loader)
+              if self.val_loader is not None else {})
+        metrics = {"epoch": 0, "lr": 0.0, **{f"train/{k}": v for k, v in tr.items()},
+                   **{f"val/{k}": v for k, v in va.items()}}
+        self._callback("on_epoch_end", 0, metrics)
+        self.log_metrics(metrics)
+        self._callback("on_train_end")
+        te = {}
+        if self.test_loader is not None:
+            te = self.evaluate()
+            self.log_metrics({f"test/{k}": v for k, v in te.items()})
+        results = {"train": tr, "val": va, "test": te}
+        self._callback("on_fit_end", results)
+        return results
+
     def _fit(self):
         """The epoch loop of :meth:`fit`."""
+        if self._closed_form:
+            return self._fit_closed_form()
         t = self.tcfg
         epochs = self.cfg.optim.epochs
         self.should_stop = False

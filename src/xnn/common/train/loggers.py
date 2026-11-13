@@ -13,23 +13,73 @@ import csv
 import os
 
 __all__ = ["Logger", "ConsoleLogger", "CSVLogger", "TensorBoardLogger", "LOGGERS",
-           "build_loggers"]
+           "build_loggers", "metric_units"]
+
+#: units of the scored quantities, from the energy unit ``E`` and the length unit ``L`` of the data
+_UNITS = {"energy": "{E}/atom", "forces": "{E}/{L}", "stress": "{E}/{L}^3", "dipole": "e*{L}",
+          "polarizability": "{L}^3", "charges": "e", "les_dipole": "e*{L}", "les_charges": "e"}
+#: the quantity whose squared error each loss term averages
+_TERMS = {"energy_mse": "energy", "force_mse": "forces", "stress_mse": "stress", "dipole_mse": "dipole",
+          "polarizability_mse": "polarizability", "charge_mse": "charges",
+          "les_dipole_mse": "les_dipole", "les_charge_mse": "les_charges"}
 
 
-def _summary(metrics: dict) -> str:
+def metric_units(energy_unit: str = "eV", length_unit: str = "A") -> dict:
+    """Units of the scored quantities (energy per atom, forces, stress, dipoles, ...).
+
+    Parameters
+    ----------
+    energy_unit : str, optional
+        Unit of the data's energies. Defaults to ``"eV"``.
+    length_unit : str, optional
+        Unit of the data's positions. Defaults to ``"A"`` (Angstrom).
+
+    Returns
+    -------
+    dict of str to str
+        Quantity names (``"energy"``, ``"forces"``, ...) mapped to units, e.g.
+        ``{"energy": "eV/atom", "forces": "eV/A", ...}``.
+    """
+    return {k: v.format(E=energy_unit, L=length_unit) for k, v in _UNITS.items()}
+
+
+def _squared(unit: str) -> str:
+    """``unit`` squared factor by factor: ``eV/A`` gives ``eV^2/A^2``."""
+    def square(factor):
+        base, _, power = factor.partition("^")
+        if not power:
+            return f"{factor}^2"
+        return f"{base}^{2 * int(power)}" if power.isdigit() else f"({factor})^2"
+    return "/".join("*".join(square(f) for f in part.split("*")) for part in unit.split("/"))
+
+
+def _with_unit(text: str, unit: str | None) -> str:
+    return f"{text} {unit}" if unit else text
+
+
+def _summary(metrics: dict, units: dict | None = None) -> str:
     """Format a metrics dict as ``loss (term values; per-head losses)``.
 
     Parameters
     ----------
     metrics : dict of str to float
         Dataset-level metrics as returned by ``Trainer._dataset_metrics``.
+    units : dict of str to str, optional
+        Units of the scored quantities (:func:`metric_units`); each term is
+        labelled with the square of its quantity's unit. The weighted loss
+        mixes quantities and stays without a unit.
 
     Returns
     -------
     str
-        For example ``"1.2340e-02 (energy 1.100e-04, force 1.200e-03)"``.
+        For example ``"1.2340e-02 (energy 1.100e-04 eV^2/atom^2, force 1.200e-03 eV^2/A^2)"``.
     """
-    parts = [f"{k[:-4]} {v:.3e}" for k, v in sorted(metrics.items())
+    units = units or {}
+
+    def unit(key):
+        quantity = units.get(_TERMS.get(key, ""))
+        return _squared(quantity) if quantity else None
+    parts = [_with_unit(f"{k[:-4]} {v:.3e}", unit(k)) for k, v in sorted(metrics.items())
              if k.endswith("_mse") and "/" not in k]
     heads = [f"{k[:-5]} {v:.3e}" for k, v in sorted(metrics.items())
              if k.endswith("/loss")]
@@ -37,12 +87,13 @@ def _summary(metrics: dict) -> str:
     return f"{metrics.get('loss', 0):.4e}" + (f" ({detail})" if detail else "")
 
 
-def _errors(metrics: dict) -> str:
-    """Format the error metrics as ``mae: energy 1.2e-03, forces 4.5e-02 | rmse: ...``."""
+def _errors(metrics: dict, units: dict | None = None) -> str:
+    """Format the error metrics as ``mae: energy 1.2e-03 eV/atom, forces 4.5e-02 eV/A | rmse: ...``."""
+    units = units or {}
     out = []
     for kind in ("mae", "rmse"):
-        parts = [f"{k[:-len(kind) - 1]} {v:.3e}" for k, v in sorted(metrics.items())
-                 if k.endswith("_" + kind)]
+        parts = [_with_unit(f"{k[:-len(kind) - 1]} {v:.3e}", units.get(k[:-len(kind) - 1].split("/")[-1]))
+                 for k, v in sorted(metrics.items()) if k.endswith("_" + kind)]
         if parts:
             out.append(f"{kind}: " + ", ".join(parts))
     return " | ".join(out)
@@ -68,6 +119,16 @@ class Logger:
         ----------
         output_dir : str
             The run's output directory, the default place for log files.
+        """
+
+    def set_units(self, units: dict) -> None:
+        """Called by the trainer, before anything is logged, with the units of the data.
+
+        Parameters
+        ----------
+        units : dict of str to str
+            Quantity names mapped to units, as returned by :func:`metric_units`.
+            The loss terms are mean squares of these quantities.
         """
 
     def log_hyperparams(self, params: dict) -> None:
@@ -104,6 +165,11 @@ class Logger:
 class ConsoleLogger(Logger):
     """Prints the epoch summary, the test loss and any step values to stdout.
 
+    Every loss term and error carries its unit: the units of the data
+    (``data.energy_unit``, ``data.length_unit``, eV and Angstrom by default)
+    for the errors and their squares for the loss terms. The weighted total
+    loss mixes quantities and is printed without a unit.
+
     Parameters
     ----------
     errors : bool, optional
@@ -113,24 +179,29 @@ class ConsoleLogger(Logger):
 
     def __init__(self, errors: bool = True):
         self.errors = errors
+        self.units = metric_units()
+
+    def set_units(self, units: dict) -> None:
+        """Label the printed values with ``units`` (see :meth:`Logger.set_units`)."""
+        self.units = dict(units)
 
     def log_metrics(self, metrics: dict, step: int) -> None:
         """Print ``metrics`` in the trainer's line format (see :class:`Logger`)."""
         tr, va, te = (_split(metrics, p) for p in ("train", "val", "test"))
         batch = _split(metrics, "train_step")
         if "epoch" in metrics:
-            msg = f"epoch {int(metrics['epoch']):4d} | train loss {_summary(tr)}"
+            msg = f"epoch {int(metrics['epoch']):4d} | train loss {_summary(tr, self.units)}"
             if va:
-                msg += f" | val loss {_summary(va)}"
-            errors = _errors(va or tr) if self.errors else ""
+                msg += f" | val loss {_summary(va, self.units)}"
+            errors = _errors(va or tr, self.units) if self.errors else ""
             if errors:
                 msg += f"\n{'':10s}{'val' if va else 'train'} {errors}"
             print(msg)
         elif te:
-            errors = _errors(te) if self.errors else ""
-            print(f"test loss {_summary(te)}" + (f"\n{'':10s}test {errors}" if errors else ""))
+            errors = _errors(te, self.units) if self.errors else ""
+            print(f"test loss {_summary(te, self.units)}" + (f"\n{'':10s}test {errors}" if errors else ""))
         elif batch:
-            print(f"step {step:7d} | train loss {_summary(batch)}")
+            print(f"step {step:7d} | train loss {_summary(batch, self.units)}")
         else:
             print(f"step {step:7d} | "
                   + ", ".join(f"{k} {v:.4e}" for k, v in sorted(metrics.items())))
