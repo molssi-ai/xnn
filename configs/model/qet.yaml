@@ -1,0 +1,31 @@
+# QET (Ko et al., arXiv:2511.07249): TensorNet with analytic charge equilibration. Every
+# option at its default; the paper's choices are the commented block at the end.
+name: qet
+cutoff: 5.0                     # trunk cutoff and range of the Coulomb potential
+n_features: 64
+n_interactions: 2
+n_rbf: 32
+extra:
+  radial_basis: gaussian        # gaussian | smooth_bessel | expnorm | bessel
+  rbf_max: null                 # last Gaussian center; null: cutoff + 1
+  gamma: null                   # Gaussian exponent, exp(-gamma (r - mu)^2); null: 0.5
+  trainable_rbf: false
+  activation: silu
+  equivariance_group: O(3)      # SO(3) distinguishes enantiomers
+  n_elements: 128               # per-element table rows, indexed by Z
+  energy_shift: 0.0             # per-atom energy standardization
+  energy_scale: 1.0
+  readout: gated                # gated | mlp
+  readout_hidden: null          # hidden widths; null: [F + 2, F, F]
+  self_pairs: false             # every atom is its own neighbor in the trunk
+  hardness: element             # element (one per element) | environment (softplus network)
+  trainable_widths: false       # learn the Gaussian charge widths (else covalent radii)
+  # species: [3, 15, 16, 17]
+  # atomic_energies: average    # per-element reference energies from the training set
+
+# The paper's foundation potentials:
+#   n_interactions: 3           # the published MatPES checkpoints use 2 and 128 features
+#   n_rbf: 9
+#   extra:
+#     radial_basis: smooth_bessel
+#     hardness: environment
