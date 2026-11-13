@@ -17,7 +17,7 @@ from e3nn import o3  # noqa: E402
 from xnn.common.config import from_dict  # noqa: E402
 from xnn.common.data import collate, structure_to_graph  # noqa: E402
 from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
-from xnn.trfnn.models.blocks import segment_softmax  # noqa: E402
+from xnn.common.models.ops import segment_softmax  # noqa: E402
 from xnn.trfnn.models.equiformer import (  # noqa: E402
     Equiformer,
     EquivariantLayerNorm,

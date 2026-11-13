@@ -10,7 +10,7 @@ from xnn.common.config.options import IgnoredOptionWarning, ModelOptions, model_
 from xnn.common.featurizers import make_radial_basis
 from xnn.common.models import build_model
 
-CONFIGS = os.path.join(os.path.dirname(__file__), "..", "configs", "model")
+CONFIGS = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "model")
 
 
 def _model(**extra):

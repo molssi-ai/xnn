@@ -971,9 +971,10 @@ def test_matgl_checkpoint_converts(tmp_path):
     network's dense layers, the energy scale and the element references."""
     from xnn.common.models.hub.formats import detect_format
     from xnn.gnn.models import tensornet_foundation as tf
+    from xnn.gnn.models.matgl_format import is_matgl_dir
     sd = _matgl_directory(tmp_path / "ckpt")
-    assert tf._is_matgl_dir(tmp_path / "ckpt") and detect_format(tmp_path / "ckpt") == "matgl"
-    assert not tf._is_matgl_dir(tmp_path)
+    assert is_matgl_dir(tmp_path / "ckpt") and detect_format(tmp_path / "ckpt") == "matgl"
+    assert not is_matgl_dir(tmp_path)
     model, cfg = tf.convert_directory(tmp_path / "ckpt")
     assert model.self_pairs is False and not model.activate_features
     assert cfg.model.extra["radial_basis"] == "smooth_bessel" and model.cutoff == 4.0
@@ -1015,13 +1016,13 @@ def test_matgl_checkpoint_refusals(tmp_path):
 
 def test_matgl_directory_detection(tmp_path):
     """Either file of a MatGL TensorNet directory is detected; an unreadable or foreign model.json is not."""
-    from xnn.gnn.models import tensornet_foundation as tf
+    from xnn.gnn.models.matgl_format import is_matgl_dir
     _matgl_directory(tmp_path)
-    assert tf._is_matgl_dir(tmp_path / "model.json") and tf._is_matgl_dir(tmp_path / "state.pt")
+    assert is_matgl_dir(tmp_path / "model.json") and is_matgl_dir(tmp_path / "state.pt")
     (tmp_path / "model.json").write_text("{not json")
-    assert not tf._is_matgl_dir(tmp_path)
+    assert not is_matgl_dir(tmp_path)
     (tmp_path / "model.json").write_text('{"kwargs": {}}')
-    assert not tf._is_matgl_dir(tmp_path)
+    assert not is_matgl_dir(tmp_path)
 
 
 def test_matgl_checkpoint_refusals_name_every_unconverted_piece(tmp_path):

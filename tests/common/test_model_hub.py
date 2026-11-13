@@ -133,7 +133,7 @@ def test_register_validates_names():
 
 # cache location
 def test_cache_dir_precedence(monkeypatch, tmp_path):
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     assert default_model_cache_dir() == repo / "models"
     monkeypatch.setenv("XNN_CACHE", str(tmp_path / "c"))
     assert default_model_cache_dir() == tmp_path / "c" / "models"

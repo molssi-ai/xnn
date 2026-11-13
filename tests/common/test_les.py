@@ -319,7 +319,7 @@ def test_fidelity_vs_original_cace_lr():
 
     Runs in float32 -- upstream's triclinic Ewald path hard-codes a float32
     k-grid and cannot run in float64; the float64 math is covered by
-    ``test_fidelity_vs_original_ewald`` and ``tests/test_cace.py``.
+    ``test_fidelity_vs_original_ewald`` and ``tests/gnn/test_cace.py``.
     """
     pytest.importorskip("cace")
     from cace.models.atomistic import NeuralNetworkPotential

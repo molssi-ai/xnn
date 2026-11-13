@@ -90,7 +90,7 @@ def test_the_generated_tangents_are_those_of_the_current_kernels():
     import ast
     import importlib.util
     from pathlib import Path
-    path = Path(__file__).resolve().parents[1] / "tools" / "generate_amoeba_derivatives.py"
+    path = Path(__file__).resolve().parents[2] / "tools" / "generate_amoeba_derivatives.py"
     if not path.exists():
         pytest.skip("the generator is not in this tree")
     spec = importlib.util.spec_from_file_location("generate_amoeba_derivatives", path)

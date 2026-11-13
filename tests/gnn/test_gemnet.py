@@ -800,7 +800,7 @@ def test_lora_adapts_the_dense_layers():
 def test_from_config_and_yaml_presets():
     import yaml
 
-    root = os.path.join(os.path.dirname(__file__), "..", "configs", "model")
+    root = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "model")
     for name, quad in (("gemnet.yaml", True), ("gemnet_t.yaml", False)):
         with open(os.path.join(root, name)) as f:
             m = build_model(from_dict({"model": yaml.safe_load(f)}).model)

@@ -30,6 +30,22 @@ def _molecule(n, seed, step=0):
     return {"pos": pos, "atomic_numbers": ([8, 1, 1, 6, 7] * n)[:n]}
 
 
+def test_capture_preparation_nests_and_ends():
+    """The capture preparation is active inside its context (nested too) and ends with it, an error
+    included."""
+    from xnn.common.models.fast import capture_preparation, preparing_capture
+    assert not preparing_capture()
+    with capture_preparation():
+        with capture_preparation():
+            assert preparing_capture()
+        assert preparing_capture()
+    assert not preparing_capture()
+    with pytest.raises(RuntimeError):
+        with capture_preparation():
+            raise RuntimeError("inside")
+    assert not preparing_capture()
+
+
 def test_a_model_without_an_index_planner_is_rejected():
     from xnn.gnn.models.schnet import SchNet
     with pytest.raises(ValueError, match="index_planner"):
@@ -127,7 +143,26 @@ def test_a_torchscript_block_first_run_in_the_warmup_is_captured():
 
     model = _ScriptedTerm(_physnet(), torch.jit.script(term)).to("cuda").eval()
     wrapped = ForceStressOutput(model).eval()
-    graphed = GraphedEvaluation(wrapped, trial=0)
+    graphed = GraphedEvaluation(wrapped, trial=0, max_ms=None)
+    graphs = [structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda") for k in range(5)]
+    outs = [graphed(g) for g in graphs]
+    assert graphed.graph is not None
+    for g, out in zip(graphs, outs):
+        ref = wrapped(g)
+        for key in ("energy", "forces"):
+            r = ref[key].detach()
+            assert (out[key] - r).abs().max() <= 1e-5 * max(float(r.abs().max()), 1.0), key
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_a_model_pairing_its_edges_is_captured(monkeypatch):
+    """A MACE that pairs its edges in ordinary evaluations is captured (its warmups and the recording
+    leave the pairing out) and replays the ordinary results."""
+    import xnn.gnn.models.mace as mm
+    monkeypatch.setattr(mm, "EDGE_PAIRS_MIN_EDGES", 0)
+    model = _model("mace").to("cuda").set_use_fast(True).eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped, trial=0, max_ms=None)
     graphs = [structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda") for k in range(5)]
     outs = [graphed(g) for g in graphs]
     assert graphed.graph is not None
@@ -197,7 +232,7 @@ def test_the_trial_keeps_the_faster_evaluation(monkeypatch, winner):
 def test_the_trial_times_both_evaluations():
     """The trial itself runs and picks one of the two."""
     model = _physnet().to("cuda").eval()
-    graphed = GraphedEvaluation(ForceStressOutput(model).eval(), trial=2)
+    graphed = GraphedEvaluation(ForceStressOutput(model).eval(), trial=2, max_ms=None)
     for k in range(4):
         graphed(structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda"))
     assert graphed.mode in ("replay", "eager")
@@ -208,6 +243,7 @@ def _cpu_graphed(monkeypatch, **options):
     recorded instead of run."""
     model = _physnet().double().eval()
     wrapped = ForceStressOutput(model).eval()
+    options.setdefault("max_ms", None)
     graphed = GraphedEvaluation(wrapped, **options)
     calls = {"synchronize": 0, "empty_cache": 0}
 
@@ -242,8 +278,9 @@ def _same(out, ref):
 
 @pytest.mark.parametrize("ordinary_time, expected", [(2.0, "replay"), (0.5, "eager")])
 def test_the_trial_picks_the_faster_by_the_clock(monkeypatch, ordinary_time, expected):
-    """The trial times the replays and the ordinary evaluations between synchronizations and keeps the
-    faster; ordinary evaluations out of memory keep the replays and release the cache."""
+    """The trial times the replays and the ordinary evaluations (after an untimed one) between
+    synchronizations and keeps the faster; ordinary evaluations out of memory beside the graph pick the
+    ordinary evaluation."""
     wrapped, graphed, graphs, calls = _cpu_graphed(monkeypatch, trial=3)
     clock = [0.0]
     monkeypatch.setattr(graphed_eval_module, "time", types.SimpleNamespace(perf_counter=lambda: clock[0]))
@@ -261,13 +298,60 @@ def test_the_trial_picks_the_faster_by_the_clock(monkeypatch, ordinary_time, exp
     monkeypatch.setattr(graphed, "_replayed", replayed)
     monkeypatch.setattr(graphed, "_ordinary", ordinary)
     assert graphed._choose(graphs[0]) == expected
-    assert runs == {"replay": 3, "ordinary": 3} and calls["synchronize"] == 4
+    assert runs == {"replay": 3, "ordinary": 4} and calls["synchronize"] == 4
 
     def out_of_memory(graph):
         raise torch.OutOfMemoryError("out of memory")
 
     monkeypatch.setattr(graphed, "_ordinary", out_of_memory)
-    assert graphed._choose(graphs[0]) == "replay" and calls["empty_cache"] == 1
+    assert graphed._choose(graphs[0]) == "eager"
+
+
+@pytest.mark.parametrize("times, max_ms, probes", [
+    ([600.0, 500.0, 480.0, 470.0], 100.0, 4), ([50.0], 100.0, 1), ([1e6, 500.0, 50.0], 100.0, 3),
+    ([1e6, 280.0, 800.0, 37.0], 100.0, 4), ([500.0], None, 0)])
+def test_a_slow_evaluation_is_not_captured(monkeypatch, times, max_ms, probes):
+    """The first calls are timed ordinary evaluations: the input is captured once one takes at most
+    max_ms (or at once without the limit), and evaluations stay ordinary without a graph when PROBES of
+    them took longer. The results are the ordinary ones."""
+    wrapped, graphed, graphs, calls = _cpu_graphed(monkeypatch, trial=0, warmup=2, max_ms=max_ms)
+    clock = [0.0]
+    monkeypatch.setattr(graphed_eval_module, "time", types.SimpleNamespace(perf_counter=lambda: clock[0]))
+    ordinary, replays = [], []
+
+    def timed_ordinary(graph):
+        clock[0] += times[min(len(ordinary), len(times) - 1)] / 1e3
+        ordinary.append(graph)
+        return graphed_eval_module.GraphedEvaluation._ordinary(graphed, graph)
+
+    monkeypatch.setattr(graphed, "_ordinary", timed_ordinary)
+    monkeypatch.setattr(graphed, "_replayed", _stand_in_replay(graphed, replays))
+    for k in range(8):
+        g = graphs[k % len(graphs)]
+        assert _same(graphed(g), wrapped(g))
+    assert len(graphed.probe_ms) == probes
+    if max_ms is None or min(times[:probes]) <= max_ms:
+        assert graphed.mode == "replay" and graphed.graph == "captured" and len(replays) == 8 - probes
+    else:
+        assert probes == graphed_eval_module.PROBES
+        assert graphed.mode == "eager" and graphed.graph is None and graphed.static is None
+        assert replays == [] and len(ordinary) == 8 and calls["empty_cache"] == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_no_input_is_captured_below_a_zero_max_ms():
+    """With max_ms 0 the first evaluations are timed, nothing is captured, and the results are the
+    ordinary ones."""
+    model = _physnet().to("cuda").eval()
+    wrapped = ForceStressOutput(model).eval()
+    graphed = GraphedEvaluation(wrapped, max_ms=0.0)
+    for k in range(8):
+        g = structure_to_graph(_molecule(8, 0, k), model.cutoff).to("cuda")
+        ref, out = wrapped(g), graphed(g)
+        assert torch.allclose(out["forces"], ref["forces"].detach(), atol=1e-5)
+        assert torch.allclose(out["energy"], ref["energy"].detach(), atol=1e-5)
+    assert graphed.mode == "eager" and graphed.graph is None and graphed.static is None
+    assert len(graphed.probe_ms) >= 2 and min(graphed.probe_ms) > 0
 
 
 @pytest.mark.parametrize("trial, winner", [(0, None), (3, "replay"), (3, "eager")])

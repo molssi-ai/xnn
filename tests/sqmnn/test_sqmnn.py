@@ -77,7 +77,7 @@ def test_model_config_files():
     import yaml
 
     from xnn.common.config.loaders import from_dict
-    root = HERE.parent / "configs" / "model"
+    root = HERE.parents[1] / "configs" / "model"
     for name, cls in (("pm3", PM3), ("pm6", PM6), ("pm6_org", PM6ORG), ("pm7", PM7)):
         cfg = from_dict({"model": yaml.safe_load((root / f"{name}.yaml").read_text())})
         model = build_model(cfg.model)

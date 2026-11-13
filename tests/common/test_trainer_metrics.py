@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from xnn.common.config import from_dict
 from xnn.common.data import AtomicDataset, collate, structure_to_graph
 from xnn.common.train import Trainer
-from xnn.common.train.loggers import ConsoleLogger, _summary
+from xnn.common.train.loggers import ConsoleLogger, Logger, _squared, _summary, metric_units
 from xnn.common.train.losses import weighted_loss
 
 BOX = 6.0
@@ -170,7 +170,43 @@ def test_log_line_reports_the_terms(capsys):
     ConsoleLogger().log_metrics({"epoch": 3, "lr": 1e-3, **{f"train/{k}": v for k, v in tr.items()},
                                  **{f"val/{k}": v for k, v in va.items()}}, step=30)
     line = capsys.readouterr().out
-    assert "train loss 1.5000e+00 (energy 2.500e-01, force 1.250e-01)" in line
+    assert "train loss 1.5000e+00 (energy 2.500e-01 eV^2/atom^2, force 1.250e-01 eV^2/A^2)" in line
     assert "val loss 2.0000e+00 (a 5.000e-01, b 1.500e+00)" in line
     assert line.startswith("epoch    3 | ")
     assert _summary({}) == "0.0000e+00"
+
+
+def test_printed_values_carry_the_data_units(capsys):
+    """Errors print with the units of the data and loss terms with their squares."""
+    logger = ConsoleLogger()
+    logger.set_units(metric_units("kcal/mol", "A"))
+    va = {"loss": 2.0, "energy_mse": 0.5, "stress_mse": 0.1, "property_mse": 0.2, "energy_mae": 0.1,
+          "forces_rmse": 0.3, "dipole_mae": 0.01, "polarizability_mae": 0.2, "a/charges_mae": 0.02}
+    logger.log_metrics({"epoch": 1, **{f"val/{k}": v for k, v in va.items()}, "train/loss": 1.0}, step=5)
+    out = capsys.readouterr().out
+    assert "energy 5.000e-01 kcal^2/mol^2/atom^2" in out and "stress 1.000e-01 kcal^2/mol^2/A^6" in out
+    assert "property 2.000e-01, stress" in out
+    assert "energy 1.000e-01 kcal/mol/atom" in out and "forces 3.000e-01 kcal/mol/A" in out
+    assert "dipole 1.000e-02 e*A" in out and "polarizability 2.000e-01 A^3" in out and "a/charges 2.000e-02 e" in out
+    logger.log_metrics({"test/loss": 1.0, "test/force_mse": 0.25}, step=6)
+    assert "force 2.500e-01 kcal^2/mol^2/A^2" in capsys.readouterr().out
+    logger.log_metrics({"train_step/loss": 1.0, "train_step/charge_mse": 0.5}, step=7)
+    assert "charge 5.000e-01 e^2" in capsys.readouterr().out
+    assert metric_units()["forces"] == "eV/A" and _squared("x^1.5") == "(x^1.5)^2"
+
+
+def test_trainer_hands_the_data_units_to_its_loggers(tmp_path):
+    """The trainer labels the console with data.energy_unit and data.length_unit."""
+    seen = []
+
+    class Recorder(Logger):
+        def set_units(self, units):
+            seen.append(units)
+
+        def log_metrics(self, metrics, step):
+            pass
+
+    cfg = _cfg(tmp_path)
+    cfg.data.energy_unit, cfg.data.length_unit = "Ha", "bohr"
+    Trainer(cfg, AtomicDataset(_structures(), CUTOFF), logger=[Recorder()])
+    assert seen == [metric_units("Ha", "bohr")] and seen[0]["forces"] == "Ha/bohr"

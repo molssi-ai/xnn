@@ -8,7 +8,7 @@ shells, and exact equivariance of the sampled kernels, the convolution,
 the gated nonlinearity, the batch normalization and the whole potential
 under the rotations of the cube. Rotation invariance of the energy under
 arbitrary rotations is approximate (the bandlimit) and is compared with
-the conventional CNN, which has none. ``tests/se3cnn_fidelity.py``
+the conventional CNN, which has none. ``tests/cnn/se3cnn_fidelity.py``
 compares with the reference implementation when it is importable.
 """
 

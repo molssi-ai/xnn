@@ -4,6 +4,8 @@ Covers exact equivariance of the symmetric contraction, model equivariance /
 force co-rotation, periodic stress, the flexible number of interaction layers
 (T = 0..N), and pair repulsion.
 """
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -152,6 +154,91 @@ def test_blocked_message_pass_equals_one_pass(blocks):
         assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_blocked_fused_message_pass_equals_one_pass(dtype):
+    """On the fused convolution in evaluation, the message pass in blocks of edges (each made again in the
+    backward) gives the single pass's energy, forces and stress."""
+    pytest.importorskip("cuequivariance_torch")
+    from xnn.gnn.fast.conv import ConvTensorProduct
+    from xnn.gnn.models.mace import set_message_blocks
+    torch.manual_seed(0)
+    model = _build(T=2).to("cuda", dtype).set_use_fast(True).eval()
+    out = {}
+    for block in ("off", 37):
+        g = _graph(n=12, periodic=True).to("cuda")  # float64 geometry whatever the model's precision
+        set_message_blocks(model, block)
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        out[block] = [res[k].detach().double() for k in ("energy", "forces", "stress")]
+    assert g.edge_index.shape[1] > 3 * 37
+    convs = [m for m in model.modules() if isinstance(m, ConvTensorProduct)]
+    assert convs and all(m.fast_active and m._split_kernel(g.pos) is not None for m in convs)
+    tol = 1e-10 if dtype == torch.float64 else 1e-5
+    for a, b in zip(out["off"], out[37]):
+        assert (a - b).abs().max() <= tol * max(float(a.abs().max()), 1.0)
+
+
+def _paired_and_per_edge(monkeypatch, model, block, dtype=None, device="cpu"):
+    """Energy, forces and stress with the edges paired and per edge; the pairings made."""
+    import xnn.gnn.models.mace as mm
+    from xnn.gnn.models.mace import set_message_blocks
+    monkeypatch.setattr(mm, "EDGE_PAIRS_MIN_EDGES", 0)
+    if device == "cpu":
+        # without the fast kernel the convolution gathers the bond weights per edge
+        conv = type(model.interactions[0].conv_tp)
+        assert not model.interactions[0].conv_tp.indexes_weights(torch.zeros(1))
+        monkeypatch.setattr(conv, "indexes_weights", lambda self, like: True)
+    made = []
+    pair = mm.edge_pairs
+    monkeypatch.setattr(mm, "edge_pairs", lambda *args: made.append(pair(*args)) or made[-1])
+    out = {}
+    for paired in (False, True):
+        model.pair_edges = paired
+        set_message_blocks(model, block)
+        g = _graph(n=12, periodic=True).to(device)
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        out[paired] = [res[k].detach().double() for k in ("energy", "forces", "stress")]
+    return out, made
+
+
+@pytest.mark.parametrize("block", ["off", 23])
+def test_paired_edges_give_the_per_edge_results(monkeypatch, block):
+    """In evaluation, the radial weights made once per bond and read by both directions of every bond
+    of a full periodic list give the per-edge energy, forces and stress; the bonds are taken back
+    after the evaluation. A message pass in blocks keeps its edges, and neither training mode nor the preparation
+    of a captured evaluation pairs."""
+    from xnn.common.models.fast import capture_preparation
+    torch.manual_seed(0)
+    model = _build(T=2).eval()
+    out, made = _paired_and_per_edge(monkeypatch, model, block)
+    assert (len(made) == 1 and made[0] is not None) if block == "off" else made == []
+    assert all(b.__dict__.get("_edge_pairs") is None for b in model.interactions)
+    for a, b in zip(out[False], out[True]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+    calls = len(made)
+    with capture_preparation():
+        ForceStressOutput(model, compute_stress=True)(_graph(n=12, periodic=True))
+    model.train()
+    ForceStressOutput(model, compute_stress=True)(_graph(n=12, periodic=True))
+    assert len(made) == calls
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("block", ["off", 23])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_paired_edges_on_the_fused_convolution(monkeypatch, dtype, block):
+    """On the fused convolution, the weights read per bond through the kernel's weight index give the
+    per-edge energy, forces and stress; in blocks the edges keep their own weights."""
+    pytest.importorskip("cuequivariance_torch")
+    torch.manual_seed(0)
+    model = _build(T=2).to("cuda", dtype).set_use_fast(True).eval()
+    out, made = _paired_and_per_edge(monkeypatch, model, block, device="cuda")
+    assert (len(made) == 1 and made[0] is not None) if block == "off" else made == []
+    tol = 1e-10 if dtype == torch.float64 else 1e-5
+    for a, b in zip(out[False], out[True]):
+        assert (a - b).abs().max() <= tol * max(float(a.abs().max()), 1.0)
+
+
 def test_message_blocks_setting():
     """"auto" stays a single pass on the CPU; a block as large as the edges is a single pass;
     other values are refused."""
@@ -169,9 +256,10 @@ def test_message_blocks_setting():
 
 
 def test_message_blocks_auto_size_from_free_memory(monkeypatch):
-    """"auto" on a GPU: one pass while the weights of all edges fit four times into the free memory
-    (unused plus reserved but unallocated), else blocks of a sixteenth of it, at least MIN_MESSAGE_BLOCK
-    edges; training mode stays a single pass."""
+    """"auto" on a GPU: one pass while the message passes of all edges from this interaction on (with the
+    margin) fit into the free memory (unused plus reserved but unallocated), or its own weights four
+    times; else blocks whose weights take a sixteenth of it, at least MIN_MESSAGE_BLOCK edges; training
+    mode stays a single pass."""
     import xnn.gnn.models.mace as mm
     model = _build(T=1).eval()
     block = model.interactions[0]
@@ -192,14 +280,46 @@ def test_message_blocks_auto_size_from_free_memory(monkeypatch):
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (unused["bytes"], 1 << 40))
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3000)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 1000)
+    assert block.message_need == 2 * numel + sum(block.radial_MLP)
+    per_edge = mm.MESSAGE_BLOCK_MARGIN * 4 * block.message_need
     n = 10 ** 8
-    unused["bytes"] = 4 * n * numel * 4 - 2000
+    unused["bytes"] = math.ceil(n * per_edge) - 2000
     assert block._message_block_size(Edges(n)) == 0
-    unused["bytes"] = 2 * n * numel * 4 - 2000
-    assert block._message_block_size(Edges(n)) == n // 8 > mm.MIN_MESSAGE_BLOCK
+    unused["bytes"] = int(n * per_edge / 2.5) - 2000
+    largest = int((unused["bytes"] + 2000) / (mm.MESSAGE_BLOCK_SHARE * numel * 4))
+    assert block._message_block_size(Edges(n)) == largest > mm.MIN_MESSAGE_BLOCK
     unused["bytes"] = 0
     assert block._message_block_size(Edges(n)) == mm.MIN_MESSAGE_BLOCK
     assert block.train()._message_block_size(Edges(n)) == 0
+
+
+def test_message_memory_counts_the_later_interactions(monkeypatch):
+    """Each interaction's message memory holds what every later one keeps (weights and radial layers) and
+    the largest weight gradient; a first interaction whose own weights fit four times runs unblocked
+    even when the later ones would not."""
+    model = _build(T=2).eval()
+    first, last = model.interactions
+    w0, w1 = first.conv_tp.weight_numel, last.conv_tp.weight_numel
+    r = sum(first.radial_MLP)
+    assert last.message_need == 2 * w1 + r
+    assert first.message_need == (w0 + r) + (w1 + r) + max(w0, w1)
+
+    class Edges:
+        is_cuda = True
+        device = torch.device("cuda")
+        shape = (10 ** 8, 8)
+
+        def element_size(self):
+            return 4
+
+    free = {"bytes": 4 * 10 ** 8 * w0 * 4}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free["bytes"], 1 << 40))
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
+    assert free["bytes"] < 10 ** 8 * 4 * first.message_need
+    assert first._message_block_size(Edges()) == 0
+    free["bytes"] -= 1
+    assert first._message_block_size(Edges()) > 0
 
 
 def test_select_fast_defaults_to_the_parameters():

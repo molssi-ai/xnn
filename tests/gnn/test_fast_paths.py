@@ -179,6 +179,118 @@ def test_conv_matches_gather_tp_scatter():
     assert torch.allclose(tp.conv(x, y, w, edge_index, 6, 2.0), expected / 2.0, atol=1e-13)
 
 
+class _StandInKernel:
+    """The parts of a fused convolution kernel, made of the reference: a layout change of the node features
+    and of the node sums (column permutations) around the gathered, multiplied and summed messages."""
+
+    weight = None
+
+    def __init__(self, tp, dim_in, dim_out):
+        self.tp = tp
+        self.perm_in = torch.randperm(dim_in, generator=torch.Generator().manual_seed(5))
+        self.perm_out = torch.randperm(dim_out, generator=torch.Generator().manual_seed(6))
+
+    def transpose_in1(self, x):
+        return x[:, self.perm_in]
+
+    def transpose_in2(self, a):
+        return a
+
+    def transpose_out(self, y):
+        return y[:, torch.argsort(self.perm_out)]
+
+    def f(self, inputs, input_indices, output_shapes, output_indices):
+        w, x, a = inputs
+        if 0 in input_indices:
+            w = w[input_indices[0]]
+        messages = self.tp(x[:, torch.argsort(self.perm_in)][input_indices[1]], a, w)
+        sums = torch.zeros(output_shapes[0].shape[0], messages.shape[1], dtype=messages.dtype)
+        return [sums.index_add(0, output_indices[0], messages)[:, self.perm_out]]
+
+
+def test_edge_pairs_finds_the_two_directions_of_every_bond():
+    """Every edge of a full periodic list is paired with its reverse (sender and receiver swapped, the
+    vector negated); a list missing a reverse is not paired."""
+    from xnn.gnn.fast.conv import edge_pairs
+    rng = np.random.default_rng(4)
+    s = {"pos": rng.uniform(0, 4.0, (5, 3)), "atomic_numbers": [1, 6, 8, 1, 6],
+         "cell": np.eye(3) * 4.0, "pbc": [True, True, True]}
+    g = structure_to_graph(s, 3.5)
+    vec = g.edge_vectors().detach()
+    rows, weight_index = edge_pairs(g.edge_index, vec)
+    E = g.edge_index.shape[1]
+    assert rows.shape == (E // 2,) and torch.equal(torch.bincount(weight_index), torch.full((E // 2,), 2))
+    assert torch.equal(weight_index[rows], torch.arange(E // 2))
+    partner = torch.empty(E, dtype=torch.long)
+    for b in range(E // 2):
+        e1, e2 = (weight_index == b).nonzero().flatten().tolist()
+        partner[e1], partner[e2] = e2, e1
+    assert torch.equal(g.edge_index[0], g.edge_index[1, partner])
+    assert torch.equal(vec, -vec[partner])
+    keep = torch.ones(E, dtype=torch.bool)
+    keep[[0, 1]] = False
+    assert edge_pairs(g.edge_index[:, keep], vec[keep]) is None
+    assert edge_pairs(g.edge_index[:, 1:], vec[1:]) is None
+
+
+@pytest.mark.parametrize("recompute", [False, True])
+@pytest.mark.parametrize("split", [False, True])
+def test_conv_blocks_equal_one_conv(monkeypatch, recompute, split):
+    """In blocks of edges, the weights made per block (kept, or made again in the backward), the message
+    pass gives conv's node sums and gradients over all edges, by the reference or by a kernel whose layout
+    changes once around the blocks."""
+    irreps_in, irreps_sh = o3.Irreps("4x0e+4x1o"), o3.Irreps.spherical_harmonics(2)
+    mid, ins = tp_out_irreps_with_instructions(irreps_in, irreps_sh, o3.Irreps("4x0e+4x1o"))
+    tp = ConvTensorProduct(irreps_in, irreps_sh, mid, ins, shared_weights=False,
+                           internal_weights=False).double()
+    gen = torch.Generator().manual_seed(3)
+    f64 = dict(dtype=torch.float64)
+    x = torch.randn(6, irreps_in.dim, generator=gen, **f64).requires_grad_()
+    edge_index = torch.tensor([[0, 1, 2, 3, 4, 5, 0], [1, 2, 3, 4, 5, 0, 3]])
+    y = torch.randn(7, irreps_sh.dim, generator=gen, **f64).requires_grad_()
+    feats = torch.randn(7, 3, generator=gen, **f64).requires_grad_()
+    project = torch.randn(3, tp.weight_numel, generator=gen, **f64)
+
+    def weights(e):
+        return torch.tanh(e @ project)
+
+    ref = tp.conv(x, y, weights(feats), edge_index, 6)
+    # three weight rows read by the seven edges through an index
+    rows = torch.tensor([2, 0, 1, 1, 0, 2, 0])
+    assert torch.allclose(tp.conv(x, y, weights(feats[:3]), edge_index, 6, weight_index=rows),
+                          tp.conv(x, y, weights(feats[:3])[rows], edge_index, 6), rtol=0, atol=1e-13)
+    if split:
+        kernel = {"op": _StandInKernel(tp, irreps_in.dim, mid.dim), "weight_index": torch.arange(tp.weight_numel),
+                  "weight_scale": torch.ones(tp.weight_numel, **f64), "out_index": torch.arange(mid.dim)}
+        monkeypatch.setattr(tp, "_split_kernel", lambda like: kernel)
+        tp.fast_active = True
+    out = tp.conv_blocks(x, y, feats, edge_index, 6, 3, weights, recompute=recompute)
+    assert torch.allclose(out, ref, rtol=0, atol=1e-13)
+    g_ref = torch.autograd.grad((ref ** 2).sum(), (x, y, feats))
+    g_out = torch.autograd.grad((out ** 2).sum(), (x, y, feats))
+    for a, b in zip(g_out, g_ref):
+        assert torch.allclose(a, b, rtol=0, atol=1e-12)
+
+
+def test_split_kernel_needs_a_kernel_with_its_parts(monkeypatch):
+    """Blocks change the kernel's layout once only when the kernel builds and its parts can be called
+    apart; otherwise every block calls conv."""
+    irreps_in, irreps_sh = o3.Irreps("4x0e+4x1o"), o3.Irreps.spherical_harmonics(2)
+    mid, ins = tp_out_irreps_with_instructions(irreps_in, irreps_sh, o3.Irreps("4x0e+4x1o"))
+    tp = ConvTensorProduct(irreps_in, irreps_sh, mid, ins, shared_weights=False, internal_weights=False)
+
+    def no_kernel(device, dtype):
+        raise RuntimeError("no kernel")
+
+    monkeypatch.setattr(tp, "_kernel", no_kernel)
+    assert tp._split_kernel(torch.zeros(1)) is None
+    monkeypatch.setattr(tp, "_kernel", lambda device, dtype: {"op": object()})
+    assert tp._split_kernel(torch.zeros(1)) is None
+    kernel = {"op": _StandInKernel(tp, irreps_in.dim, mid.dim)}
+    monkeypatch.setattr(tp, "_kernel", lambda device, dtype: kernel)
+    assert tp._split_kernel(torch.zeros(1)) is kernel
+
+
 @pytest.mark.skipif(GPU, reason="the fused kernel builds where CUDA and cuEquivariance are present")
 @pytest.mark.parametrize("mapped", [False, True])
 def test_conv_without_kernel_falls_back_to_reference(monkeypatch, mapped):
@@ -198,11 +310,41 @@ def test_conv_without_kernel_falls_back_to_reference(monkeypatch, mapped):
     assert tp.weight_map(w, 2.0) == (None, None)
     with pytest.warns(RuntimeWarning, match="reference implementation"):
         if mapped:
-            out = tp.conv(x, y, w, edge_index, 6, weights_mapped=True)
+            # the edges read their rows of the weights through an index
+            rows = torch.tensor([3, 0, 6, 1, 5, 2, 4])
+            w_rows = torch.empty_like(w)
+            w_rows[rows] = w
+            out = tp.conv(x, y, w_rows, edge_index, 6, weights_mapped=True, weight_index=rows)
         else:
             out = tp.conv(x, y, w, edge_index, 6, 2.0)
     assert not tp.fast_active and not tp.fast_eligible
     assert torch.allclose(out, expected if mapped else expected / 2.0, rtol=0, atol=1e-13)
+
+
+@pytest.mark.parametrize("parts", [False, True])
+def test_kernel_call_reads_the_weights_through_an_index(parts):
+    """With a weight index each edge reads its row of the weights: through the kernel's input indices,
+    or gathered per edge for a kernel whose parts cannot be called apart."""
+    from xnn.gnn.fast.conv import _run_channelwise
+    irreps_in, irreps_sh = o3.Irreps("4x0e+4x1o"), o3.Irreps.spherical_harmonics(2)
+    mid, ins = tp_out_irreps_with_instructions(irreps_in, irreps_sh, o3.Irreps("4x0e+4x1o"))
+    tp = ConvTensorProduct(irreps_in, irreps_sh, mid, ins, shared_weights=False,
+                           internal_weights=False).double()
+    gen = torch.Generator().manual_seed(7)
+    x = torch.randn(6, irreps_in.dim, generator=gen, dtype=torch.float64)
+    src, dst = torch.tensor([0, 1, 2, 3, 4, 5, 0]), torch.tensor([1, 2, 3, 4, 5, 0, 3])
+    y = torch.randn(7, irreps_sh.dim, generator=gen, dtype=torch.float64)
+    w = torch.randn(3, tp.weight_numel, generator=gen, dtype=torch.float64)
+    rows = torch.tensor([2, 0, 1, 1, 0, 2, 0])
+    expected = torch.zeros(6, mid.dim, dtype=torch.float64).index_add_(0, dst, tp(x[src], y, w[rows]))
+    if parts:
+        op = _StandInKernel(tp, irreps_in.dim, mid.dim)
+    else:
+        def op(x1, x2, weight, indices_1, indices_out, size_out):
+            return torch.zeros(size_out, mid.dim, dtype=x1.dtype).index_add_(0, indices_out,
+                                                                             tp(x1[indices_1], x2, weight))
+    out = _run_channelwise(op, x, y, w, src, dst, 6, rows)
+    assert torch.allclose(out, expected, rtol=0, atol=1e-13)
 
 
 def _einsum_contraction(c, x, y):

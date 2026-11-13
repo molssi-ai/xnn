@@ -12,7 +12,7 @@ import sys
 import torch
 
 # The training script run by every rank. The dataset matches the one built by
-# tests/test_smoke.py; forces are trained (default force_weight > 0), so the
+# tests/common/test_smoke.py; forces are trained (default force_weight > 0), so the
 # backward pass goes through the create_graph force gradients under DDP.
 _SCRIPT = """
 import numpy as np

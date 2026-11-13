@@ -692,7 +692,7 @@ def test_from_config_and_reference_key_translation():
 
 def test_paper_config_file():
     import yaml
-    path = os.path.join(os.path.dirname(__file__), "..", "configs", "model", "spookynet.yaml")
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "model", "spookynet.yaml")
     with open(path) as fh:
         cfg = from_dict({"model": yaml.safe_load(fh)})
     m = build_model(cfg.model)

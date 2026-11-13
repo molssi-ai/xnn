@@ -7,7 +7,7 @@ generalized Fourier transforms), the correlation layers against the direct
 evaluation of eq 4 and eq 6 for point filters, the rotation operators
 against exact grid rotations, and the equivariance of every layer and of
 the potential; the spherical-signal featurizer against a loop reference.
-``tests/s2cnn_fidelity.py`` compares with the reference implementation when
+``tests/cnn/s2cnn_fidelity.py`` compares with the reference implementation when
 it is importable.
 """
 import math

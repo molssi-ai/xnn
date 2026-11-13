@@ -19,7 +19,7 @@ xnn energy head, so energies and forces compare the trunks alone.
 quantity. The reference caches its sampled harmonics in ``cache/`` under the
 working directory.
 
-    python tests/se3cnn_fidelity.py            # prints both precisions
+    python tests/cnn/se3cnn_fidelity.py            # prints both precisions
 """
 from __future__ import annotations
 
@@ -231,6 +231,11 @@ class ReferencePipeline(torch.nn.Module):
 
 def random_batch(n_atoms, cutoff: float, dtype: torch.dtype, seeds=(0, 1)):
     """A batch of random H/C/N/O molecules (no two atoms closer than 0.9 Angstrom)."""
+    import os
+    import sys
+
+    # the random molecules come from the PaiNN harness of the graph tests
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gnn"))
     from painn_fidelity import random_molecule
     from xnn.common.data import collate, structure_to_graph
 

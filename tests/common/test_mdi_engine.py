@@ -229,7 +229,7 @@ def test_float32_model_under_float64_default(tmp_path, extra):
 
 RECORD = {"name": "d4", "s8": 1.1, "cutoff_pair": 9.0, "cutoff_triple": 6.0, "cutoff_cn": 7.0,
           "cutoff_eeq_cn": 7.0, "cutoff_eeq": 9.0, "dataset": "water_minusD4"}
-TOOL = pathlib.Path(__file__).resolve().parents[1] / "tools" / "record_subtracted_dispersion.py"
+TOOL = pathlib.Path(__file__).resolve().parents[2] / "tools" / "record_subtracted_dispersion.py"
 
 
 def _recorded_checkpoint(tmp_path, record=RECORD, name="recorded.pt"):

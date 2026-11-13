@@ -28,8 +28,11 @@ import sys
 import torch
 from torch import nn
 
-import torchmdnet_fidelity as upstream
-from painn_fidelity import random_molecule, water_box
+# the shared torchmd-net harness lives with the transformer tests
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trfnn"))
+
+import torchmdnet_fidelity as upstream  # noqa: E402
+from painn_fidelity import random_molecule, water_box  # noqa: E402
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput
 from xnn.gnn.models.tensornet import TensorNet

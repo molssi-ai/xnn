@@ -12,7 +12,7 @@ with the model's weights; between the xnn featurizer and energy head
 reference trunk. ``compare_all(dtype)`` returns the worst relative error of
 every compared quantity.
 
-    python tests/s2cnn_fidelity.py            # prints both precisions
+    python tests/cnn/s2cnn_fidelity.py            # prints both precisions
 """
 from __future__ import annotations
 

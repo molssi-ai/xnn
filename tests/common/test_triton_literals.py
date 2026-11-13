@@ -10,7 +10,7 @@ import ast
 import struct
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "xnn"
+SRC = Path(__file__).resolve().parents[2] / "src" / "xnn"
 
 # deliberate margins whose float32 rounding does not matter
 ALLOWED = {("common/data/grid_pairs.py", "cut2 * 1.000001")}
