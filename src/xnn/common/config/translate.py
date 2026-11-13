@@ -233,6 +233,15 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "max_z": "n_elements",
         "equivariance_invariance_group": "equivariance_group",
     },
+    # MatGL QET constructor spellings; MatGL's Gaussian width is the exponent gamma
+    "qet": {
+        "units": "n_features",
+        "nblocks": "n_interactions",
+        "num_rbf": "n_rbf",
+        "equivariance_invariance_group": "equivariance_group",
+        "width": "gamma",
+        "is_sigma_train": "trainable_widths",
+    },
     # MatGL MEGNet constructor spellings; MatGL's gauss_width is the exponent gamma
     "megnet": {
         "dim_node_embedding": "n_features",
