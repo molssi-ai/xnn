@@ -182,13 +182,24 @@ Read `docs/developer_guide/extending.rst` first. A new model needs:
 ## Tests
 
 ```bash
-pytest -q                     # the whole suite, as in CI (CPU)
-pytest tests/test_mace.py -q  # one file
+pytest tests/ -q                  # the whole suite (CPU)
+pytest tests/gnn -q               # one family
+pytest tests/gnn/test_mace.py -q  # one file
 ```
 
-The suite is a flat `tests/` directory, one file per model or subsystem. Tests that need an
-optional reference package skip when it is missing; GPU-only tests skip without CUDA. CI runs
-on CPU with `XNN_OFFLINE=1`, so tests must not download anything.
+The tests exist in one folder per model family (`tests/gnn/`, `tests/ffnn/`,
+...), one file per model or subsystem. `tests/common/` holds the tests of the
+shared code and every test that uses models of several families. File names are
+unique across the folders. So, a test file can import helpers from any of them.
+
+Tests that need an optional reference package skip when it is missing; GPU-only tests skip
+without CUDA. CI runs on CPU with `XNN_OFFLINE=1`, so tests must not download anything.
+
+CI runs each folder as its own job. A pull request runs only the folders
+affected by changes: the family that changed, the families that import from it,
+and `tests/common/`. A change to `xnn.common`, `configs/`, `tools/` or
+`pyproject.toml` runs everything. To run every folder on a branch, start the
+Tests workflow by hand (Actions, Tests, Run workflow).
 
 Every new model gets at least:
 

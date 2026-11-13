@@ -11,6 +11,14 @@ coverage:
       default:
         target: 85%
 
+# The Tests workflow uploads one report per shard (a family folder of tests/),
+# flagged with the shard's name, and runs only the shards a change can affect.
+# The flags of the shards that did not run are carried forward from the last
+# commit they ran on, so the project coverage always covers the whole suite.
+flag_management:
+  default_rules:
+    carryforward: true
+
 ignore:
   # Derivative kernels written by tools/generate_amoeba_derivatives.py and
   # tools/generate_amoeba_ladders.py
