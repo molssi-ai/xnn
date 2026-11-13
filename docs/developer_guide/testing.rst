@@ -31,7 +31,7 @@ What the tests check
   agreement with the reference to float64 round-off, and to float32 round-off
   in single precision. The reference is the upstream code under identical
   weights where one exists (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
-  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, MEGNet, ET, Equiformer, EquiformerV2, PhysNet,
+  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, QET, MEGNet, ET, Equiformer, EquiformerV2, PhysNet,
   ANI, the spherical CNN, HDNNP against the RuNNer executable when
   ``XNN_RUNNER`` points to it,
   BAMBOO, ByteFF, ByteFF-Pol, GDML, sGDML, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,

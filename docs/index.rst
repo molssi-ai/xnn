@@ -147,9 +147,9 @@ Models at a glance
      - Models
    * - Graph neural networks (``gnn``)
      - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, GemNet, PaiNN,
-       TensorNet, MEGNet (single- and multi-fidelity property models)
+       TensorNet, QET, MEGNet (single- and multi-fidelity property models)
    * - Dense neural networks (``dnn``)
-     - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4)
+     - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4), QRNN
    * - Convolutional neural networks (``cnn``)
      - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
@@ -169,8 +169,8 @@ Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every potential trains,
 evaluates and runs under ASE deployment interface. MEGNet predicts a property per
 structure instead of an energy surface. SchNet, DimeNet, GemNet,
-PaiNN, TensorNet, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
-Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP and PM3 / PM6 / PM6-ORG / PM7 also
+PaiNN, TensorNet, QET, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
+Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP, QRNN and PM3 / PM6 / PM6-ORG / PM7 also
 export to TorchScript for
 LAMMPS. OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and HIPPO
 deploy as LAMMPS inputs. Any checkpoint can also serve as an MDI engine

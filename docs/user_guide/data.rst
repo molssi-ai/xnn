@@ -21,6 +21,7 @@ dataclass object holding one structure or a batch of structures.
    graph.energy, graph.forces, graph.stress        # Targets, optional
    graph.dipole, graph.polarizability              # (B, 3), (B, 3, 3) targets, optional
    graph.charges                                   # (N,) partial-charge targets, optional
+   graph.external_potential                        # (N,) applied potential in V (QET), optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
    graph.properties                                # (B,) or (B, k) property targets (MEGNet), optional
    graph.state                                     # (B,) labels or (B, d) features (MEGNet), optional
@@ -52,7 +53,8 @@ The input format is a plain dictionary representing each **structure**:
        "stress": ...,             # (3, 3) target
        "dipole": ...,             # (3,) target, e Angstrom; optional
        "polarizability": ...,     # (3, 3) target, Angstrom^3; optional
-       "charges": ...,            # (N,) partial charges, e; optional (HDNNP 3G / 4G)
+       "charges": ...,            # (N,) partial charges, e; optional (HDNNP 3G / 4G, QET)
+       "external_potential": ..., # (N,) applied potential, V; optional (QET)
        "total_charge": 0.0,       # Or "charge"; optional
        "spin_multiplicity": 1,    # Optional
        "properties": 1.1,         # Property target, such as a band gap (MEGNet); optional
@@ -100,7 +102,8 @@ frames if present. The stress is converted from Voigt to a full matrix form
 The atomic positions do need not be wrapped into a cell. The converters
 :func:`~xnn.common.data.ase_io.load_structures` and
 :func:`~xnn.common.data.ase_io.atoms_to_structure` are public and can be used.
-Per-atom ``charges`` are read from ``atoms.arrays["charges"]``. The loss weights
+Per-atom ``charges`` are read from ``atoms.arrays["charges"]``, and an applied
+potential from ``atoms.arrays["external_potential"]``. The loss weights
 ``weight``, ``energy_weight``, ``force_weight``, ``stress_weight`` can be read
 from the ``atoms.info`` and the ``atom_force_weight`` from ``atoms.arrays`` from
 the atomic frames in the same way.

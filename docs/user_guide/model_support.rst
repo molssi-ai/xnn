@@ -65,6 +65,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - QET
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
    * - MEGNet
      - |N|
      - |N|
@@ -126,6 +133,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+     - |Y|
+     - |Y|
+   * - QRNN
+     - |Y|
+     - |Y|
+     - |Y|
+     - |O|
      - |Y|
      - |Y|
    * - SE(3) steerable CNN / 3D CNN
@@ -252,14 +266,14 @@ and is at least as fast, for evaluation and for a training step.
      - |N|
      - |Y|
      - |Y|
-     - |O|
+     - |Y|
      - |Y|
 
 - **ASE and MDI** serve every model, with or without a D3 / D4 term (see
   :ref:`deployment`).
 - **Torchscript-LAMMPS** exports the reference implementation with
   ``xnn export``. A model with long-range terms (LES, D4, SpookyNet, or the
-  charges of AIMNet2, BAMBOO, PhysNet and HDNNP 3G / 4G) needs the whole system on one
+  charges of AIMNet2, BAMBOO, PhysNet, QET, QRNN and HDNNP 3G / 4G) needs the whole system on one
   rank, and so do PM3, PM6, PM6-ORG and PM7, whose energy takes every atom
   pair of a molecule.
 - **Reference-Path** rates the reference implementation against the upstream
@@ -312,11 +326,19 @@ Why a cell is orange or red:
   forces for molecular dynamics.
 - **GDML and sGDML, LAMMPS (red).** Each model serves one molecule with its atoms in a fixed order. They
   run molecular dynamics through ASE and MDI.
-- **GDML and sGDML, Fast-Path (Training) (orange).** The models are fitted in closed form, which runs on the
-  reference implementation. The fused kernels serve the second derivatives of the energy (Hessians).
 
 Notes on individual models:
 
+- **GDML and sGDML.** Training is one closed-form fit, run on the GPU when there
+  is one. When the kernel matrix does not fit in the GPU's memory, the fit
+  switches to an iterative solve.
+- **QRNN.** Its Coulomb and dispersion terms take every atom pair of a molecule,
+  so in LAMMPS the whole molecule must be on one rank in a non-periodic box (a
+  zero cell). Periodic cells need ``coulomb: false`` and ``dispersion: false``.
+  No code was published with the paper. The reference matches the paper's
+  equations. The fast path runs the AEV on the kernels of ANI and,
+  when every element has networks of the same shape (the default), evaluates
+  them together. ``"auto"`` takes it below about 300k edges, where it is faster.
 - **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
   Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
   :ref:`howto-fast-paths`), which runs the same reference implementation and

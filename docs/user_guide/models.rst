@@ -301,6 +301,51 @@ The MatGL TensorNet foundation potentials trained on MatPES load with one call:
 - They use the smooth spherical Bessel basis, the gated readout and no self pairs.
 - The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
 
+QET
+===
+:class:`~xnn.gnn.models.qet.QET` (`MatGL
+<https://github.com/materialyzeai/matgl>`_) is the charge-equilibrated TensorNet
+of `Ko et al., arXiv:2511.07249 (2025)
+<https://doi.org/10.48550/arXiv.2511.07249>`_. TensorNet's features give every
+atom an electronegativity and a hardness. The charges follow from them in closed
+form, at the structure's total charge, so the cost stays linear in the number of
+atoms. The atomic energy then reads the charge and the Coulomb potential of the
+neighbors' charges.
+
+.. code-block:: yaml
+
+   model:
+     name: qet
+     cutoff: 5.0
+     n_features: 64
+     n_interactions: 2
+     hardness: environment       # or element: one hardness per element (default)
+   optim:
+     charge_weight: 1.0          # train the charges on "charges" labels
+
+Give each structure its total charge, and optionally an applied potential (V) on
+some atoms, such as a bias on an electrode:
+
+.. code-block:: python
+
+   {"pos": pos, "atomic_numbers": z, "cell": cell, "total_charge": 1.0,
+    "external_potential": phi}                   # (N,), optional
+
+- The model returns ``"charges"`` and ``"electrostatic_potential"`` next to the energy.
+- The charge widths are the covalent radii; ``trainable_widths: true`` learns them.
+- The other options are those of TensorNet. The defaults follow MatGL: 32
+  Gaussians and no self pairs.
+
+The MatGL QET foundation potentials trained on MatPES load with one call:
+
+.. code-block:: python
+
+   from xnn.gnn.models import QET
+
+   model = QET.from_foundation("qet-matpes-pbe-2025.2")   # or qet-matpes-r2scan-2025.2
+
+- The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
+
 MEGNet
 ======
 :class:`~xnn.gnn.models.megnet.MEGNet` (`MatGL
@@ -472,6 +517,35 @@ match the RuNNer code:
 The 3G and 4G models also return ``charges``, ``energy_elec`` and ``dipole``.
 You can also train the charges with ``charge_weight`` on ``charges`` labels. The
 ``configs/model/hdnnp.yaml`` config file lists every available option.
+
+QRNN
+====
+:class:`~xnn.dnn.models.qrnn.QRNN` is the charge recursive neural network of
+`Jacobson et al., J. Chem. Theory Comput. 18, 2354 (2022)
+<https://doi.org/10.1021/acs.jctc.1c00821>`_, written from the paper. It is an
+ANI-style HDNNP for neutral and charged closed-shell molecules. Two cycles of
+element networks predict atomic charges that add up to the net charge, and the
+charges then enter the atomic energies.
+
+.. code-block:: yaml
+
+   model:
+     name: qrnn
+     cutoff: 5.2
+     extra:
+       species: [1, 6, 7, 8, 9, 15, 16, 17]   # H, C, N, O, F, P, S, Cl
+       charge_model: recursive                # or qeq, the paper's QeqNN
+       coulomb: true                          # set both to false for delta learning
+       dispersion: true
+
+- Give the net charge of every structure as ``total_charge``. The model returns
+  ``charges`` and, for molecules, ``dipole``.
+- Train the charges on ``dipole`` labels (``dipole_weight``) or on
+  ``charges`` labels (``charge_weight``), as the paper does.
+- The Coulomb and wB97X-D dispersion terms sum over every atom pair of a
+  molecule. Turn them off for periodic cells.
+
+The ``configs/model/qrnn.yaml`` config file lists every available option.
 
 Equivariant Transformer (ET)
 ============================

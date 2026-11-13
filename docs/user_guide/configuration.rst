@@ -73,6 +73,7 @@ training configuration in YAML format, with the default values for each section.
      train_only: []             # Patterns of the only parameters to train
      prior_weight: 0.0          # > 0 pulls the trainable parameters toward their starting values
      prior_weights: null        # The same per parameter-name pattern, {pattern: weight}
+     loss_weighting: fixed      # fixed / uncertainty (learns a weight per loss term)
 
    trainer:
      loggers: [console]         # Any of console / csv / tensorboard

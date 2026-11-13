@@ -148,6 +148,18 @@ parameter directions free. ``model.pretrained``, ``model.lora`` and
 ``model.heads`` turn the same trainer into a fine-tuning run (see
 :ref:`howto-finetune`).
 
+``loss_weighting: uncertainty`` learns the balance between the loss terms
+instead of fixing it, as QRNN does for its energy and charge terms. Each term
+``L`` (times its weight) is trained as ``L / (2 sigma^2) + log sigma`` with a
+learned ``sigma`` per term (`Kendall et al., Proc. IEEE CVPR, 7482 (2018)
+<https://doi.org/10.1109/CVPR.2018.00781>`_).
+
+- The logged ``loss`` stays the fixed-weight sum, so validation and early
+  stopping compare epochs the same way.
+- ``sigma_<term>`` logs each learned scale, and checkpoints keep them as
+  ``loss_sigmas``.
+- It needs a single head and does not combine with ``trainer.cuda_graph``.
+
 Captured steps and fast paths
 =============================
 Models with a fast path train through it when ``use_fast`` takes it (see

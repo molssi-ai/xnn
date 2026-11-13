@@ -15,7 +15,7 @@ contraction of MACE and NequIP (where we use `cuEquivariance
 <https://github.com/NVIDIA/cuEquivariance>`_), the equivariant linear layers,
 element self-connections and radial networks of MACE, the continuous-filter
 convolution of SchNet, the message block of PaiNN, the embedding and interaction layers of
-TensorNet, the blocks and readouts of MEGNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
+TensorNet (and of QET's TensorNet trunk), the blocks and readouts of MEGNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
@@ -23,7 +23,8 @@ and the interaction modules of SpookyNet (compiled with ``torch.compile``), the
 residual MLPs of SpookyNet in training, the
 3D convolutions of the SE(3) steerable CNN and the 3D CNN (on cuDNN's
 channels-last kernels), the Fourier transforms and spectral products of the
-spherical CNN, the atomic environment vectors of ANI, the message sums of
+spherical CNN, the atomic environment vectors of ANI (also in QRNN, whose element
+networks run as batched products), the message sums of
 PhysNet, the symmetry functions of HDNNP, the attention messages of BAMBOO,
 the kernel expansion of GDML and sGDML, every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
 solve of ReaxFF and ReaxFF-nn, the pair terms, fields, induction solve and
@@ -78,7 +79,7 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.gnn.fast.schnet.AUTO_POLICY_TRAINING`
 - PaiNN: :data:`xnn.gnn.fast.painn.AUTO_POLICY`,
   :data:`xnn.gnn.fast.painn.AUTO_POLICY_TRAINING`
-- TensorNet: :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
+- TensorNet and QET: :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
   :data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`
 - MEGNet: :data:`xnn.gnn.fast.megnet.AUTO_POLICY`,
   :data:`xnn.gnn.fast.megnet.AUTO_POLICY_TRAINING`
@@ -109,6 +110,8 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.cnn.fast.spherical.AUTO_POLICY_TRAINING`
 - ANI: :data:`xnn.dnn.fast.aev.AUTO_POLICY`,
   :data:`xnn.dnn.fast.aev.AUTO_POLICY_TRAINING`
+- QRNN: :data:`xnn.dnn.fast.qrnn.AUTO_POLICY`,
+  :data:`xnn.dnn.fast.qrnn.AUTO_POLICY_TRAINING` (maximum edge counts)
 - PhysNet: :data:`xnn.dnn.fast.physnet.AUTO_POLICY`,
   :data:`xnn.dnn.fast.physnet.AUTO_POLICY_TRAINING`
 - HDNNP: :data:`xnn.dnn.fast.acsf.AUTO_POLICY`,
@@ -129,7 +132,8 @@ kernels win from a few structures at a time. So are the AIMNet2 kernels, except
 for training on small systems on an A30 or an L40S. The ANI kernels are faster
 at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
-float64 throughput is low. The PhysNet kernels win on large systems, from about
+float64 throughput is low. The QRNN fast path wins below about 300k edges
+(500k for evaluations in float32). The PhysNet kernels win on large systems, from about
 20k to 300k edges depending on the GPU (at every size in float64 on a T4), and the BAMBOO kernels from about 5k to
 60k. The HDNNP kernels are faster at every size, for evaluation and training,
 except in float64 on an L40S or a T4. ``"auto"`` takes the
@@ -254,8 +258,8 @@ What to expect from fast implementations
 Captured training steps
 =======================
 A training step on small molecules is bound by kernel launches, not by the
-GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE, the
-trainer can record the whole step once as a CUDA graph and replay it for every
+GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, TensorNet and QET,
+the trainer can record the whole step once as a CUDA graph and replay it for every
 batch:
 
 .. code-block:: yaml
@@ -278,8 +282,8 @@ ordinary steps.
 Captured evaluations
 ====================
 An evaluation of a small structure is bound by kernel launches in the same
-way. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE and AIMNet2, the ASE calculator
-can record the evaluation once as a CUDA graph and replay it at every step:
+way. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, AIMNet2, TensorNet and QET, the ASE
+calculator can record the evaluation once as a CUDA graph and replay it at every step:
 
 .. code-block:: python
 
@@ -293,7 +297,7 @@ replay runs the same code as an ordinary evaluation, so the results equal those
 of ordinary evaluations up to round-off. After each recording, a few replays are
 timed against ordinary evaluations, and the faster one is kept. Large structures
 therefore run ordinarily. SpookyNet's replay also uses its compiled block where
-``"auto"`` takes it. AIMNet2 replays on its fused shell convolutions, which need
+``"auto"`` takes it. TensorNet and QET replay on their fused layers. AIMNet2 replays on its fused shell convolutions, which need
 a power-of-two ``n_rbf``, with ``coulomb=None`` or ``"dsf"``. Its all-pairs,
 Ewald and PME sums size their work on the host, so they cannot be captured.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any evaluation

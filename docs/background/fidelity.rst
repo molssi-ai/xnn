@@ -88,6 +88,11 @@ Agreement with the upstream codes under identical weights:
   and forces agree to about 1e-14 in float64 and to float32 round-off, for
   molecules, batches, charged structures, both ET cutoff conventions and all
   TensorNet groups.
+- **QET** (`MatGL 4.1.4 <https://github.com/materialyzeai/matgl>`_): MatGL's
+  MatPES PBE and r2SCAN potentials, and MatGL's default architecture with
+  random weights, agree to about 1e-13 in float64 and to float32 round-off.
+  This holds for energies, forces, stresses and charges of neutral and charged
+  cells, with and without an applied potential.
 - **MEGNet** (`MatGL 4.1.4 <https://github.com/materialyzeai/matgl>`_): MatGL's
   pretrained formation energy and multi-fidelity band gap models agree to about
   1e-14 in float64 and to float32 round-off, at every fidelity, for crystals,
