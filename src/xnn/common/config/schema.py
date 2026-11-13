@@ -266,6 +266,13 @@ class OptimConfig:
         to weights, e.g. ``{"*dihedral_v": 0.1, "*charge": 10.0}``. The
         first pattern that matches a parameter sets its weight; the others
         take ``prior_weight``.
+    loss_weighting : str
+        ``"fixed"`` (the default) sums the terms with their weights.
+        ``"uncertainty"`` also learns a scale ``sigma_k`` per term: the training
+        steps minimize ``sum_k L_k / (2 sigma_k^2) + log sigma_k`` (Kendall *et
+        al.*, CVPR 2018), where ``L_k`` is the term times its weight. The
+        logged ``loss`` stays the fixed-weight sum, and ``sigma_<term>`` gives
+        each scale. Single-head training without ``trainer.cuda_graph``.
     """
 
     lr: float = 1e-3
@@ -294,6 +301,7 @@ class OptimConfig:
     train_only: list[str] = field(default_factory=list)   # patterns of the only parameters to train
     prior_weight: float = 0.0          # > 0 pulls every trainable parameter toward its starting value
     prior_weights: Optional[dict[str, float]] = None   # per-parameter-pattern pulls, {pattern: weight}
+    loss_weighting: str = "fixed"      # fixed / uncertainty (learned weight per loss term)
 
 
 @dataclass
