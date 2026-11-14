@@ -87,11 +87,12 @@ The same training runs from the command line:
 
 ```python
 from xnn.common.models import from_pretrained, list_models
-from xnn.gnn.models import MEGNet, TensorNet
+from xnn.gnn.models import MEGNet, QET, TensorNet
 
 print(list_models())                                                  # Foundation models and the local cache
 mace = from_pretrained("mace-off23-small")                            # MACE-OFF23, converted once and cached
 tensornet = TensorNet.from_foundation("tensornet-matpes-pbe-2025.2")  # MatGL's TensorNet trained on MatPES
+qet = QET.from_foundation("qet-matpes-pbe-2025.2")                    # MatGL's charge-equilibrated TensorNet
 gap = MEGNet.from_foundation("megnet-mp-2019.4.1-bandgap-mfi")        # MatGL's multi-fidelity band-gap MEGNet
 mine = from_pretrained("runs/nequip/best.pt")                         # Your own checkpoint
 ```
@@ -161,8 +162,8 @@ Other deployment routes:
 | Family | Models |
 |---|---|
 | Generic add-ons (`common`) | LES long-range electrostatics (k-space or particle-mesh sum; optionally charge-constrained or charge-equilibrated; latent charges and dipoles trainable on labels); D3 (zero, BJ, mzero, op damping) and D4 dispersion |
-| Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, GemNet (-Q, -T, -dQ, -dT), PaiNN, TensorNet, NequIP, MACE, Allegro, CACE, AIMNet2, MEGNet (single- and multi-fidelity property models) |
-| Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4) |
+| Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, GemNet (-Q, -T, -dQ, -dT), PaiNN, TensorNet, QET, NequIP, MACE, Allegro, CACE, AIMNet2, MEGNet (single- and multi-fidelity property models) |
+| Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4), QRNN |
 | Convolutional neural networks (`cnn`) | 3D steerable-/ conventional- / spherical-CNN |
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO |
 | Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
@@ -200,7 +201,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.27.0},
+  version = {0.28.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```
