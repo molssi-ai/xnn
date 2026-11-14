@@ -15,15 +15,17 @@ from xnn.common.models.fast import AutoPolicy
 #: When ``use_fast="auto"`` takes the fast path in evaluation mode (energy and forces). It saves
 #: kernel launches, so it wins from the smallest molecules (0.63-0.75 of the reference's time up to
 #: 1000 atoms on an A100) until the padded products cost as much as they save (a tie near 500k edges
-#: in float32, 300k in float64). An unmeasured GPU takes the A100's bounds.
+#: in float32, 300k in float64). An L40S, weak in float64, takes it in float64 below 20k edges only.
+#: An unmeasured GPU takes the A100's bounds.
 AUTO_POLICY = AutoPolicy(
-    max_edges={"A100": 500_000}, max_edges_float64={"A100": 300_000},
+    max_edges={"A100": 500_000, "L40S": 500_000}, max_edges_float64={"A100": 300_000, "L40S": 20_000},
     default_max_edges=500_000, default_max_edges_float64=300_000,
 )
 
 #: The same for training mode (a step with a force loss, second derivatives included): 0.43-0.55 of
-#: the reference's time up to 1000 atoms, a tie near 300k edges in both precisions.
+#: the reference's time up to 1000 atoms, a tie near 300k edges in both precisions (an L40S in
+#: float64: 20k edges).
 AUTO_POLICY_TRAINING = AutoPolicy(
-    max_edges={"A100": 300_000}, max_edges_float64={"A100": 300_000},
+    max_edges={"A100": 300_000, "L40S": 300_000}, max_edges_float64={"A100": 300_000, "L40S": 20_000},
     default_max_edges=300_000, default_max_edges_float64=300_000,
 )
