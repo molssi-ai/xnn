@@ -46,6 +46,41 @@ def test_capture_preparation_nests_and_ends():
     assert not preparing_capture()
 
 
+class _Planned(torch.nn.Module):
+    """A stand-in model that only provides an index planner."""
+
+    def __init__(self, planner):
+        super().__init__()
+        self.planner = planner
+
+    def index_planner(self):
+        return self.planner
+
+
+def test_in_place_load_equals_a_new_padded_batch():
+    """An input with the last atom and structure counts and the same fields (moved atoms, fewer edges) is copied
+    into the captured buffers: the static batch equals a newly padded one and points at the buffers again, also
+    after the model replaced a field; other counts or fields, and a planner without padding, take the padding."""
+    from xnn.common.train.graphed import FixedShapePlanner, NoIndexPlanner
+    graphed = GraphedEvaluation(_Planned(NoIndexPlanner()))
+    first = structure_to_graph({**_molecule(8, 0), "total_charge": 1.0}, 3.0)
+    assert not graphed._load_in_place(first)
+    graphed._load(graphed._pad(first))
+    moved = structure_to_graph({**_molecule(8, 0, 3), "total_charge": 1.0}, 3.0)
+    moved.edge_index, moved.cell_shifts = moved.edge_index[:, :-2], moved.cell_shifts[:-2]
+    expected = graphed._pad(moved)
+    graphed.static.pos = graphed.static.pos.clone()          # what a force derivative does to its input
+    assert graphed._load_in_place(moved)
+    for name, t in graphed.inputs.items():
+        assert getattr(graphed.static, name) is t, name
+        assert torch.equal(t, getattr(expected, name)), name
+    assert not graphed._load_in_place(structure_to_graph({**_molecule(7, 0), "total_charge": 1.0}, 3.0))
+    assert not graphed._load_in_place(structure_to_graph(_molecule(8, 0), 3.0))
+    fixed = GraphedEvaluation(_Planned(FixedShapePlanner()))
+    fixed._load(fixed._pad(first))
+    assert not fixed._load_in_place(moved)
+
+
 def test_a_model_without_an_index_planner_is_rejected():
     from xnn.gnn.models.schnet import SchNet
     with pytest.raises(ValueError, match="index_planner"):
@@ -93,7 +128,7 @@ def _model(name):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.parametrize("name", ["physnet", "dimenet", "dimenet++", "gemnet", "spookynet", "spookynet-lr", "mace",
-                                  "aimnet2", "aimnet2-dsf"])
+                                  "aimnet2", "aimnet2-dsf", "tensornet", "qet"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_replays_equal_ordinary_evaluations(name, dtype):
     """Energies and forces (charges and dipoles of PhysNet) along a sequence of inputs (the steps of a

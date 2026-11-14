@@ -41,12 +41,16 @@ GEMNET = dict(n_features=12, n_edge_features=10, n_interactions=2, n_rbf=3, n_sp
               n_rbf_features=4, n_cbf_features=4, n_sbf_features=5, n_bilinear_triplet=7,
               n_bilinear_quadruplet=6, n_atom_residual=1)
 
-MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q", "physnet", "spookynet", "spookynet-lr", "mace"]
+MODELS = ["dimenet", "dimenet++", "gemnet-t", "gemnet-q", "physnet", "spookynet", "spookynet-lr", "mace",
+          "tensornet", "qet"]
 MACE = {"name": "mace", "cutoff": 5.0, "n_features": 8, "n_interactions": 2, "n_rbf": 4,
         "extra": {"species": [1, 6, 8], "max_ell": 2, "correlation": 2, "num_channels": 8, "max_L": 1}}
 
 #: PhysNet sizes (small)
 PHYSNET = dict(cutoff=5.0, n_features=16, n_rbf=8, num_blocks=2)
+TENSORNET = {"name": "tensornet", "cutoff": 5.0, "n_features": 16, "n_interactions": 2, "n_rbf": 8}
+QET = {"name": "qet", "cutoff": 5.0, "n_features": 16, "n_interactions": 2, "n_rbf": 8,
+       "extra": {"hardness": "environment"}}
 
 #: SpookyNet sizes (small): long-range terms over all pairs, or over the edges within lr_cutoff
 #: (with a shorter local cutoff, so that the plan selects the local edges)
@@ -70,6 +74,9 @@ def _small(name="dimenet"):
         pytest.importorskip("e3nn")
         from xnn.common.models import build_model
         return build_model(from_dict({"model": MACE}).model)
+    if name in ("tensornet", "qet"):
+        from xnn.common.models import build_model
+        return build_model(from_dict({"model": TENSORNET if name == "tensornet" else QET}).model)
     if name.startswith("spookynet"):
         model = SpookyNet(**(SPOOKYNET_LR if name == "spookynet-lr" else SPOOKYNET))
         with torch.no_grad():          # the zero-initialized layers randomized (all terms contribute)
@@ -95,7 +102,7 @@ def test_padded_batch_is_inert(name):
     assert padded.num_nodes == cap.atoms and padded.edge_index.shape[1] == cap.edges
     if name.startswith("spookynet"):
         assert padded.index_plan["local"].shape[0] == cap.plan["local"]
-    elif name not in ("physnet", "mace"):
+    elif name not in ("physnet", "mace", "tensornet", "qet"):
         triplets = padded.index_plan["t_out" if name.startswith("gemnet") else "kj"]
         assert triplets.shape[0] == cap.plan["triplets"]
     plain = collate(graphs[:3])
@@ -138,6 +145,8 @@ def _cfg(tmp_path, cuda_graph, model="dimenet"):
                 "extra": {k: sizes[k] for k in ("seed", "lr_cutoff") if k in sizes}}
     elif model == "mace":
         spec = MACE
+    elif model in ("tensornet", "qet"):
+        spec = TENSORNET if model == "tensornet" else QET
     elif model.startswith("gemnet"):
         extra = {k: v for k, v in GEMNET.items()
                  if k not in ("n_features", "n_interactions", "n_rbf", "cutoff")}
@@ -172,8 +181,9 @@ def test_captured_steps_match_ordinary_steps(tmp_path, model):
         if cuda_graph:
             assert trainer._graphed is not None and trainer._graphed.graph is not None
         weights[cuda_graph] = {n: p.detach().clone() for n, p in trainer.module.named_parameters()}
-    # SpookyNet's and MACE's sums add in no fixed order (atomic adds): two ordinary runs differ by about 1e-8
-    tol = 1e-7 if model.startswith("spookynet") or model == "mace" else 1e-10
+    # SpookyNet's, MACE's and TensorNet's fused sums add in no fixed order (atomic adds): two ordinary runs
+    # differ by about 1e-8
+    tol = 1e-7 if model.startswith("spookynet") or model in ("mace", "tensornet", "qet") else 1e-10
     for name, p in weights[False].items():
         err = (weights[True][name] - p).abs().max() / p.abs().max().clamp_min(1e-30)
         assert err < tol, (name, float(err))

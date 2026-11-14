@@ -1006,12 +1006,38 @@ def test_matgl_checkpoint_refusals(tmp_path):
     from xnn.gnn.models import tensornet_foundation as tf
     _matgl_directory(tmp_path)
     meta = json.loads((tmp_path / "model.json").read_text())
-    meta["kwargs"]["model"]["init_args"]["rbf_type"] = "Gaussian"
+    meta["kwargs"]["model"]["init_args"]["use_smooth"] = False
     (tmp_path / "model.json").write_text(json.dumps(meta))
     with pytest.raises(NotImplementedError, match="radial basis"):
         tf.convert_directory(tmp_path)
     with pytest.raises(KeyError):
         tf.from_foundation("tensornet-unknown")
+
+
+@pytest.mark.parametrize("width, gamma", [(0.7, 0.7), (None, 2 / 5.0)])
+def test_matgl_gaussian_basis_converts(tmp_path, width, gamma):
+    """MatGL's Gaussians (centers on [0, cutoff + 1], its width the exponent; no width: the inverse
+    center spacing) convert to the Gaussian basis with rbf_max and gamma."""
+    import json
+
+    from xnn.gnn.models import tensornet_foundation as tf
+    _matgl_directory(tmp_path)
+    meta = json.loads((tmp_path / "model.json").read_text())
+    meta["kwargs"]["model"]["init_args"].update(rbf_type="Gaussian", num_rbf=3, width=width)
+    (tmp_path / "model.json").write_text(json.dumps(meta))
+    model, cfg = tf.convert_directory(tmp_path, torch.float64)
+    assert cfg.model.extra["radial_basis"] == "gaussian" and cfg.model.extra["rbf_max"] == 5.0
+    assert model.rbf.gamma == pytest.approx(gamma)
+    assert torch.equal(model.rbf.centers, torch.tensor([0.0, 2.5, 5.0]))
+
+
+def test_gaussian_basis_options():
+    """rbf_max moves the last Gaussian and gamma sets their exponent; other bases ignore rbf_max."""
+    m = TensorNet(n_features=8, n_rbf=5, cutoff=4.0, radial_basis="gaussian", rbf_max=6.0, gamma=0.5)
+    assert float(m.rbf.centers[-1]) == 6.0 and m.rbf.gamma == 0.5
+    assert float(TensorNet(n_features=8, n_rbf=5, cutoff=4.0, radial_basis="gaussian").rbf.centers[-1]) == 4.0
+    with pytest.warns(UserWarning, match="rbf_max"):
+        TensorNet(n_features=8, radial_basis="expnorm", rbf_max=6.0)
 
 
 def test_matgl_directory_detection(tmp_path):
@@ -1042,12 +1068,13 @@ def test_matgl_checkpoint_refusals_name_every_unconverted_piece(tmp_path):
 
     meta = json.loads(text)
     meta["kwargs"]["model"]["init_args"].update(is_intensive=True, include_state=True, ntargets=2,
-                                                activation_type="tanh")
+                                                activation_type="tanh", equivariance_invariance_group="SO(3)")
     meta["kwargs"]["calc_repuls"] = True
     (tmp_path / "model.json").write_text(json.dumps(meta))
     with pytest.raises(NotImplementedError) as err:
         tf.convert_directory(tmp_path)
-    for piece in ("intensive target", "state features", "several targets", "repulsion term", "activation tanh"):
+    for piece in ("intensive target", "state features", "several targets", "repulsion term", "activation tanh",
+                  "SO(3) group"):
         assert piece in str(err.value)
 
     (tmp_path / "model.json").write_text(text)

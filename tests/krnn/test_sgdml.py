@@ -331,6 +331,45 @@ def test_symmetry_search_and_group_helpers():
     assert d[0, 1] == pytest.approx(0.2)
 
 
+def _match_pairs_one_by_one(r, z):
+    """One assignment problem per pair of geometries: the matching written out pair by pair."""
+    from scipy.optimize import linear_sum_assignment
+    m = len(r)
+    other = (z[:, None] != z[None, :]).astype(float)
+    adj = [P._distances(x, None) for x in r]
+    vec = []
+    for a in adj:
+        w, v = np.linalg.eig(a)
+        vec.append(np.abs(v[:, np.argsort(w)[::-1]].real))
+    perms, cost = {}, np.zeros((m, m))
+    for i in range(m):
+        for j in range(i + 1, m):
+            c = -vec[i] @ vec[j].T
+            c = c + other * np.max(np.abs(c))
+            p = linear_sum_assignment(c)[1]
+            before = np.linalg.norm(adj[i] - adj[j])
+            after = np.linalg.norm(adj[i][np.ix_(p, p)] - adj[j])
+            cost[i, j] = min(after, before)
+            if after < before and not np.isclose(before, after):
+                perms[i, j] = p
+    cost = cost + cost.T
+    np.fill_diagonal(cost, np.inf)
+    return perms, cost
+
+
+def test_batched_pair_matching_equals_one_assignment_per_pair(monkeypatch, data):
+    """Batched pairs, with plain assignments read off the costs, match solving every pair."""
+    exact = FID.ETHANOL_R
+    r = np.concatenate([data["R"][:10], exact[None], exact[None][:, FID.SYMMETRIES[1]], exact[None]])
+    z = np.asarray(data["z"])
+    monkeypatch.setattr(P, "PAIR_BLOCK", 3 * len(z) ** 2)
+    ref_perms, ref_cost = _match_pairs_one_by_one(r, z)
+    perms, cost = P.match_pairs(r, z)
+    assert set(perms) == set(ref_perms) and len(perms) > 0
+    assert all(np.array_equal(perms[k], ref_perms[k]) for k in perms)
+    np.testing.assert_allclose(cost, ref_cost, rtol=1e-12, atol=1e-14)
+
+
 def test_symmetry_fallback_to_the_cycle_subgroup(monkeypatch, data):
     """A closure that outgrows the limit falls back to the unshadowed cycles."""
     big = np.array([np.roll(np.arange(9), k) for k in range(2)])
