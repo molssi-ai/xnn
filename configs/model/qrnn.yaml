@@ -1,0 +1,32 @@
+# QRNN (Jacobson et al., J. Chem. Theory Comput. 18, 2354, 2022): an HDNNP whose atomic charges,
+# predicted recursively at a fixed net charge, enter the atomic energies. Every option at its default.
+name: qrnn
+cutoff: 5.2                     # neighbor list: max(radial, angular) cutoff
+n_features: 0                   # unused (descriptor model)
+n_interactions: 0
+n_rbf: 0
+extra:
+  species: [1, 6, 7, 8, 9, 15, 16, 17]   # H, C, N, O, F, P, S, Cl
+  radial_cutoff: 5.2            # AEV radial cutoff
+  angular_cutoff: 3.5           # AEV angular cutoff
+  aev_kwargs: null              # AEV grids and conventions; null: the ANI-1x grids
+  hidden: [128, 128, 64]        # energy network widths (or a {Z: [...]} mapping)
+  charge_hidden: null           # charge network widths; null: hidden
+  activation: gelu
+  atomic_energies: null         # per-species energies added to every atom
+  charge_model: recursive       # recursive (QRNN) | qeq (QeqNN, full charge equilibration)
+  n_iterations: 2               # cycles of the charge recursion
+  initial_charges: uniform      # charges of the first cycle: uniform (net charge / atoms) | zero
+  hardness: null                # fixed hardnesses in eV/e^2 per species; null: D4 EEQ diagonal
+  min_width: 0.05               # QeqNN: smallest Gaussian charge width (Angstrom)
+  coulomb: true                 # attenuated Coulomb energy of the charges (molecules)
+  coulomb_midpoint: 2.2         # attenuation midpoint a (Angstrom)
+  coulomb_steepness: 8.5        # attenuation steepness b (1/Angstrom)
+  dispersion: true              # wB97X-D dispersion (molecules, H to Xe)
+  dispersion_s6: 1.0
+  dispersion_damping: 6.0
+
+# Delta learning on a semiempirical method (QRNN-TB in the paper):
+#   extra:
+#     coulomb: false
+#     dispersion: false

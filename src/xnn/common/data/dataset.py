@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -38,12 +39,19 @@ def structure_to_graph(
         targets of the HDNNP charge networks), ``total_charge`` (scalar net
         charge; the key ``charge`` is accepted as a synonym), ``fragment_charges``
         ``(N,)`` (the net charge of the fragment each atom belongs to, for the
-        LES charge solve), ``spin_multiplicity``
+        LES charge solve), ``external_potential`` ``(N,)`` (an applied
+        potential on every atom, in V; read by QET), ``spin_multiplicity``
         (scalar ``2S + 1``; ``multiplicity`` is a synonym), ``weight`` (scalar
         per-structure loss weight; see
         :func:`~xnn.common.train.losses.weighted_loss`), ``head`` (integer
         index of the readout head, for multi-head models; see
-        :func:`~xnn.common.finetune.label_head`), the per-structure term
+        :func:`~xnn.common.finetune.label_head`), ``properties`` (scalar or
+        ``(k,)``, an intensive property target such as a band gap),
+        ``state`` (an integer label such as the data fidelity, or a ``(d,)``
+        feature vector; the global state of MEGNet), ``occupancies`` (one
+        ``{element: fraction}`` mapping per site, elements as symbols or atomic
+        numbers: disordered sites for MEGNet; ``atomic_numbers`` may then be
+        left out and default to each site's largest occupant), the per-structure term
         weights ``energy_weight`` / ``force_weight`` / ``stress_weight``
         (scalars) and ``atom_force_weight`` ``(N,)`` (the weight of every
         atom's force error).
@@ -85,7 +93,13 @@ def structure_to_graph(
         return out if device is None else out.to(device)
 
     pos = t(s["pos"])
-    z = t(s["atomic_numbers"], dtype=torch.long)
+    sites = _site_mixture(s.get("occupancies"), pos.shape[0])
+    if s.get("atomic_numbers") is not None:
+        z = t(s["atomic_numbers"], dtype=torch.long)
+    elif sites is not None:
+        z = t(sites[0][np.arange(len(sites[0])), sites[1].argmax(1)], dtype=torch.long)
+    else:
+        raise KeyError("a structure needs atomic_numbers (or occupancies)")
     cell = t(s["cell"]).reshape(3, 3) if s.get("cell") is not None else None
     pbc = (torch.as_tensor(s["pbc"], dtype=torch.bool)
            if s.get("pbc") is not None else
@@ -98,6 +112,14 @@ def structure_to_graph(
     mult = s.get("spin_multiplicity", s.get("multiplicity"))
     dipole = s.get("dipole", s.get("dipole_moment"))
     alpha = s.get("polarizability")
+    prop = s.get("properties")
+    state = s.get("state")
+    if state is not None:
+        # an integer label stays one (an embedding index); features take the default dtype
+        integer = (state.dtype in (torch.int32, torch.int64) if isinstance(state, Tensor)
+                   else np.issubdtype(np.asarray(state).dtype, np.integer))
+        state = (t(state, dtype=torch.long).reshape(1) if integer
+                 else t(state).reshape(1, -1))
     return AtomicGraph(
         pos=pos,
         atomic_numbers=z,
@@ -118,11 +140,17 @@ def structure_to_graph(
         charges=t(s["charges"]).reshape(n) if s.get("charges") is not None else None,
         fragment_charges=(t(s["fragment_charges"]).reshape(n)
                           if s.get("fragment_charges") is not None else None),
+        external_potential=(t(s["external_potential"]).reshape(n)
+                            if s.get("external_potential") is not None else None),
         total_charge=(t([charge]).reshape(1) if charge is not None else None),
         spin_multiplicity=(t([mult]).reshape(1) if mult is not None else None),
         weight=(t([s["weight"]]).reshape(1) if s.get("weight") is not None else None),
         head=(t([int(s["head"])], dtype=torch.long).reshape(1)
               if s.get("head") is not None else None),
+        properties=(t(prop).reshape((1,) + tuple(np.shape(prop))) if prop is not None else None),
+        state=state,
+        site_species=t(sites[0], dtype=torch.long) if sites is not None else None,
+        site_occupancy=t(sites[1]) if sites is not None else None,
         energy_weight=(t([s["energy_weight"]]).reshape(1)
                        if s.get("energy_weight") is not None else None),
         force_weight=(t([s["force_weight"]]).reshape(1)
@@ -132,6 +160,49 @@ def structure_to_graph(
         atom_force_weight=(t(s["atom_force_weight"]).reshape(n)
                            if s.get("atom_force_weight") is not None else None),
     )
+
+
+def _site_mixture(occupancies, n: int):
+    """The ``(species, occupancy)`` arrays ``(n, K)`` of per-site ``{element: fraction}`` mappings, or ``None``.
+
+    Raises
+    ------
+    ValueError
+        For a site count other than ``n``, negative occupancies or a site whose occupancies sum above 1.
+    """
+    if occupancies is None:
+        return None
+    from .elements import SYMBOL_TO_Z
+    if len(occupancies) != n:
+        raise ValueError(f"got occupancies for {len(occupancies)} sites and {n} positions")
+    k = max(len(site) for site in occupancies)
+    species, weight = np.zeros((n, k), dtype=np.int64), np.zeros((n, k))
+    for i, site in enumerate(occupancies):
+        for j, (element, x) in enumerate(site.items()):
+            species[i, j] = SYMBOL_TO_Z[element] if isinstance(element, str) else int(element)
+            weight[i, j] = float(x)
+    if (weight < 0).any() or (weight.sum(1) > 1 + 1e-6).any():
+        raise ValueError("site occupancies must be non-negative and sum to at most 1")
+    return species, weight
+
+
+def _site_rows(graphs: list) -> tuple:
+    """The batch's ``site_species`` and ``site_occupancy`` padded to its widest site, or ``(None, None)`` when
+    every structure is ordered."""
+    if all(g.site_species is None for g in graphs):
+        return None, None
+    width = max(g.site_species.shape[1] for g in graphs if g.site_species is not None)
+    species, occupancy = [], []
+    for g in graphs:
+        if g.site_species is None:
+            sp = g.atomic_numbers[:, None]
+            oc = torch.ones(sp.shape, dtype=g.pos.dtype, device=sp.device)
+        else:
+            sp, oc = g.site_species, g.site_occupancy
+        pad = width - sp.shape[1]
+        species.append(torch.nn.functional.pad(sp, (0, pad)))
+        occupancy.append(torch.nn.functional.pad(oc.to(g.pos.dtype), (0, pad)))
+    return torch.cat(species, 0), torch.cat(occupancy, 0)
 
 
 def energy_labelled(structures) -> list[dict]:
@@ -290,12 +361,18 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
       periodic flag (its edges carry no image shift, so every edge keeps its
       length, and its stress is zero);
     * structures with and without energy, force, stress, dipole,
-      polarizability or partial-charge labels: the missing ones are zeros,
-      and ``energy_mask`` / ``forces_mask`` / ``stress_mask`` /
-      ``dipole_mask`` / ``polarizability_mask`` / ``charges_mask`` (per
-      structure) mark the labelled ones for the loss and the metrics;
+      polarizability, partial-charge or property labels: the missing ones are
+      zeros, and ``energy_mask`` / ``forces_mask`` / ``stress_mask`` /
+      ``dipole_mask`` / ``polarizability_mask`` / ``charges_mask`` /
+      ``properties_mask`` (per structure) mark the labelled ones for the loss
+      and the metrics;
+    * structures with and without ``state`` (missing = label 0 or zero
+      features);
+    * ordered structures and structures with disordered sites: every site
+      becomes a padded row of ``site_species`` / ``site_occupancy``, an
+      ordered one its own species at occupancy 1;
     * structures with and without ``total_charge`` (missing = neutral),
-      ``spin_multiplicity`` (missing = 1), ``weight``, ``energy_weight``,
+      ``external_potential`` (missing = 0), ``spin_multiplicity`` (missing = 1), ``weight``, ``energy_weight``,
       ``force_weight``, ``stress_weight``, ``atom_force_weight`` (missing =
       1) or ``head`` (missing = 0, the first head).
 
@@ -317,7 +394,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     dipoles, alphas, d_masks, p_masks = [], [], [], []
     atom_charges, ac_masks = [], []
     heads = []
+    props, pr_masks, states = [], [], []
     frag_charges, fc_masks = [], []
+    potentials = []
     e_masks, f_masks, s_masks = [], [], []
     term_weights = {k: [] for k in ("energy_weight", "force_weight", "stress_weight")}
     atom_force_weights = []
@@ -332,9 +411,13 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_ac = any(g.charges is not None for g in graphs)
     has_q = any(g.total_charge is not None for g in graphs)
     has_fc = any(g.fragment_charges is not None for g in graphs)
+    has_ep = any(g.external_potential is not None for g in graphs)
     has_m = any(g.spin_multiplicity is not None for g in graphs)
     has_w = any(g.weight is not None for g in graphs)
     has_h = any(g.head is not None for g in graphs)
+    # the shape and dtype of a missing property or state follow the first given one
+    prop_like = next((g.properties for g in graphs if g.properties is not None), None)
+    state_like = next((g.state for g in graphs if g.state is not None), None)
     has_tw = {k: any(getattr(g, k) is not None for g in graphs) for k in term_weights}
     has_aw = any(g.atom_force_weight is not None for g in graphs)
 
@@ -394,6 +477,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
             frag_charges.append(g.fragment_charges if g.fragment_charges is not None
                                 else torch.zeros(g.pos.shape[0], dtype=dtype, device=device))
             fc_masks.append(label_mask(g, g.fragment_charges, g.fragment_charges_mask))
+        if has_ep:
+            potentials.append(g.external_potential if g.external_potential is not None
+                              else torch.zeros(g.pos.shape[0], dtype=dtype, device=device))
         if has_m:
             mults.append(g.spin_multiplicity if g.spin_multiplicity is not None
                          else torch.ones(b, dtype=dtype, device=device))
@@ -403,6 +489,13 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         if has_h:
             heads.append(g.head if g.head is not None
                          else torch.zeros(b, dtype=torch.long, device=device))
+        if prop_like is not None:
+            props.append(g.properties if g.properties is not None
+                         else prop_like.new_zeros((b,) + tuple(prop_like.shape[1:])))
+            pr_masks.append(label_mask(g, g.properties, g.properties_mask))
+        if state_like is not None:
+            states.append(g.state if g.state is not None
+                          else state_like.new_zeros((b,) + tuple(state_like.shape[1:])))
         for k, values in term_weights.items():
             if has_tw[k]:
                 v = getattr(g, k)
@@ -419,6 +512,8 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     p_mask = torch.cat(p_masks, 0) if has_p else None
     ac_mask = torch.cat(ac_masks, 0) if has_ac else None
     fc_mask = torch.cat(fc_masks, 0) if has_fc else None
+    pr_mask = torch.cat(pr_masks, 0) if prop_like is not None else None
+    site_species, site_occupancy = _site_rows(graphs)
     return AtomicGraph(
         pos=torch.cat(pos, 0),
         atomic_numbers=torch.cat(z, 0),
@@ -442,11 +537,17 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         charges=torch.cat(atom_charges, 0) if has_ac else None,
         charges_mask=None if ac_mask is None or bool(ac_mask.all()) else ac_mask,
         fragment_charges=torch.cat(frag_charges, 0) if has_fc else None,
+        external_potential=torch.cat(potentials, 0) if has_ep else None,
         fragment_charges_mask=None if fc_mask is None or bool(fc_mask.all()) else fc_mask,
         total_charge=torch.cat(charges, 0) if has_q else None,
         spin_multiplicity=torch.cat(mults, 0) if has_m else None,
         weight=torch.cat(weights, 0) if has_w else None,
         head=torch.cat(heads, 0) if has_h else None,
+        properties=torch.cat(props, 0) if prop_like is not None else None,
+        properties_mask=None if pr_mask is None or bool(pr_mask.all()) else pr_mask,
+        state=torch.cat(states, 0) if state_like is not None else None,
+        site_species=site_species,
+        site_occupancy=site_occupancy,
         energy_weight=torch.cat(term_weights["energy_weight"], 0) if has_tw["energy_weight"] else None,
         force_weight=torch.cat(term_weights["force_weight"], 0) if has_tw["force_weight"] else None,
         stress_weight=torch.cat(term_weights["stress_weight"], 0) if has_tw["stress_weight"] else None,

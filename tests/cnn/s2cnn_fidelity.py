@@ -1,0 +1,326 @@
+"""Fidelity of the xnn spherical CNN to the reference implementation
+(jonas-koehler/s2cnn), as a harness for the tests and the fidelity notebook.
+
+``setup()`` makes the reference importable on a current Python / numpy / torch
+(``collections.Iterable`` for its ``lie_learn`` dependency, ``np.float`` in its
+grids) and, for the float64 run, routes its float32 constant tables through
+the default dtype. ``build_reference_trunk(model)`` composes the ResNet blocks
+of a :class:`~xnn.cnn.models.SphericalCNN` (Table 3 of the paper; the
+reference ships the layers, not this network) from the reference layers
+with the model's weights; between the xnn featurizer and energy head
+(``se3cnn_fidelity.ReferencePipeline``) it gives energies and forces of the
+reference trunk. ``compare_all(dtype)`` returns the worst relative error of
+every compared quantity.
+
+    python tests/cnn/s2cnn_fidelity.py            # prints both precisions
+"""
+from __future__ import annotations
+
+import collections
+import collections.abc
+import contextlib
+import io
+import math
+
+import numpy as np
+import torch
+
+_PATCHED = False
+
+
+def setup() -> None:
+    """Import patches for the reference packages (idempotent)."""
+    global _PATCHED
+    if _PATCHED:
+        return
+    if not hasattr(collections, "Iterable"):
+        collections.Iterable = collections.abc.Iterable
+    if not hasattr(np, "float"):
+        np.float = float
+    import importlib
+
+    import s2cnn  # noqa: F401
+    # the package re-exports functions under their module names, so take the modules by path
+    s2_ft = importlib.import_module("s2cnn.s2_ft")
+    so3_ft = importlib.import_module("s2cnn.so3_ft")
+    s2_fft = importlib.import_module("s2cnn.soft.s2_fft")
+    so3_fft = importlib.import_module("s2cnn.soft.so3_fft")
+    so3_integrate = importlib.import_module("s2cnn.soft.so3_integrate")
+    so3_rotation = importlib.import_module("s2cnn.soft.so3_rotation")
+
+    import lie_learn.spaces.S3 as S3
+    from lie_learn.representations.SO3.wigner_d import wigner_D_matrix
+
+    # the reference's CPU path of the real SO(3) transform calls rfftn on a complex
+    # tensor (a torch < 1.8 idiom); route it through its complex transform instead
+    def so3_rfft(x, for_grad=False, b_out=None):
+        return so3_fft.so3_fft(torch.stack((x, torch.zeros_like(x)), -1), for_grad=for_grad, b_out=b_out)
+
+    so3_fft.so3_rfft = so3_rfft
+
+    # the reference builds its constant tables in float64 (lie_learn) and stores
+    # them in float32; take the float64 arrays in the working precision instead
+    def wigner_s2(b, nl, weighted, device):
+        w = s2_fft._setup_s2_fft(b, nl, weighted)
+        return torch.tensor(w, dtype=torch.get_default_dtype(), device=device).contiguous()
+
+    def wigner_so3(b, nl, weighted, device):
+        w = so3_fft._setup_so3_fft(b, nl, weighted)
+        return torch.tensor(w, dtype=torch.get_default_dtype(), device=device).contiguous()
+
+    def setup_s2_ft(b, grid, device_type, device_index):
+        return torch.tensor(getattr(s2_ft, "__setup_s2_ft")(b, grid), dtype=torch.get_default_dtype(),
+                            device=torch.device(device_type, device_index))
+
+    def setup_so3_ft(b, grid, device_type, device_index):
+        return torch.tensor(getattr(so3_ft, "__setup_so3_ft")(b, grid), dtype=torch.get_default_dtype(),
+                            device=torch.device(device_type, device_index))
+
+    def setup_integrate(b, device_type, device_index):
+        return torch.tensor(S3.quadrature_weights(b), dtype=torch.get_default_dtype(),
+                            device=torch.device(device_type, device_index))
+
+    def setup_rotation(b, alpha, beta, gamma, device_type, device_index):
+        out = []
+        for l in range(b):
+            U = wigner_D_matrix(l, alpha, beta, gamma, field="complex", normalization="quantum",
+                                order="centered", condon_shortley="cs")
+            U = np.ascontiguousarray(U.astype(np.complex128)).view(np.float64).reshape(2 * l + 1, 2 * l + 1, 2)
+            out.append(torch.tensor(U, dtype=torch.get_default_dtype(), device=torch.device(device_type, device_index)))
+        return out
+
+    # the reference keeps every table in an lru_cache; so do these, per working precision
+    def cached(fn):
+        tables = {}
+
+        def lookup(*args, **kwargs):
+            key = (torch.get_default_dtype(), args, tuple(sorted(kwargs.items())))
+            if key not in tables:
+                tables[key] = fn(*args, **kwargs)
+            return tables[key]
+        return lookup
+
+    s2_fft._setup_wigner = cached(wigner_s2)
+    so3_fft._setup_wigner = cached(wigner_so3)
+    s2_ft._setup_s2_ft = cached(setup_s2_ft)
+    so3_ft._setup_so3_ft = cached(setup_so3_ft)
+    so3_integrate._setup_so3_integrate = cached(setup_integrate)
+    so3_rotation._setup_so3_rotation = cached(setup_rotation)
+    _PATCHED = True
+
+
+class _ReferenceResBlock(torch.nn.Module):
+    """A ResNet block of Table 3 of reference layers: correlation, batch norm,
+    activation, SO(3) correlation, batch norm, plus the shortcut."""
+
+    def __init__(self, conv1, norm1, act, conv2, norm2, shortcut):
+        super().__init__()
+        self.conv1, self.norm1, self.act = conv1, norm1, act
+        self.conv2, self.norm2, self.shortcut = conv2, norm2, shortcut
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv1(x)
+        if self.norm1 is not None:
+            y = self.norm1(y)
+        y = self.conv2(self.act(y))
+        if self.norm2 is not None:
+            y = self.norm2(y)
+        return y + (x if self.shortcut is None else self.shortcut(x))
+
+
+class _Integrate(torch.nn.Module):
+    """The reference integral over SO(3)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import importlib
+        return importlib.import_module("s2cnn.soft.so3_integrate").so3_integrate(x)
+
+
+def reference_conv(conv):
+    """The reference correlation of an xnn ``S2Convolution`` / ``SO3Convolution``, filter and bias copied."""
+    setup()
+    from s2cnn import S2Convolution as RefS2Conv
+    from s2cnn import SO3Convolution as RefSO3Conv
+
+    from xnn.cnn.models import S2Convolution
+
+    grid = tuple(tuple(float(v) for v in p) for p in conv.points.double().tolist())
+    cls = RefS2Conv if isinstance(conv, S2Convolution) else RefSO3Conv
+    with contextlib.redirect_stdout(io.StringIO()):
+        ref = cls(conv.n_in, conv.n_out, conv.b_in, conv.b_out, grid)
+    assert abs(ref.scaling - conv.scaling) < 1e-15
+    with torch.no_grad():
+        ref.kernel.copy_(conv.kernel)
+        ref.bias.copy_(conv.bias)
+    return ref
+
+
+def build_reference_trunk(model):
+    """The ResNet blocks and SO(3) integral of a :class:`~xnn.cnn.models.SphericalCNN` of reference layers."""
+    import copy
+
+    blocks = [_ReferenceResBlock(reference_conv(b.conv1), copy.deepcopy(b.norm1), b.act,
+                                 reference_conv(b.conv2), copy.deepcopy(b.norm2),
+                                 None if b.shortcut is None else reference_conv(b.shortcut))
+              for b in model.blocks]
+    return torch.nn.Sequential(*blocks, _Integrate())
+
+
+def _relative(a: torch.Tensor, b: torch.Tensor) -> float:
+    return float((a - b).abs().max() / b.abs().max().clamp(min=1e-300))
+
+
+def _to_padded_s2(flat: torch.Tensor, b: int) -> torch.Tensor:
+    """Reference S2 spectrum [l * m, ..., complex] -> xnn layout (..., b, 2b - 1)."""
+    z = torch.view_as_complex(flat.contiguous())                          # (nspec, ...)
+    out = torch.zeros(z.shape[1:] + (b, 2 * b - 1), dtype=z.dtype)
+    for l in range(b):
+        out[..., l, b - 1 - l:b + l] = z[l * l:(l + 1) ** 2].movedim(0, -1)
+    return out
+
+
+def _to_padded_so3(flat: torch.Tensor, b: int) -> torch.Tensor:
+    """Reference SO(3) spectrum [l * m * n, ..., complex] -> xnn layout (..., b, 2b - 1, 2b - 1)."""
+    z = torch.view_as_complex(flat.contiguous())
+    out = torch.zeros(z.shape[1:] + (b, 2 * b - 1, 2 * b - 1), dtype=z.dtype)
+    for l in range(b):
+        o = b - 1 - l
+        start = l * (4 * l * l - 1) // 3
+        block = z[start:start + (2 * l + 1) ** 2].movedim(0, -1).reshape(*z.shape[1:], 2 * l + 1, 2 * l + 1)
+        out[..., l, o:o + 2 * l + 1, o:o + 2 * l + 1] = block
+    return out
+
+
+def _from_padded_s2(spec: torch.Tensor) -> torch.Tensor:
+    """xnn S2 spectrum (..., b, 2b - 1) -> reference [l * m, ..., complex]."""
+    b = spec.shape[-2]
+    parts = [spec[..., l, b - 1 - l:b + l].movedim(-1, 0) for l in range(b)]
+    return torch.view_as_real(torch.cat(parts, 0).contiguous())
+
+
+def _from_padded_so3(spec: torch.Tensor) -> torch.Tensor:
+    b = spec.shape[-3]
+    parts = []
+    for l in range(b):
+        o = b - 1 - l
+        block = spec[..., l, o:o + 2 * l + 1, o:o + 2 * l + 1]
+        parts.append(block.reshape(*block.shape[:-2], (2 * l + 1) ** 2).movedim(-1, 0))
+    return torch.view_as_real(torch.cat(parts, 0).contiguous())
+
+
+def compare_all(dtype: torch.dtype = torch.float64, seed: int = 0) -> dict[str, float]:
+    """Worst relative errors of every compared quantity, in ``dtype``."""
+    setup()
+    import importlib
+
+    from s2cnn import S2Convolution as RefS2Conv
+    from s2cnn import SO3Convolution as RefSO3Conv
+    from s2cnn import s2_near_identity_grid as ref_s2_grid
+    from s2cnn import so3_near_identity_grid as ref_so3_grid
+    from s2cnn.soft.s2_fft import s2_fft as ref_s2_fft
+    from s2cnn.soft.s2_fft import s2_ifft as ref_s2_ifft
+    from s2cnn.soft.so3_fft import so3_rfft as ref_so3_rfft
+    from s2cnn.soft.so3_fft import so3_rifft as ref_so3_rifft
+    ref_rotation = importlib.import_module("s2cnn.soft.so3_rotation").so3_rotation
+    ref_integrate = importlib.import_module("s2cnn.soft.so3_integrate").so3_integrate
+    from se3cnn_fidelity import ReferencePipeline, energy_forces, random_batch
+    from xnn.cnn.models import (
+        S2Convolution,
+        S2Transform,
+        SO3Convolution,
+        SO3Transform,
+        SphericalCNN,
+        s2_near_identity_grid,
+        so3_integrate,
+        so3_near_identity_grid,
+        so3_rotate,
+    )
+
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    errors = {}
+    try:
+        g = torch.Generator().manual_seed(seed)
+        b_in, b_out = 6, 4
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        # S2 transform and inverse
+        x = torch.randn(2, 3, 2 * b_in, 2 * b_in, generator=g, dtype=dtype)
+        with quiet:
+            ref = ref_s2_fft(torch.stack([x, torch.zeros_like(x)], -1), b_out=b_out)
+        tr = S2Transform(b_in, b_out)
+        errors["s2_fft"] = _relative(tr.analyze(x), _to_padded_s2(ref, b_out))
+        spec = tr.analyze(x)
+        with quiet:
+            ref_sig = ref_s2_ifft(_from_padded_s2(spec), b_out=b_in)[..., 0]
+        errors["s2_ifft"] = _relative(tr.synthesize(spec), ref_sig)
+        # SO(3) transform and inverse
+        y = torch.randn(2, 3, 2 * b_in, 2 * b_in, 2 * b_in, generator=g, dtype=dtype)
+        with quiet:
+            ref = ref_so3_rfft(y, b_out=b_out)
+        tr3 = SO3Transform(b_in, b_out)
+        errors["so3_fft"] = _relative(tr3.analyze(y), _to_padded_so3(ref, b_out))
+        spec3 = tr3.analyze(y)
+        with quiet:
+            ref_sig = ref_so3_rifft(_from_padded_so3(spec3), b_out=b_in)
+        errors["so3_ifft"] = _relative(tr3.synthesize(spec3), ref_sig)
+        # integration and rotation
+        with quiet:
+            errors["so3_integrate"] = _relative(so3_integrate(y), ref_integrate(y))
+            errors["so3_rotate"] = _relative(so3_rotate(y, 0.7, 1.2, 2.5), ref_rotation(y, 0.7, 1.2, 2.5))
+        # the correlation layers with transplanted filters
+        s2_pts = s2_near_identity_grid(math.pi / 8, 2 * b_in, 2)
+        so3_pts = so3_near_identity_grid(math.pi / 8, 2 * math.pi, 2 * b_out, 2, 2)
+        with quiet:
+            ref_s2 = RefS2Conv(3, 4, b_in, b_out, ref_s2_grid(math.pi / 8, 2 * b_in, 2))
+            ref_so3 = RefSO3Conv(4, 2, b_out, b_out, ref_so3_grid(math.pi / 8, 2 * math.pi, 2 * b_out, 2, 2))
+        s2 = S2Convolution(3, 4, b_in, b_out, s2_pts)
+        so3 = SO3Convolution(4, 2, b_out, b_out, so3_pts)
+        errors["s2_grid"] = _relative(s2_pts, torch.tensor(ref_s2_grid(math.pi / 8, 2 * b_in, 2), dtype=dtype))
+        ref_grid = torch.tensor(ref_so3_grid(math.pi / 8, 2 * math.pi, 2 * b_out, 2, 2), dtype=dtype)
+        errors["so3_grid"] = _relative(so3_pts, ref_grid)
+        with torch.no_grad():
+            for mine, theirs in ((s2, ref_s2), (so3, ref_so3)):
+                theirs.kernel.copy_(mine.kernel)
+                theirs.bias.normal_(generator=g)
+                mine.bias.copy_(theirs.bias)
+            assert abs(s2.scaling - ref_s2.scaling) < 1e-15 and abs(so3.scaling - ref_so3.scaling) < 1e-15
+            with quiet:
+                z_ref = ref_s2(x)
+            z = s2(x)
+            errors["s2_conv"] = _relative(z, z_ref)
+            with quiet:
+                errors["so3_conv"] = _relative(so3(z), ref_so3(z_ref))
+        # the whole network (Table 3 scaled down, one identity shortcut) with transplanted weights:
+        # trunk features with batch statistics, then energies and forces with running statistics
+        n_atoms, cutoff = 5, 4.0
+        model = SphericalCNN([1, 6, 7, 8], cutoff, radius=0.5, bandwidth=5, features=[4, 6, 6],
+                             bandwidths=[4, 3, 3])
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if name.endswith("bias") or name.endswith("norm1.weight") or name.endswith("norm2.weight"):
+                    p.add_(0.3 * torch.randn(p.shape, generator=g, dtype=dtype))
+            for name, buf in model.named_buffers():
+                if name.endswith("running_mean"):
+                    buf.normal_(0.0, 0.3, generator=g)
+                elif name.endswith("running_var"):
+                    buf.uniform_(0.5, 1.5, generator=g)
+            model.readout[-1].weight.normal_(generator=g)
+            model.readout[-1].bias.normal_(generator=g)
+        with quiet:
+            trunk = build_reference_trunk(model)
+            grids = model.featurizer(random_batch(n_atoms, cutoff, dtype))
+            errors["network"] = _relative(model.train().trunk(grids), trunk.train()(grids))
+            e, f = energy_forces(model, n_atoms, cutoff, dtype)
+            e_ref, f_ref = energy_forces(ReferencePipeline(model, trunk), n_atoms, cutoff, dtype)
+        errors["energy"] = _relative(e, e_ref)
+        errors["forces"] = _relative(f, f_ref)
+    finally:
+        torch.set_default_dtype(old)
+    return errors
+
+
+if __name__ == "__main__":
+    for dtype in (torch.float32, torch.float64):
+        out = compare_all(dtype)
+        print(dtype, {k: f"{v:.2e}" for k, v in out.items()})
+        print("worst", max(out.values()))

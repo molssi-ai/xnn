@@ -16,8 +16,9 @@ synchronization inside the evaluation, as the captured training step of
 
 The replay runs the same code as an ordinary evaluation, so the results agree with it to round-off.
 On large structures the launches are a small part of an evaluation and the padding costs more than
-they do: after each capture a few replays are timed against ordinary evaluations, and the faster
-is kept (the graph and its memory are released when the ordinary evaluation wins).
+they do: the first input is evaluated ordinarily and timed, an evaluation slower than ``max_ms`` is
+not captured at all, and after each capture a few replays are timed against ordinary evaluations,
+and the faster is kept (the graph and its memory are released when the ordinary evaluation wins).
 """
 from __future__ import annotations
 
@@ -25,13 +26,19 @@ import copy
 import dataclasses
 import math
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 from torch import Tensor, nn
 
 from ..data import AtomicGraph, collate
+from ..models.fast import capture_preparation
 from ..train.graphed import Capacity, _inputs, index_planner, padding_structure
+
+#: Timed ordinary evaluations of the first input, at most: the capture goes ahead at the first one no
+#: slower than ``max_ms``; when all are slower the evaluations stay ordinary (the first calls of a new
+#: model compile and are slow, at times the third again).
+PROBES = 4
 
 
 class GraphedEvaluation:
@@ -55,6 +62,12 @@ class GraphedEvaluation:
     trial : int, optional
         Replays and ordinary evaluations timed against each other after a capture, by default
         3; the faster is used until the input outgrows the counts. ``0`` always replays.
+    max_ms : float or None, optional
+        Wall time in milliseconds of an ordinary evaluation of the first input above which nothing
+        is captured and evaluations stay ordinary, by default 100: the launches are a small part
+        of such an evaluation, and a graph's memory would come on top of its own. The first calls
+        are ordinary evaluations, timed, until one takes at most ``max_ms`` or ``PROBES`` of them
+        took longer. ``None`` captures whatever the time, from the first call.
 
     Raises
     ------
@@ -63,9 +76,10 @@ class GraphedEvaluation:
     """
 
     def __init__(self, model: nn.Module, margin: float = 1.05, slack: int = 64, warmup: int = 2,
-                 trial: int = 3):
+                 trial: int = 3, max_ms: Optional[float] = 100.0):
         self.model = model
         self.trial = int(trial)
+        self.max_ms = None if max_ms is None else float(max_ms)
         self.planner = index_planner(model)
         if self.planner is None:
             raise ValueError("a captured evaluation needs a model with index_planner() "
@@ -75,12 +89,20 @@ class GraphedEvaluation:
         self.warmup = int(warmup)
         self.cap: Optional[Capacity] = None
         self.n_graphs = 0
+        self.probe_ms: List[float] = []
+        # whether the timed ordinary evaluations have let the capture go ahead
+        self.probed = self.max_ms is None
         self._reset()
 
     def _reset(self) -> None:
         self.graph: Optional[torch.cuda.CUDAGraph] = None
         self.static: Optional[AtomicGraph] = None
         self.inputs: Dict[str, Tensor] = {}
+        # the real atom and structure counts of the last padded input and of the static batch, and
+        # the padding edges of an empty real part (see _load_in_place)
+        self._padded: Optional[tuple] = None
+        self._loaded: Optional[tuple] = None
+        self._pad_edges: Optional[Tensor] = None
         self.out: Optional[Dict[str, Tensor]] = None
         self.steps = 0
         # "replay" or "eager" once the trial after a capture has run
@@ -119,6 +141,7 @@ class GraphedEvaluation:
                 self.cap = Capacity(atoms=n, edges=e, plan={})
                 self._reset()
             graph.index_plan, graph.index_sizes = {}, {}
+            self._padded = None
             return graph
         # planners work on CPU graphs (in training, the data-loader workers); one that plans nothing
         # (NoIndexPlanner) needs no copy
@@ -132,12 +155,63 @@ class GraphedEvaluation:
         batch.compute_dtype = graph.compute_dtype
         batch.index_plan = {k: v.to(graph.pos.device) for k, v in self.planner.pad(plan, self.cap.plan, e).items()}
         batch.index_sizes = dict(self.cap.plan)
+        self._padded = (n, b)
         return batch
 
+    def _load_in_place(self, graph: AtomicGraph) -> bool:
+        """Copy ``graph`` into the static batch without building the padded batch, when only its
+        edges can have changed: a planner without index work, the atom and structure counts of the
+        last padded load, the same fields. The padding atoms and structure then keep their values,
+        and only the padding edges, which follow the real ones, are written again. ``False`` when
+        the input needs the ordinary padding."""
+        if (self.static is None or self._pad_edges is None or self.cap is None or self.cap.plan
+                or self.planner.offsets or not getattr(self.planner, "pads", True)):
+            return False
+        n, e, b = graph.num_nodes, int(graph.edge_index.shape[1]), graph.num_graphs
+        if (n, b) != self._loaded or not self._fits(n, e, b, {}):
+            return False
+        self.planner(graph)
+        # the captured input buffers (the model may have replaced the static batch's own fields,
+        # the positions of a force derivative for one)
+        buffers = self.inputs
+        writes = []
+        for f in dataclasses.fields(graph):
+            v, s = getattr(graph, f.name), buffers.get(f.name)
+            if not isinstance(v, Tensor) and s is None:
+                continue
+            if not (isinstance(v, Tensor) and s is not None):
+                return False
+            if f.name == "edge_index":
+                if v.shape[0] != 2:
+                    return False
+                writes.append((s[:, :e], v))
+            elif f.name == "cell_shifts":
+                writes.append((s[:e], v))
+            elif s.shape[1:] == v.shape[1:] and ((s.shape[0], v.shape[0]) in ((self.cap.atoms, n), (b + 1, b))):
+                # per atom: the real atoms come first; per structure: the padding structure is last
+                writes.append((s[:v.shape[0]], v))
+            else:
+                return False
+        with torch.no_grad():
+            for target, value in writes:
+                target.copy_(value, non_blocking=True)
+            # the padding edges (pairs of padding atoms, numbered from n) after the real ones
+            buffers["edge_index"][:, e:].copy_(self._pad_edges[:, :self.cap.edges - e] + n)
+            buffers["cell_shifts"][e:].zero_()
+        for name, t in buffers.items():
+            if not name.startswith("plan/"):
+                setattr(self.static, name, t)
+        return True
+
     def _load(self, batch: AtomicGraph) -> None:
+        self._loaded = self._padded
         if self.static is None:
             self.static = batch
             self.inputs = _inputs(batch)
+            if self._padded is not None and not self.cap.plan and not self.planner.offsets:
+                # the padding edges of the largest padding, numbered from the padding's first atom
+                like = padding_structure(self.cap.atoms - self._padded[0], self.cap.edges, batch)
+                self._pad_edges = like.edge_index.to(batch.pos.device)
             return
         new = _inputs(batch)
         if new.keys() != self.inputs.keys():
@@ -167,10 +241,14 @@ class GraphedEvaluation:
             return time.perf_counter() - t0
         t_replay = timed(self._replayed)
         try:
+            # untimed first: the first ordinary evaluation after the capture can be slower (TorchScript
+            # blocks run fused again)
+            self._ordinary(graph)
             t_ordinary = timed(self._ordinary)
         except torch.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            return "replay"
+            # an ordinary evaluation does not fit beside the graph's memory: the input is large, and
+            # without the graph it fits (the warmup evaluations ran)
+            return "eager"
         return "replay" if t_replay <= t_ordinary else "eager"
 
     def _release(self) -> None:
@@ -194,10 +272,15 @@ class GraphedEvaluation:
         """
         if self.mode == "eager":
             return self._ordinary(graph)
+        if not self.probed:
+            return self._probe(graph)
         try:
             out = self._replayed(graph)
         except torch.OutOfMemoryError:
-            # the graph's memory pool comes on top of an ordinary evaluation's: evaluate ordinarily
+            out = None
+        if out is None:
+            # the graph's memory pool comes on top of an ordinary evaluation's: evaluate ordinarily,
+            # outside the handler, whose traceback holds the failed evaluation's tensors
             self._release()
             self.mode = "eager"
             return self._ordinary(graph)
@@ -207,24 +290,41 @@ class GraphedEvaluation:
                 self._release()
         return out
 
+    def _probe(self, graph: AtomicGraph) -> Dict[str, Tensor]:
+        """An ordinary evaluation of ``graph``, timed: the capture goes ahead once one takes at most
+        ``max_ms``, and evaluations stay ordinary when ``PROBES`` of them took longer."""
+        torch.cuda.synchronize(graph.pos.device)
+        t0 = time.perf_counter()
+        out = self._ordinary(graph)
+        torch.cuda.synchronize(graph.pos.device)
+        self.probe_ms.append((time.perf_counter() - t0) * 1e3)
+        if self.probe_ms[-1] <= self.max_ms:
+            self.probed = True
+        elif len(self.probe_ms) >= PROBES:
+            # launches are a small part of so long an evaluation: no capture
+            self._release()
+            self.mode = "eager"
+        return out
+
     def _replayed(self, graph: AtomicGraph) -> Dict[str, Tensor]:
         """The evaluation of ``graph`` padded, through the captured graph once it is recorded."""
         n, b = graph.num_nodes, graph.num_graphs
-        self._load(self._pad(graph))
+        if not self._load_in_place(graph):
+            self._load(self._pad(graph))
         device = self.static.pos.device
         if self.graph is not None:
             self.graph.replay()
         elif self.steps < self.warmup:
             side = torch.cuda.Stream(device)
             side.wait_stream(torch.cuda.current_stream(device))
-            with torch.cuda.stream(side), torch.jit.fuser("none"):
+            with torch.cuda.stream(side), torch.jit.fuser("none"), capture_preparation():
                 self.out = self.model(self.static)
             torch.cuda.current_stream(device).wait_stream(side)
         else:
             self.graph = torch.cuda.CUDAGraph()
             # TorchScript blocks (e3nn's spherical harmonics) compile fused kernels after their
             # profiling runs, and a capture cannot load a kernel: they run unfused here
-            with torch.cuda.graph(self.graph), torch.jit.fuser("none"):
+            with torch.cuda.graph(self.graph), torch.jit.fuser("none"), capture_preparation():
                 self.out = self.model(self.static)
             # recording does not run the evaluation: replay it for this input
             self.graph.replay()

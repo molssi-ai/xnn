@@ -41,6 +41,8 @@ training configuration in YAML format, with the default values for each section.
      energy_key: energy         # Names of the targets in the file (e.g. REF_energy)
      forces_key: forces
      stress_key: stress
+     energy_unit: eV            # Units of the data, printed with the losses and errors
+     length_unit: A             # (labels only, nothing is converted)
      head: null                 # Multi-head fine-tuning: head of the training structures
      replay_path: null          # Replay structures and their head
      replay_head: pt_head
@@ -61,6 +63,7 @@ training configuration in YAML format, with the default values for each section.
      charge_weight: 0.0         # Partial-charge labels (HDNNP 3G / 4G; any model with charges)
      les_dipole_weight: 0.0     # LES latent dipole against dipole labels
      les_charge_weight: 0.0     # LES latent charges against charges labels
+     property_weight: 0.0       # Property labels per structure (MEGNet), not divided by the atom count
      huber_delta: 0.0           # > 0 clips the loss tails; per-term huber_delta_energy / _forces / _stress
      scheduler: plateau         # none / cosine / plateau
      clip_grad: 0.0             # Max gradient norm per step; 0 = off
@@ -70,6 +73,7 @@ training configuration in YAML format, with the default values for each section.
      train_only: []             # Patterns of the only parameters to train
      prior_weight: 0.0          # > 0 pulls the trainable parameters toward their starting values
      prior_weights: null        # The same per parameter-name pattern, {pattern: weight}
+     loss_weighting: fixed      # fixed / uncertainty (learns a weight per loss term)
 
    trainer:
      loggers: [console]         # Any of console / csv / tensorboard
@@ -85,7 +89,7 @@ training configuration in YAML format, with the default values for each section.
      early_stopping_min_delta: 0.0
      early_stopping_threshold: null
      progress_bar: false
-     cuda_graph: false          # Replay each training step as one CUDA graph (DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE)
+     cuda_graph: false          # Replay each training step as one CUDA graph (see Captured training steps)
 
    device: auto                 # auto / cpu / cuda / cuda:0
    seed: 1234

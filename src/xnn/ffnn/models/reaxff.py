@@ -25,7 +25,7 @@ message-passing neural network acting on the uncorrected bond orders and
 (optionally) the closed-form bond energy with a small per-bond network,
 keeping every other ReaxFF term intact. Both variants are implemented here in
 one model; every term is checked against the published equations in
-``tests/test_reaxff.py`` (see the fidelity notes in the documentation for why
+``tests/ffnn/test_reaxff.py`` (see the fidelity notes in the documentation for why
 no third-party verification artifact is distributed).
 
 Conventions and scope

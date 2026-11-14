@@ -27,7 +27,7 @@ With ``prefactor=0.25`` and ``cos_factor=0.95`` these featurizers reproduce
 from __future__ import annotations
 
 import itertools
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -124,6 +124,26 @@ class RadialSymmetryFunctions(FastPathModule, Featurizer):
         parameters per species bucket)."""
         return self._n_params * len(self.species)
 
+    def edge_terms(self, r: Tensor, weight: Tensor) -> Tensor:
+        """The terms ``weight * exp(-eta (r - Rs)^2)`` of every edge, ``(E, n_params)``.
+
+        Parameters
+        ----------
+        r : Tensor
+            Edge lengths ``(E,)``.
+        weight : Tensor
+            Factor of every edge ``(E,)``: the prefactor times the cutoff
+            function for the descriptor.
+
+        Returns
+        -------
+        Tensor
+            The terms, ordered ``(eta, Rs)`` like torchani's ``(EtaR, ShfR)``.
+        """
+        # views by unsqueeze / view: indexing with ``[:, None]`` records a slice per call
+        g = torch.exp(-self.etas.view(-1, 1) * (r.view(-1, 1, 1) - self.rs) ** 2)
+        return (g * weight.view(-1, 1, 1)).reshape(r.shape[0], self._n_params)
+
     @torch.jit.ignore
     def forward(self, data: AtomicGraph) -> Tensor:
         """Compute the radial symmetry-function descriptor.
@@ -154,10 +174,7 @@ class RadialSymmetryFunctions(FastPathModule, Featurizer):
         bucket = self._bucket[atomic_numbers[src]]
         known = bucket >= 0
         fc = torch.where(known, self.prefactor * self.cutoff_fn(r), torch.zeros_like(r))
-        # (E, n_eta, n_rs); ordering (eta, rs) matches torchani's (EtaR, ShfR).
-        # views by unsqueeze / view: indexing with ``[:, None]`` records a slice per call
-        g = torch.exp(-self.etas.view(-1, 1) * (r.view(-1, 1, 1) - self.rs) ** 2)
-        g = (g * fc.view(-1, 1, 1)).reshape(r.shape[0], self._n_params)
+        g = self.edge_terms(r, fc)
         n_species = len(self.species)
         row = dst * n_species + bucket.clamp(min=0)
         out = torch.zeros(num_nodes * n_species, self._n_params, device=r.device, dtype=r.dtype)
@@ -301,16 +318,28 @@ class AngularSymmetryFunctions(FastPathModule, Featurizer):
         return self.compute(data.atomic_numbers, data.edge_index, data.edge_vectors(), data.num_nodes)
 
     def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
-                num_nodes: int, r: Optional[Tensor] = None) -> Tensor:
+                num_nodes: int, r: Optional[Tensor] = None,
+                triplets: Optional[Tuple[Tensor, Tensor]] = None) -> Tensor:
         """:meth:`forward` on tensors: atomic numbers ``(N,)``, edges ``(2, E)``, edge vectors
-        ``(E, 3)`` and optionally their lengths ``(E,)`` (TorchScript-compatible)."""
+        ``(E, 3)``, optionally their lengths ``(E,)`` and the edge pairs ``(T,)`` and ``(T,)`` of the
+        triplets, when the caller has enumerated them (TorchScript-compatible).
+
+        Given triplets may cover every edge pair of a center: the pairs beyond the cutoff add exact
+        zeros, so a plan built from the neighbor list alone serves every geometry it was built for.
+        """
         r_all = torch.linalg.norm(edge_vec, dim=-1) if r is None else r
-        if self.fast_active and not torch.jit.is_scripting():
-            return self._compute_fast(atomic_numbers, edge_index, edge_vec, r_all, num_nodes)
-        # the triplets of the edges within this cutoff only: the others carry fc = 0
-        inside = torch.nonzero(r_all <= self.cutoff).squeeze(-1)
-        sub = edge_index[:, inside]
-        e1, e2, center = build_triplets(sub, num_nodes)
+        if triplets is not None:
+            # enumerated by the caller (a padded batch of fixed size): indices into every edge
+            i1, i2 = triplets[0], triplets[1]
+            center = edge_index[1][i1]
+        else:
+            if self.fast_active and not torch.jit.is_scripting():
+                return self._compute_fast(atomic_numbers, edge_index, edge_vec, r_all, num_nodes)
+            # the triplets of the edges within this cutoff only: the others carry fc = 0
+            inside = torch.nonzero(r_all <= self.cutoff).squeeze(-1)
+            sub = edge_index[:, inside]
+            e1, e2, center = build_triplets(sub, num_nodes)
+            i1, i2 = inside[e1], inside[e2]
 
         n_pairs = len(self.pairs)
         out = torch.zeros(num_nodes * n_pairs, self._n_params, device=edge_vec.device, dtype=edge_vec.dtype)
@@ -320,7 +349,6 @@ class AngularSymmetryFunctions(FastPathModule, Featurizer):
         # vector, length and cutoff of every edge in one row: one gather per triplet side
         # (split / unbind below: their backward is one concatenation, not a zero fill per slice)
         rows = torch.cat([edge_vec, r_all.unsqueeze(-1), self.cutoff_fn(r_all).unsqueeze(-1)], dim=-1)
-        i1, i2 = inside[e1], inside[e2]
         va, la = gather_rows(rows, i1).split([3, 2], dim=-1)
         vb, lb = gather_rows(rows, i2).split([3, 2], dim=-1)
         r12, fc12 = (la * lb).unbind(-1)                               # r1 r2, fc1 fc2

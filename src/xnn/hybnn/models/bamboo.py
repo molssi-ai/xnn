@@ -38,7 +38,7 @@ gradient of its Coulomb *energy* (the softplus energy damping differentiates to
 the sigmoid force damping), so autograd reproduces it.
 
 Given the same weights this matches the original ``bamboo`` package
-(bytedance/bamboo) to machine precision -- see ``tests/test_bamboo.py`` and
+(bytedance/bamboo) to machine precision -- see ``tests/hybnn/test_bamboo.py`` and
 ``notebooks/fidelity_checks/hybnn/bamboo/bamboo_verification.ipynb``.
 """
 # no ``from __future__ import annotations``: the TorchScript core resolves the annotations

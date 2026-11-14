@@ -33,7 +33,7 @@ from torch import Tensor
 
 from .eeq import lu_solve_implicit
 from .electrostatics import reciprocal_lattice
-from .ops import cell_volume
+from .ops import cell_volume, gather_rows, scatter_sum
 
 _SYMBOLS = ("X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si",
             "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu",
@@ -328,6 +328,40 @@ def solve_charges(chi: Tensor, hardness: Tensor, gamma: Tensor, target: Tensor,
         sol = lu_solve_implicit(lu, pivots, full, rhs, 1 if chi.dtype == torch.float32 else 0)
     # the augmented system carries -mu in its last unknowns
     return sol[:n, 0], -sol[n:, 0]
+
+
+def closed_form_charges(chi: Tensor, inverse_hardness: Tensor, total_charge: Tensor,
+                        batch: Tensor, num_graphs: int) -> Tensor:
+    """The constrained minimum of ``sum_i chi_i q_i + 1/2 J_i q_i^2`` per structure.
+
+    Without coupling between the charges the minimum at a fixed total charge
+    ``Q`` of every structure is analytic::
+
+        q_i = (lambda - chi_i) / J_i,   lambda = (Q + sum_j chi_j / J_j) / sum_j 1 / J_j
+
+    The sum of inverse hardnesses is bounded below by ``1e-12``.
+
+    Parameters
+    ----------
+    chi : Tensor
+        Electronegativities ``(N,)``.
+    inverse_hardness : Tensor
+        ``1 / J > 0``, ``(N,)``, in the inverse unit of ``chi`` per charge.
+    total_charge : Tensor
+        Net charge of every structure ``(B,)``.
+    batch : Tensor
+        Structure index per atom ``(N,)``.
+    num_graphs : int
+        Number of structures ``B``.
+
+    Returns
+    -------
+    Tensor
+        The charges ``(N,)``, summing to ``total_charge`` in every structure.
+    """
+    sums = scatter_sum(torch.stack([inverse_hardness, chi * inverse_hardness], dim=-1), batch, num_graphs)
+    lam = (total_charge.to(chi.dtype) + sums[:, 1]) / sums[:, 0].clamp(min=1e-12)
+    return inverse_hardness * (gather_rows(lam, batch) - chi)
 
 
 def charge_energy(chi: Tensor, hardness: Tensor, q: Tensor) -> Tensor:

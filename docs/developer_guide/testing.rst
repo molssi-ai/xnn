@@ -7,9 +7,13 @@ Testing
 .. code-block:: bash
 
    pip install -e ".[dev,gnn,ase,ffnn,vesin,cpu-kernels]"
-   pytest tests/
+   pytest tests/                   # the whole suite
+   pytest tests/gnn                # one family
+   pytest tests/gnn/test_mace.py   # one file
 
-The suite is a flat ``tests/`` directory, one file per model or subsystem.
+The tests live in one folder per model family (``tests/gnn/``, ``tests/ffnn/``,
+...), one file per model or subsystem. ``tests/common/`` holds the tests of the
+shared code and every test that uses models of several families.
 Tests that need a reference package (``mace-torch``, ``nequip``,
 ``torchani``, ``dftd4``, OpenMM, ...) skip when it is not installed, so
 the suite runs with the core extras alone. Without a CUDA device, the Triton
@@ -27,10 +31,10 @@ What the tests check
   agreement with the reference to float64 round-off, and to float32 round-off
   in single precision. The reference is the upstream code under identical
   weights where one exists (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
-  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, ET, Equiformer, EquiformerV2, PhysNet,
+  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, QET, MEGNet, ET, Equiformer, EquiformerV2, PhysNet,
   ANI, the spherical CNN, HDNNP against the RuNNer executable when
   ``XNN_RUNNER`` points to it,
-  BAMBOO, ByteFF, ByteFF-Pol, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
+  BAMBOO, ByteFF, ByteFF-Pol, GDML, sGDML, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
   AMBER, CHARMM and DREIDING, Tinker for AMOEBA and HIPPO, MOPAC for the NDDO
   methods), and otherwise an independent implementation of the paper's
   equations with its published tables (the SE(3) steerable CNN).
@@ -57,6 +61,27 @@ What the tests check
   lattice translations and rotations. Deployment tests also check LES
   charge solves and stress with rotated cells.
 
+Continuous integration
+======================
+The Tests workflow runs each folder of ``tests/`` as its own job, in parallel,
+on the oldest supported and the current PyTorch.
+
+- A pull request runs only the folders its changes can affect: the family that
+  changed, the families that import from it (``dnn`` and ``hybnn`` import
+  ``gnn``; ``hybnn`` also imports ``ffnn`` and ``trfnn``) and ``tests/common/``.
+- A change to ``xnn.common``, ``configs/``, ``tools/``, ``pyproject.toml`` or
+  ``tests/conftest.py`` runs every folder.
+- Every folder runs on each merge into ``main`` and once a week, at midnight US
+  Eastern time on Monday. To run them all on a branch, start the workflow by
+  hand (Actions, Tests, Run workflow).
+- The ``Tests passed`` job reports the overall result. It is the check that
+  branch protection requires.
+
+Put a new test file in the folder of the family it tests. Put it in
+``tests/common/`` when it tests shared code or uses models of several families.
+Keep file names unique across the folders, because test files import helpers
+from each other by name.
+
 Conventions for new code
 ========================
 - A new model gets, at minimum: a registration test, an invariance or
@@ -75,4 +100,4 @@ Conventions for new code
   differs, the paper's values are options, which the tests and notebooks pass.
   Options draw on the shared abstractions (radial bases, cutoffs, activations)
   wherever they fit. A config key or option that nothing uses is ignored with
-  an ``IgnoredOptionWarning`` (``tests/test_config_options.py``).
+  an ``IgnoredOptionWarning`` (``tests/common/test_config_options.py``).

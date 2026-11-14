@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import Optional
 
 import torch
 from torch import Tensor, nn
@@ -445,6 +446,49 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
         view = [index.shape[0]] + [1] * (src.dim() - 1)
         return out.scatter_add_(0, index.reshape(view).expand(src.shape), src)
     return out.index_add_(0, index, src)
+
+
+def segment_softmax(logits: Tensor, index: Tensor, num_segments: int,
+                    weight: Optional[Tensor] = None) -> Tensor:
+    """Softmax of row logits over the rows that share a segment.
+
+    Without ``weight`` this is ``a_r = exp(z_r) / sum_s exp(z_s)`` over the
+    rows ``s`` of the segment of row ``r``: the attention normalization of the
+    Equiformers (rows are edges, segments their receiving atoms) and of the
+    Set2Set readout of MEGNet (rows are atoms or bonds, segments their
+    structures). With a per-row ``weight`` ``u_r`` (a cutoff envelope) it
+    becomes ``a_r = u_r exp(z_r) / (1 + sum_s u_s exp(z_s))``: a neighbor
+    leaving the cutoff sphere fades out instead of dropping from the
+    normalization, and the null term (a key of logit zero and zero value) lets
+    the last neighbor fade out too, so the attention is continuous in the
+    positions.
+
+    Parameters
+    ----------
+    logits : Tensor
+        Row logits ``(R, H)``.
+    index : Tensor
+        Segment of every row ``(R,)``.
+    num_segments : int
+        Number of segments.
+    weight : Tensor, optional
+        Per-row weights ``(R,)`` in ``[0, 1]``.
+
+    Returns
+    -------
+    Tensor
+        The normalized weights ``(R, H)``.
+    """
+    idx = index.unsqueeze(-1).expand_as(logits)
+    zmax = torch.full((num_segments, logits.shape[1]), float("-inf"), dtype=logits.dtype,
+                      device=logits.device)
+    zmax = zmax.scatter_reduce(0, idx, logits.detach(), reduce="amax", include_self=True)
+    if weight is None:
+        ex = torch.exp(logits - zmax[index])
+        return ex / (scatter_sum(ex, index, num_segments) + 1e-16)[index]
+    zmax = zmax.clamp(min=0.0)
+    ex = torch.exp(logits - zmax[index]) * weight.unsqueeze(-1)
+    return ex / (scatter_sum(ex, index, num_segments) + torch.exp(-zmax))[index]
 
 
 def gather_rows(src: Tensor, index: Tensor) -> Tensor:

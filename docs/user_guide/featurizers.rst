@@ -160,5 +160,11 @@ such as SpookyNet:
   Bernstein polynomials of ``exp(-gamma r)`` with a learned decay rate. These
   featurizers construct the radial basis of SpookyNet.
 
+Kernel descriptors
+==================
+:class:`~xnn.krnn.featurizers.inverse_distance.InverseDistances` gives the
+inverse distances of all atom pairs of a molecule, the global descriptor of GDML
+and sGDML.
+
 Writing a new featurizer is relatively straightforward. See the
 :ref:`developer-guide-extending` guide for more details.

@@ -118,6 +118,11 @@ class DataConfig:
     stress_key : str
         Name under which the reference stress is stored (``atoms.info``).
         Defaults to ``"stress"``.
+    energy_unit : str
+        Unit of the data's energies, printed with the training losses and
+        errors (nothing is converted). Defaults to ``"eV"``.
+    length_unit : str
+        Unit of the data's positions, likewise. Defaults to ``"A"`` (Angstrom).
     head : Optional[str]
         For a multi-head model (``model.extra["heads"]``): the head the
         training, validation and test structures belong to. ``None`` (the
@@ -152,6 +157,8 @@ class DataConfig:
     energy_key: str = "energy"         # MACE-CLI spelling; e.g. "REF_energy"
     forces_key: str = "forces"
     stress_key: str = "stress"
+    energy_unit: str = "eV"            # labels only: printed with the losses and errors
+    length_unit: str = "A"
     # multi-head fine-tuning (model.extra["heads"]): which head the training,
     # validation and test structures belong to (None = the first head that is
     # not the replay head), and the replay set of the pretraining distribution
@@ -200,6 +207,10 @@ class OptimConfig:
     les_charge_weight : float
         Weight of the LES charge term: ``les_charges`` against the
         ``charges`` labels. Defaults to ``0.0``.
+    property_weight : float
+        Weight of the property term: the ``properties`` output of a property
+        model (MEGNet) against the ``properties`` labels, without division by
+        the atom count. Defaults to ``0.0``.
     scheduler : str
         Learning-rate scheduler (``none`` / ``cosine`` / ``plateau``). MACE uses
         ``ReduceLROnPlateau``. Defaults to ``"plateau"``.
@@ -255,6 +266,13 @@ class OptimConfig:
         to weights, e.g. ``{"*dihedral_v": 0.1, "*charge": 10.0}``. The
         first pattern that matches a parameter sets its weight; the others
         take ``prior_weight``.
+    loss_weighting : str
+        ``"fixed"`` (the default) sums the terms with their weights.
+        ``"uncertainty"`` also learns a scale ``sigma_k`` per term: the training
+        steps minimize ``sum_k L_k / (2 sigma_k^2) + log sigma_k`` (Kendall *et
+        al.*, CVPR 2018), where ``L_k`` is the term times its weight. The
+        logged ``loss`` stays the fixed-weight sum, and ``sigma_<term>`` gives
+        each scale. Single-head training without ``trainer.cuda_graph``.
     """
 
     lr: float = 1e-3
@@ -268,6 +286,7 @@ class OptimConfig:
     charge_weight: float = 0.0         # > 0 trains the predicted partial charges on charges labels
     les_dipole_weight: float = 0.0     # > 0 trains the LES latent dipole on dipole labels
     les_charge_weight: float = 0.0     # > 0 trains the LES latent charges on charges labels
+    property_weight: float = 0.0       # > 0 trains a property model (MEGNet) on properties labels
     scheduler: str = "plateau"         # none / cosine / plateau (MACE: ReduceLROnPlateau)
     huber_delta: float = 0.0           # > 0 clips the loss tails; 0 = squared error
     huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta
@@ -282,6 +301,7 @@ class OptimConfig:
     train_only: list[str] = field(default_factory=list)   # patterns of the only parameters to train
     prior_weight: float = 0.0          # > 0 pulls every trainable parameter toward its starting value
     prior_weights: Optional[dict[str, float]] = None   # per-parameter-pattern pulls, {pattern: weight}
+    loss_weighting: str = "fixed"      # fixed / uncertainty (learned weight per loss term)
 
 
 @dataclass

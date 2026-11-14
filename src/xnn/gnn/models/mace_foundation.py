@@ -310,7 +310,7 @@ def from_mace_torch(upstream: nn.Module, head: Optional[str] = None,
     the equivalent :class:`~xnn.gnn.models.mace.MACE`, and copies the
     weights; multi-head checkpoints are sliced to the requested ``head``.
     The converted model reproduces the upstream energies, forces and stress
-    to numerical precision (see ``tests/test_mace.py`` and the foundation
+    to numerical precision (see ``tests/gnn/test_mace.py`` and the foundation
     fidelity notebook).
 
     Parameters

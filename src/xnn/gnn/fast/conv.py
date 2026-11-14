@@ -10,7 +10,7 @@ the node features and writes the node sums directly.
 """
 # NOTE: no `from __future__ import annotations` here: ConvTensorProduct.conv is
 # compiled by torch.jit.script, which cannot resolve stringified annotations.
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from e3nn import o3
@@ -92,7 +92,8 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
 
     def conv(self, node_feats: Tensor, edge_attrs: Tensor, edge_weights: Tensor,
              edge_index: Tensor, num_nodes: int,
-             message_divisor: Optional[float] = None, weights_mapped: bool = False) -> Tensor:
+             message_divisor: Optional[float] = None, weights_mapped: bool = False,
+             weight_index: Optional[Tensor] = None) -> Tensor:
         """Gather, tensor product and sum onto the receivers in one call.
 
         Parameters
@@ -115,6 +116,9 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
         weights_mapped : bool, optional
             ``edge_weights`` already carry the column map of
             :meth:`weight_map` (divisor included). Default ``False``.
+        weight_index : torch.Tensor, optional
+            ``(E,)``: edge ``e`` takes the weights of row ``weight_index[e]`` (the two directions of a
+            bond share theirs, :func:`edge_pairs`); by default row ``e``.
 
         Returns
         -------
@@ -123,11 +127,15 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
         """
         if self.fast_active:
             if weights_mapped:
-                return self._conv_fast(node_feats, edge_attrs, edge_weights, edge_index, num_nodes, True)
+                return self._conv_fast(node_feats, edge_attrs, edge_weights, edge_index, num_nodes, True,
+                                       weight_index)
             if message_divisor is not None:
                 edge_weights = edge_weights / message_divisor
             # every argument given: an unused method keeps no defaults under TorchScript
-            return self._conv_fast(node_feats, edge_attrs, edge_weights, edge_index, num_nodes, False)
+            return self._conv_fast(node_feats, edge_attrs, edge_weights, edge_index, num_nodes, False,
+                                   weight_index)
+        if weight_index is not None:
+            edge_weights = edge_weights.index_select(0, weight_index)
         messages = self(gather_rows(node_feats, edge_index[0]), edge_attrs, edge_weights)
         out = scatter_sum(messages, edge_index[1], num_nodes)
         if message_divisor is not None:
@@ -135,14 +143,99 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
         return out
 
     @torch.jit.unused
+    def conv_blocks(self, node_feats: Tensor, edge_attrs: Tensor, edge_feats: Tensor, edge_index: Tensor,
+                    num_nodes: int, block: int, weights: Callable[[Tensor], Tensor],
+                    weights_mapped: bool = False, recompute: bool = False) -> Tensor:
+        """:meth:`conv` over blocks of edges, the per-edge weights made per block from ``edge_feats``.
+
+        The weights of one block exist at a time. On the fast path the node features are brought to
+        the kernel's layout once and the blocks' node sums are added in that layout, then brought
+        back once, and the edge inputs are split once, so that a block costs work over its edges
+        only, besides one sum over the nodes.
+
+        Parameters
+        ----------
+        node_feats, edge_attrs, edge_index, num_nodes
+            As in :meth:`conv`.
+        edge_feats : torch.Tensor
+            The per-edge input of ``weights``, ``(E, ...)``.
+        block : int
+            Edges per block.
+        weights : callable
+            ``weights(edge_feats[a:b])`` is the per-edge weights of edges ``a:b``.
+        weights_mapped : bool, optional
+            As in :meth:`conv`.
+        recompute : bool, optional
+            Keep no block's weights for the backward: each block runs again there.
+
+        Returns
+        -------
+        torch.Tensor
+            The summed messages, ``(N, irreps_out.dim)``, equal to :meth:`conv` on all edges up to
+            the order of the sums.
+        """
+        from torch.utils.checkpoint import checkpoint
+
+        kernel = self._split_kernel(node_feats) if self.fast_active else None
+        if kernel is None:
+            def part(x: Tensor, a: Tensor, e: Tensor, idx: Tensor) -> Tensor:
+                return self.conv(x, a, weights(e), idx, num_nodes, weights_mapped=weights_mapped)
+            x = node_feats
+        else:
+            op = kernel["op"]
+
+            def part(x: Tensor, a: Tensor, e: Tensor, idx: Tensor) -> Tensor:
+                w = weights(e)
+                if not weights_mapped:
+                    if kernel["weight_index"] is not None:
+                        w = w.index_select(1, kernel["weight_index"])
+                    w = w * kernel["weight_scale"]
+                return op.f([w, x, op.transpose_in2(a)], input_indices={1: idx[0]},
+                            output_shapes={0: x.new_empty(num_nodes, 1)}, output_indices={0: idx[1]})[0]
+            x = op.transpose_in1(node_feats)
+        out: Optional[Tensor] = None
+        # split once: the gradients of the parts are joined once, where slices would each fill and add
+        # a gradient as large as all edges
+        for a, e, idx in zip(edge_attrs.split(block), edge_feats.split(block), edge_index.split(block, dim=1)):
+            y = checkpoint(part, x, a, e, idx, use_reentrant=False) if recompute else part(x, a, e, idx)
+            out = y if out is None else out + y
+        if kernel is not None:
+            out = kernel["op"].transpose_out(out)
+            if kernel["out_index"] is not None:
+                out = out.index_select(1, kernel["out_index"])
+        return out
+
+    @torch.jit.unused
+    def _split_kernel(self, like: Tensor) -> Optional[Dict[str, Optional[Tensor]]]:
+        """The fast kernel when its layout changes and its product can be called apart, else ``None``."""
+        try:
+            kernel = self._kernel(like.device, like.dtype)
+        except Exception:  # conv falls back to the reference and says so
+            return None
+        op = kernel["op"]
+        parts = ("transpose_in1", "transpose_in2", "transpose_out", "f")
+        if getattr(op, "weight", None) is not None or not all(hasattr(op, a) for a in parts):
+            return None
+        return kernel
+
+    @torch.jit.unused
+    def indexes_weights(self, like: Tensor) -> bool:
+        """Whether :meth:`conv` reads ``weight_index`` inside the fast kernel; otherwise it gathers
+        the weights per edge first."""
+        return self.fast_active and self._split_kernel(like) is not None
+
+    @torch.jit.unused
     def _conv_fast(self, node_feats: Tensor, edge_attrs: Tensor, edge_weights: Tensor,
-                   edge_index: Tensor, num_nodes: int, mapped: bool = False) -> Tensor:
+                   edge_index: Tensor, num_nodes: int, mapped: bool = False,
+                   weight_index: Optional[Tensor] = None) -> Tensor:
         try:
             kernel = self._kernel(node_feats.device, node_feats.dtype)
         except Exception as exc:  # an irreps layout the kernel does not cover
             self.fast_eligible = False
             self.fast_active = False
             _cueq.warn_fallback(type(self).__name__, exc)
+            if weight_index is not None:
+                edge_weights = edge_weights.index_select(0, weight_index)
             messages = self(gather_rows(node_feats, edge_index[0]), edge_attrs, edge_weights)
             return scatter_sum(messages, edge_index[1], num_nodes)
         w = edge_weights
@@ -150,7 +243,8 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
             if kernel["weight_index"] is not None:
                 w = w.index_select(1, kernel["weight_index"])
             w = w * kernel["weight_scale"]
-        out = _run_channelwise(kernel["op"], node_feats, edge_attrs, w, edge_index[0], edge_index[1], num_nodes)
+        out = _run_channelwise(kernel["op"], node_feats, edge_attrs, w, edge_index[0], edge_index[1], num_nodes,
+                               weight_index)
         if kernel["out_index"] is not None:
             out = out.index_select(1, kernel["out_index"])
         return out
@@ -271,19 +365,67 @@ class ConvTensorProduct(o3.TensorProduct, FastPathModule):
         return maps
 
 
+def edge_pairs(edge_index: Tensor, edge_vec: Tensor) -> Optional[Tuple[Tensor, Tensor]]:
+    """The two directions of every bond, when each edge has its reverse.
+
+    Edge ``s -> d`` with vector ``r`` and edge ``d -> s`` with vector ``-r`` (the same periodic
+    image seen from the other atom) are one bond: a radial network gives both the same weights.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        ``(2, E)``: senders and receivers.
+    edge_vec : torch.Tensor
+        ``(E, 3)``: the edge vectors.
+
+    Returns
+    -------
+    tuple of (torch.Tensor, torch.Tensor) or None
+        ``(rows, weight_index)``: one edge of each bond ``(E / 2,)``, and the bond of every edge
+        ``(E,)``; ``None`` when some edge has no reverse (a half or an asymmetric list).
+    """
+    n = int(edge_index.shape[1])
+    if n == 0 or n % 2:
+        return None
+    src, dst = edge_index[0], edge_index[1]
+    v = edge_vec.detach()
+    lead = torch.where(v[:, 0] != 0, v[:, 0], torch.where(v[:, 1] != 0, v[:, 1], v[:, 2]))
+    first = (src < dst) | ((src == dst) & (lead > 0))
+    lo, hi = torch.minimum(src, dst), torch.maximum(src, dst)
+    canonical = torch.where(first[:, None], v, -v)
+    # the bonds in order of (lo, hi, canonical vector): stable sorts, least significant key first
+    order = torch.arange(n, device=v.device)
+    for key in (canonical[:, 2], canonical[:, 1], canonical[:, 0], hi, lo):
+        order = order.index_select(0, torch.sort(key.index_select(0, order), stable=True).indices)
+    a, b = order[0::2], order[1::2]
+    paired = ((lo[a] == lo[b]) & (hi[a] == hi[b]) & (canonical[a] == canonical[b]).all(1)
+              & (first[a] != first[b]))
+    if not bool(paired.all()):
+        return None
+    bond = torch.arange(n // 2, device=v.device)
+    weight_index = torch.empty(n, dtype=torch.long, device=v.device)
+    weight_index[a] = bond
+    weight_index[b] = bond
+    return torch.where(first[a], a, b), weight_index
+
+
 def _run_channelwise(op, x1: Tensor, x2: Tensor, weight: Tensor, indices_1: Tensor,
-                     indices_out: Tensor, size_out: int) -> Tensor:
+                     indices_out: Tensor, size_out: int, weight_index: Optional[Tensor] = None) -> Tensor:
     """``op(x1, x2, weight, indices_1=..., indices_out=..., size_out=...)`` without a host sync.
 
     The channel-wise operation of cuEquivariance builds its output shape as a
     CPU tensor copied to the device on every call, which waits for the GPU;
-    here the shape tensor is made on the device. Operations without the parts
-    used (other cuEquivariance versions) are called as they are.
+    here the shape tensor is made on the device. With ``weight_index`` edge ``e`` reads
+    the weights of row ``weight_index[e]``. Operations without the parts used (other
+    cuEquivariance versions) are called as they are, on the weights gathered per edge.
     """
     parts = ("transpose_in1", "transpose_in2", "transpose_out", "f")
     if getattr(op, "weight", None) is not None or not all(hasattr(op, a) for a in parts):
+        if weight_index is not None:
+            weight = weight.index_select(0, weight_index)
         return op(x1, x2, weight, indices_1=indices_1, indices_out=indices_out, size_out=size_out)
-    out = op.f([weight, op.transpose_in1(x1), op.transpose_in2(x2)], input_indices={1: indices_1},
+    indices = {1: indices_1} if weight_index is None else {0: weight_index, 1: indices_1}
+    out = op.f([weight, op.transpose_in1(x1), op.transpose_in2(x2)], input_indices=indices,
                output_shapes={0: x1.new_empty(size_out, 1)}, output_indices={0: indices_out})
     return op.transpose_out(out[0])
 

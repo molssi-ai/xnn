@@ -1,14 +1,22 @@
 name: Tests
 
-# Runs the test suite on CPU with coverage and uploads the coverage report and
-# the JUnit test results to Codecov (coverage graphs and test analytics).
+# Runs the test suite on CPU with coverage, one job per family folder of tests/
+# (a shard) and torch version, in parallel. Pull requests and pushes to dev run
+# only the shards their changes can affect; merges into main, the weekly run
+# and manual runs (Run workflow, on any branch) run every shard.
 # GPU-only tests (fast paths, Triton kernels) skip themselves without CUDA; the
 # Triton kernels also run on CPU tensors under Triton's interpreter.
+# Each shard uploads its coverage and JUnit results to Codecov under its own
+# flag; Codecov carries the flags of shards that did not run forward from the
+# last commit they ran on (codecov.yml).
 
 on:
   push:
     branches: [main, dev]
   pull_request:
+  schedule:
+    # weekly, Mondays at 05:00 UTC (midnight US Eastern standard time), on the default branch: every shard
+    - cron: "0 5 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -19,7 +27,101 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      shards: ${{ steps.pick.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the shards the changes affect
+        id: filter
+        # a pull request is compared with its base branch and a push to dev with
+        # main, so everything not yet on main is tested again on each push
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        uses: dorny/paths-filter@v3
+        with:
+          base: main
+          # A shard runs when its own sources or tests change, when a family it
+          # imports from changes (dnn and hybnn import gnn; hybnn also imports
+          # ffnn and trfnn), or when anything shared by all families changes.
+          # The common shard holds the tests that cross families, so it runs on
+          # every change to the package or the tests.
+          filters: |
+            shared: &shared
+              - 'src/xnn/common/**'
+              - 'src/xnn/*.py'
+              - 'tests/conftest.py'
+              - 'configs/**'
+              - 'tools/**'
+              - 'pyproject.toml'
+              - 'codecov.yml'
+              - '.github/workflows/tests.yml'
+            common:
+              - *shared
+              - 'src/xnn/**'
+              - 'tests/**'
+            gnn:
+              - *shared
+              - 'src/xnn/gnn/**'
+              - 'tests/gnn/**'
+            dnn:
+              - *shared
+              - 'src/xnn/dnn/**'
+              - 'src/xnn/gnn/**'
+              - 'tests/dnn/**'
+            cnn:
+              - *shared
+              - 'src/xnn/cnn/**'
+              - 'tests/cnn/**'
+            ffnn:
+              - *shared
+              - 'src/xnn/ffnn/**'
+              - 'tests/ffnn/**'
+            sqmnn:
+              - *shared
+              - 'src/xnn/sqmnn/**'
+              - 'tests/sqmnn/**'
+            trfnn:
+              - *shared
+              - 'src/xnn/trfnn/**'
+              - 'tests/trfnn/**'
+            krnn:
+              - *shared
+              - 'src/xnn/krnn/**'
+              - 'tests/krnn/**'
+            hybnn:
+              - *shared
+              - 'src/xnn/hybnn/**'
+              - 'src/xnn/gnn/**'
+              - 'src/xnn/ffnn/**'
+              - 'src/xnn/trfnn/**'
+              - 'tests/hybnn/**'
+
+      - name: List the shards to run
+        id: pick
+        env:
+          CHANGED: ${{ steps.filter.outputs.changes }}
+        # without the filter (merges into main, weekly and manual runs) every
+        # shard runs;
+        # "shared" is a group of paths in the filter, not a shard
+        run: |
+          if [ -z "$CHANGED" ]; then
+            CHANGED='["common","gnn","dnn","cnn","ffnn","sqmnn","trfnn","krnn","hybnn"]'
+          fi
+          SHARDS=$(echo "$CHANGED" | jq -c 'map(select(. != "shared"))')
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "Shards to run: $SHARDS" >> "$GITHUB_STEP_SUMMARY"
+
   test:
+    name: ${{ matrix.shard }} (torch ${{ matrix.torch }})
+    needs: changes
+    if: needs.changes.outputs.shards != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # the oldest supported torch and the current one, each with the Triton
@@ -27,6 +129,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.shards) }}
+        torch: ["2.5.1", "2.14.1"]
         include:
           - torch: "2.5.1"
             triton: "3.3.1"
@@ -34,6 +138,11 @@ jobs:
           - torch: "2.14.1"
             triton: "3.8.0"
             upload: true
+    env:
+      XNN_OFFLINE: "1"
+      # the test files of this shard whose torch.compile functions get a second
+      # pass as plain Python (see the step below)
+      UNCOMPILED: ${{ fromJSON('{"common":"tests/common/test_dispersion_fast.py tests/common/test_compiled_blocks.py","dnn":"tests/dnn/test_hdnnp.py"}')[matrix.shard] }}
     steps:
       - uses: actions/checkout@v7
 
@@ -53,38 +162,35 @@ jobs:
 
       - name: Install xnn and test dependencies
         # cpu-kernels: ninja, which builds the C++ CPU kernels of the HDNNP tests
-        run: pip install -e ".[ase,gnn,ffnn,vesin,cpu-kernels,dev]" "e3nn==0.4.4" pytest-cov
+        run: pip install -e ".[ase,gnn,ffnn,krnn,vesin,cpu-kernels,dev]" "e3nn==0.4.4" pytest-cov
 
       - name: Fetch the MOPAC parameter files of the sqmnn methods
         # xnn does not ship the published PM3/PM6/PM6-ORG/PM7 values; they are
         # downloaded from the pinned MOPAC release (MD5-checked) into the model
         # cache here, the only network access of the run, so the tests below
         # can run with XNN_OFFLINE
+        env:
+          XNN_OFFLINE: "0"
         run: >
           python -c "from xnn.sqmnn.common.published import published_parameters as p;
           [p(m) for m in ('pm3', 'pm6', 'pm6-org', 'pm7')]"
 
-      - name: Run the tests with coverage
-        env:
-          XNN_OFFLINE: "1"
+      - name: Run the tests of the shard with coverage
         # junit.xml (legacy family, the schema Codecov Test Analytics reads)
         # feeds the per-test insights: flaky tests, slowest tests, failure rates
         run: >
-          pytest -q -rfEs --cov=xnn --cov-report=
+          pytest tests/${{ matrix.shard }} -q -rfEs --durations=15
+          --cov=xnn --cov-report=xml
           --junitxml=junit.xml -o junit_family=legacy
 
       - name: Run the compiled CPU paths again without the compiler
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.UNCOMPILED != '' }}
         env:
-          XNN_OFFLINE: "1"
           TORCHDYNAMO_DISABLE: "1"
         # the functions torch.compile runs are read by the compiler, not run line
         # by line, so coverage misses them; this pass runs them as plain Python
         # (the run above checks the compiled code) and adds to the same report
-        run: >
-          pytest -q -rfEs --cov=xnn --cov-append --cov-report=xml
-          --cov-report=term-missing:skip-covered
-          tests/test_dispersion_fast.py tests/test_hdnnp.py tests/test_compiled_blocks.py
+        run: pytest $UNCOMPILED -q -rfEs --cov=xnn --cov-append --cov-report=xml
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && matrix.upload }}
@@ -93,6 +199,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: molssi-ai/xnn
           files: coverage.xml
+          flags: ${{ matrix.shard }}
           # a failed upload fails the job, so a missing or wrong token is
           # visible in the run instead of only as an empty dashboard
           fail_ci_if_error: true
@@ -105,4 +212,23 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: molssi-ai/xnn
           files: junit.xml
+          flags: ${{ matrix.shard }}
           fail_ci_if_error: true
+
+  tests-ok:
+    name: Tests passed
+    # the one check to require in branch protection: it reports on every run,
+    # whichever shards ran, and passes when none of them failed
+    needs: [changes, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the shard results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          TESTS: ${{ needs.test.result }}
+        run: |
+          echo "shard selection: $CHANGES, tests: $TESTS"
+          [ "$CHANGES" = "success" ] || exit 1
+          [ "$TESTS" = "success" ] || [ "$TESTS" = "skipped" ]

@@ -7,9 +7,10 @@ Load a Pre-trained Model
 The ``from_pretrained()`` function loads the model artifacts: the original
 foundation models pre-trained by their main developer teams (e.g., MACE and
 AIMNet2), models trained with xnn, Zenodo uploads and local checkpoints, all can
-be loaded through the same function call and the same cache. MatGL's TensorNet
-foundation models load with ``TensorNet.from_foundation()``, and a local MatGL
-TensorNet directory loads with ``from_pretrained()``. The
+be loaded through the same function call and the same cache. MatGL's TensorNet,
+QET and MEGNet models load with ``TensorNet.from_foundation()``,
+``QET.from_foundation()`` and ``MEGNet.from_foundation()``, and a local MatGL
+directory of any of them loads with ``from_pretrained()``. The
 ``notebooks/examples/common/models/pretrained_models_tutorial.ipynb`` notebook provides a
 runnable version of this page.
 

@@ -233,6 +233,31 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "max_z": "n_elements",
         "equivariance_invariance_group": "equivariance_group",
     },
+    # MatGL QET constructor spellings; MatGL's Gaussian width is the exponent gamma
+    "qet": {
+        "units": "n_features",
+        "nblocks": "n_interactions",
+        "num_rbf": "n_rbf",
+        "equivariance_invariance_group": "equivariance_group",
+        "width": "gamma",
+        "is_sigma_train": "trainable_widths",
+    },
+    # MatGL MEGNet constructor spellings; MatGL's gauss_width is the exponent gamma
+    "megnet": {
+        "dim_node_embedding": "n_features",
+        "dim_edge_embedding": "n_rbf",
+        "nblocks": "n_interactions",
+        "dim_state_embedding": "state_dim",
+        "ntypes_state": "n_state_types",
+        "hidden_layer_sizes_input": "encoder_sizes",
+        "hidden_layer_sizes_conv": "conv_sizes",
+        "hidden_layer_sizes_output": "readout_sizes",
+        "niters_set2set": "set2set_steps",
+        "nlayers_set2set": "set2set_layers",
+        "activation_type": "activation",
+        "is_classification": "classification",
+        "gauss_width": "gamma",
+    },
     # Equiformer (atomicarchitects/equiformer) constructor spellings; key names only
     "equiformer": {
         "num_layers": "n_interactions",

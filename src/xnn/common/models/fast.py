@@ -233,6 +233,29 @@ def iter_fast_capable(model: nn.Module, device: torch.device,
             yield m
 
 
+_CAPTURE = {"depth": 0}
+
+
+@contextlib.contextmanager
+def capture_preparation() -> Iterator[None]:
+    """A context in which an evaluation is warmed up for or recorded into a CUDA graph.
+
+    Inside it models leave out steps that read a result on the host to choose their
+    work (a recording cannot read one, and its warmups must run the code it records),
+    such as MACE's pairing of the two directions of its bonds.
+    """
+    _CAPTURE["depth"] += 1
+    try:
+        yield
+    finally:
+        _CAPTURE["depth"] -= 1
+
+
+def preparing_capture() -> bool:
+    """Whether :func:`capture_preparation` is active."""
+    return _CAPTURE["depth"] > 0
+
+
 def separate_shapes():
     """A context in which :func:`torch.compile` gives every dynamic size its own symbol.
 
@@ -250,10 +273,12 @@ def separate_shapes():
 
 
 def _dense(grads: tuple) -> tuple:
-    """Incoming gradients as dense tensors. Autograd hands on views, such as the zero-stride expansion of
-    a sum's gradient, and the compiled derivative stages are specialized to their inputs' strides; the GPU code
+    """Incoming gradients as dense tensors of their own. Autograd hands on views, such as the zero-stride
+    expansion of a sum's gradient or a slice of a concatenation's, and the compiled derivative stages are
+    specialized to their inputs' strides and storage offsets (every new offset a recompilation); the GPU code
     inductor (torch 2.11) generated for such an expanded gradient of a batch gave wrong derivatives."""
-    return tuple(g.contiguous() if isinstance(g, torch.Tensor) else g for g in grads)
+    return tuple(g if not isinstance(g, torch.Tensor) or (g.is_contiguous() and g.storage_offset() == 0)
+                 else g.clone(memory_format=torch.contiguous_format) for g in grads)
 
 
 def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,

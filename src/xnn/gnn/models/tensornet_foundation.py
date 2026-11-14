@@ -24,7 +24,6 @@ import torch
 
 from xnn.common.config import Config, ModelConfig
 from xnn.common.data.elements import SYMBOL_TO_Z
-from xnn.common.models.hub import ModelFormat, register_format
 
 from .tensornet import TensorNet
 
@@ -42,18 +41,108 @@ FOUNDATION_MODELS = {
 _ACTIVATIONS = {"swish": "silu", "silu": "silu"}
 
 
-def _is_matgl_dir(path: Path) -> bool:
-    """Whether ``path`` is a MatGL TensorNet directory (``model.json`` and ``state.pt``)."""
+def read_matgl_directory(path: Union[str, Path], model_class: str) -> tuple:
+    """The parts of a MatGL potential directory whose model is ``model_class``.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        The directory of ``model.json`` and ``state.pt`` (or either file in it).
+    model_class : str
+        The MatGL class of the wrapped model (``"TensorNet"``, ``"QET"``).
+
+    Returns
+    -------
+    tuple
+        The directory, the potential's arguments, the model's ``init_args``
+        and the state dict.
+
+    Raises
+    ------
+    NotImplementedError
+        When the directory holds another model.
+    """
     path = Path(path)
-    if path.is_file() and path.name in ("model.json", "state.pt"):
+    if path.is_file():
         path = path.parent
-    if not ((path / "model.json").is_file() and (path / "state.pt").is_file()):
-        return False
+    meta = json.loads((path / "model.json").read_text())
+    kwargs = meta["kwargs"]
+    model_meta = kwargs["model"]
+    if model_meta.get("@class") != model_class:
+        raise NotImplementedError(f"{path} holds a {model_meta.get('@class')}, not a {model_class}")
+    state = torch.load(path / "state.pt", map_location="cpu", weights_only=True)
+    if "state_dict" in state and isinstance(state["state_dict"], dict):
+        state = state["state_dict"]
+    return path, kwargs, model_meta["init_args"], state
+
+
+def trunk_options(kwargs: dict, a: dict, unsupported: list) -> tuple:
+    """The radial basis of a MatGL TensorNet trunk as xnn options, and the number of its functions.
+
+    Pieces xnn does not convert (another basis, the ``SO(3)`` group, state
+    features, several targets, a repulsion term, an activation other than
+    SiLU) are appended to ``unsupported``.
+    """
+    rbf = str(a.get("rbf_type", "Gaussian")).lower()
+    extra, n_rbf = {}, 0
+    if rbf == "sphericalbessel" and a.get("use_smooth", False):
+        extra, n_rbf = {"radial_basis": "smooth_bessel"}, int(a["max_n"])
+    elif rbf == "gaussian":
+        # n Gaussians from 0 to the cutoff plus one; a width of None is the inverse center spacing
+        n_rbf, span = int(a.get("num_rbf", 32)), float(a["cutoff"]) + 1.0
+        width = a.get("width", 0.5)
+        extra = {"radial_basis": "gaussian", "rbf_max": span,
+                 "gamma": float(width) if width is not None else (n_rbf - 1) / span}
+    else:
+        unsupported.append(f"radial basis {a.get('rbf_type')} (smooth={a.get('use_smooth')})")
+    if str(a.get("equivariance_invariance_group", "O(3)")) != "O(3)":
+        # MatGL's edge vectors point from the center to the neighbor, xnn's the other way: the same weights
+        # give the mirror-image model, which only an O(3) model does not tell apart
+        unsupported.append(f"the {a.get('equivariance_invariance_group')} group")
+    if a.get("include_state", False):
+        unsupported.append("state features")
+    if int(a.get("ntargets", 1)) != 1:
+        unsupported.append("several targets")
+    if kwargs.get("calc_repuls", False):
+        unsupported.append("a repulsion term")
+    if str(a.get("activation_type", "swish")) not in _ACTIVATIONS:
+        unsupported.append(f"activation {a.get('activation_type')}")
+    return extra, n_rbf
+
+
+def potential_options(path: Path, a: dict, state: dict) -> dict:
+    """The options of a MatGL potential's trunk and energy standardization: activation, symmetry
+    group, species, the energy scale and the element references."""
+    if float(state.get("data_mean", torch.tensor(0.0))) != 0.0:
+        raise NotImplementedError(f"{path}: a constant energy offset per structure is not converted")
+    species = [SYMBOL_TO_Z[s] for s in a["element_types"]]
+    extra = {
+        "self_pairs": False,
+        "activation": _ACTIVATIONS[str(a.get("activation_type", "swish"))],
+        "equivariance_group": str(a.get("equivariance_invariance_group", "O(3)")),
+        "n_elements": max(128, max(species) + 1),
+        "energy_scale": float(state.get("data_std", torch.tensor(1.0))),
+        "species": species,
+    }
+    refs = state.get("element_refs.property_offset")
+    if refs is not None:
+        extra["atomic_energies"] = [float(v) for v in refs.reshape(-1)[:len(species)]]
+    return extra
+
+
+def build_converted(cls, name: str, a: dict, extra: dict, n_rbf: int, state: dict, dtype) -> tuple:
+    """Build ``cls`` from converted options in ``dtype`` (by default the checkpoint's); returns the
+    model and its :class:`~xnn.common.config.ModelConfig`."""
+    model_cfg = ModelConfig(name=name, cutoff=float(a["cutoff"]), n_features=int(a["units"]),
+                            n_interactions=int(a["nblocks"]), n_rbf=n_rbf, extra=extra)
+    dtype = state["model.linear.weight"].dtype if dtype is None else dtype
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
     try:
-        meta = json.loads((path / "model.json").read_text())
-        return meta["kwargs"]["model"]["@class"] == "TensorNet"
-    except (ValueError, KeyError, TypeError):
-        return False
+        model = cls.from_config(model_cfg)
+    finally:
+        torch.set_default_dtype(previous)
+    return model, model_cfg
 
 
 def convert_directory(path: Union[str, Path], dtype=None) -> tuple:
@@ -76,71 +165,32 @@ def convert_directory(path: Union[str, Path], dtype=None) -> tuple:
     Raises
     ------
     NotImplementedError
-        For an architecture outside the converted ones (another radial basis,
-        an intensive target, state features, a repulsion term, a constant
-        energy offset per structure).
+        For an architecture outside the converted ones (a radial basis other
+        than the Gaussians or the smooth Bessel functions, the ``SO(3)``
+        group, an intensive target, state features, a repulsion term, a
+        constant energy offset per structure).
     """
-    path = Path(path)
-    if path.is_file():
-        path = path.parent
-    meta = json.loads((path / "model.json").read_text())
-    kwargs = meta["kwargs"]
-    model_meta = kwargs["model"]
-    if model_meta.get("@class") != "TensorNet":
-        raise NotImplementedError(f"{path} holds a {model_meta.get('@class')}, not a TensorNet")
-    a = model_meta["init_args"]
+    path, kwargs, a, state = read_matgl_directory(path, "TensorNet")
     unsupported = []
-    if str(a.get("rbf_type", "")).lower() != "sphericalbessel" or not a.get("use_smooth", False):
-        unsupported.append(f"radial basis {a.get('rbf_type')} (smooth={a.get('use_smooth')})")
+    extra, n_rbf = trunk_options(kwargs, a, unsupported)
     if a.get("is_intensive", True):
         unsupported.append("an intensive target")
-    if a.get("include_state", False):
-        unsupported.append("state features")
-    if int(a.get("ntargets", 1)) != 1:
-        unsupported.append("several targets")
-    if kwargs.get("calc_repuls", False):
-        unsupported.append("a repulsion term")
-    if str(a.get("activation_type", "swish")) not in _ACTIVATIONS:
-        unsupported.append(f"activation {a.get('activation_type')}")
     if unsupported:
         raise NotImplementedError(f"{path}: not converted: {', '.join(unsupported)}")
-
-    state = torch.load(path / "state.pt", map_location="cpu", weights_only=True)
-    if "state_dict" in state and isinstance(state["state_dict"], dict):
-        state = state["state_dict"]
-    if float(state.get("data_mean", torch.tensor(0.0))) != 0.0:
-        raise NotImplementedError(f"{path}: a constant energy offset per structure is not converted")
-    units, n_layers = int(a["units"]), int(a["nblocks"])
-    n_rbf = int(a["max_n"])
-    species = [SYMBOL_TO_Z[s] for s in a["element_types"]]
-    refs = state.get("element_refs.property_offset")
-    extra = {
-        "radial_basis": "smooth_bessel", "readout": "gated", "self_pairs": False,
-        "activation": _ACTIVATIONS[str(a.get("activation_type", "swish"))],
-        "equivariance_group": str(a.get("equivariance_invariance_group", "O(3)")),
-        "n_elements": max(128, max(species) + 1),
-        "energy_scale": float(state.get("data_std", torch.tensor(1.0))),
-        "species": species,
-    }
-    if refs is not None:
-        extra["atomic_energies"] = [float(v) for v in refs.reshape(-1)[:len(species)]]
-    model_cfg = ModelConfig(name="tensornet", cutoff=float(a["cutoff"]), n_features=units,
-                            n_interactions=n_layers, n_rbf=n_rbf, extra=extra)
-
-    dtype = state["model.linear.weight"].dtype if dtype is None else dtype
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        model = TensorNet.from_config(model_cfg)
-    finally:
-        torch.set_default_dtype(previous)
-    _transplant(model, state, species, n_layers)
+    extra.update(potential_options(path, a, state), readout="gated")
+    model, model_cfg = build_converted(TensorNet, "tensornet", a, extra, n_rbf, state, dtype)
+    transplant(model, state, extra["species"], int(a["nblocks"]))
     return model, Config(model=model_cfg)
 
 
-def _transplant(model: TensorNet, state: dict, species: list, n_layers: int) -> None:
+def transplant(model: TensorNet, state: dict, species: list, n_layers: int,
+               extra: Optional[dict] = None, skip: tuple = ()) -> None:
     """Copy MatGL's weights into ``model``: the same layer names, the embedding rows by atomic
-    number, the ``3F`` outputs of the last scalar layers reordered from per feature to per part."""
+    number, the ``3F`` outputs of the last scalar layers reordered from per feature to per part.
+
+    ``extra`` holds the converted weights of a subclass's own layers; parameters whose names start
+    with a prefix in ``skip`` keep their values.
+    """
     own = model.state_dict()
     out = {}
     for name in own:
@@ -166,10 +216,26 @@ def _transplant(model: TensorNet, state: dict, species: list, n_layers: int) -> 
         for p in ("weight", "bias"):
             t = out[f"{name}.{p}"]
             out[f"{name}.{p}"] = t.reshape(units, 3, *t.shape[1:]).transpose(0, 1).reshape(t.shape)
-    missing = [n for n in own if n not in out and not n.startswith(("rbf.", "energy_", "atom_ref.", "cutoff_fn."))]
+    out.update(extra or {})
+    kept = ("rbf.", "energy_", "atom_ref.", "cutoff_fn.") + tuple(skip)
+    missing = [n for n in own if n not in out and not n.startswith(kept)]
     if missing:
         raise KeyError(f"MatGL checkpoint lacks weights for {missing}")
     model.load_state_dict({**own, **{k: v.to(own[k].dtype) for k, v in out.items()}})
+
+
+def fetch_foundation(name: str, models: dict, cache_dir: Optional[Union[str, Path]] = None) -> Path:
+    """Download (once) a registered MatGL potential ``name`` of ``models`` into the model cache and
+    return its directory."""
+    from xnn.common.data.hub._download import download_file
+    from xnn.common.models.hub.cache import resolve_cache_dir
+    if name not in models:
+        raise KeyError(f"unknown MatGL model {name!r}; known: {sorted(models)}")
+    repo, revision = models[name]
+    folder = resolve_cache_dir(cache_dir) / "matgl" / name / revision
+    for file in ("model.json", "state.pt"):
+        download_file(_HF.format(repo=repo, revision=revision, file=file), folder / file)
+    return folder
 
 
 def from_foundation(name: str = "tensornet-matpes-pbe-2025.2", dtype=None,
@@ -190,23 +256,10 @@ def from_foundation(name: str = "tensornet-matpes-pbe-2025.2", dtype=None,
     TensorNet
         The converted potential, in evaluation mode.
     """
-    from xnn.common.data.hub._download import download_file
-    from xnn.common.models.hub.cache import resolve_cache_dir
-    if name not in FOUNDATION_MODELS:
-        raise KeyError(f"unknown MatGL TensorNet model {name!r}; known: {sorted(FOUNDATION_MODELS)}")
-    repo, revision = FOUNDATION_MODELS[name]
-    folder = resolve_cache_dir(cache_dir) / "matgl" / name / revision
-    for file in ("model.json", "state.pt"):
-        download_file(_HF.format(repo=repo, revision=revision, file=file), folder / file)
+    folder = fetch_foundation(name, FOUNDATION_MODELS, cache_dir)
     model, _ = convert_directory(folder, getattr(torch, dtype) if isinstance(dtype, str) else dtype)
     return model.eval()
 
 
-def _convert_file(path: Path, head: Optional[str]):
-    """The model hub's ``matgl`` converter: directory -> (model, config)."""
-    return convert_directory(path)
-
-
-register_format(ModelFormat(name="matgl", suffixes=(), convert=_convert_file, detect=_is_matgl_dir))
-
-__all__ = ["FOUNDATION_MODELS", "convert_directory", "from_foundation"]
+__all__ = ["FOUNDATION_MODELS", "convert_directory", "from_foundation", "read_matgl_directory",
+           "trunk_options", "potential_options", "build_converted", "transplant", "fetch_foundation"]

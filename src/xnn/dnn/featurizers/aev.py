@@ -22,6 +22,7 @@ Two ready-made parameterisations are provided as classmethods:
 from __future__ import annotations
 
 import math
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -229,8 +230,10 @@ class AEV(Featurizer):
         return self.compute(data.atomic_numbers, data.edge_index, data.edge_vectors(), data.num_nodes)
 
     def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor,
-                num_nodes: int) -> Tensor:
-        """:meth:`forward` on tensors (TorchScript-compatible)."""
+                num_nodes: int, triplets: Optional[Tuple[Tensor, Tensor]] = None) -> Tensor:
+        """:meth:`forward` on tensors, optionally with the enumerated triplets of the angular term
+        (:meth:`AngularSymmetryFunctions.compute`) (TorchScript-compatible)."""
         r = torch.linalg.norm(edge_vec, dim=-1)
         return torch.cat([self.radial.compute(atomic_numbers, edge_index, edge_vec, num_nodes, r),
-                          self.angular.compute(atomic_numbers, edge_index, edge_vec, num_nodes, r)], dim=-1)
+                          self.angular.compute(atomic_numbers, edge_index, edge_vec, num_nodes, r, triplets)],
+                         dim=-1)

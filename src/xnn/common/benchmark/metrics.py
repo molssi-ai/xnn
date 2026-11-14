@@ -240,6 +240,12 @@ def prediction_pairs(out: dict, data: AtomicGraph, targets: list[str],
                 atoms = mask[data.batch]
                 q_pred, q_ref = q_pred[atoms], q_ref[atoms]
             pairs[key] = (q_pred.reshape(-1), q_ref.reshape(-1))
+    if "properties" in targets and data.properties is not None and "properties" in out:
+        p_pred, p_ref = out["properties"].detach(), data.properties.detach()
+        mask = _scored(data, data.properties_mask)
+        if mask is not None:
+            p_pred, p_ref = p_pred[mask], p_ref[mask]
+        pairs["properties"] = (p_pred.reshape(-1), p_ref.reshape(-1).to(p_pred.dtype))
     return pairs
 
 

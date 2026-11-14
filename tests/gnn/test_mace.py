@@ -1,0 +1,850 @@
+"""Tests for the faithful MACE (registered as ``mace``).
+
+Covers exact equivariance of the symmetric contraction, model equivariance /
+force co-rotation, periodic stress, the flexible number of interaction layers
+(T = 0..N), and pair repulsion.
+"""
+import math
+
+import numpy as np
+import pytest
+import torch
+
+pytest.importorskip("e3nn")
+
+from e3nn import o3  # noqa: E402
+
+from xnn.common.config import from_dict  # noqa: E402
+from xnn.common.data import structure_to_graph  # noqa: E402
+from xnn.common.models import ForceStressOutput, available_models, build_model  # noqa: E402
+from xnn.gnn.models.mace import SymmetricContraction, U_matrix_real  # noqa: E402
+
+SPECIES = [1, 6, 8]
+
+
+@pytest.fixture(autouse=True)
+def _f64():
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(old)
+
+
+def _graph(n=6, cutoff=5.0, periodic=False, R=None):
+    rng = np.random.default_rng(1)
+    pos = rng.uniform(0, 4, (n, 3))
+    if R is not None:
+        pos = pos @ R.T
+    s = {"pos": pos, "atomic_numbers": ([1, 6, 8] * n)[:n]}
+    if periodic:
+        s["cell"] = np.eye(3) * 6.0
+        s["pbc"] = [True, True, True]
+    return structure_to_graph(s, cutoff)
+
+
+def _proper_rotation(seed=3):
+    rng = np.random.default_rng(seed)
+    R, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    if np.linalg.det(R) < 0:
+        R[:, 0] *= -1
+    return R
+
+
+def _build(T=2, max_L=1, max_ell=3, correlation=3, n_features=16, **extra):
+    cfg = from_dict({"model": {
+        "name": "mace", "cutoff": 5.0, "n_features": n_features, "n_interactions": T,
+        "extra": {"species": SPECIES, "max_ell": max_ell, "correlation": correlation,
+                  "num_channels": n_features, "max_L": max_L, **extra},
+    }})
+    return build_model(cfg.model)
+
+
+def test_state_dict_without_scale_shift_loads_strictly():
+    """Checkpoints from before ``scale_shift`` existed load as the identity
+    (the values the module was built with), through a strict load."""
+    torch.manual_seed(0)
+    m = _build(T=1)
+    sd = {k: v for k, v in m.state_dict().items() if "scale_shift" not in k}
+    torch.manual_seed(1)
+    m2 = _build(T=1)
+    m2.load_state_dict(sd)
+    assert float(m2.scale_shift.scale) == 1.0 and float(m2.scale_shift.shift) == 0.0
+    assert all(torch.equal(a, b) for a, b in zip(m.state_dict().values(), m2.state_dict().values()))
+    with pytest.raises(RuntimeError, match="Missing key"):
+        m2.load_state_dict({k: v for k, v in sd.items() if "atom_ref" not in k})
+
+
+def test_registered_single_mace():
+    models = available_models()
+    assert "mace" in models
+    assert "mace02" not in models  # only one MACE implementation
+
+
+def test_u_matrix_shapes():
+    coup = o3.Irreps("1x0e+1x1o+1x2e+1x3o")
+    U = U_matrix_real(coup, "0e", 3, dtype=torch.float64)[-1]
+    assert U.shape[:-1] == (coup.dim, coup.dim, coup.dim)  # nu=3 -> 3 input axes
+
+
+def test_symmetric_contraction_equivariant():
+    irreps_in = o3.Irreps("8x0e+8x1o+8x2e+8x3o")
+    irreps_out = o3.Irreps("8x0e+8x1o")
+    coupling = o3.Irreps([ir.ir for ir in irreps_in])
+    sc = SymmetricContraction(irreps_in, irreps_out, correlation=3, num_elements=3)
+    B, nf = 5, irreps_in.count((0, 1))
+    x = torch.randn(B, nf, coupling.dim)
+    y = torch.zeros(B, 3)
+    y[torch.arange(B), torch.randint(0, 3, (B,))] = 1.0
+    R = o3.rand_matrix()
+    Dc, Do = coupling.D_from_matrix(R), irreps_out.D_from_matrix(R)
+    out0 = sc(x, y)
+    out1 = sc(torch.einsum("ij,bcj->bci", Dc, x), y)
+    assert torch.allclose(out1, torch.einsum("ij,bj->bi", Do, out0), atol=1e-9)
+
+
+@pytest.mark.parametrize("T", [1, 2, 3])
+def test_model_equivariance(T):
+    model = ForceStressOutput(_build(T=T))
+    R = _proper_rotation()
+    Rt = torch.tensor(R, dtype=torch.get_default_dtype())
+    o0 = model(_graph())
+    o1 = model(_graph(R=R))
+    assert abs(float(o0["energy"].detach()) - float(o1["energy"].detach())) < 1e-8
+    assert torch.allclose(o1["forces"].detach(), o0["forces"].detach() @ Rt.T, atol=1e-7)
+
+
+@pytest.mark.parametrize("T", [0, 1, 2, 4])
+def test_flexible_num_interactions(T):
+    """T = 0..N must all build and run (upstream MACE fixes T = 2)."""
+    model = ForceStressOutput(_build(T=T, max_L=0, max_ell=2))
+    out = model(_graph())
+    assert out["forces"].shape == (6, 3)
+    assert len(model.model.interactions) == T
+    if T == 0:  # pure reference-energy baseline: constant energy, zero forces
+        assert torch.allclose(out["forces"], torch.zeros_like(out["forces"]))
+
+
+def test_periodic_stress():
+    model = ForceStressOutput(_build(T=2, max_L=0, max_ell=2), compute_stress=True)
+    out = model(_graph(n=4, cutoff=5.0, periodic=True))
+    assert out["stress"].shape == (1, 3, 3)
+
+
+@pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"}])
+def test_blocked_message_pass_equals_one_pass(blocks):
+    """The message pass in blocks of edges (each recomputed in the backward) gives the single
+    pass's energy, forces, stress and the parameter gradient of a force loss."""
+    from xnn.gnn.models.mace import set_message_blocks
+    torch.manual_seed(0)
+    model = _build(T=2, **blocks)
+    out = {}
+    for block in ("off", 37):
+        g = _graph(n=12, periodic=True)  # the stress wrapper strains the graph it is given
+        set_message_blocks(model, block)
+        model.zero_grad()
+        model.train()
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        loss = res["energy"].sum() + (res["forces"] ** 2).sum()
+        loss.backward()
+        grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+        out[block] = (res["energy"].detach(), res["forces"].detach(), res["stress"].detach(), grads)
+    assert g.edge_index.shape[1] > 3 * 37
+    for a, b in zip(out["off"], out[37]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_blocked_fused_message_pass_equals_one_pass(dtype):
+    """On the fused convolution in evaluation, the message pass in blocks of edges (each made again in the
+    backward) gives the single pass's energy, forces and stress."""
+    pytest.importorskip("cuequivariance_torch")
+    from xnn.gnn.fast.conv import ConvTensorProduct
+    from xnn.gnn.models.mace import set_message_blocks
+    torch.manual_seed(0)
+    model = _build(T=2).to("cuda", dtype).set_use_fast(True).eval()
+    out = {}
+    for block in ("off", 37):
+        g = _graph(n=12, periodic=True).to("cuda")  # float64 geometry whatever the model's precision
+        set_message_blocks(model, block)
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        out[block] = [res[k].detach().double() for k in ("energy", "forces", "stress")]
+    assert g.edge_index.shape[1] > 3 * 37
+    convs = [m for m in model.modules() if isinstance(m, ConvTensorProduct)]
+    assert convs and all(m.fast_active and m._split_kernel(g.pos) is not None for m in convs)
+    tol = 1e-10 if dtype == torch.float64 else 1e-5
+    for a, b in zip(out["off"], out[37]):
+        assert (a - b).abs().max() <= tol * max(float(a.abs().max()), 1.0)
+
+
+def _paired_and_per_edge(monkeypatch, model, block, dtype=None, device="cpu"):
+    """Energy, forces and stress with the edges paired and per edge; the pairings made."""
+    import xnn.gnn.models.mace as mm
+    from xnn.gnn.models.mace import set_message_blocks
+    monkeypatch.setattr(mm, "EDGE_PAIRS_MIN_EDGES", 0)
+    if device == "cpu":
+        # without the fast kernel the convolution gathers the bond weights per edge
+        conv = type(model.interactions[0].conv_tp)
+        assert not model.interactions[0].conv_tp.indexes_weights(torch.zeros(1))
+        monkeypatch.setattr(conv, "indexes_weights", lambda self, like: True)
+    made = []
+    pair = mm.edge_pairs
+    monkeypatch.setattr(mm, "edge_pairs", lambda *args: made.append(pair(*args)) or made[-1])
+    out = {}
+    for paired in (False, True):
+        model.pair_edges = paired
+        set_message_blocks(model, block)
+        g = _graph(n=12, periodic=True).to(device)
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        out[paired] = [res[k].detach().double() for k in ("energy", "forces", "stress")]
+    return out, made
+
+
+@pytest.mark.parametrize("block", ["off", 23])
+def test_paired_edges_give_the_per_edge_results(monkeypatch, block):
+    """In evaluation, the radial weights made once per bond and read by both directions of every bond
+    of a full periodic list give the per-edge energy, forces and stress; the bonds are taken back
+    after the evaluation. A message pass in blocks keeps its edges, and neither training mode nor the preparation
+    of a captured evaluation pairs."""
+    from xnn.common.models.fast import capture_preparation
+    torch.manual_seed(0)
+    model = _build(T=2).eval()
+    out, made = _paired_and_per_edge(monkeypatch, model, block)
+    assert (len(made) == 1 and made[0] is not None) if block == "off" else made == []
+    assert all(b.__dict__.get("_edge_pairs") is None for b in model.interactions)
+    for a, b in zip(out[False], out[True]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+    calls = len(made)
+    with capture_preparation():
+        ForceStressOutput(model, compute_stress=True)(_graph(n=12, periodic=True))
+    model.train()
+    ForceStressOutput(model, compute_stress=True)(_graph(n=12, periodic=True))
+    assert len(made) == calls
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("block", ["off", 23])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_paired_edges_on_the_fused_convolution(monkeypatch, dtype, block):
+    """On the fused convolution, the weights read per bond through the kernel's weight index give the
+    per-edge energy, forces and stress; in blocks the edges keep their own weights."""
+    pytest.importorskip("cuequivariance_torch")
+    torch.manual_seed(0)
+    model = _build(T=2).to("cuda", dtype).set_use_fast(True).eval()
+    out, made = _paired_and_per_edge(monkeypatch, model, block, device="cuda")
+    assert (len(made) == 1 and made[0] is not None) if block == "off" else made == []
+    tol = 1e-10 if dtype == torch.float64 else 1e-5
+    for a, b in zip(out[False], out[True]):
+        assert (a - b).abs().max() <= tol * max(float(a.abs().max()), 1.0)
+
+
+def test_message_blocks_setting():
+    """"auto" stays a single pass on the CPU; a block as large as the edges is a single pass;
+    other values are refused."""
+    from xnn.gnn.models.mace import set_message_blocks
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    feats = torch.zeros(500, 8)
+    assert block._message_block_size(feats) == 0
+    set_message_blocks(model, 1000)
+    assert block.message_block == "1000" and block._message_block_size(feats) == 0
+    set_message_blocks(model, 100)
+    assert block._message_block_size(feats) == 100
+    with pytest.raises(ValueError):
+        set_message_blocks(model, "sometimes")
+
+
+def test_message_blocks_auto_size_from_free_memory(monkeypatch):
+    """"auto" on a GPU: one pass while the message passes of all edges from this interaction on (with the
+    margin) fit into the free memory (unused plus reserved but unallocated), or its own weights four
+    times; else blocks whose weights take a sixteenth of it, at least MIN_MESSAGE_BLOCK edges; training
+    mode stays a single pass."""
+    import xnn.gnn.models.mace as mm
+    model = _build(T=1).eval()
+    block = model.interactions[0]
+    numel = block.conv_tp.weight_numel
+
+    class Edges:
+        """The attributes the sizing reads of float32 edge features on a GPU."""
+        is_cuda = True
+        device = torch.device("cuda")
+
+        def __init__(self, n):
+            self.shape = (n, 8)
+
+        def element_size(self):
+            return 4
+
+    unused = {"bytes": 0}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (unused["bytes"], 1 << 40))
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3000)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 1000)
+    assert block.message_need == 2 * numel + sum(block.radial_MLP)
+    per_edge = mm.MESSAGE_BLOCK_MARGIN * 4 * block.message_need
+    n = 10 ** 8
+    unused["bytes"] = math.ceil(n * per_edge) - 2000
+    assert block._message_block_size(Edges(n)) == 0
+    unused["bytes"] = int(n * per_edge / 2.5) - 2000
+    largest = int((unused["bytes"] + 2000) / (mm.MESSAGE_BLOCK_SHARE * numel * 4))
+    assert block._message_block_size(Edges(n)) == largest > mm.MIN_MESSAGE_BLOCK
+    unused["bytes"] = 0
+    assert block._message_block_size(Edges(n)) == mm.MIN_MESSAGE_BLOCK
+    assert block.train()._message_block_size(Edges(n)) == 0
+
+
+def test_message_memory_counts_the_later_interactions(monkeypatch):
+    """Each interaction's message memory holds what every later one keeps (weights and radial layers) and
+    the largest weight gradient; a first interaction whose own weights fit four times runs unblocked
+    even when the later ones would not."""
+    model = _build(T=2).eval()
+    first, last = model.interactions
+    w0, w1 = first.conv_tp.weight_numel, last.conv_tp.weight_numel
+    r = sum(first.radial_MLP)
+    assert last.message_need == 2 * w1 + r
+    assert first.message_need == (w0 + r) + (w1 + r) + max(w0, w1)
+
+    class Edges:
+        is_cuda = True
+        device = torch.device("cuda")
+        shape = (10 ** 8, 8)
+
+        def element_size(self):
+            return 4
+
+    free = {"bytes": 4 * 10 ** 8 * w0 * 4}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free["bytes"], 1 << 40))
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
+    assert free["bytes"] < 10 ** 8 * 4 * first.message_need
+    assert first._message_block_size(Edges()) == 0
+    free["bytes"] -= 1
+    assert first._message_block_size(Edges()) > 0
+
+
+def test_select_fast_defaults_to_the_parameters():
+    """Without a tensor to go by, the fast blocks are chosen for the device and dtype of the
+    parameters: the linear maps on, the CUDA-only radial kernels off on a CPU."""
+    from xnn.common.models.fast import fast_modules
+    from xnn.gnn.fast.linear import EquivariantLinear
+    from xnn.gnn.models.blocks import RadialNet
+    model = _build(T=1).set_use_fast(True)
+    model._select_fast(10)
+    blocks = fast_modules(model)
+    assert any(isinstance(m, EquivariantLinear) and m.fast_active for m in blocks)
+    assert all(not m.fast_active for m in blocks if isinstance(m, RadialNet))
+    model.set_use_fast(False)._select_fast(10)
+    assert not any(m.fast_active for m in blocks)
+
+
+def _derivatives(module, inputs, weight, *args):
+    """Output, first derivatives with respect to the input and the weight, and the weight
+    gradient of a loss on the input derivative."""
+    out = module(*args)
+    gx, gw = torch.autograd.grad((out * out.detach().cos()).sum(), (inputs, weight), create_graph=True)
+    ggw, = torch.autograd.grad((gx ** 2).sum(), weight)
+    return out, gx, gw, ggw
+
+
+@pytest.mark.parametrize("species", [[2, 0, 4, 2, 2, 0, 4, 4, 0, 2, 4], [3] * 7])
+def test_species_tensor_product_fast_equals_reference(species):
+    """The element-grouped self-connection equals the product with the one-hot elements, with the
+    same first and second derivatives; a gradient to the elements takes the reference."""
+    from xnn.gnn.fast.linear import SpeciesTensorProduct
+    torch.manual_seed(0)
+    tp = SpeciesTensorProduct("4x0e+3x1o+2x2e+2x1o", "5x0e", "3x0e+2x1o+2x2e+1x3o")
+    y = torch.nn.functional.one_hot(torch.tensor(species), 5).double()
+    x = torch.randn(len(species), tp.irreps_in1.dim, requires_grad=True)
+    res = {}
+    for fast in (False, True):
+        tp.fast_active = fast
+        res[fast] = _derivatives(tp, x, tp.weight, x, y)
+    for a, b in zip(res[False], res[True]):
+        assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
+    plan = tp.__dict__["_plan"]
+    x_ir = plan.to_ir_mul(x.detach(), [(m, ir.dim) for m, ir in tp.irreps_in1])
+    ref = plan.to_ir_mul(res[False][0].detach(), [(m, ir.dim) for m, ir in tp.irreps_out])
+    for attrs in (y, y.clone().requires_grad_(True)):
+        assert torch.allclose(tp.ir_mul(x_ir, attrs), ref, rtol=1e-12, atol=1e-12)
+    y.requires_grad_(True)
+    gy = []
+    for fast in (False, True):
+        tp.fast_active = fast
+        gy.append(torch.autograd.grad(tp(x, y).sum(), y)[0])
+    assert torch.allclose(gy[0], gy[1], rtol=1e-12, atol=1e-12)
+
+
+def test_equivariant_linear_fast_equals_reference():
+    """The split-once linear map equals e3nn's, with the same first and second derivatives, for
+    its own weight and for a weight passed in (as a LoRA adapter does)."""
+    from xnn.gnn.fast.linear import EquivariantLinear
+    torch.manual_seed(0)
+    lin = EquivariantLinear("4x0e+3x1o+2x2e+2x1o", "3x0e+2x1o+1x3o")
+    x = torch.randn(9, lin.irreps_in.dim, requires_grad=True)
+    external = (1.5 * lin.weight.detach() + 0.1).requires_grad_(True)
+    for weight, args in ((lin.weight, (x,)), (external, (x, external))):
+        res = {}
+        for fast in (False, True):
+            lin.fast_active = fast
+            res[fast] = _derivatives(lin, x, weight, *args)
+        for a, b in zip(res[False], res[True]):
+            assert torch.allclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+def test_equivariant_linear_bias_paths_and_external_parameters():
+    """Bias paths stay out of the fast plan (a map with biases is not eligible) and give e3nn's values;
+    without internal weights the weights and the biases must be passed."""
+    from xnn.gnn.fast.linear import EquivariantLinear
+    torch.manual_seed(0)
+    lin = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    with torch.no_grad():
+        lin.bias.normal_()
+    ref = o3.Linear("2x0e+1x1o", "3x0e+1x1o", biases=True)
+    ref.load_state_dict(lin.state_dict())
+    assert not lin.fast_eligible and len(lin.__dict__["_plan"].paths) == 2
+    x = torch.randn(5, lin.irreps_in.dim)
+    assert torch.allclose(lin(x), ref(x), rtol=0, atol=1e-14)
+    external = EquivariantLinear("2x0e+1x1o", "3x0e+1x1o", internal_weights=False, biases=True)
+    with pytest.raises(RuntimeError, match="Weights must be provided"):
+        external(x)
+    with pytest.raises(RuntimeError, match="Biases must be provided"):
+        external(x, lin.weight)
+    assert torch.allclose(external(x, lin.weight, lin.bias), ref(x), rtol=0, atol=1e-14)
+
+
+@pytest.mark.parametrize("blocks", [{}, {"interaction_first": "RealAgnosticDensityInteractionBlock",
+                                         "interaction": "RealAgnosticDensityResidualInteractionBlock"},
+                                    {"interaction_first": "RealAgnosticInteractionBlock"}])
+def test_plain_fast_paths_equal_reference_in_mace(blocks):
+    """With the linear maps and self-connections on their fast paths, MACE gives the reference's
+    energy, forces, stress and the parameter gradient of a force loss."""
+    from xnn.gnn.fast.linear import EquivariantLinear, SpeciesTensorProduct
+    torch.manual_seed(0)
+    model = _build(T=2, **blocks)
+    out = {}
+    for fast in (False, True):
+        g = _graph(n=12, periodic=True)  # the stress wrapper strains the graph it is given
+        model.set_use_fast(fast)
+        model.zero_grad()
+        model.train()
+        res = ForceStressOutput(model, compute_stress=True)(g)
+        loss = res["energy"].sum() + (res["forces"] ** 2).sum()
+        loss.backward()
+        grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+        out[fast] = (res["energy"].detach(), res["forces"].detach(), res["stress"].detach(), grads)
+        active = [m.fast_active for m in model.modules()
+                  if isinstance(m, (EquivariantLinear, SpeciesTensorProduct))]
+        assert len(active) == 8 and all(a == fast for a in active)
+    for a, b in zip(out[False], out[True]):
+        assert torch.allclose(a, b, rtol=1e-11, atol=1e-11)
+
+
+def test_fused_radial_hidden_layers_equal_the_layers():
+    """The fused hidden layers of the radial network give the layers' values, input gradient (kernel),
+    weight gradients and second derivatives with respect to the input (PyTorch backward)."""
+    import os
+    if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
+        pytest.skip("needs CUDA or Triton's interpreter")
+    pytest.importorskip("triton")
+    from xnn.gnn.fast.radial_kernels import fused_hidden
+    from xnn.gnn.models.blocks import RadialNet
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(0)
+    net = RadialNet([10, 64, 64, 64, 40], torch.nn.functional.silu).to(dev, torch.float32)
+    hidden = net._plan()[0]
+    weights = [layer.weight for layer, _, _, _ in hidden]
+    x = torch.randn(150, 10, device=dev, dtype=torch.float32, requires_grad=True)
+
+    def both():
+        return net._hidden(x), fused_hidden(x, *[layer.weight * f for layer, _, _, f in hidden])
+
+    ref, out = both()
+    assert torch.allclose(out, ref, rtol=1e-5, atol=1e-6)
+    g = torch.randn_like(out)
+    gx = [torch.autograd.grad(h, x, g)[0] for h in both()]
+    assert torch.allclose(gx[0], gx[1], rtol=1e-4, atol=1e-5)
+    grads = [torch.autograd.grad(h, [x, *weights], g) for h in both()]
+    for a, b in zip(*grads):
+        assert torch.allclose(a, b, rtol=1e-4, atol=1e-5)
+    second = []
+    for h in both():
+        d, = torch.autograd.grad(h, x, g, create_graph=True)
+        second.append(torch.autograd.grad((d ** 2).sum(), x)[0])
+    assert torch.allclose(second[0], second[1], rtol=1e-4, atol=1e-5)
+
+
+def test_pair_repulsion_runs():
+    pytest.importorskip("ase")
+    model = ForceStressOutput(_build(T=1, max_L=0, max_ell=2, pair_repulsion=True))
+    out = model(_graph())
+    assert out["forces"].shape == (6, 3)
+
+
+def test_mace_scriptable_and_lammps_export(tmp_path):
+    """MACE must torch.jit.script cleanly and the LAMMPS artifact must
+    reproduce the eager model's energy and forces on a periodic system."""
+    from xnn.common.deploy import export_to_lammps
+
+    model = _build(T=2, max_L=1, max_ell=2).eval()
+    # the scriptability placeholders must not leak into the state_dict
+    assert not any("U_matrix_4" in k for k in model.state_dict())
+
+    g = _graph(n=6, cutoff=5.0, periodic=True)
+    scripted = torch.jit.script(model)
+    d = (scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+         - model.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors()))
+    assert d.abs().max() < 1e-12  # scripted == eager
+
+    path = str(tmp_path / "mace_lammps.pt")
+    export_to_lammps(model, 5.0, path)
+    loaded = torch.jit.load(path)
+    out = loaded(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, g.cell[0])
+    ref = ForceStressOutput(model)(g)
+    assert abs(float(out["total_energy"]) - float(ref["energy"])) < 1e-10
+    assert (out["forces"] - ref["forces"].detach()).abs().max() < 1e-10
+
+
+def test_mace_lammps_export_t0_zero_forces(tmp_path):
+    """T=0 (pure reference energy) must export and yield zero forces."""
+    from xnn.common.deploy import export_to_lammps
+
+    model = _build(T=0, max_L=0, max_ell=2).eval()
+    path = str(tmp_path / "mace_t0.pt")
+    export_to_lammps(model, 5.0, path)
+    loaded = torch.jit.load(path)
+    g = _graph(n=6, cutoff=5.0, periodic=True)
+    out = loaded(g.pos, g.edge_index, g.cell_shifts, g.atomic_numbers, g.cell[0])
+    assert out["forces"].abs().max() == 0.0
+
+
+def test_upstream_mace_key_translation():
+    """Keys copied verbatim from an upstream MACE yaml are translated to xnn names."""
+    cfg = from_dict({"model": {
+        "name": "mace",
+        "r_max": 5.5, "num_channels": 8, "num_interactions": 3,
+        "num_radial_basis": 10, "num_cutoff_basis": 6,
+        "atomic_numbers": "[1, 8]", "E0s": "{1: -13.6, 8: -2000.0}",
+        "radial_MLP": "[16, 16]", "max_ell": 2, "max_L": 0,
+    }})
+    assert cfg.model.cutoff == 5.5           # r_max -> typed core field
+    assert cfg.data.cutoff == 5.5            # ... so the neighbor-list cutoff follows
+    assert "r_max" not in cfg.model.extra    # translated, not duplicated
+    m = build_model(cfg.model)
+    assert m.cutoff == 5.5
+    assert len(m.interactions) == 3
+    assert m.species == [1, 8]
+    assert m.atom_ref.weight[1].item() == -13.6
+    assert m.atom_ref.weight[8].item() == -2000.0
+
+    # identical architecture whether xnn or upstream MACE names are used
+    xnn_names = from_dict({"model": {
+        "name": "mace", "cutoff": 5.5, "n_features": 8, "n_interactions": 3,
+        "n_rbf": 10, "num_polynomial_cutoff": 6, "species": [1, 8],
+        "atomic_energies": [-13.6, -2000.0], "radial_MLP": [16, 16],
+        "max_ell": 2, "max_L": 0,
+    }})
+    m2 = build_model(xnn_names.model)
+    assert {k: v.shape for k, v in m.state_dict().items()} == \
+           {k: v.shape for k, v in m2.state_dict().items()}
+
+    # the xnn canonical spelling wins when both are present
+    both = from_dict({"model": {"name": "mace", "cutoff": 4.5, "r_max": 9.0}})
+    assert both.model.cutoff == 4.5
+
+    with pytest.raises(ValueError, match="E0s"):
+        build_model(from_dict({"model": {"name": "mace", "E0s": "average"}}).model)
+
+
+# ScaleShiftMACE energy expression, distance transforms, density blocks
+def test_scale_shift_energy_expression():
+    """E_i = E0_i + scale * E_int,i + shift, with ZBL inside the scale."""
+    pytest.importorskip("ase")
+    torch.manual_seed(0)
+    base = _build(T=2, pair_repulsion=True)
+    scaled = _build(T=2, pair_repulsion=True, scale=1.7, shift=-0.25)
+    scaled.load_state_dict(base.state_dict(), strict=False)
+    with torch.no_grad():
+        scaled.scale_shift.scale.fill_(1.7)
+        scaled.scale_shift.shift.fill_(-0.25)
+    g = _graph()
+    e0 = base.atom_ref(g.atomic_numbers).squeeze(-1)
+    inter = base(g)["node_energy"] - e0          # scale=1, shift=0 baseline
+    expected = e0 + 1.7 * inter - 0.25
+    assert torch.allclose(scaled(g)["node_energy"], expected, atol=1e-12)
+    # the defaults are the exact identity (plain MACE)
+    assert float(base.scale_shift.scale) == 1.0
+    assert float(base.scale_shift.shift) == 0.0
+
+
+def test_distance_transform_formulas():
+    """Agnesi and Soft recomputed by hand from their published forms."""
+    ase = pytest.importorskip("ase")
+    import math
+
+    from xnn.gnn.featurizers import AgnesiDistanceTransform, SoftDistanceTransform
+
+    z = torch.tensor([1, 8])
+    edge_index = torch.tensor([[0, 1], [1, 0]])
+    r = torch.tensor([0.97, 2.31])
+    rc = ase.data.covalent_radii
+
+    agnesi = AgnesiDistanceTransform()
+    out = agnesi(r, z, edge_index)
+    for k in range(2):
+        r0 = 0.5 * (rc[1] + rc[8])
+        u = float(r[k]) / r0
+        expect = 1.0 / (1.0 + 1.0805 * u ** 0.9183 / (1.0 + u ** (0.9183 - 4.5791)))
+        assert abs(float(out[k]) - expect) < 1e-12
+
+    soft = SoftDistanceTransform()
+    out = soft(r, z, edge_index)
+    for k in range(2):
+        r0 = rc[1] + rc[8]
+        p0, p1 = 0.75 * r0, 4.0 / 3.0 * r0
+        s = 0.5 * (1.0 + math.tanh(4.0 / (p1 - p0) * (float(r[k]) - 0.5 * (p0 + p1))))
+        expect = p0 + (float(r[k]) - p0) * s
+        assert abs(float(out[k]) - expect) < 1e-12
+
+    with pytest.raises(NotImplementedError, match="distance_transform"):
+        _build(T=1, distance_transform="Bogus")
+
+
+def test_identity_transform_matches_previous_embedding():
+    """distance_transform='None' reproduces the plain featurizer path."""
+    model = _build(T=2)
+    g = _graph()
+    vec = g.edge_vectors()
+    lengths, _, radial = model.edge_feat.embed(vec)
+    r_t = model.distance_transform(lengths, g.atomic_numbers, g.edge_index)
+    recomputed = model.edge_feat.rbf(r_t) * model.edge_feat.envelope(lengths)[:, None]
+    assert torch.allclose(radial, recomputed, atol=0)
+
+
+@pytest.mark.parametrize("first,rest", [
+    ("RealAgnosticDensityInteractionBlock",
+     "RealAgnosticDensityResidualInteractionBlock"),
+])
+def test_density_blocks_equivariance_and_script(first, rest):
+    pytest.importorskip("ase")
+    model = _build(T=2, interaction_first=first, interaction=rest,
+                   distance_transform="Agnesi", pair_repulsion=True,
+                   scale=0.8, shift=0.1)
+    fmodel = ForceStressOutput(model)
+    R = _proper_rotation()
+    Rt = torch.tensor(R, dtype=torch.get_default_dtype())
+    o0, o1 = fmodel(_graph()), fmodel(_graph(R=R))
+    assert abs(float(o0["energy"]) - float(o1["energy"])) < 1e-8
+    assert torch.allclose(o1["forces"].detach(), o0["forces"].detach() @ Rt.T,
+                          atol=1e-7)
+    g = _graph()
+    scripted = torch.jit.script(model)
+    e_s = scripted.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+    e_e = model.node_energy(g.atomic_numbers, g.edge_index, g.edge_vectors())
+    assert torch.allclose(e_s, e_e, atol=1e-14)
+
+
+def test_non_residual_first_block_is_the_density_block_without_density():
+    """The non-residual block divides by avg_num_neighbors (1 here); the density block with a
+    vanishing density network divides by 1 + 0: the same energies and forces."""
+    torch.manual_seed(0)
+    dense = _build(T=2, max_ell=2, interaction_first="RealAgnosticDensityInteractionBlock")
+    with torch.no_grad():
+        for name, p in dense.named_parameters():
+            if "density_fn" in name:
+                p.zero_()
+    plain = _build(T=2, max_ell=2, interaction_first="RealAgnosticInteractionBlock")
+    assert type(plain.interactions[0]).__name__ == "RealAgnosticInteractionBlock"
+    plain.load_state_dict({k: v for k, v in dense.state_dict().items() if "density_fn" not in k})
+    o0, o1 = ForceStressOutput(plain)(_graph()), ForceStressOutput(dense)(_graph())
+    assert abs(float(o0["energy"]) - float(o1["energy"])) < 1e-12 * max(1.0, abs(float(o1["energy"])))
+    assert torch.allclose(o0["forces"], o1["forces"], rtol=0, atol=1e-12)
+
+
+def test_from_config_scale_shift_transform_keys():
+    pytest.importorskip("ase")
+    cfg = from_dict({"model": {
+        "name": "mace", "cutoff": 4.0, "n_features": 8, "n_interactions": 1,
+        "species": SPECIES, "max_ell": 2, "scale": 0.9, "shift": 0.2,
+        "distance_transform": "Agnesi", "pair_repulsion": True,
+        "interaction_first": "RealAgnosticDensityResidualInteractionBlock",
+        "interaction": "RealAgnosticDensityResidualInteractionBlock",
+    }})
+    m = build_model(cfg.model)
+    assert float(m.scale_shift.scale) == 0.9
+    assert float(m.scale_shift.shift) == 0.2
+    assert type(m.distance_transform).__name__ == "AgnesiDistanceTransform"
+    assert m.pair_repulsion
+
+
+# foundation-model conversion: fidelity to upstream mace-torch
+def _upstream_scale_shift_mace(flavor, heads=None):
+    """Build a small upstream ScaleShiftMACE of the requested flavor."""
+    import mace.modules as mm
+
+    blocks = {
+        "mp0": (mm.RealAgnosticResidualInteractionBlock,
+                mm.RealAgnosticResidualInteractionBlock, "None", False),
+        "off23": (mm.RealAgnosticInteractionBlock,
+                  mm.RealAgnosticResidualInteractionBlock, "None", False),
+        "0b": (mm.RealAgnosticInteractionBlock,
+               mm.RealAgnosticResidualInteractionBlock, "Agnesi", True),
+        "0b2": (mm.RealAgnosticDensityInteractionBlock,
+                mm.RealAgnosticDensityResidualInteractionBlock, "Agnesi", True),
+        "soft": (mm.RealAgnosticResidualInteractionBlock,
+                 mm.RealAgnosticResidualInteractionBlock, "Soft", False),
+    }
+    first, rest, transform, zbl = blocks[flavor]
+    n_heads = len(heads) if heads else 1
+    e0 = np.array([[0.5, -1.3, -2.1], [0.1, -0.4, -0.9]])[:n_heads].squeeze(0) \
+        if n_heads == 1 else np.array([[0.5, -1.3, -2.1], [0.1, -0.4, -0.9]])
+    scale = 0.83 if n_heads == 1 else np.array([0.8, 1.1])
+    shift = 0.11 if n_heads == 1 else np.array([0.1, -0.2])
+    up = mm.ScaleShiftMACE(
+        atomic_inter_scale=scale, atomic_inter_shift=shift,
+        r_max=4.0, num_bessel=6, num_polynomial_cutoff=5, max_ell=2,
+        interaction_cls=rest, interaction_cls_first=first, num_interactions=2,
+        num_elements=3, hidden_irreps=o3.Irreps("8x0e+8x1o"),
+        MLP_irreps=o3.Irreps(f"{16 * n_heads}x0e"), atomic_energies=e0,
+        avg_num_neighbors=3.1, atomic_numbers=SPECIES, correlation=3,
+        gate=torch.nn.functional.silu, radial_MLP=[16, 16],
+        radial_type="bessel", distance_transform=transform,
+        pair_repulsion=zbl, heads=heads, use_reduced_cg=False,
+        apply_cutoff=True).double()
+    torch.manual_seed(11)
+    with torch.no_grad():
+        for p in up.parameters():
+            p.add_(0.05 * torch.randn_like(p))   # break symmetric inits
+    return up
+
+
+def _upstream_eval(up, g, head=None):
+    """Evaluate an upstream model through its own data pipeline."""
+    from mace.data import AtomicData, Configuration
+    from mace.tools import AtomicNumberTable, torch_geometric
+
+    conf = Configuration(atomic_numbers=g.atomic_numbers.numpy(),
+                         positions=g.pos.detach().numpy(), properties={},
+                         property_weights={})
+    ad = AtomicData.from_config(conf, z_table=AtomicNumberTable(SPECIES),
+                                cutoff=float(up.r_max))
+    batch = next(iter(torch_geometric.dataloader.DataLoader([ad], batch_size=1)))
+    d = batch.to_dict()
+    if head is not None:
+        d["head"] = torch.tensor([head])
+    out = up(d, compute_force=True)
+    return float(out["energy"]), out["forces"].detach()
+
+
+@pytest.mark.parametrize("flavor", ["mp0", "off23", "0b", "0b2", "soft"])
+def test_from_mace_torch_fidelity(flavor):
+    """Every foundation-generation flavor converts to machine precision."""
+    pytest.importorskip("mace")
+    pytest.importorskip("ase")
+    from xnn.gnn.models.mace_foundation import from_mace_torch
+
+    up = _upstream_scale_shift_mace(flavor)
+    model = ForceStressOutput(from_mace_torch(up))
+    g = _graph(cutoff=4.0)
+    e_u, f_u = _upstream_eval(up, g)
+    out = model(g)
+    assert abs(float(out["energy"]) - e_u) < 1e-11
+    assert (out["forces"].detach() - f_u).abs().max() < 1e-11
+
+
+def test_from_mace_torch_multihead_slicing():
+    """Multi-head checkpoints slice to each head exactly; head is required."""
+    pytest.importorskip("mace")
+    pytest.importorskip("ase")
+    from xnn.gnn.models.mace_foundation import from_mace_torch
+
+    up = _upstream_scale_shift_mace("0b2", heads=["ha", "hb"])
+    g = _graph(cutoff=4.0)
+    with pytest.raises(ValueError, match="ha"):
+        from_mace_torch(up)                    # ambiguous: must pick a head
+    with pytest.raises(ValueError, match="unknown head"):
+        from_mace_torch(up, head="nope")
+    for idx, name in enumerate(["ha", "hb"]):
+        model = ForceStressOutput(from_mace_torch(up, head=name))
+        e_u, f_u = _upstream_eval(up, g, head=idx)
+        out = model(g)
+        assert abs(float(out["energy"]) - e_u) < 1e-11
+        assert (out["forces"].detach() - f_u).abs().max() < 1e-11
+
+
+@pytest.mark.parametrize("as_buffer", [False, True])
+def test_interaction_transplant_reads_the_neighbor_count_as_number_or_buffer(as_buffer):
+    """An upstream interaction block loads whether its avg_num_neighbors is a number or a buffer."""
+    import copy
+
+    from xnn.gnn.models.mace_foundation import _load_interaction
+
+    model = _build(T=1)
+    up = copy.deepcopy(model.interactions[0])
+    with torch.no_grad():
+        for p in up.parameters():
+            p.add_(torch.randn_like(p))
+    del up.avg_num_neighbors
+    if as_buffer:
+        up.register_buffer("avg_num_neighbors", torch.tensor(7.25))
+    else:
+        up.avg_num_neighbors = 7.25
+    _load_interaction(model.interactions[0], up)
+    got = model.interactions[0].state_dict()
+    want = {k: v for k, v in up.state_dict().items() if k != "avg_num_neighbors"}
+    assert got.keys() == want.keys() and all(torch.equal(got[k], want[k]) for k in want)
+    assert type(model.interactions[0].avg_num_neighbors) is float
+    assert model.interactions[0].avg_num_neighbors == 7.25
+
+
+def test_foundation_registry_and_errors():
+    from xnn.common.models import list_models
+    from xnn.gnn.models.mace_foundation import FOUNDATION_MODELS, _checkpoint_path
+
+    assert "mace-mp-0-medium" in FOUNDATION_MODELS
+    assert "mace-off23-small" in FOUNDATION_MODELS
+    for url, license_ in FOUNDATION_MODELS.values():
+        assert url.startswith("https://") and license_ in ("MIT", "ASL")
+    # one list: the aliases are the mace-torch entries of the model hub registry
+    assert sorted(FOUNDATION_MODELS) == list_models(format="mace-torch")
+    with pytest.raises(FileNotFoundError, match="registered foundation model"):
+        _checkpoint_path("not-a-model")
+
+
+def test_from_foundation_cached_checkpoint():
+    """Convert a real foundation checkpoint when one is already cached."""
+    pytest.importorskip("mace")
+    pytest.importorskip("ase")
+    from pathlib import Path
+
+    from xnn.gnn.models.mace import MACE
+    from xnn.gnn.models.mace_foundation import load_foundation
+
+    # only use a file that is already on disk; tests never download
+    # (the name is the upstream cache spelling: non-alphanumerics stripped)
+    cached = Path.home() / ".cache" / "mace" / "MACEOFF23_smallmodel"
+    if not cached.is_file():
+        pytest.skip("no cached MACE-OFF23 small checkpoint")
+    up = load_foundation(cached).double()
+    model = MACE.from_foundation(cached, dtype=torch.float64)
+    assert isinstance(model, MACE)
+    assert model.species == [int(z) for z in up.atomic_numbers]
+    g = _graph(cutoff=float(up.r_max))
+    e_u, f_u = _upstream_eval_off(up, g)
+    out = ForceStressOutput(model)(g)
+    assert abs(float(out["energy"]) - e_u) < 1e-9
+    assert (out["forces"].detach() - f_u).abs().max() < 1e-9
+
+
+def _upstream_eval_off(up, g):
+    """Upstream evaluation against the checkpoint's own element table."""
+    from mace.data import AtomicData, Configuration
+    from mace.tools import AtomicNumberTable, torch_geometric
+
+    conf = Configuration(atomic_numbers=g.atomic_numbers.numpy(),
+                         positions=g.pos.detach().numpy(), properties={},
+                         property_weights={})
+    zt = AtomicNumberTable([int(z) for z in up.atomic_numbers])
+    ad = AtomicData.from_config(conf, z_table=zt, cutoff=float(up.r_max))
+    batch = next(iter(torch_geometric.dataloader.DataLoader([ad], batch_size=1)))
+    out = up(batch.to_dict(), compute_force=True)
+    return float(out["energy"]), out["forces"].detach()

@@ -76,6 +76,16 @@ Training and MD against the original TensorFlow PhysNet.
    Training & testing PhysNet on Argon MD data: `xnn` vs the original PhysNet, step by step <nb/examples/dnn/physnet/physnet_argon_train_test>
    Argon MD with PhysNet: `xnn` NPT density + lock-step NVE against the original <nb/examples/dnn/physnet/physnet_argon_density_md>
 
+QRNN (dnn)
+==========
+
+Charges that follow the net charge of a molecule, trained with learned loss weights.
+
+.. example-toctree::
+   :caption: QRNN (dnn)
+
+   QRNN on charged and neutral carbon chains: charge transfer beyond the cutoff <nb/examples/dnn/qrnn/qrnn_carbon_chains>
+
 SchNet (gnn)
 ============
 
@@ -165,6 +175,20 @@ QM9 subset at a short budget.
    TensorNet from the paper: Cartesian tensors, O(3) and SO(3), charge coupling and layer depth <nb/examples/gnn/tensornet/tensornet_paper_checks>
    TensorNet on rMD17 aspirin: energies and forces from 950 structures <nb/examples/gnn/tensornet/tensornet_rmd17_train>
    TensorNet and ET on QM9 U0: the layer-depth trend of TorchMD-Net 2.0 at a short budget <nb/examples/gnn/tensornet/tensornet_qm9_u0>
+   MEGNet on Materials Project formation energies <nb/examples/gnn/megnet/megnet_formation_energy>
+   Multi-fidelity MEGNet: band gaps from cheap and accurate data <nb/examples/gnn/megnet/megnet_multifidelity_band_gap>
+
+QET (gnn)
+=========
+
+The charge-equilibrated TensorNet of `Ko et al., arXiv:2511.07249 (2025)
+<https://doi.org/10.48550/arXiv.2511.07249>`_, with MatGL's MatPES potential: the
+charges of a crystal, a charged vacancy and an applied potential.
+
+.. example-toctree::
+   :caption: QET (gnn)
+
+   QET: charges, charge states and an applied potential <nb/examples/gnn/qet/qet_charge_states>
 
 
 3D steerable CNN (cnn)
@@ -482,6 +506,19 @@ by gradient descent and written back for MOPAC.
    Noncovalent interactions: PM7 (S22, S66) and PM6-ORG <nb/examples/sqmnn/nddo/pm7_pm6org_noncovalent>
    Refitting NDDO parameters: hydrogen bonds, MOPAC export and force training <nb/examples/sqmnn/nddo/sqmnn_parameter_refit>
 
+GDML and sGDML (krnn)
+=====================
+
+The kernel force fields of `Chmiela et al., Sci. Adv. 3, e1603015 (2017)
+<https://doi.org/10.1126/sciadv.1603015>`_ and `Chmiela et al., Nat. Commun. 9,
+3887 (2018) <https://doi.org/10.1038/s41467-018-06169-2>`_: a closed-form fit on
+rMD17 ethanol, the test errors, and NVE dynamics.
+
+.. example-toctree::
+   :caption: GDML and sGDML (krnn)
+
+   Fitting sGDML on rMD17 ethanol: a closed-form force field and its dynamics <nb/examples/krnn/sgdml/sgdml_rmd17_fit>
+
 Deployment: MDI (common)
 ========================
 
@@ -509,6 +546,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
    PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
+   QET against MatGL: the published MatPES potential, charged cells and an applied potential <nb/fidelity_checks/gnn/qet/qet_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/trfnn/et/torchmdnet_verification>
    Equiformer, block by block: the authors' implementation in float64 and float32, and the speed of a training step <nb/fidelity_checks/trfnn/equiformer/equiformer_verification>
@@ -517,6 +555,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    HDNNP (2G, 3G, 4G) against the RuNNer code, including a published 4G model <nb/fidelity_checks/dnn/hdnnp/hdnnp_verification>
    ANI-1, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/dnn/ani/ani_verification>
    PhysNet, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/dnn/physnet/physnet_verification>
+   QRNN against the paper's equations and Psi4's wB97X-D dispersion <nb/fidelity_checks/dnn/qrnn/qrnn_verification>
    NequIP, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/gnn/nequip/nequip_verification>
    MACE, block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/gnn/mace/mace_verification>
    MACE foundation models: verifying `MACE.from_foundation()` against `mace-torch` <nb/fidelity_checks/gnn/mace/mace_foundation_verification>
@@ -526,7 +565,6 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    Latent Ewald Summation (LES), block by block: reproducing the original implementation with `xnn` <nb/fidelity_checks/common/les/les_verification>
    D4 dispersion, block by block: reproducing the reference `dftd4` with `xnn` <nb/fidelity_checks/common/d4/d4_verification>
    D3 dispersion, block by block: reproducing the reference `simple-dftd3` with `xnn` <nb/fidelity_checks/common/d3/d3_verification>
-   BAMBOO fidelity check: `xnn` vs the original `bytedance/bamboo`, block by block <nb/fidelity_checks/hybnn/bamboo/bamboo_verification>
    ByteFF and ByteFF-Pol fidelity check: `xnn` vs byteff2 and its patched OpenMM <nb/fidelity_checks/hybnn/byteff/byteff_verification>
    OPLS: verifying the `xnn` implementation against OpenMM and the 1996 paper <nb/fidelity_checks/ffnn/opls/opls_verification>
    DREIDING: verifying the `xnn` implementation against LAMMPS and the 1990 paper <nb/fidelity_checks/ffnn/dreiding/dreiding_verification>
@@ -535,6 +573,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    AMOEBA: verifying the `xnn` implementation against Tinker, LAMMPS and the papers <nb/fidelity_checks/ffnn/amoeba/amoeba_verification>
    HIPPO: verifying the `xnn` implementation against Tinker, LAMMPS and the 2021 paper <nb/fidelity_checks/ffnn/hippo/hippo_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
+   GDML and sGDML against the sGDML package: equations, transplanted models, refits and speed <nb/fidelity_checks/krnn/sgdml/sgdml_verification>
 
 Parity checks
 =============
@@ -559,9 +598,12 @@ gradients and timings.
    DimeNet and DimeNet++ fast path: parity with the reference <nb/parity_checks/gnn/dimenet/dimenet_parity>
    GemNet fast path: parity with the reference <nb/parity_checks/gnn/gemnet/gemnet_parity>
    TensorNet fast path: parity with the reference <nb/parity_checks/gnn/tensornet/tensornet_parity>
+   QET fast path: parity with the reference <nb/parity_checks/gnn/qet/qet_parity>
+   MEGNet fast path: parity with the reference <nb/parity_checks/gnn/megnet/megnet_parity>
    ANI fast path: parity with the reference <nb/parity_checks/dnn/ani/ani_parity>
    PhysNet fast path: parity with the reference <nb/parity_checks/dnn/physnet/physnet_parity>
    HDNNP fast paths: parity with the reference (GPU and CPU) <nb/parity_checks/dnn/hdnnp/hdnnp_parity>
+   QRNN fast path: parity with the reference <nb/parity_checks/dnn/qrnn/qrnn_parity>
    SE(3) steerable CNN and 3D CNN fast path: parity with the reference <nb/parity_checks/cnn/se3cnn/se3cnn_parity>
    Spherical CNN fast path: parity with the reference <nb/parity_checks/cnn/s2cnn/s2cnn_parity>
    OPLS, AMBER, CHARMM and DREIDING fast paths: parity with the reference <nb/parity_checks/ffnn/classical/classical_parity>
@@ -574,3 +616,4 @@ gradients and timings.
    BAMBOO fast path: parity with the reference <nb/parity_checks/hybnn/bamboo/bamboo_parity>
    SpookyNet fast paths: parity with the reference <nb/parity_checks/hybnn/spookynet/spookynet_parity>
    ByteFF and ByteFF-Pol fast paths and export: parity with the reference <nb/parity_checks/hybnn/byteff/byteff_parity>
+   GDML and sGDML fast path: parity with the reference <nb/parity_checks/krnn/sgdml/sgdml_parity>

@@ -143,6 +143,27 @@ def all_reduce_sum(values: list[float], device: torch.device) -> list[float]:
     return t.tolist()
 
 
+def average_gradients(params: list[torch.Tensor]) -> None:
+    """Average the gradients of parameters outside a ``DistributedDataParallel`` module over the ranks.
+
+    In place, in the same order on every rank; a missing gradient counts as
+    zero. Nothing happens outside a distributed run.
+
+    Parameters
+    ----------
+    params : list of Tensor
+        The parameters, identical on every rank.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    size = dist.get_world_size()
+    for p in params:
+        if p.grad is None:
+            p.grad = torch.zeros_like(p)
+        dist.all_reduce(p.grad)
+        p.grad.div_(size)
+
+
 def merge_dicts(d: dict) -> dict:
     """Merge a small picklable dict over all ranks (identity outside a distributed run).
 

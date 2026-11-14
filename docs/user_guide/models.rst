@@ -301,6 +301,100 @@ The MatGL TensorNet foundation potentials trained on MatPES load with one call:
 - They use the smooth spherical Bessel basis, the gated readout and no self pairs.
 - The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
 
+QET
+===
+:class:`~xnn.gnn.models.qet.QET` (`MatGL
+<https://github.com/materialyzeai/matgl>`_) is the charge-equilibrated TensorNet
+of `Ko et al., arXiv:2511.07249 (2025)
+<https://doi.org/10.48550/arXiv.2511.07249>`_. TensorNet's features give every
+atom an electronegativity and a hardness. The charges follow from them in closed
+form, at the structure's total charge, so the cost stays linear in the number of
+atoms. The atomic energy then reads the charge and the Coulomb potential of the
+neighbors' charges.
+
+.. code-block:: yaml
+
+   model:
+     name: qet
+     cutoff: 5.0
+     n_features: 64
+     n_interactions: 2
+     hardness: environment       # or element: one hardness per element (default)
+   optim:
+     charge_weight: 1.0          # train the charges on "charges" labels
+
+Give each structure its total charge, and optionally an applied potential (V) on
+some atoms, such as a bias on an electrode:
+
+.. code-block:: python
+
+   {"pos": pos, "atomic_numbers": z, "cell": cell, "total_charge": 1.0,
+    "external_potential": phi}                   # (N,), optional
+
+- The model returns ``"charges"`` and ``"electrostatic_potential"`` next to the energy.
+- The charge widths are the covalent radii; ``trainable_widths: true`` learns them.
+- The other options are those of TensorNet. The defaults follow MatGL: 32
+  Gaussians and no self pairs.
+
+The MatGL QET foundation potentials trained on MatPES load with one call:
+
+.. code-block:: python
+
+   from xnn.gnn.models import QET
+
+   model = QET.from_foundation("qet-matpes-pbe-2025.2")   # or qet-matpes-r2scan-2025.2
+
+- The weights are downloaded from MatGL's release and keep MatGL's BSD-3-Clause license.
+
+MEGNet
+======
+:class:`~xnn.gnn.models.megnet.MEGNet` (`MatGL
+<https://github.com/materialyzeai/matgl>`_) predicts one property per
+structure, such as a band gap (`Chen et al., Chem. Mater. 31, 3564 (2019)
+<https://doi.org/10.1021/acs.chemmater.9b01294>`_). Multi-fidelity MEGNet
+(`Chen et al., Nat. Comput. Sci. 1, 46 (2021)
+<https://doi.org/10.1038/s43588-020-00002-x>`_) also takes the fidelity of
+each label.
+
+.. code-block:: yaml
+
+   model:
+     name: megnet
+     cutoff: 5.0
+     n_state_types: 4            # Number of fidelities
+     state_dim: 16
+   optim:
+     property_weight: 1.0
+
+Give each structure its target and fidelity:
+
+.. code-block:: python
+
+   {"pos": pos, "atomic_numbers": z, "cell": cell, "properties": 1.1, "state": 2}
+
+- The loss does not divide ``properties`` by the number of atoms.
+- Without ``n_state_types``, ``state`` is a list of floats, such as a temperature.
+- MEGNet predicts no energy, so it gives no forces.
+- A disordered site takes the occupancy-weighted mix of its elements, as in the
+  multi-fidelity paper. Give it as ``"occupancies": [{"Al": 0.3, "Ga": 0.7}, ...]``,
+  one mapping per site.
+
+MatGL's pretrained models load with one call:
+
+.. code-block:: python
+
+   from xnn.common.data import structure_to_graph
+   from xnn.gnn.models import MEGNet
+
+   model = MEGNet.from_foundation("megnet-mp-2019.4.1-bandgap-mfi")   # or megnet-mp-2018.6.1-eform
+   s = {"pos": pos, "atomic_numbers": z, "cell": cell, "state": model.state_label("HSE")}
+   print(model(structure_to_graph(s, model.cutoff))["properties"])     # band gap in eV
+
+- The band gap fidelities are PBE, GLLB-SC, HSE and SCAN.
+- The band gap model is off by about 1 eV. Train your own model for predicting
+  the band gaps.
+- The weights of the pre-trained models keep MatGL's BSD-3-Clause license.
+
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN` is the rotation-equivariant
@@ -423,6 +517,35 @@ match the RuNNer code:
 The 3G and 4G models also return ``charges``, ``energy_elec`` and ``dipole``.
 You can also train the charges with ``charge_weight`` on ``charges`` labels. The
 ``configs/model/hdnnp.yaml`` config file lists every available option.
+
+QRNN
+====
+:class:`~xnn.dnn.models.qrnn.QRNN` is the charge recursive neural network of
+`Jacobson et al., J. Chem. Theory Comput. 18, 2354 (2022)
+<https://doi.org/10.1021/acs.jctc.1c00821>`_, written from the paper. It is an
+ANI-style HDNNP for neutral and charged closed-shell molecules. Two cycles of
+element networks predict atomic charges that add up to the net charge, and the
+charges then enter the atomic energies.
+
+.. code-block:: yaml
+
+   model:
+     name: qrnn
+     cutoff: 5.2
+     extra:
+       species: [1, 6, 7, 8, 9, 15, 16, 17]   # H, C, N, O, F, P, S, Cl
+       charge_model: recursive                # or qeq, the paper's QeqNN
+       coulomb: true                          # set both to false for delta learning
+       dispersion: true
+
+- Give the net charge of every structure as ``total_charge``. The model returns
+  ``charges`` and, for molecules, ``dipole``.
+- Train the charges on ``dipole`` labels (``dipole_weight``) or on
+  ``charges`` labels (``charge_weight``), as the paper does.
+- The Coulomb and wB97X-D dispersion terms sum over every atom pair of a
+  molecule. Turn them off for periodic cells.
+
+The ``configs/model/qrnn.yaml`` config file lists every available option.
 
 Equivariant Transformer (ET)
 ============================
@@ -624,6 +747,35 @@ charge transfer terms.
      cutoff: 0.1                 # Neighbor-list radius; every pair interacts
      structure: CCO
      members: 1
+
+GDML / sGDML
+============
+:class:`~xnn.krnn.models.sgdml.SGDML` is the symmetrized gradient-domain machine-learning force field
+(`Chmiela et al., Sci. Adv. 3, e1603015 (2017) <https://doi.org/10.1126/sciadv.1603015>`_;
+`Chmiela et al., Nat. Commun. 9, 3887 (2018) <https://doi.org/10.1038/s41467-018-06169-2>`_;
+`Chmiela et al., Comput. Phys. Commun. 240, 38 (2019) <https://doi.org/10.1016/j.cpc.2019.02.007>`_).
+It models one molecule with its atoms in a fixed order. The energy is a kernel expansion over the training
+geometries, and its gradient reproduces the training forces.
+
+.. code-block:: python
+
+   from xnn.krnn.models import SGDML
+   from xnn.krnn.common import load_sgdml_model
+
+   model = SGDML(species=["C", "C", "O"] + ["H"] * 6, sigma=10.0)
+   model.fit(train_graphs)                  # Forces, plus energies for the constant
+   model = load_sgdml_model("m_ethanol.npz")  # A model trained by the sGDML package
+
+- ``fit`` finds the molecule's permutational symmetries from the training geometries. Use the ``gdml``
+  model to leave them out.
+- Pass a list of ``sigma`` values and ``validation`` structures to pick the length scale with the lowest
+  force error.
+- Every structure must list the atoms in the model's order.
+- Large training sets are fitted iteratively when the kernel matrix does not fit in memory. Pass
+  ``solver="cg"`` to choose this yourself. The result matches the exact fit to the tolerance ``tol``
+  (1e-4 by default).
+
+The ``configs/model/sgdml.yaml`` config file lists every available option.
 
 ReaxFF / ReaxFF-nn
 ==================

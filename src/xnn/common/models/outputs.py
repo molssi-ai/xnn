@@ -169,6 +169,9 @@ class ForceStressOutput(nn.Module):
             data.pos.requires_grad_(True)
 
         out = self.model(data) if plan is None else self.model(data, plan)
+        if "energy" not in out:
+            # a property model (MEGNet) predicts no energy: there are no forces or stress to form
+            return out
         energy = out["energy"]
         # a model that predicts forces directly (GemNet-dT/dQ) returns them itself
         direct = "forces" in out

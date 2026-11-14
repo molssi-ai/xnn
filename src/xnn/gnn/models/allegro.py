@@ -8,7 +8,7 @@ energy shift ``atom_ref``, shared edge featurizer) and adds the genuinely
 Allegro-specific pieces -- the two-body scalar embedding, the per-edge scalar /
 tensor latent tracks, and the iterated weighted-environment tensor products
 (paper eqs 7-16). Given the same weights it reproduces the original package to
-machine precision (``tests/test_allegro.py`` and the block-by-block notebook),
+machine precision (``tests/gnn/test_allegro.py`` and the block-by-block notebook),
 needing only ``e3nn`` -- no ``nequip``/``allegro``/``opt_einsum_fx``.
 
 Upstream conventions preserved (defaults of the reference ``uuulin`` mode):

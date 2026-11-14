@@ -88,6 +88,16 @@ Agreement with the upstream codes under identical weights:
   and forces agree to about 1e-14 in float64 and to float32 round-off, for
   molecules, batches, charged structures, both ET cutoff conventions and all
   TensorNet groups.
+- **QET** (`MatGL 4.1.4 <https://github.com/materialyzeai/matgl>`_): MatGL's
+  MatPES PBE and r2SCAN potentials, and MatGL's default architecture with
+  random weights, agree to about 1e-13 in float64 and to float32 round-off.
+  This holds for energies, forces, stresses and charges of neutral and charged
+  cells, with and without an applied potential.
+- **MEGNet** (`MatGL 4.1.4 <https://github.com/materialyzeai/matgl>`_): MatGL's
+  pretrained formation energy and multi-fidelity band gap models agree to about
+  1e-14 in float64 and to float32 round-off, at every fidelity, for crystals,
+  molecules and batches. Disordered sites match the paper's code (`megnet 1.3.2
+  <https://github.com/materialyzeai/megnet>`_) as closely as possible.
 - **Equiformer and EquiformerV2**
   (`atomicarchitects/equiformer <https://github.com/atomicarchitects/equiformer>`_;
   `fairchem-core 1.10 <https://github.com/facebookresearch/fairchem>`_): built
@@ -104,6 +114,11 @@ Agreement with the upstream codes under identical weights:
   term uses the ``dftd4`` data of :mod:`~xnn.common.models.d4`. The reference
   code rounds its covalent radii to float32, which moves its dispersion
   energies by about 1e-8 relative.
+- **GDML and sGDML** (`stefanch/sGDML <https://github.com/stefanch/sGDML>`_): models trained by
+  the sGDML package load into xnn and give the same energies and forces to about 1e-13 in float64. A
+  float32 model rounds only its positions, as the package's GPU backend does, and keeps its coefficients
+  in float64. Refitting the same training data gives the same predictions to 1e-9 or better, and the
+  symmetry search finds the same permutations.
 - **SE(3) steerable CNN** (`Weiler et al., Adv. Neural Inf. Process. Syst. 31
   (2018)
   <https://proceedings.neurips.cc/paper/2018/hash/488e4104520c6aab692863cc1dba45af-Abstract.html>`_):

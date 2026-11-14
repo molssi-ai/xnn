@@ -111,6 +111,17 @@ default. TensorBoard needs the ``tensorboard`` extra:
      loggers: [console, csv, tensorboard]
      log_every_n_steps: 0            # > 0 also logs training values every n steps
 
+The console prints every error with its unit and every loss term with the
+square of it, for example ``forces 4.5e-02 eV/A``. The units come from the
+data section and default to eV and Angstrom. They only label the numbers, so
+set them to the units your data are in:
+
+.. code-block:: yaml
+
+   data:
+     energy_unit: kcal/mol
+     length_unit: A
+
 In Python, pass ``logger=[...]`` to the trainer, or subclass
 :class:`~xnn.common.train.loggers.Logger` to send the metrics anywhere.
 
@@ -137,11 +148,24 @@ parameter directions free. ``model.pretrained``, ``model.lora`` and
 ``model.heads`` turn the same trainer into a fine-tuning run (see
 :ref:`howto-finetune`).
 
+``loss_weighting: uncertainty`` learns the balance between the loss terms
+instead of fixing it, as QRNN does for its energy and charge terms. Each term
+``L`` (times its weight) is trained as ``L / (2 sigma^2) + log sigma`` with a
+learned ``sigma`` per term (`Kendall et al., Proc. IEEE CVPR, 7482 (2018)
+<https://doi.org/10.1109/CVPR.2018.00781>`_).
+
+- The logged ``loss`` stays the fixed-weight sum, so validation and early
+  stopping compare epochs the same way.
+- ``sigma_<term>`` logs each learned scale, and checkpoints keep them as
+  ``loss_sigmas``.
+- It needs a single head and does not combine with ``trainer.cuda_graph``.
+
 Captured steps and fast paths
 =============================
 Models with a fast path train through it when ``use_fast`` takes it (see
 :ref:`howto-fast-paths`). ``trainer.cuda_graph: true`` replays each training
-step as one CUDA graph for DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet and MACE.
+step as one CUDA graph for DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, TensorNet, QET
+and QRNN.
 It needs one GPU and a single head, pads every batch to fixed sizes and drops
 the last, smaller batch of each epoch.
 

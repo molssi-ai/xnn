@@ -65,6 +65,8 @@ vesin = ["vesin-torch>=0.3"]
 # Builds the optional C++ / OpenMP CPU kernels of D3, D4 and the HDNNP symmetry
 # functions (XNN_CPP_KERNELS=1; also needs a C++ compiler with OpenMP).
 cpu-kernels = ["ninja"]
+# assignment and spanning-tree solvers of the sGDML symmetry search
+krnn = ["scipy>=1.7"]
 hydra = ["hydra-core>=1.3.6", "omegaconf>=2.3"]
 # TensorBoardLogger (loggers: [tensorboard]); console and CSV logging need nothing.
 tensorboard = ["tensorboard>=2.10"]
@@ -112,6 +114,7 @@ ffnn = ["rdkit>=2023.9"]
 opls = ["openmm>=8.0", "rdkit>=2023.9"]
 all = [
     "ase>=3.22",
+    "scipy>=1.7",
     "e3nn>=0.4.4",
     "vesin-torch>=0.3",
     "ninja",
@@ -182,7 +185,12 @@ exclude_also = ["@triton\\.jit"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["src", "tests"]
+# the family folders of tests/ are roots too: test files import helpers from
+# each other by module name
+src = [
+    "src", "tests", "tests/common", "tests/gnn", "tests/dnn", "tests/cnn",
+    "tests/ffnn", "tests/sqmnn", "tests/trfnn", "tests/krnn", "tests/hybnn",
+]
 extend-exclude = ["*.ipynb"]   # executed notebooks are published as they are
 
 [tool.ruff.lint]
@@ -204,7 +212,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]            # re-exports
-"tests/test_aimnet2.py" = ["E501"]  # reference tables kept on one line each
+"tests/gnn/test_aimnet2.py" = ["E501"]  # reference tables kept on one line each
 
 # uv configuration -- the GPU development environment.
 #
@@ -216,6 +224,8 @@ ignore = [
 # torchani 2.9.0 (the ani extra) declares torch<=2.13 but runs on torch 2.14
 # (pure Python; the ANI fidelity tests pass), so the lock ignores that cap
 override-dependencies = ["torch>=2.0"]
+# the patched soupsieve (4.x) needs Python 3.11.5, so the lock leaves out older 3.11 releases
+environments = ["python_full_version >= '3.11.5'"]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

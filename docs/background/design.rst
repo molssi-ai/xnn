@@ -25,7 +25,7 @@ xnn is organized by model family, with everything shared in ``common``:
        cpu_kernels.py Triton kernels as C++ / OpenMP loops on CPUs
      gnn/
        featurizers/   spherical harmonics, Cartesian monomials, Bessel, spherical Bessel, polynomial cutoff
-       models/        schnet, dimenet, gemnet, painn, tensornet, nequip, mace, allegro, cace,
+       models/        schnet, dimenet, gemnet, painn, tensornet, qet, megnet, nequip, mace, allegro, cace,
                       aimnet2 (+ foundation loaders)
        fast/          Triton kernels; cuEquivariance for MACE and NequIP
      cnn/
@@ -34,7 +34,7 @@ xnn is organized by model family, with everything shared in ``common``:
      dnn/
        common/        RuNNer model files (input.nn, weights, scaling)
        featurizers/   atom-centered symmetry functions, AEV
-       models/        hdnnp (1G to 4G), ani, physnet
+       models/        hdnnp (1G to 4G), ani, physnet, qrnn
      ffnn/
        common/        .frc force-field reader, SMARTS atom typing
        data/          the shipped .frc files
