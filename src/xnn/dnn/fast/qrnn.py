@@ -19,7 +19,6 @@ from xnn.common.models.fast import AutoPolicy
 #: in float32. GPUs with little float64 throughput tie earlier in float64 (an L40S near 20k edges) or
 #: never win (a T4). An unmeasured GPU takes the A100's bounds.
 AUTO_POLICY = AutoPolicy(
-    max_edges={"A100": 500_000, "L40S": 500_000}, max_edges_float64={"A100": 300_000, "L40S": 20_000},
     max_edges={"A100": 500_000, "L40S": 500_000, "A30": 100_000, "T4": 100_000, "V100": 250_000},
     max_edges_float64={"A100": 300_000, "L40S": 20_000, "A30": 50_000, "T4": 0, "V100": 100_000},
     default_max_edges=500_000, default_max_edges_float64=300_000,
