@@ -73,13 +73,41 @@ def all_pairs(batch: Tensor) -> Tuple[Tensor, Tensor]:
     return pairs[:, 0], pairs[:, 1]
 
 
+def dense_pairs(pos: Tensor, batch: Tensor) -> Tuple[Tensor, Tensor]:
+    """Every atom pair as dense ``(N, N)`` matrices, without a host synchronization.
+
+    Parameters
+    ----------
+    pos : Tensor
+        Positions ``(N, 3)``.
+    batch : Tensor
+        Structure index per atom ``(N,)``.
+
+    Returns
+    -------
+    tuple of Tensor
+        The squared distances (the diagonal at one, a finite placeholder) and the mask of the
+        distinct pairs of one structure, ``(N, N)`` each.
+    """
+    eye = torch.eye(pos.shape[0], dtype=torch.bool, device=pos.device)
+    d = pos.unsqueeze(1) - pos.unsqueeze(0)
+    r2 = (d * d).sum(-1) + eye.to(pos.dtype)
+    keep = (batch.unsqueeze(0) == batch.unsqueeze(1)) & ~eye
+    return r2, keep
+
+
 def coulomb_direct(charges: Tensor, pos: Tensor, batch: Tensor,
-                   k_e: float = COULOMB_CONSTANT, num_graphs: int = 0) -> Tensor:
+                   k_e: float = COULOMB_CONSTANT, num_graphs: int = 0,
+                   damping_midpoint: float = 0.0, damping_steepness: float = 0.0,
+                   dense: bool = False) -> Tensor:
     """Per-atom share of the all-pairs Coulomb energy of molecular structures.
 
     ``E_i = (k_e / 2) sum_{j != i} q_i q_j / r_ij`` over the atoms of the same
     structure, summing to ``k_e sum_{i<j} q_i q_j / r_ij``. The pair terms are
-    accumulated in float64 whatever their dtype.
+    accumulated in float64 whatever their dtype. With a positive
+    ``damping_steepness`` ``b`` every pair term is multiplied by the Fermi
+    function ``1 / (1 + exp(b (a - r_ij)))`` of midpoint ``a``, which
+    attenuates the short-range pairs.
 
     Parameters
     ----------
@@ -97,6 +125,15 @@ def coulomb_direct(charges: Tensor, pos: Tensor, batch: Tensor,
         Number of structures, when the caller knows it: one structure sums
         its pair matrix directly (no host synchronization for the pair list),
         by default 0 (unknown).
+    damping_midpoint : float, optional
+        Distance ``a`` where the damping is one half, by default 0.0.
+    damping_steepness : float, optional
+        Steepness ``b`` of the damping in inverse length, by default 0.0 (no
+        damping).
+    dense : bool, optional
+        Sum several structures over a masked ``(N, N)`` pair matrix
+        (:func:`dense_pairs`) instead of a pair list, which reads no count
+        back from the device (a captured evaluation), by default ``False``.
 
     Returns
     -------
@@ -111,10 +148,21 @@ def coulomb_direct(charges: Tensor, pos: Tensor, batch: Tensor,
             + torch.nn.functional.pad(eye.unsqueeze(-1), (0, 2))
         r = torch.linalg.norm(diff, dim=-1)
         pair = (0.5 * k_e) * (charges.unsqueeze(1) * charges.unsqueeze(0)) * (1.0 - eye) / r
+        if damping_steepness > 0.0:
+            pair = pair * torch.sigmoid(damping_steepness * (r - damping_midpoint))
         return pair.to(torch.float64).sum(1)
+    if dense:
+        r2, keep = dense_pairs(pos.to(charges.dtype), batch)
+        r = torch.sqrt(r2)
+        pair = (0.5 * k_e) * (charges.unsqueeze(1) * charges.unsqueeze(0)) / r
+        if damping_steepness > 0.0:
+            pair = pair * torch.sigmoid(damping_steepness * (r - damping_midpoint))
+        return torch.where(keep, pair, torch.zeros_like(pair)).to(torch.float64).sum(1)
     row, col = all_pairs(batch)
     r = torch.linalg.norm((gather_rows(pos, row) - gather_rows(pos, col)).to(charges.dtype), dim=-1)
     pair = 0.5 * k_e * gather_rows(charges, row) * gather_rows(charges, col) / r
+    if damping_steepness > 0.0:
+        pair = pair * torch.sigmoid(damping_steepness * (r - damping_midpoint))
     return scatter_sum(pair.to(torch.float64), row, charges.shape[0])
 
 

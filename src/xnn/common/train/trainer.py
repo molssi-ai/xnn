@@ -44,7 +44,7 @@ from ..models import ForceStressOutput
 from ..models.registry import prepare_model
 from .callbacks import EarlyStopping, ModelCheckpoint, ProgressBar, monitored_value
 from .loggers import build_loggers, metric_units
-from .losses import weighted_loss
+from .losses import LOSS_TERMS, UncertaintyWeights, weighted_loss
 
 
 def resolve_device(name: str) -> torch.device:
@@ -533,6 +533,12 @@ class Trainer:
         name = o.optimizer.lower()
         optimizer = {"adam": torch.optim.Adam, "amsgrad": torch.optim.Adam,
                      "adamw": torch.optim.AdamW}[name]
+        self.loss_weights = self._make_loss_weights(o)
+        groups = self._params
+        if self.loss_weights is not None:
+            # the learned scales of the loss terms, without weight decay
+            groups = [{"params": self._params},
+                      {"params": list(self.loss_weights.parameters()), "weight_decay": 0.0}]
         if self._closed_form:
             self.opt = None
         elif self._graph_mode:
@@ -541,7 +547,7 @@ class Trainer:
                                  weight_decay=o.weight_decay, amsgrad=(name == "amsgrad"),
                                  capturable=True)
         else:
-            self.opt = optimizer(self._params, lr=o.lr, weight_decay=o.weight_decay,
+            self.opt = optimizer(groups, lr=o.lr, weight_decay=o.weight_decay,
                                  amsgrad=(name == "amsgrad"))
         self.sched = None if self._closed_form else self._make_scheduler(o.scheduler)
         self.ema = None
@@ -571,6 +577,22 @@ class Trainer:
         for cb in defaults:
             if not any(isinstance(c, type(cb)) for c in self.callbacks):
                 self.callbacks.append(cb)
+
+    def _make_loss_weights(self, o):
+        """The learned scales of the loss terms (``optim.loss_weighting: uncertainty``), or ``None``."""
+        if o.loss_weighting not in ("fixed", "uncertainty"):
+            raise ValueError(f"optim.loss_weighting must be 'fixed' or 'uncertainty', got {o.loss_weighting!r}")
+        if o.loss_weighting == "fixed" or self._closed_form:
+            return None
+        if self._graph_mode:
+            raise ValueError("optim.loss_weighting: uncertainty does not run in captured steps "
+                             "(trainer.cuda_graph)")
+        if self.heads and len(self.heads) > 1:
+            raise ValueError("optim.loss_weighting: uncertainty takes single-head training only")
+        names = [term for term, weight in LOSS_TERMS.items() if getattr(o, weight) > 0]
+        if not names:
+            raise ValueError("optim.loss_weighting: uncertainty needs a loss term with a positive weight")
+        return UncertaintyWeights(names).to(self.device, self._params[0].dtype)
 
     def _init_distributed(self, dev: torch.device) -> torch.device:
         """Join the process group of a distributed launcher, if there is one.
@@ -975,6 +997,7 @@ class Trainer:
         model = self.model if train else self.eval_module
         pred = model(data)
         counts = {}
+        parts = {} if train and self.loss_weights is not None else None
         loss, logs = weighted_loss(
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
             dipole_weight=o.dipole_weight,
@@ -988,9 +1011,15 @@ class Trainer:
             huber_delta_forces=o.huber_delta_forces,
             huber_delta_stress=o.huber_delta_stress,
             head_weights=self._head_weights or None, head_names=self.heads,
-            counts=counts)
+            counts=counts, parts=parts)
         if self.tcfg.metrics:
             self._error_metrics(pred, data, logs, counts)
+        if train and self.loss_weights is not None:
+            # the objective of the learned scales; the logged loss stays the fixed-weight sum
+            loss = self.loss_weights(parts)
+            for term, sigma in self.loss_weights.sigmas().items():
+                logs[f"sigma_{term}"] = sigma
+                counts[f"sigma_{term}"] = (1.0, None)
         if train:
             if self._prior:
                 prior = sum(w * (p - p0).pow(2).sum() for p, p0, w in self._prior)
@@ -1009,10 +1038,16 @@ class Trainer:
             self.opt.zero_grad()
             if self.distributed:
                 loss.backward()
+                if self.loss_weights is not None:
+                    # outside the DDP module: their gradients are averaged here
+                    distributed.average_gradients(list(self.loss_weights.parameters()))
             else:
                 # the trainable parameters only: the positions of a force loss need no
                 # gradient of their own (a second derivative of every geometric term)
-                loss.backward(inputs=self._params)
+                inputs = self._params
+                if self.loss_weights is not None:
+                    inputs = inputs + list(self.loss_weights.parameters())
+                loss.backward(inputs=inputs)
             if o.clip_grad > 0:
                 torch.nn.utils.clip_grad_norm_(self._params, o.clip_grad)
             self.opt.step()
@@ -1289,7 +1324,10 @@ class Trainer:
         None
         """
         if self.is_main:
-            torch.save({"model": self.eval_module.state_dict(), "cfg": self.cfg}, path)
+            state = {"model": self.eval_module.state_dict(), "cfg": self.cfg}
+            if self.loss_weights is not None:
+                state["loss_sigmas"] = self.loss_weights.sigmas()
+            torch.save(state, path)
         distributed.barrier()
 
     def save_pretrained(self, save_directory: str, **card_fields):

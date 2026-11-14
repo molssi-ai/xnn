@@ -2,8 +2,9 @@
 
 A MatGL model is a directory of ``model.json`` (the architecture) and
 ``state.pt`` (the weights). The architecture's class picks the converter:
-TensorNet potentials (:mod:`xnn.gnn.models.tensornet_foundation`) and MEGNet
-property models (:mod:`xnn.gnn.models.megnet_foundation`).
+TensorNet potentials (:mod:`xnn.gnn.models.tensornet_foundation`), QET
+potentials (:mod:`xnn.gnn.models.qet_foundation`) and MEGNet property models
+(:mod:`xnn.gnn.models.megnet_foundation`).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from xnn.common.models.hub import ModelFormat, register_format
 #: MatGL architecture -> the module whose ``convert_directory`` converts it.
 CONVERTERS = {
     "TensorNet": "xnn.gnn.models.tensornet_foundation",
+    "QET": "xnn.gnn.models.qet_foundation",
     "MEGNet": "xnn.gnn.models.megnet_foundation",
 }
 

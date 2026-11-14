@@ -50,7 +50,7 @@ Conventions worth knowing:
 """
 # NOTE: no `from __future__ import annotations` here -- PEP 563 stringifies
 # the annotations that TorchScript needs to resolve.
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -436,6 +436,13 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
     self_pairs : bool, optional
         Whether every atom is its own neighbor (at distance 0, with no
         direction) in the embedding and the messages, by default ``True``.
+    rbf_max : float or None, optional
+        Position of the last Gaussian of the ``"gaussian"`` basis; ``None``
+        (default) is the cutoff.
+    gamma : float or None, optional
+        Exponent of the Gaussians of the ``"gaussian"`` basis,
+        ``exp(-gamma (r - mu)^2)``; ``None`` (default) takes the center
+        spacing as width.
 
     Attributes
     ----------
@@ -461,6 +468,8 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
 
     head_modules = ("readout", "energy_scale", "energy_shift", "atom_ref")
     refreshes_ghosts = True
+    #: Per-atom inputs of the energy network besides the ``F`` features (a subclass's own).
+    readout_extra_inputs = 0
 
     def __init__(self, n_features: int = 128, n_interactions: int = 2, n_rbf: int = 32,
                  cutoff: float = 4.5, radial_basis: str = "expnorm",
@@ -468,7 +477,8 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
                  equivariance_group: str = "O(3)", n_elements: int = 128,
                  energy_shift: float = 0.0, energy_scale: float = 1.0,
                  species=None, atomic_energies=None, readout: str = "mlp",
-                 readout_hidden=None, self_pairs: bool = True):
+                 readout_hidden=None, self_pairs: bool = True,
+                 rbf_max: Optional[float] = None, gamma: Optional[float] = None):
         super().__init__()
         if readout not in _READOUTS:
             raise ValueError(f"readout must be one of {_READOUTS}, got {readout!r}")
@@ -482,7 +492,11 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         self.node_feature_dim = n_features
         self.n_interactions = n_interactions
         self.equivariance_group = equivariance_group
-        self.rbf = make_radial_basis(radial_basis, n_rbf, cutoff, trainable_rbf)
+        if rbf_max is not None and radial_basis != "gaussian":
+            from xnn.common.config.options import warn_ignored
+            warn_ignored(f"radial basis {radial_basis!r}", ["rbf_max"])
+        span = float(rbf_max) if rbf_max is not None and radial_basis == "gaussian" else cutoff
+        self.rbf = make_radial_basis(radial_basis, n_rbf, span, trainable_rbf, gamma=gamma)
         self.cutoff_fn = CosineCutoff(cutoff)
         self.tensor_embedding = _TensorEmbedding(n_features, n_rbf, n_elements, activation)
         self.layers = nn.ModuleList([
@@ -494,9 +508,10 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         self.self_pairs = bool(self_pairs)
         # the gated network brings its own nonlinearity: it reads the projection directly
         self.activate_features = readout == "mlp"
+        n_in = n_features + self.readout_extra_inputs
         if readout_hidden is None:
-            readout_hidden = (n_features // 2,) if readout == "mlp" else (n_features,) * 3
-        sizes = [n_features, *[int(h) for h in readout_hidden], 1]
+            readout_hidden = (n_features // 2,) if readout == "mlp" else (n_in, n_features, n_features)
+        sizes = [n_in, *[int(h) for h in readout_hidden], 1]
         if readout == "mlp":
             layers = []
             for a, b in zip(sizes[:-1], sizes[1:]):
@@ -550,6 +565,12 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         """The distance (Angstrom) beyond which atoms no longer change an atom's
         energy: one cutoff for the embedding and one per interaction."""
         return (self.n_interactions + 1) * self.cutoff
+
+    def index_planner(self):
+        """The planner of a captured evaluation or training step: TensorNet needs nothing beyond its
+        edges (:class:`~xnn.common.train.graphed.NoIndexPlanner`)."""
+        from xnn.common.train.graphed import NoIndexPlanner
+        return NoIndexPlanner()
 
     @torch.jit.unused
     def _select_fast(self, num_edges: int) -> None:
@@ -783,7 +804,7 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
         (``radial_basis``, ``trainable_rbf``, ``activation``,
         ``equivariance_group``, ``n_elements``, ``energy_shift``,
         ``energy_scale``, ``species``, ``atomic_energies``, ``readout``,
-        ``readout_hidden``, ``self_pairs``); the reference
+        ``readout_hidden``, ``self_pairs``, ``rbf_max``, ``gamma``); the reference
         code's key spellings are translated by
         :mod:`xnn.common.config.translate`.
 
@@ -821,4 +842,6 @@ class TensorNet(ExactFloat64Constants, InteratomicPotential):
             readout=str(extra.get("readout", "mlp")),
             readout_hidden=extra.get("readout_hidden", None),
             self_pairs=bool(extra.get("self_pairs", True)),
+            rbf_max=None if extra.get("rbf_max") is None else float(extra["rbf_max"]),
+            gamma=None if extra.get("gamma") is None else float(extra["gamma"]),
         )

@@ -136,7 +136,7 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
            d_t: float = 0.0, charge_weight: float = 0.0,
            counts: Optional[dict] = None, les_dipole_weight: float = 0.0,
            les_charge_weight: float = 0.0, sync: bool = True,
-           property_weight: float = 0.0) -> tuple[Tensor, dict[str, float]]:
+           property_weight: float = 0.0, parts: Optional[dict] = None) -> tuple[Tensor, dict[str, float]]:
     """The weighted energy, force, stress, dipole, polarizability, charge and property
     terms over the structures weighted by ``w``.
 
@@ -152,6 +152,9 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
         Filled, when given, as described in :func:`weighted_loss`.
     sync : bool, optional
         As in :func:`weighted_loss`.
+    parts : dict or None, optional
+        Filled, when given, with every included term times its weight, under
+        its log key.
 
     Returns
     -------
@@ -177,6 +180,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             e_loss = _mean(err, w_e, sync)
             loss = loss + energy_weight * e_loss
             logs["energy_mse"] = value(e_loss)
+            if parts is not None:
+                parts["energy_mse"] = energy_weight * e_loss
             if counts is not None:
                 counts["energy_mse"] = (_count(err, w_e, sync), energy_weight)
 
@@ -195,6 +200,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             f_loss = _mean(err, w_atom, sync)
             loss = loss + force_weight * f_loss
             logs["force_mse"] = value(f_loss)
+            if parts is not None:
+                parts["force_mse"] = force_weight * f_loss
             if counts is not None:
                 counts["force_mse"] = (_count(err, w_atom, sync), force_weight)
 
@@ -206,6 +213,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             s_loss = _mean(err, w_s, sync)
             loss = loss + stress_weight * s_loss
             logs["stress_mse"] = value(s_loss)
+            if parts is not None:
+                parts["stress_mse"] = stress_weight * s_loss
             if counts is not None:
                 counts["stress_mse"] = (_count(err, w_s, sync), stress_weight)
 
@@ -224,6 +233,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             t_loss = _mean(err, w_t, sync)
             loss = loss + weight * t_loss
             logs[key + "_mse"] = value(t_loss)
+            if parts is not None:
+                parts[key + "_mse"] = weight * t_loss
             if counts is not None:
                 counts[key + "_mse"] = (_count(err, w_t, sync), weight)
 
@@ -241,6 +252,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             q_loss = _mean(err, w_atom, sync)
             loss = loss + weight * q_loss
             logs[name] = value(q_loss)
+            if parts is not None:
+                parts[name] = weight * q_loss
             if counts is not None:
                 counts[name] = (_count(err, w_atom, sync), weight)
 
@@ -254,6 +267,8 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             p_loss = _mean(err, w_p, sync)
             loss = loss + property_weight * p_loss
             logs["property_mse"] = value(p_loss)
+            if parts is not None:
+                parts["property_mse"] = property_weight * p_loss
             if counts is not None:
                 counts["property_mse"] = (_count(err, w_p, sync), property_weight)
     return loss, logs
@@ -276,6 +291,7 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   head_names: Optional[Sequence[str]] = None,
                   counts: Optional[dict] = None,
                   sync: bool = True,
+                  parts: Optional[dict] = None,
                   ) -> tuple[Tensor, dict[str, float]]:
     """Compute a weighted sum of energy, force and stress loss terms.
 
@@ -423,6 +439,10 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         CUDA graph. Every term whose labels the batch carries is included (one
         whose structures are all masked out is exactly 0) and ``logs`` and
         ``counts`` hold 0-dimensional tensors. Single-head batches only.
+    parts : dict or None, optional
+        When given, filled with every included term times its weight (the
+        summands of ``loss``) under its log key, for :class:`UncertaintyWeights`.
+        Batches of one head only.
 
     Returns
     -------
@@ -448,7 +468,7 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         loss, logs = _terms(pred, data, data.weight, energy_weight, force_weight, stress_weight,
                             d_e, d_f, d_s, dipole_weight, polarizability_weight, huber_delta,
                             charge_weight, counts, les_dipole_weight, les_charge_weight, sync=False,
-                            property_weight=property_weight)
+                            property_weight=property_weight, parts=parts)
         logs["loss"] = loss.detach()
         return loss, logs
 
@@ -462,7 +482,7 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         loss, logs = _terms(pred, data, data.weight, w_e, w_f, w_s, d_e, d_f, d_s,
                             dipole_weight, polarizability_weight, huber_delta,
                             charge_weight, part_counts, les_dipole_weight,
-                            les_charge_weight, property_weight=property_weight)
+                            les_charge_weight, property_weight=property_weight, parts=parts)
         if heads and head_names is not None:
             # one head of a multi-head run: log under its name, like mixed batches
             name = _name(heads[0])
@@ -475,6 +495,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         logs["loss"] = float(loss.detach())
         return loss, logs
 
+    if parts is not None:
+        raise ValueError("weighted_loss(parts=...) takes batches of one head only")
     loss = _first_output(pred).new_zeros(())
     logs: dict[str, float] = {}
     for h in heads:
@@ -494,3 +516,62 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         logs[f"{name}/loss"] = float(part.detach())
     logs["loss"] = float(loss.detach())
     return loss, logs
+
+
+#: Loss terms and the config weights that switch them on.
+LOSS_TERMS = {"energy_mse": "energy_weight", "force_mse": "force_weight", "stress_mse": "stress_weight",
+              "dipole_mse": "dipole_weight", "polarizability_mse": "polarizability_weight",
+              "charge_mse": "charge_weight", "les_dipole_mse": "les_dipole_weight",
+              "les_charge_mse": "les_charge_weight", "property_mse": "property_weight"}
+
+
+class UncertaintyWeights(torch.nn.Module):
+    """Learned weights of the loss terms, after Kendall, Gal and Cipolla (CVPR 2018).
+
+    Every term ``L_k`` (already times its config weight) enters the training
+    objective as ``L_k / (2 sigma_k^2) + log sigma_k`` with a trainable
+    ``log sigma_k``, which starts at zero. The weights settle where each term
+    is balanced by its own noise level, so they need no hand tuning.
+
+    Parameters
+    ----------
+    names : sequence of str
+        The log keys of the weighted terms (``"energy_mse"``, ``"charge_mse"``,
+        ...).
+
+    Attributes
+    ----------
+    log_sigma : torch.nn.ParameterDict
+        ``log sigma_k`` per term.
+    """
+
+    def __init__(self, names: Sequence[str]):
+        super().__init__()
+        self.log_sigma = torch.nn.ParameterDict({n: torch.nn.Parameter(torch.zeros(())) for n in names})
+
+    def forward(self, parts: dict) -> Tensor:
+        """The objective of the terms in ``parts`` (a term without a weight adds as it is).
+
+        Parameters
+        ----------
+        parts : dict of str to Tensor
+            The weighted terms of :func:`weighted_loss` (its ``parts``).
+
+        Returns
+        -------
+        Tensor
+            The scalar objective.
+        """
+        total = None
+        for name, term in parts.items():
+            if name in self.log_sigma:
+                s = self.log_sigma[name].to(term.dtype)
+                term = 0.5 * torch.exp(-2.0 * s) * term + s
+            total = term if total is None else total + term
+        if total is None:
+            return next(iter(self.log_sigma.values())).new_zeros(())
+        return total
+
+    def sigmas(self) -> dict[str, float]:
+        """``sigma_k`` of every term."""
+        return {name: float(torch.exp(s.detach())) for name, s in self.log_sigma.items()}

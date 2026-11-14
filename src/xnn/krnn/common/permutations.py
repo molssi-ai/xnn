@@ -16,6 +16,8 @@ import numpy as np
 
 #: the largest symmetry group accepted before the closure falls back to a subgroup
 MAX_PERMUTATIONS = 100
+#: entries of the ``(pairs, N, N)`` cost matrices formed at once (32 MB in float64)
+PAIR_BLOCK = 1 << 22
 
 
 def _distances(r: np.ndarray, cell: Optional[np.ndarray]) -> np.ndarray:
@@ -26,8 +28,21 @@ def _distances(r: np.ndarray, cell: Optional[np.ndarray]) -> np.ndarray:
     return np.sqrt((d * d).sum(-1))
 
 
+def _eigenvector_magnitudes(adj: np.ndarray) -> np.ndarray:
+    """``(M, N, N)`` magnitudes of the eigenvectors of each distance matrix, by decreasing eigenvalue."""
+    w, v = np.linalg.eig(adj)
+    order = np.argsort(w, axis=-1)[:, ::-1]
+    return np.abs(np.take_along_axis(v, order[:, None, :], axis=-1).real)
+
+
 def match_pairs(positions: np.ndarray, atomic_numbers: np.ndarray, cell: Optional[np.ndarray] = None):
     """Match every pair of geometries.
+
+    The cost matrices, the norms and the permuted distance matrices of one geometry
+    against all later ones are formed at once. The assignment problem of a pair is
+    solved only when its answer is not plain: when every row's smallest cost is
+    strictly smaller than the rest of its row and the rows pick distinct columns,
+    that choice is the unique optimal assignment.
 
     Parameters
     ----------
@@ -49,24 +64,29 @@ def match_pairs(positions: np.ndarray, atomic_numbers: np.ndarray, cell: Optiona
     m, n = positions.shape[:2]
     z = np.asarray(atomic_numbers)
     other_element = (z[:, None] != z[None, :]).astype(float)
-    adj, vec = [], []
-    for k in range(m):
-        a = _distances(positions[k], cell)
-        w, v = np.linalg.eig(a)
-        adj.append(a)
-        vec.append(np.abs(v[:, np.argsort(w)[::-1]].real))
+    adj = np.stack([_distances(positions[k], cell) for k in range(m)])
+    vec = _eigenvector_magnitudes(adj)
+    flat = adj.reshape(m, -1)
+    identity = np.arange(n)
     perms = {}
     cost = np.zeros((m, m))
-    for i in range(m):
-        for j in range(i + 1, m):
-            c = -vec[i] @ vec[j].T
-            c = c + other_element * np.max(np.abs(c))
-            _, p = linear_sum_assignment(c)
-            before = np.linalg.norm(adj[i] - adj[j])
-            after = np.linalg.norm(adj[i][np.ix_(p, p)] - adj[j])
-            cost[i, j] = min(after, before)
-            if after < before and not np.isclose(before, after):
-                perms[i, j] = p
+    step = max(1, PAIR_BLOCK // (n * n))
+    for i in range(m - 1):
+        for j0 in range(i + 1, m, step):
+            js = np.arange(j0, min(m, j0 + step))
+            c = -np.matmul(vec[i], vec[js].transpose(0, 2, 1))
+            c = c + other_element * np.abs(c).max(axis=(1, 2))[:, None, None]
+            p = np.argmin(c, axis=-1)
+            two = np.partition(c, 1, axis=-1)
+            plain = (two[..., 0] < two[..., 1]).all(-1) & (np.sort(p, axis=-1) == identity).all(-1)
+            for k in np.flatnonzero(~plain):
+                p[k] = linear_sum_assignment(c[k])[1]
+            before = np.linalg.norm(flat[i] - flat[js], axis=-1)
+            moved = adj[i][p[:, :, None], p[:, None, :]].reshape(len(js), -1)
+            after = np.linalg.norm(moved - flat[js], axis=-1)
+            cost[i, js] = np.minimum(after, before)
+            for k in np.flatnonzero((after < before) & ~np.isclose(before, after)):
+                perms[i, int(js[k])] = p[k]
     cost = cost + cost.T
     np.fill_diagonal(cost, np.inf)
     return perms, cost

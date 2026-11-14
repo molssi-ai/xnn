@@ -21,10 +21,11 @@ from torch import Tensor, nn
 from xnn.common.data import AtomicGraph
 from xnn.common.featurizers import Featurizer
 from xnn.common.models.base import InteratomicPotential
+from xnn.common.models.fast import FastPathModule
 from xnn.common.models.ops import gather_rows, make_activation
 
 
-class _ElementNetworks(nn.Module):
+class _ElementNetworks(FastPathModule, nn.Module):
     """One atomic MLP per element; dispatches atoms by species.
 
     Holds a separate MLP (mapping a descriptor to a scalar) for each chemical
@@ -53,6 +54,9 @@ class _ElementNetworks(nn.Module):
     extra_inputs : int, optional
         Number of per-atom inputs appended after the descriptor columns (the
         atomic charge of the 4G-HDNNP), by default 0.
+    n_outputs : int, optional
+        Width of every network's output layer, by default 1 (a scalar per
+        atom).
 
     Attributes
     ----------
@@ -62,14 +66,20 @@ class _ElementNetworks(nn.Module):
         Descriptor columns read by every element.
     nets : torch.nn.ModuleDict
         Per-element MLPs keyed by ``str(atomic_number)``.
+    grouping : bool
+        Whether the fast path may evaluate the networks together (set by the
+        owning model, only when :meth:`groupable`): one batched matrix product
+        per layer over the atoms of every element, padded to the largest
+        element, instead of one product per element.
     """
 
     def __init__(self, species: Sequence[int], input_dim: Union[int, dict],
                  hidden: Union[Sequence[int], dict] = (64, 64),
                  activation: Union[str, nn.Module, Sequence, dict] = "silu",
-                 bias: bool = True, extra_inputs: int = 0):
+                 bias: bool = True, extra_inputs: int = 0, n_outputs: int = 1):
         super().__init__()
         self.species = list(species)
+        self.n_outputs = int(n_outputs)
         self.input_dims = {z: int(input_dim[z]) if isinstance(input_dim, dict) else int(input_dim)
                            for z in self.species}
         self.extra_inputs = int(extra_inputs)
@@ -90,16 +100,148 @@ class _ElementNetworks(nn.Module):
                 raise ValueError(f"element {z}: {len(acts)} activations for {len(widths)} hidden "
                                  f"layers and the output layer (need {len(widths) + 1})")
             layers, d = [], self.input_dims[z] + self.extra_inputs
-            for h, act in zip(widths + [1], acts):
+            for h, act in zip(widths + [self.n_outputs], acts):
                 layers.append(nn.Linear(d, h, bias=bias))
                 if act is not None and not (isinstance(act, str) and act.lower() == "linear"
-                                            and h == 1):
+                                            and h == self.n_outputs):
                     layers.append(make_activation(act))
                 d = h
             self.nets[str(z)] = nn.Sequential(*layers)
+        self.grouping = False
+        self.fast_active = False
+
+    @torch.jit.unused
+    def groupable(self) -> bool:
+        """Whether every element has the same architecture (layer shapes, activations, inputs)."""
+        nets = list(self.nets.values())
+        if len(set(self.input_dims.values())) != 1:
+            return False
+        for net in nets[1:]:
+            if len(net) != len(nets[0]):
+                return False
+            for a, b in zip(nets[0], net):
+                if type(a) is not type(b):
+                    return False
+                if isinstance(a, nn.Linear):
+                    if a.weight.shape != b.weight.shape or (a.bias is None) != (b.bias is None):
+                        return False
+                elif repr(a) != repr(b):
+                    return False
+        return True
+
+    def fast_supported(self, device: torch.device, dtype: torch.dtype) -> bool:
+        """The grouped evaluation, where the owning model allows it, on a CUDA device."""
+        return self.grouping and device.type == "cuda"
+
+    def plan(self, atomic_numbers: Tensor) -> Tuple[Tensor, Tensor, List[int]]:
+        """The atoms sorted by element, which several calls on the same atoms can share.
+
+        Parameters
+        ----------
+        atomic_numbers : Tensor
+            Per-atom atomic numbers ``(N,)``.
+
+        Returns
+        -------
+        tuple of (Tensor, Tensor, list of int)
+            The position of every atom's element in ``species`` ``(N,)``
+            (``len(species)``: no network), the stable sorting order ``(N,)``
+            and the block size of every element and of the atoms without a
+            network (one device-to-host copy).
+        """
+        n_species = len(self.species)
+        code = self._element_code(atomic_numbers)
+        order = torch.argsort(code, stable=True)
+        sizes: List[int] = torch.bincount(code, minlength=n_species + 1).cpu().tolist()
+        return code, order, sizes
+
+    def _element_code(self, atomic_numbers: Tensor) -> Tensor:
+        """The position of every atom's element in ``species`` ``(N,)`` (``len(species)``: no network)."""
+        n_species = len(self.species)
+        code = self._code_of_z[atomic_numbers.clamp(max=self._code_of_z.shape[0] - 1)]
+        return torch.where(atomic_numbers < self._code_of_z.shape[0], code, torch.full_like(code, n_species))
+
+    @torch.jit.unused
+    def _forward_grouped(self, desc: Tensor, extra: Optional[Tensor], code: Tensor, order: Tensor,
+                         sizes: List[int]) -> Tensor:
+        """:meth:`forward` with one batched product per layer over the padded element blocks."""
+        n_species, n = len(self.species), desc.shape[0]
+        counts = sizes[:n_species]
+        width = max(counts)
+        if width == 0:
+            out = desc.new_zeros(n, self.n_outputs)
+            return out.squeeze(-1) if self.n_outputs == 1 else out
+        kept = sum(counts)
+        rows = order[:kept]
+        # the slot of every atom in its element's padded block: block start plus rank in the block
+        offsets = [0]
+        for c in counts[:-1]:
+            offsets.append(offsets[-1] + c)
+        element = code[rows]
+        start = torch.tensor(offsets, dtype=torch.long, device=desc.device)
+        slot = element * width + (torch.arange(kept, device=desc.device) - start[element])
+        return self._grouped_layers(desc, extra, rows, slot, width)
+
+    @torch.jit.unused
+    def forward_padded(self, desc: Tensor, atomic_numbers: Tensor, extra: Optional[Tensor],
+                       width: int) -> Tensor:
+        """:meth:`forward` as the grouped evaluation with element blocks of ``width`` rows, without
+        reading a value back from the device (a captured step).
+
+        Parameters
+        ----------
+        desc, atomic_numbers, extra
+            As for :meth:`forward`.
+        width : int
+            Rows per element block, at least the largest element count (the atom count always is).
+
+        Returns
+        -------
+        Tensor
+            As :meth:`forward`.
+        """
+        n_species, n = len(self.species), desc.shape[0]
+        code = self._element_code(atomic_numbers)
+        order = torch.argsort(code, stable=True)
+        # counted by an index_add into a fixed length: bincount sizes its output on the host
+        counts = torch.zeros(n_species + 1, dtype=torch.long, device=desc.device).index_add_(
+            0, code, torch.ones_like(code))
+        start = torch.cumsum(counts, 0) - counts
+        element = code[order]
+        rank = torch.arange(n, device=desc.device) - start[element]
+        # atoms without a network go to one spare row past the blocks, whose output is zero
+        slot = torch.where(element < n_species, element * width + rank, torch.full_like(rank, n_species * width))
+        return self._grouped_layers(desc, extra, order, slot, width)
+
+    @torch.jit.unused
+    def _grouped_layers(self, desc: Tensor, extra: Optional[Tensor], rows: Tensor, slot: Tensor,
+                        width: int) -> Tensor:
+        """The networks of every element as batched products: atom ``rows[i]`` sits at ``slot[i]`` of a
+        table of ``len(species) * width`` rows plus a spare one, and gets its output from there."""
+        n_species, n = len(self.species), desc.shape[0]
+        columns = self.input_dims[self.species[0]]
+        x = desc if columns == desc.shape[1] else desc[:, :columns]
+        if self.extra_inputs > 0 and extra is not None:
+            x = torch.cat([x, extra.reshape(n, -1).to(x.dtype)], dim=-1)
+        table = x.new_zeros(n_species * width + 1, x.shape[1]).index_copy(0, slot, gather_rows(x, rows))
+        h = table[:n_species * width].view(n_species, width, -1)
+        nets = list(self.nets.values())
+        for i, layer in enumerate(nets[0]):
+            if isinstance(layer, nn.Linear):
+                weight = torch.stack([net[i].weight for net in nets]).transpose(1, 2)
+                if layer.bias is not None:
+                    h = torch.baddbmm(torch.stack([net[i].bias for net in nets]).unsqueeze(1), h, weight)
+                else:
+                    h = torch.bmm(h, weight)
+            else:
+                h = layer(h)
+        flat = torch.cat([h.reshape(n_species * width, self.n_outputs), h.new_zeros(1, self.n_outputs)])
+        out = x.new_zeros(n, self.n_outputs).index_copy(0, rows, gather_rows(flat, slot))
+        return out.squeeze(-1) if self.n_outputs == 1 else out
 
     def forward(self, desc: Tensor, atomic_numbers: Tensor,
-                extra: Optional[Tensor] = None) -> Tensor:
+                extra: Optional[Tensor] = None,
+                plan: Optional[Tuple[Tensor, Tensor, List[int]]] = None) -> Tensor:
         """Map per-atom descriptors to per-atom outputs via element networks.
 
         Parameters
@@ -111,24 +253,28 @@ class _ElementNetworks(nn.Module):
             element network.
         extra : Tensor, optional
             The ``(N, extra_inputs)`` inputs appended to the descriptor.
+        plan : tuple, optional
+            The :meth:`plan` of ``atomic_numbers``, when the caller has it.
 
         Returns
         -------
         Tensor
-            Per-atom output, shape ``(N,)``.
+            Per-atom output, shape ``(N,)``, or ``(N, n_outputs)`` for
+            networks with several outputs.
         """
         n_species = len(self.species)
-        code = self._code_of_z[atomic_numbers.clamp(max=self._code_of_z.shape[0] - 1)]
-        code = torch.where(atomic_numbers < self._code_of_z.shape[0], code, torch.full_like(code, n_species))
         # the atoms sorted by element: one gather, a contiguous block per network, one scatter
         # back, and a single device-to-host copy (the block sizes)
-        order = torch.argsort(code, stable=True)
-        counts = torch.bincount(code, minlength=n_species + 1).cpu()
+        if plan is None:
+            code, order, sizes = self.plan(atomic_numbers)
+        else:
+            code, order, sizes = plan
+        if self.fast_active and not torch.jit.is_scripting():
+            return self._forward_grouped(desc, extra, code, order, sizes)
         x_all = gather_rows(desc, order)
         e_all = gather_rows(extra.reshape(desc.shape[0], -1), order) if (
             self.extra_inputs > 0 and extra is not None) else None
         # contiguous blocks by split (its backward is one concatenation)
-        sizes: List[int] = counts.tolist()
         blocks = x_all.split(sizes)
         e_blocks = e_all.split(sizes) if e_all is not None else None
         pieces: List[Tensor] = []
@@ -142,9 +288,14 @@ class _ElementNetworks(nn.Module):
                     x = x[:, :width]
                 if e_blocks is not None:
                     x = torch.cat([x, e_blocks[k].to(x.dtype)], dim=-1)
-                pieces.append(net(x).squeeze(-1))
+                pieces.append(net(x).squeeze(-1) if self.n_outputs == 1 else net(x))
             k += 1
         rest = sizes[n_species]
+        if self.n_outputs != 1:
+            if rest > 0:
+                pieces.append(desc.new_zeros(rest, self.n_outputs))
+            values = torch.cat(pieces) if len(pieces) > 0 else desc.new_zeros(0, self.n_outputs)
+            return desc.new_zeros(desc.shape[0], self.n_outputs).index_copy(0, order, values)
         if rest > 0:
             pieces.append(desc.new_zeros(rest))
         values = torch.cat(pieces) if len(pieces) > 0 else desc.new_zeros(0)
@@ -256,6 +407,12 @@ class DescriptorPotential(InteratomicPotential):
         return self
 
     @torch.jit.unused
+    def fast_policies(self):
+        """The ``"auto"`` policies (evaluation, training): the featurizer's (``None``: always fast)."""
+        policies = getattr(self.featurizer, "fast_policies", None)
+        return (None, None) if policies is None else policies()
+
+    @torch.jit.unused
     def _select_fast(self, num_edges: int) -> None:
         """Switch the fused featurizer kernels on or off for one evaluation."""
         from xnn.common.models.fast import fast_modules, select
@@ -265,7 +422,7 @@ class DescriptorPotential(InteratomicPotential):
             self.__dict__["_fast_blocks"] = blocks
         if not blocks:
             return
-        policies = self.featurizer.fast_policies()
+        policies = self.fast_policies()
         like = self._self_energies_by_z
         policy = policies[1] if self.training else policies[0]
         dtype = next(self.element_nets.parameters()).dtype
