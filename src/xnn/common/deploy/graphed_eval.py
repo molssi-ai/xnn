@@ -98,6 +98,11 @@ class GraphedEvaluation:
         self.graph: Optional[torch.cuda.CUDAGraph] = None
         self.static: Optional[AtomicGraph] = None
         self.inputs: Dict[str, Tensor] = {}
+        # the real atom and structure counts of the last padded input and of the static batch, and
+        # the padding edges of an empty real part (see _load_in_place)
+        self._padded: Optional[tuple] = None
+        self._loaded: Optional[tuple] = None
+        self._pad_edges: Optional[Tensor] = None
         self.out: Optional[Dict[str, Tensor]] = None
         self.steps = 0
         # "replay" or "eager" once the trial after a capture has run
@@ -136,6 +141,7 @@ class GraphedEvaluation:
                 self.cap = Capacity(atoms=n, edges=e, plan={})
                 self._reset()
             graph.index_plan, graph.index_sizes = {}, {}
+            self._padded = None
             return graph
         # planners work on CPU graphs (in training, the data-loader workers); one that plans nothing
         # (NoIndexPlanner) needs no copy
@@ -149,12 +155,63 @@ class GraphedEvaluation:
         batch.compute_dtype = graph.compute_dtype
         batch.index_plan = {k: v.to(graph.pos.device) for k, v in self.planner.pad(plan, self.cap.plan, e).items()}
         batch.index_sizes = dict(self.cap.plan)
+        self._padded = (n, b)
         return batch
 
+    def _load_in_place(self, graph: AtomicGraph) -> bool:
+        """Copy ``graph`` into the static batch without building the padded batch, when only its
+        edges can have changed: a planner without index work, the atom and structure counts of the
+        last padded load, the same fields. The padding atoms and structure then keep their values,
+        and only the padding edges, which follow the real ones, are written again. ``False`` when
+        the input needs the ordinary padding."""
+        if (self.static is None or self._pad_edges is None or self.cap is None or self.cap.plan
+                or self.planner.offsets or not getattr(self.planner, "pads", True)):
+            return False
+        n, e, b = graph.num_nodes, int(graph.edge_index.shape[1]), graph.num_graphs
+        if (n, b) != self._loaded or not self._fits(n, e, b, {}):
+            return False
+        self.planner(graph)
+        # the captured input buffers (the model may have replaced the static batch's own fields,
+        # the positions of a force derivative for one)
+        buffers = self.inputs
+        writes = []
+        for f in dataclasses.fields(graph):
+            v, s = getattr(graph, f.name), buffers.get(f.name)
+            if not isinstance(v, Tensor) and s is None:
+                continue
+            if not (isinstance(v, Tensor) and s is not None):
+                return False
+            if f.name == "edge_index":
+                if v.shape[0] != 2:
+                    return False
+                writes.append((s[:, :e], v))
+            elif f.name == "cell_shifts":
+                writes.append((s[:e], v))
+            elif s.shape[1:] == v.shape[1:] and ((s.shape[0], v.shape[0]) in ((self.cap.atoms, n), (b + 1, b))):
+                # per atom: the real atoms come first; per structure: the padding structure is last
+                writes.append((s[:v.shape[0]], v))
+            else:
+                return False
+        with torch.no_grad():
+            for target, value in writes:
+                target.copy_(value, non_blocking=True)
+            # the padding edges (pairs of padding atoms, numbered from n) after the real ones
+            buffers["edge_index"][:, e:].copy_(self._pad_edges[:, :self.cap.edges - e] + n)
+            buffers["cell_shifts"][e:].zero_()
+        for name, t in buffers.items():
+            if not name.startswith("plan/"):
+                setattr(self.static, name, t)
+        return True
+
     def _load(self, batch: AtomicGraph) -> None:
+        self._loaded = self._padded
         if self.static is None:
             self.static = batch
             self.inputs = _inputs(batch)
+            if self._padded is not None and not self.cap.plan and not self.planner.offsets:
+                # the padding edges of the largest padding, numbered from the padding's first atom
+                like = padding_structure(self.cap.atoms - self._padded[0], self.cap.edges, batch)
+                self._pad_edges = like.edge_index.to(batch.pos.device)
             return
         new = _inputs(batch)
         if new.keys() != self.inputs.keys():
@@ -252,7 +309,8 @@ class GraphedEvaluation:
     def _replayed(self, graph: AtomicGraph) -> Dict[str, Tensor]:
         """The evaluation of ``graph`` padded, through the captured graph once it is recorded."""
         n, b = graph.num_nodes, graph.num_graphs
-        self._load(self._pad(graph))
+        if not self._load_in_place(graph):
+            self._load(self._pad(graph))
         device = self.static.pos.device
         if self.graph is not None:
             self.graph.replay()

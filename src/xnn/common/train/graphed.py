@@ -279,7 +279,8 @@ class PaddedCollate:
 
 
 #: The per-atom fields of a graph (the others are per edge: edge_index, cell_shifts; or per structure).
-_ATOM_FIELDS = ("pos", "atomic_numbers", "batch", "forces", "charges", "fragment_charges", "atom_force_weight")
+_ATOM_FIELDS = ("pos", "atomic_numbers", "batch", "forces", "charges", "fragment_charges", "external_potential",
+                "atom_force_weight")
 
 
 def strip_padding(batch: AtomicGraph) -> AtomicGraph:

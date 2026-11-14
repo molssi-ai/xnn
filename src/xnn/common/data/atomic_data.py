@@ -100,6 +100,10 @@ class AtomicGraph:
     fragment_charges_mask : Tensor, optional
         Which structures carry ``fragment_charges`` when a batch mixes labeled
         and unlabeled ones, shape ``(B,)``; ``None`` means all of them.
+    external_potential : Tensor, optional
+        An applied electrostatic potential on every atom, shape ``(N,)`` (V),
+        for example a bias on electrode atoms. QET adds it to the atoms'
+        electronegativities. ``None`` means no applied potential.
     total_charge : Tensor, optional
         Net charge per structure, of shape ``(B,)``. ``None`` means neutral.
         Read by the charge-aware models (D4 dispersion, PhysNet, ReaxFF,
@@ -179,6 +183,8 @@ class AtomicGraph:
         Target partial charges ``(N,)``.
     charges_mask : Tensor or None
         Bool ``(B,)``: the structures that carry partial-charge labels.
+    external_potential : Tensor or None
+        Applied potential per atom ``(N,)``.
     total_charge : Tensor or None
         Net charge per structure ``(B,)``.
     spin_multiplicity : Tensor or None
@@ -232,6 +238,8 @@ class AtomicGraph:
     # the fragment charge of every atom (LES charge solve); None = unlabeled
     fragment_charges: Optional[Tensor] = None        # (N,) e
     fragment_charges_mask: Optional[Tensor] = None   # (B,) bool; None = all labeled
+    # an applied potential on every atom (V); None = none
+    external_potential: Optional[Tensor] = None      # (N,)
     # optional per-structure metadata
     total_charge: Optional[Tensor] = None   # (B,) net charge; None = neutral
     spin_multiplicity: Optional[Tensor] = None   # (B,) 2S+1; None = closed shell
@@ -343,6 +351,7 @@ class AtomicGraph:
             charges_mask=rows(self.charges_mask, keep),
             fragment_charges=rows(self.fragment_charges, node_keep),
             fragment_charges_mask=rows(self.fragment_charges_mask, keep),
+            external_potential=rows(self.external_potential, node_keep),
             total_charge=rows(self.total_charge, keep),
             spin_multiplicity=rows(self.spin_multiplicity, keep),
             weight=rows(self.weight, keep),

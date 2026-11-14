@@ -218,6 +218,8 @@ class XNNCalculator(Calculator):
                 break
         if "fragment_charges" in atoms.arrays:
             struct["fragment_charges"] = np.asarray(atoms.arrays["fragment_charges"], dtype=float)
+        if "external_potential" in atoms.arrays:
+            struct["external_potential"] = np.asarray(atoms.arrays["external_potential"], dtype=float)
         graph = structure_to_graph(struct, self.cutoff, device=self.device)
         graph.compute_dtype = self.dtype
         out = self._graphed(graph) if self._graphed is not None else self.model(graph)

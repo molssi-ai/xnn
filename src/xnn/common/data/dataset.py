@@ -39,7 +39,8 @@ def structure_to_graph(
         targets of the HDNNP charge networks), ``total_charge`` (scalar net
         charge; the key ``charge`` is accepted as a synonym), ``fragment_charges``
         ``(N,)`` (the net charge of the fragment each atom belongs to, for the
-        LES charge solve), ``spin_multiplicity``
+        LES charge solve), ``external_potential`` ``(N,)`` (an applied
+        potential on every atom, in V; read by QET), ``spin_multiplicity``
         (scalar ``2S + 1``; ``multiplicity`` is a synonym), ``weight`` (scalar
         per-structure loss weight; see
         :func:`~xnn.common.train.losses.weighted_loss`), ``head`` (integer
@@ -139,6 +140,8 @@ def structure_to_graph(
         charges=t(s["charges"]).reshape(n) if s.get("charges") is not None else None,
         fragment_charges=(t(s["fragment_charges"]).reshape(n)
                           if s.get("fragment_charges") is not None else None),
+        external_potential=(t(s["external_potential"]).reshape(n)
+                            if s.get("external_potential") is not None else None),
         total_charge=(t([charge]).reshape(1) if charge is not None else None),
         spin_multiplicity=(t([mult]).reshape(1) if mult is not None else None),
         weight=(t([s["weight"]]).reshape(1) if s.get("weight") is not None else None),
@@ -369,7 +372,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
       becomes a padded row of ``site_species`` / ``site_occupancy``, an
       ordered one its own species at occupancy 1;
     * structures with and without ``total_charge`` (missing = neutral),
-      ``spin_multiplicity`` (missing = 1), ``weight``, ``energy_weight``,
+      ``external_potential`` (missing = 0), ``spin_multiplicity`` (missing = 1), ``weight``, ``energy_weight``,
       ``force_weight``, ``stress_weight``, ``atom_force_weight`` (missing =
       1) or ``head`` (missing = 0, the first head).
 
@@ -393,6 +396,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     heads = []
     props, pr_masks, states = [], [], []
     frag_charges, fc_masks = [], []
+    potentials = []
     e_masks, f_masks, s_masks = [], [], []
     term_weights = {k: [] for k in ("energy_weight", "force_weight", "stress_weight")}
     atom_force_weights = []
@@ -407,6 +411,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_ac = any(g.charges is not None for g in graphs)
     has_q = any(g.total_charge is not None for g in graphs)
     has_fc = any(g.fragment_charges is not None for g in graphs)
+    has_ep = any(g.external_potential is not None for g in graphs)
     has_m = any(g.spin_multiplicity is not None for g in graphs)
     has_w = any(g.weight is not None for g in graphs)
     has_h = any(g.head is not None for g in graphs)
@@ -472,6 +477,9 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
             frag_charges.append(g.fragment_charges if g.fragment_charges is not None
                                 else torch.zeros(g.pos.shape[0], dtype=dtype, device=device))
             fc_masks.append(label_mask(g, g.fragment_charges, g.fragment_charges_mask))
+        if has_ep:
+            potentials.append(g.external_potential if g.external_potential is not None
+                              else torch.zeros(g.pos.shape[0], dtype=dtype, device=device))
         if has_m:
             mults.append(g.spin_multiplicity if g.spin_multiplicity is not None
                          else torch.ones(b, dtype=dtype, device=device))
@@ -529,6 +537,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         charges=torch.cat(atom_charges, 0) if has_ac else None,
         charges_mask=None if ac_mask is None or bool(ac_mask.all()) else ac_mask,
         fragment_charges=torch.cat(frag_charges, 0) if has_fc else None,
+        external_potential=torch.cat(potentials, 0) if has_ep else None,
         fragment_charges_mask=None if fc_mask is None or bool(fc_mask.all()) else fc_mask,
         total_charge=torch.cat(charges, 0) if has_q else None,
         spin_multiplicity=torch.cat(mults, 0) if has_m else None,

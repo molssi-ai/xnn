@@ -76,7 +76,9 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         ``atoms.info["total_charge"]`` or ``atoms.info["charge"]``),
         ``"charges"`` (from ``atoms.arrays["charges"]``, reference partial
         charges), ``"fragment_charges"`` (from ``atoms.arrays["fragment_charges"]``, the
-        net charge of each atom's fragment), ``"spin_multiplicity"`` (from
+        net charge of each atom's fragment), ``"external_potential"`` (from
+        ``atoms.arrays["external_potential"]``, an applied potential per atom in V),
+        ``"spin_multiplicity"`` (from
         ``atoms.info["spin_multiplicity"]`` or ``atoms.info["multiplicity"]``),
         the loss weights ``"weight"``, ``"energy_weight"``,
         ``"force_weight"`` and ``"stress_weight"`` (from the same keys of
@@ -126,6 +128,8 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         d["charges"] = np.asarray(atoms.arrays["charges"], dtype=float)
     if "fragment_charges" in atoms.arrays:
         d["fragment_charges"] = np.asarray(atoms.arrays["fragment_charges"], dtype=float)
+    if "external_potential" in atoms.arrays:
+        d["external_potential"] = np.asarray(atoms.arrays["external_potential"], dtype=float)
     for key in ("weight", "energy_weight", "force_weight", "stress_weight"):
         if key in atoms.info:
             d[key] = float(atoms.info[key])
