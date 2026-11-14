@@ -258,8 +258,8 @@ What to expect from fast implementations
 Captured training steps
 =======================
 A training step on small molecules is bound by kernel launches, not by the
-GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, TensorNet and QET,
-the trainer can record the whole step once as a CUDA graph and replay it for every
+GPU's arithmetic. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, TensorNet, QET and
+QRNN, the trainer can record the whole step once as a CUDA graph and replay it for every
 batch:
 
 .. code-block:: yaml
@@ -269,10 +269,12 @@ batch:
 
 The data loader pads every batch to fixed counts with one inert structure
 and builds the model's index work on the CPU: the triplets of DimeNet, the
-quadruplets of GemNet, and the local edges and long-range pairs of SpookyNet.
+quadruplets of GemNet, the local edges and long-range pairs of SpookyNet, and the angular triplets
+of QRNN.
 The step runs the reference implementation (SpookyNet's runs its fused MLPs).
 SpookyNet steps are 3 to 5 times faster this way on small and medium systems. They do not support the Ewald
-sum. The results equal those of ordinary
+sum. QRNN steps are 3 to 4 times faster on small molecules. They need the recursive charges (not
+QeqNN) and molecules when the Coulomb or dispersion terms are on. The results equal those of ordinary
 steps up to round-off. Where ``use_fast`` takes the fused kernels for the
 padded batch size, the first steps time ordinary steps on the kernels against
 captured ones, and training goes on with the faster. It needs one GPU and a
@@ -282,7 +284,7 @@ ordinary steps.
 Captured evaluations
 ====================
 An evaluation of a small structure is bound by kernel launches in the same
-way. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, AIMNet2, TensorNet and QET, the ASE
+way. For DimeNet, DimeNet++, GemNet, PhysNet, SpookyNet, MACE, AIMNet2, TensorNet, QET and QRNN, the ASE
 calculator can record the evaluation once as a CUDA graph and replay it at every step:
 
 .. code-block:: python
@@ -297,7 +299,8 @@ replay runs the same code as an ordinary evaluation, so the results equal those
 of ordinary evaluations up to round-off. After each recording, a few replays are
 timed against ordinary evaluations, and the faster one is kept. Large structures
 therefore run ordinarily. SpookyNet's replay also uses its compiled block where
-``"auto"`` takes it. TensorNet and QET replay on their fused layers. AIMNet2 replays on its fused shell convolutions, which need
+``"auto"`` takes it. TensorNet and QET replay on their fused layers. QRNN replays its networks
+together as batched products, with the same limits as its captured training steps. AIMNet2 replays on its fused shell convolutions, which need
 a power-of-two ``n_rbf``, with ``coulomb=None`` or ``"dsf"``. Its all-pairs,
 Ewald and PME sums size their work on the host, so they cannot be captured.
 :class:`~xnn.common.deploy.GraphedEvaluation` does the same for any evaluation
