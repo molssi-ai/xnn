@@ -497,6 +497,8 @@ The tables of the PM3, PM6, PM7 and PM6-ORG papers (`Stewart, J. Comput. Chem.
 parameters: heats of formation, dipoles and ionization potentials, the modified
 core-core terms, and the S22 / S66 interaction energies; then the parameters refit
 by gradient descent and written back for MOPAC.
+The tight-binding methods GFN1-xTB and GFN2-xTB follow with their charges, a
+geometry optimization, the S22 interaction energies and a parameter refit.
 
 .. example-toctree::
    :caption: Semiempirical methods (sqmnn)
@@ -505,6 +507,7 @@ by gradient descent and written back for MOPAC.
    PM6: the modified NDDO approximations of the 2007 paper <nb/examples/sqmnn/nddo/pm6_approximations>
    Noncovalent interactions: PM7 (S22, S66) and PM6-ORG <nb/examples/sqmnn/nddo/pm7_pm6org_noncovalent>
    Refitting NDDO parameters: hydrogen bonds, MOPAC export and force training <nb/examples/sqmnn/nddo/sqmnn_parameter_refit>
+   GFN1-xTB and GFN2-xTB: charges, a geometry optimization, the S22 interaction energies and a parameter refit <nb/examples/sqmnn/xtb/gfn_xtb_noncovalent>
 
 GDML and sGDML (krnn)
 =====================
@@ -573,6 +576,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    AMOEBA: verifying the `xnn` implementation against Tinker, LAMMPS and the papers <nb/fidelity_checks/ffnn/amoeba/amoeba_verification>
    HIPPO: verifying the `xnn` implementation against Tinker, LAMMPS and the 2021 paper <nb/fidelity_checks/ffnn/hippo/hippo_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
+   GFN0-xTB, GFN1-xTB and GFN2-xTB against the xtb program <nb/fidelity_checks/sqmnn/xtb/xtb_verification>
    GDML and sGDML against the sGDML package: equations, transplanted models, refits and speed <nb/fidelity_checks/krnn/sgdml/sgdml_verification>
 
 Parity checks
@@ -593,6 +597,7 @@ gradients and timings.
    Dispersion fast paths: parity with the reference (D3, D4) <nb/parity_checks/common/dispersion/dispersion_parity>
    LES fast path: parity with the reference <nb/parity_checks/common/les/les_parity>
    PM3, PM6, PM6-ORG and PM7 fast path: parity with the reference <nb/parity_checks/sqmnn/nddo/nddo_parity>
+   GFN0-xTB, GFN1-xTB and GFN2-xTB fast path: parity with the reference <nb/parity_checks/sqmnn/xtb/gfn_xtb_parity>
    SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
    PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>
    DimeNet and DimeNet++ fast path: parity with the reference <nb/parity_checks/gnn/dimenet/dimenet_parity>

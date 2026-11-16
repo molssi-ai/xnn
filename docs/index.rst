@@ -27,8 +27,8 @@ xnn offers several benefits out-of-the-box:
   (:ref:`fidelity`). :ref:`model-support` rates their speed against the
   upstream codes.
 - **Classical force fields and semiempirical methods, modernized.** ReaxFF,
-  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO and PM3 / PM6 / PM6-ORG / PM7
-  use the same PyTorch
+  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO, PM3 / PM6 / PM6-ORG / PM7 and
+  GFN0-xTB / GFN1-xTB / GFN2-xTB use the same PyTorch
   interface as the MLIPs, so they train (reparameterize), evaluate and deploy
   the same way, on CPU or GPU.
 - **One pipeline.** Shared data object, config schema, trainer and
@@ -155,7 +155,7 @@ Models at a glance
    * - Classical force fields (``ffnn``)
      - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO
    * - Semi-empirical quantum mechanics (``sqmnn``)
-     - PM3, PM6, PM6-ORG, PM7
+     - PM3, PM6, PM6-ORG, PM7, GFN0-xTB, GFN1-xTB, GFN2-xTB
    * - Transformer neural networks (``trfnn``)
      - ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2
    * - Hybrid neural networks (``hybnn``)

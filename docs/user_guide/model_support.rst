@@ -261,6 +261,20 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - GFN0-xTB
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+   * - GFN1-xTB / GFN2-xTB
+     - |Y|
+     - |Y|
+     - |Y|
+     - |O|
+     - |Y|
+     - |Y|
    * - GDML / sGDML
      - |Y|
      - |N|
@@ -274,8 +288,8 @@ and is at least as fast, for evaluation and for a training step.
 - **Torchscript-LAMMPS** exports the reference implementation with
   ``xnn export``. A model with long-range terms (LES, D4, SpookyNet, or the
   charges of AIMNet2, BAMBOO, PhysNet, QET, QRNN and HDNNP 3G / 4G) needs the whole system on one
-  rank, and so do PM3, PM6, PM6-ORG and PM7, whose energy takes every atom
-  pair of a molecule.
+  rank, and so do PM3, PM6, PM6-ORG, PM7 and the GFN methods, whose
+  energy takes every atom pair of a molecule.
 - **Reference-Path** rates the reference implementation against the upstream
   code:
 
@@ -338,7 +352,8 @@ Notes on individual models:
   No code was published with the paper. The reference matches the paper's
   equations. The fast path runs the AEV on the kernels of ANI and,
   when every element has networks of the same shape (the default), evaluates
-  them together. ``"auto"`` takes it below about 300k edges, where it is faster.
+  them together. ``"auto"`` takes it below a size measured for each GPU and
+  precision (about 300k edges on an A100), where it is faster.
 - **DimeNet.** The upstream times its steps on TensorFlow's graph executor.
   Compare it with a captured xnn step (``trainer.cuda_graph: true``, see
   :ref:`howto-fast-paths`), which runs the same reference implementation and
@@ -453,6 +468,23 @@ Notes on individual models:
   derivatives and the density response. It is 1.6 to 3 times faster. The
   TorchScript export runs the same reference code and matches it to round-off
   (see :ref:`howto-lammps`).
+- **GFN0-xTB.** It matches the xtb program to round-off and takes 0.2 to 0.6
+  of its time on the same CPU cores at every size.
+- **GFN1-xTB and GFN2-xTB, Reference-Path (orange).** Both match the xtb
+  program to round-off. xtb runs only on CPUs. On the same cores and at the
+  same convergence setting, both are faster than xtb up to about 400 atoms:
+  GFN1-xTB takes 0.5 to 0.8 of its time and GFN2-xTB 0.4 to 1.0. Near 770
+  atoms the dense diagonalization dominates both programs, and xnn takes 0.9
+  to 1.2 of xtb's time.
+- **GFN0-xTB, GFN1-xTB and GFN2-xTB, fast path.** The integrals run on
+  kernels: C++ loops on a CPU (see :ref:`howto-fast-paths-cpu`) and Triton
+  programs on a GPU. A training step with a force loss runs them too and takes
+  0.5 to 0.9 of the reference's time. On a CPU, GFN2-xTB also runs its
+  three-body dispersion term compiled. On a GPU, batches of small structures
+  (up to about 200 atomic orbitals) are evaluated on the host. Element
+  parameters, Slater exponents and global parameters can be trained with exact
+  gradients of energy and force losses. The TorchScript export evaluates one
+  molecule and matches the reference to round-off (see :ref:`howto-lammps`).
 - **AMOEBA and HIPPO.** Both match Tinker 8 to round-off. On CPUs, their
   kernels run as C++ loops (see :ref:`howto-fast-paths-cpu`) and are faster
   than Tinker 8. On GPUs, both run on fused kernels. Both deploy as inputs for

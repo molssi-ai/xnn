@@ -26,13 +26,15 @@ channels-last kernels), the Fourier transforms and spectral products of the
 spherical CNN, the atomic environment vectors of ANI (also in QRNN, whose element
 networks run as batched products), the message sums of
 PhysNet, the symmetry functions of HDNNP, the attention messages of BAMBOO,
-the kernel expansion of GDML and sGDML, every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
+the kernel expansion of GDML and sGDML, the integrals of GFN0-xTB, GFN1-xTB and
+GFN2-xTB, every energy term of the OPLS, AMBER, CHARMM and DREIDING force fields, the terms and the charge
 solve of ReaxFF and ReaxFF-nn, the pair terms, fields, induction solve and
 mesh sums of AMOEBA and HIPPO, the three-body term of D3 and D4 and the
 large-system EEQ solve of D4 (where we use the Triton kernels, shipped with CUDA
 builds of PyTorch), and the reciprocal sum of the LES long-range term (for
 which, we use plain PyTorch). On a CPU, the three-body term of D3 and D4 and the
-symmetry functions of HDNNP run compiled (see :ref:`howto-fast-paths-cpu`).
+symmetry functions of HDNNP run compiled, and the kernels of AMOEBA, HIPPO and
+the GFN methods run as C++ loops (see :ref:`howto-fast-paths-cpu`).
 
 Install
 =======
@@ -132,8 +134,10 @@ kernels win from a few structures at a time. So are the AIMNet2 kernels, except
 for training on small systems on an A30 or an L40S. The ANI kernels are faster
 at every size in float32. In float64 they win at every size on an A100 and on
 small systems on an A30 or a V100. They are not taken on a T4 or an L40S, whose
-float64 throughput is low. The QRNN fast path wins below about 300k edges
-(500k for evaluations in float32). The PhysNet kernels win on large systems, from about
+float64 throughput is low. The QRNN fast path wins below a size that depends
+on the GPU: about 300k edges on an A100 (500k for evaluations in float32) and
+100k on an A30 or a T4. In float64 an L40S takes it only below about 20k edges,
+and a T4 not at all for evaluations. The PhysNet kernels win on large systems, from about
 20k to 300k edges depending on the GPU (at every size in float64 on a T4), and the BAMBOO kernels from about 5k to
 60k. The HDNNP kernels are faster at every size, for evaluation and training,
 except in float64 on an L40S or a T4. ``"auto"`` takes the
@@ -197,6 +201,14 @@ results match the reference.
   water atoms). ``use_fast=True`` uses them at every size.
 - **Training.** A training step uses the pair kernels. The mesh and the dipole
   solver run eagerly.
+
+GFN0-xTB, GFN1-xTB and GFN2-xTB run their integral kernels on a CPU in the same
+way, with the same cache.
+
+- **Choice.** ``"auto"`` uses them at every size.
+- **Training.** A training step with a force loss uses them too. GFN2-xTB also
+  keeps its compiled three-body term. Trained Slater exponents take the
+  reference integrals.
 
 What to expect from fast implementations
 ========================================
