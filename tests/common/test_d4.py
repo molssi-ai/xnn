@@ -583,3 +583,14 @@ def test_fidelity_vs_dftd4_reduced_cutoffs():
     out = _xnn(pos, z, cutoff_pair=12.0 * BOHR, cutoff_triple=9.0 * BOHR,
                cutoff_cn=10.0 * BOHR)
     assert abs(float(out["energy"]) / HARTREE - e_ref) < 1e-13
+
+
+def test_reference_charge_sets():
+    """The GFN2 reference charges change the reference polarizabilities; unknown sets raise."""
+    from xnn.common.models.d4 import DFTD4
+    eeq, gfn2 = DFTD4(), DFTD4(reference_charges="gfn2")
+    assert eeq.reference_charges == "eeq" and gfn2.reference_charges == "gfn2"
+    assert not torch.equal(eeq.refq, gfn2.refq) and not torch.equal(eeq.refalpha, gfn2.refalpha)
+    assert torch.equal(eeq.refcn, gfn2.refcn)
+    with pytest.raises(ValueError, match="reference_charges"):
+        DFTD4(reference_charges="dft")

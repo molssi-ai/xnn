@@ -504,6 +504,8 @@ def test_refresh_is_the_identity_outside_a_decomposition():
 
 
 _SCRIPT = """
+import os
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -562,8 +564,11 @@ forces = torch.zeros(40, 3)
 forces[plan.owned] = out["forces"]
 dist.all_reduce(forces)
 check(out, ref, forces)
+dist.barrier()
 dist.destroy_process_group()
-print("ok")
+print("ok", flush=True)
+# skip the interpreter teardown, where Gloo's threads can abort a process that finished cleanly
+os._exit(0)
 """
 
 
