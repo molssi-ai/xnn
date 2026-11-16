@@ -345,7 +345,7 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
     def compute(self, atomic_numbers: Tensor, edge_index: Tensor, edge_vec: Tensor, pos: Tensor,
                 batch: Tensor, num_graphs: int, total_charge: Tensor, cell: Optional[Tensor],
                 pbc: Optional[Tensor], triplets: Optional[Tuple[Tensor, Tensor]] = None,
-                width: int = 0) -> Dict[str, Tensor]:
+                width: int = 0, element_widths: Optional[List[int]] = None) -> Dict[str, Tensor]:
         """Energies and charges of a batch from tensors (TorchScript-compatible).
 
         Parameters
@@ -375,6 +375,10 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
             device (a captured step): the networks of every element together
             with blocks of ``width`` rows, the all-pair terms as masked
             matrices. By default 0.
+        element_widths : list of int, optional
+            In a captured step, the rows of each element's block in the order
+            of ``species`` (:class:`QRNNPlanner`) instead of ``width`` for
+            every element.
 
         Returns
         -------
@@ -411,7 +415,7 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
             for _ in range(self.n_iterations):
                 inputs = torch.cat([q.unsqueeze(-1), self._charge_features(basis, q, edge_index, n)], dim=-1)
                 if captured and not torch.jit.is_scripting():
-                    chi = self.charge_nets.forward_padded(desc, z, inputs, width)
+                    chi = self.charge_nets.forward_padded(desc, z, inputs, width, element_widths)
                 else:
                     chi = self.charge_nets(desc, z, inputs, plan)
                 q = closed_form_charges(chi, inverse, total, batch, num_graphs)
@@ -424,7 +428,7 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
             q = self._qeq_charges(chi, sigma, pos, batch, num_graphs, total, cell, periodic)
         inputs = torch.cat([q.unsqueeze(-1), self._charge_features(basis, q, edge_index, n)], dim=-1)
         if captured and not torch.jit.is_scripting():
-            short = self.element_nets.forward_padded(desc, z, inputs, width)
+            short = self.element_nets.forward_padded(desc, z, inputs, width, element_widths)
         else:
             short = self.element_nets(desc, z, inputs, plan)
         short = short + self._self_energies_by_z.to(dtype)[z]
@@ -527,20 +531,26 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
         index_plan = getattr(data, "index_plan", None)
         triplets: Optional[Tuple[Tensor, Tensor]] = None
         width = 0
+        element_widths: Optional[List[int]] = None
         if index_plan is not None:
             # a padded batch of fixed counts (a captured step): the enumerated triplets, the grouped
-            # networks with blocks as long as the batch, no host reads
+            # networks with the element blocks the batch fixes (as long as the batch without them),
+            # no host reads
             from xnn.common.models.fast import deactivate
             deactivate(self)
             triplets = (index_plan["aev_e1"].long(), index_plan["aev_e2"].long())
             width = data.num_nodes
+            sizes = getattr(data, "index_sizes", None) or {}
+            names = [f"element_{z}" for z in self.element_nets.species]
+            if all(k in sizes for k in names):
+                element_widths = [int(sizes[k]) for k in names]
         else:
             self._select_fast(int(data.edge_index.shape[1]))
         edge_vec = data.edge_vectors()
         total = (data.total_charge if data.total_charge is not None
                  else torch.zeros(data.num_graphs, dtype=edge_vec.dtype, device=edge_vec.device))
         out = self.compute(data.atomic_numbers, data.edge_index, edge_vec, data.pos, data.batch,
-                           data.num_graphs, total, data.cell, data.pbc, triplets, width)
+                           data.num_graphs, total, data.cell, data.pbc, triplets, width, element_widths)
         out["energy"] = self.aggregate_energy(out["node_energy"], data)
         out["energy_short"] = self.aggregate_energy(out["node_energy_short"], data)
         out["energy_elec"] = self.aggregate_energy(out["node_energy_elec"], data)
@@ -562,7 +572,8 @@ class QRNN(ExactFloat64Constants, DescriptorPotential):
         if self.charge_model != "recursive":
             raise ValueError("a captured step needs charge_model='recursive' (QeqNN solves a linear system "
                              "per structure)")
-        return QRNNPlanner(self.coulomb or self.dispersion)
+        return QRNNPlanner(self.coulomb or self.dispersion, float(self.featurizer.angular.cutoff),
+                           [int(z) for z in self.element_nets.species])
 
     @classmethod
     def from_config(cls, cfg) -> "QRNN":
@@ -615,35 +626,60 @@ class QRNNPlanner:
 
     A captured evaluation or training step (:mod:`xnn.common.train.graphed`) needs fixed shapes and no
     host synchronization, while the triplet count of a structure is known only after enumerating them.
-    The planner enumerates every pair of edges at each center on the CPU (the pairs beyond the angular
-    cutoff add exact zeros), and the padded batch carries them as ``index_plan``. Holds no tensors, so
-    data-loader workers receive it cheaply.
+    The planner enumerates on the CPU the pairs of edges at each center within the angular cutoff (with a
+    small margin: the pairs beyond the cutoff add exact zeros) at the structure's own positions, and the
+    padded batch carries them as ``index_plan``. With ``species`` it also counts the atoms of every
+    element, so that a padded batch fixes the size of each element's block of the networks. Holds no
+    tensors, so data-loader workers receive it cheaply.
 
     Parameters
     ----------
     all_pairs : bool
         Whether the model sums every atom pair (Coulomb or dispersion term), which needs molecules.
+    angular_cutoff : float, optional
+        The cutoff of the angular terms (default: every pair of edges).
+    species : sequence of int, optional
+        The elements with networks, in the model's order (default: no counts).
     """
 
     #: The count each plan entry indexes (for batching the plans of single structures).
-    offsets = {"aev_e1": "edges", "aev_e2": "edges"}
+    offsets = {"aev_e1": "edges", "aev_e2": "edges", "element_counts": None}
     #: Batches are padded by an inert structure to fixed counts.
     pads = True
 
-    def __init__(self, all_pairs: bool):
+    #: Relative margin on the angular cutoff, so that no rounding of the edge lengths drops a pair.
+    margin = 1e-5
+
+    def __init__(self, all_pairs: bool, angular_cutoff: float = math.inf, species: Sequence[int] = ()):
         self.all_pairs = bool(all_pairs)
+        self.angular_cutoff = float(angular_cutoff)
+        self.species = [int(z) for z in species]
 
     def __call__(self, data: AtomicGraph) -> Dict[str, Tensor]:
         if self.all_pairs and data.pbc is not None and bool(data.pbc.any()):
             raise ValueError("the QRNN Coulomb and dispersion terms sum every pair of a molecule; "
                              "periodic structures need coulomb=False and dispersion=False")
-        e1, e2, _ = build_triplets(data.edge_index, data.num_nodes)
-        return {"aev_e1": e1, "aev_e2": e2}
+        with torch.no_grad():
+            r = torch.linalg.norm(data.edge_vectors(), dim=-1)
+        inside = torch.nonzero(r <= self.angular_cutoff * (1.0 + self.margin)).squeeze(-1)
+        e1, e2, _ = build_triplets(data.edge_index[:, inside], data.num_nodes)
+        plan = {"aev_e1": inside[e1], "aev_e2": inside[e2]}
+        if self.species:
+            # per element (the last entry: atoms without a network); a batch concatenates its structures'
+            code = torch.full_like(data.atomic_numbers, len(self.species))
+            for k, z in enumerate(self.species):
+                code = torch.where(data.atomic_numbers == z, torch.full_like(code, k), code)
+            plan["element_counts"] = torch.bincount(code.long(), minlength=len(self.species) + 1)
+        return plan
 
-    @staticmethod
-    def sizes(plan: Dict[str, Tensor]) -> Dict[str, int]:
-        """The sizes a padded batch fixes: the triplet count."""
-        return {"triplets": int(plan["aev_e1"].shape[0])}
+    def sizes(self, plan: Dict[str, Tensor]) -> Dict[str, int]:
+        """The sizes a padded batch fixes: the triplet count and, with ``species``, the atoms of every
+        element (``"element_<Z>"``)."""
+        out = {"triplets": int(plan["aev_e1"].shape[0])}
+        if self.species and "element_counts" in plan:
+            counts = plan["element_counts"].reshape(-1, len(self.species) + 1).sum(0).tolist()
+            out.update({f"element_{z}": int(c) for z, c in zip(self.species, counts)})
+        return out
 
     @staticmethod
     def pad(plan: Dict[str, Tensor], sizes: Dict[str, int], dummy_edge: int) -> Dict[str, Tensor]:

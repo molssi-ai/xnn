@@ -180,20 +180,29 @@ class _ElementNetworks(FastPathModule, nn.Module):
         element = code[rows]
         start = torch.tensor(offsets, dtype=torch.long, device=desc.device)
         slot = element * width + (torch.arange(kept, device=desc.device) - start[element])
-        return self._grouped_layers(desc, extra, rows, slot, width)
+        return self._grouped_layers(desc, extra, rows, slot, list(range(n_species)), width)
 
     @torch.jit.unused
     def forward_padded(self, desc: Tensor, atomic_numbers: Tensor, extra: Optional[Tensor],
-                       width: int) -> Tensor:
-        """:meth:`forward` as the grouped evaluation with element blocks of ``width`` rows, without
+                       width: int, widths: Optional[List[int]] = None) -> Tensor:
+        """:meth:`forward` as the grouped evaluation with element blocks of fixed sizes, without
         reading a value back from the device (a captured step).
+
+        Every element's block is cut into chunks of one common length (the mean block size), so
+        that each layer stays one batched product while the rows exceed the blocks' total by at
+        most one chunk per element.
 
         Parameters
         ----------
         desc, atomic_numbers, extra
             As for :meth:`forward`.
         width : int
-            Rows per element block, at least the largest element count (the atom count always is).
+            Rows of every element's block when ``widths`` is not given: at least the largest
+            element count (the atom count always is).
+        widths : list of int, optional
+            Rows of each element's block, in the order of ``species``: at least the element's count
+            of atoms with outputs. Atoms past their block's end (a captured batch's padding) get a
+            zero output.
 
         Returns
         -------
@@ -201,6 +210,13 @@ class _ElementNetworks(FastPathModule, nn.Module):
             As :meth:`forward`.
         """
         n_species, n = len(self.species), desc.shape[0]
+        c, chunks, first_rows = self._padded_layout([width] * n_species if widths is None else list(widths))
+        # the first row of every element's chunks, the spare row twice: filled one by one, since a
+        # captured step cannot copy a host list to the device
+        first = torch.empty(n_species + 2, dtype=torch.long, device=desc.device)
+        for e, row in enumerate(first_rows + [first_rows[-1]]):
+            first[e].fill_(row)
+        room = first[1:] - first[:-1]
         code = self._element_code(atomic_numbers)
         order = torch.argsort(code, stable=True)
         # counted by an index_add into a fixed length: bincount sizes its output on the host
@@ -209,33 +225,47 @@ class _ElementNetworks(FastPathModule, nn.Module):
         start = torch.cumsum(counts, 0) - counts
         element = code[order]
         rank = torch.arange(n, device=desc.device) - start[element]
-        # atoms without a network go to one spare row past the blocks, whose output is zero
-        slot = torch.where(element < n_species, element * width + rank, torch.full_like(rank, n_species * width))
-        return self._grouped_layers(desc, extra, order, slot, width)
+        # atoms without a network (no room) or past their block go to one spare row, whose output is zero
+        slot = torch.where(rank < room[element], first[element] + rank, torch.full_like(rank, first_rows[-1]))
+        return self._grouped_layers(desc, extra, order, slot, chunks, c)
+
+    def _padded_layout(self, widths: List[int]) -> Tuple[int, List[int], List[int]]:
+        """The chunk length, the element of every chunk and the first row of every element's chunks
+        (with the total rows last) for blocks of ``widths`` rows."""
+        c = max(1, -(-sum(widths) // max(len(widths), 1)))
+        chunks: List[int] = []
+        first = [0]
+        for e, w in enumerate(widths):
+            k = -(-max(w, 0) // c)
+            chunks += [e] * k
+            first.append(first[-1] + k * c)
+        return c, chunks, first
 
     @torch.jit.unused
     def _grouped_layers(self, desc: Tensor, extra: Optional[Tensor], rows: Tensor, slot: Tensor,
-                        width: int) -> Tensor:
+                        chunks: List[int], width: int) -> Tensor:
         """The networks of every element as batched products: atom ``rows[i]`` sits at ``slot[i]`` of a
-        table of ``len(species) * width`` rows plus a spare one, and gets its output from there."""
-        n_species, n = len(self.species), desc.shape[0]
+        table of ``len(chunks) * width`` rows (chunk ``j`` evaluated by the network of element
+        ``chunks[j]``) plus a spare one, and gets its output from there."""
+        n = desc.shape[0]
+        n_rows = len(chunks) * width
         columns = self.input_dims[self.species[0]]
         x = desc if columns == desc.shape[1] else desc[:, :columns]
         if self.extra_inputs > 0 and extra is not None:
             x = torch.cat([x, extra.reshape(n, -1).to(x.dtype)], dim=-1)
-        table = x.new_zeros(n_species * width + 1, x.shape[1]).index_copy(0, slot, gather_rows(x, rows))
-        h = table[:n_species * width].view(n_species, width, -1)
+        table = x.new_zeros(n_rows + 1, x.shape[1]).index_copy(0, slot, gather_rows(x, rows))
+        h = table[:n_rows].view(len(chunks), width, -1)
         nets = list(self.nets.values())
         for i, layer in enumerate(nets[0]):
             if isinstance(layer, nn.Linear):
-                weight = torch.stack([net[i].weight for net in nets]).transpose(1, 2)
+                weight = torch.stack([nets[e][i].weight for e in chunks]).transpose(1, 2)
                 if layer.bias is not None:
-                    h = torch.baddbmm(torch.stack([net[i].bias for net in nets]).unsqueeze(1), h, weight)
+                    h = torch.baddbmm(torch.stack([nets[e][i].bias for e in chunks]).unsqueeze(1), h, weight)
                 else:
                     h = torch.bmm(h, weight)
             else:
                 h = layer(h)
-        flat = torch.cat([h.reshape(n_species * width, self.n_outputs), h.new_zeros(1, self.n_outputs)])
+        flat = torch.cat([h.reshape(n_rows, self.n_outputs), h.new_zeros(1, self.n_outputs)])
         out = x.new_zeros(n, self.n_outputs).index_copy(0, rows, gather_rows(flat, slot))
         return out.squeeze(-1) if self.n_outputs == 1 else out
 
