@@ -180,6 +180,8 @@ def build(dftd4: Path, multicharge: Path, mctc: Path) -> dict[str, np.ndarray]:
         "refcn_d3": refcn,                    # only for provenance / ngw
         "refq": table("clsq"),                # EEQ charge of A in the reference
         "refh": table("clsh"),                # EEQ charge of X in the reference
+        "refq_gfn2": table("refq"),           # GFN2-xTB charge of A in the reference
+        "refh_gfn2": table("refh"),           # GFN2-xTB charge of X in the reference
         "hcount": table("hcount"),            # n / m of eq 5
         "ascale": table("ascale"),            # 1 / m of eq 5
         "refsys": refsys,                     # secondary system (X) index
