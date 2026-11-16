@@ -5,9 +5,10 @@ program that hold them (github.com/openmopac/mopac, release 23.2.5) are
 downloaded, checked by MD5 and kept in the model cache under
 ``sqmnn/mopac-23.2.5`` (see
 :func:`~xnn.common.models.hub.cache.default_model_cache_dir`); later loads read
-the cached files. The values are taken from the ``data`` statements and the
-diatomic assignments of those files as text; nothing in them is compiled or
-executed.
+the cached files. A ``LICENSE.txt`` beside them records where they came from
+and the license of MOPAC. The values are taken from the ``data`` statements and
+the diatomic assignments of those files as text; nothing in them is compiled
+or executed.
 
 With ``XNN_OFFLINE=1`` the files must already be in the cache. A parameter
 set can always be given as a MOPAC ``EXTERNAL`` file instead (for example one
@@ -106,15 +107,21 @@ def source_file(file: str, cache_dir: Optional[Union[str, Path]] = None) -> Path
     """
     from ...common.data.hub._download import download_file, md5sum
     from ...common.models.hub.cache import offline, resolve_cache_dir
+    from .provenance import write_license_note
 
     dest = resolve_cache_dir(cache_dir) / "sqmnn" / f"mopac-{RELEASE.lstrip('v')}" / file
+    note = (dest.parent, "MOPAC", RELEASE, "https://github.com/openmopac/mopac", "Apache-2.0",
+            (f"https://raw.githubusercontent.com/openmopac/mopac/{RELEASE}/LICENSE",))
     if dest.exists() and md5sum(dest) == _MD5[file]:
+        write_license_note(*note)
         return dest
     if offline():
         raise FileNotFoundError(
             f"{dest} is not cached and XNN_OFFLINE is set; load the method once with network "
             "access, or pass a MOPAC EXTERNAL parameter file")
-    return download_file(_URL.format(release=RELEASE, file=file), dest, _MD5[file], quiet=True)
+    path = download_file(_URL.format(release=RELEASE, file=file), dest, _MD5[file], quiet=True)
+    write_license_note(*note)
+    return path
 
 
 def published_parameters(method: str, cache_dir: Optional[Union[str, Path]] = None):
