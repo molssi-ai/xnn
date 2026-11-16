@@ -1,0 +1,11 @@
+name: gfn0_xtb
+cutoff: 0.1                   # neighbor-list radius of the data pipeline; the model forms all atom pairs itself
+parameters: gfn0              # parameter set: the published gfn0 values (downloaded from the xtb program on first use) or a parameter file in the xtb format
+electronic_temperature: 300.0 # Fermi smearing temperature of the occupations (K)
+max_iter: 500                 # no effect: the method has no self-consistent cycle
+accuracy: 1.0                 # no effect: the method has no self-consistent cycle
+mixing: 0.4                   # no effect: the method has no self-consistent cycle
+history: 8                    # no effect: the method has no self-consistent cycle
+use_fast: auto                # fast path: auto, true or false (false = the reference)
+guess: eeq                    # no effect: the method has no self-consistent cycle
+trainable: false              # element parameters to train: false, true (the list), all (also EXP, GLOBAL, XI, KAPPA, GAM, ALPG) or a list (LEV, KCN, KQ, KQAT2, POLY, REPA, REPB)
