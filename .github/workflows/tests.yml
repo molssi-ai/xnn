@@ -164,16 +164,18 @@ jobs:
         # cpu-kernels: ninja, which builds the C++ CPU kernels of the HDNNP tests
         run: pip install -e ".[ase,gnn,ffnn,krnn,vesin,cpu-kernels,dev]" "e3nn==0.4.4" pytest-cov
 
-      - name: Fetch the MOPAC parameter files of the sqmnn methods
-        # xnn does not ship the published PM3/PM6/PM6-ORG/PM7 values; they are
-        # downloaded from the pinned MOPAC release (MD5-checked) into the model
-        # cache here, the only network access of the run, so the tests below
-        # can run with XNN_OFFLINE
+      - name: Fetch the published parameter files
+        # xnn does not ship the published PM3/PM6/PM6-ORG/PM7, GFN0/1/2-xTB and
+        # GFN-FF values; they are downloaded from the pinned MOPAC and xtb
+        # releases (MD5-checked) into the model cache here, the only network
+        # access of the run, so the tests below can run with XNN_OFFLINE
         env:
           XNN_OFFLINE: "0"
         run: >
-          python -c "from xnn.sqmnn.common.published import published_parameters as p;
-          [p(m) for m in ('pm3', 'pm6', 'pm6-org', 'pm7')]"
+          python -W ignore -c "from xnn.sqmnn.common.published import published_parameters as p;
+          from xnn.sqmnn.common.xtb_published import parameter_file as x;
+          from xnn.ffnn.models.gfnfflib import parameter_file as f;
+          [p(m) for m in ('pm3', 'pm6', 'pm6-org', 'pm7')]; [x(m) for m in ('gfn0', 'gfn1', 'gfn2')]; f()"
 
       - name: Run the tests of the shard with coverage
         # junit.xml (legacy family, the schema Codecov Test Analytics reads)
