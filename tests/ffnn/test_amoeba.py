@@ -1107,6 +1107,99 @@ def test_protein_dipeptide_valence_terms_and_file_round_trips(tmp_path):
     assert float(Amoeba(back, renamed, cutoff=30.0)(g)["energy"]) == pytest.approx(e_ref, abs=1e-5)
 
 
+def _interpreted_valence(monkeypatch, device):
+    """The valence kernels' module; under Triton's interpreter (no CUDA) with numpy stand-ins for the
+    libdevice functions the interpreter lacks."""
+    from xnn.ffnn.models import amoeba_valence as kv
+    if device == "cuda":
+        return kv
+    import os
+    import types
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    import triton.language as tl
+    from triton.runtime.interpreter import TensorHandle
+
+    def unary(fn):
+        return lambda x: tl.core.tensor(TensorHandle(fn(x.handle.data), x.handle.dtype.scalar), x.type)
+    monkeypatch.setattr(kv, "libdevice", types.SimpleNamespace(acos=unary(np.arccos), asin=unary(np.arcsin)))
+    return kv
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("device", [
+    "cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU"))])
+def test_valence_kernels_match_the_valence_block(tmp_path, monkeypatch, device, dtype):
+    """The valence kernels give the valence block's per-atom terms (bonds, in-plane angles, stretch-bends,
+    out-of-plane bends, torsions) on a step plan of a periodic peptide, and its gradient of a weighted sum
+    of them with respect to the positions and the cell, also with an atom wrapped into the cell."""
+    kv = _interpreted_valence(monkeypatch, device)
+    model0, pos, z, lib = _protein(tmp_path, ALA_WATER_XYZ)
+    lib = copy.deepcopy(lib)
+    lib.pitors_types = {}
+    model = Amoeba(lib, model0.topology, cutoff=6.3, ewald_cutoff=6.0, vdw_cutoff=6.0, taper=5.4,
+                   pme_grid=24, dpme_grid=24).to(device=device, dtype=dtype).eval()
+    assert model.strbnd_angle.numel() and model.opbend_type.numel() and model._inplane_any
+    assert model.torsion_type.numel()
+    cell = 18.0 * np.eye(3)
+    s = {"pos": torch.as_tensor(np.asarray(pos)), "atomic_numbers": torch.as_tensor(np.asarray(z)),
+         "cell": torch.as_tensor(cell), "pbc": torch.ones(3, dtype=torch.bool)}
+    graph = structure_to_graph(s, cutoff=6.8, device=device)
+    graph.compute_dtype = dtype
+    plan = model.plan_step(graph, 0.5, capacity=None)
+    N = graph.num_nodes
+    table = model._valence_table(plan, 1, N)
+    assert table is not None and model._valence_table(plan, 1, N) is table
+    gen = torch.Generator().manual_seed(2)
+    weights = torch.rand(len(kv.TERMS), N, generator=gen, dtype=torch.float64).to(device=device, dtype=dtype)
+    tol = 1e-11 if dtype == torch.float64 else 2e-5
+    for wrapped in (False, True):
+        p0, jumps = graph.pos.detach().clone(), None
+        if wrapped:
+            p0[5, 1] += float(cell[1, 1])
+            jumps = torch.zeros_like(p0)
+            jumps[5, 1] = 1.0
+        found = []
+        for kernels in (False, True):
+            data = copy.copy(graph)
+            data.pos = p0.clone().requires_grad_(True)
+            data.cell = graph.cell.detach().clone().requires_grad_(True)
+            if kernels:
+                stacked = model._valence_kernel_rows(data, plan, table, jumps)
+            else:
+                rows = model._valence(data, None, plan.shifts, 1, N, plan.image_pairs[:plan.energy_calls], None,
+                                      False, jumps)["terms"]
+                stacked = torch.stack([rows[k] for k in kv.TERMS])
+            grads = torch.autograd.grad((stacked * weights).sum(), (data.pos, data.cell))
+            found.append((stacked.detach(), *grads))
+        for got, want in zip(found[1], found[0]):
+            scale = float(want.abs().max())
+            assert torch.allclose(got.double(), want.double(), rtol=tol, atol=tol * scale), wrapped
+    # the inner step formed directly (no autograd) against the autograd pass on the plan, through the
+    # hook of ForceStressOutput
+    plan.terms = "valence"
+    fso = ForceStressOutput(model, compute_stress=True)
+    monkeypatch.setattr(model, "forms_plan_forces", lambda data, plan: False)
+    want = fso(copy.copy(graph), plan)
+    monkeypatch.setattr(model, "forms_plan_forces", lambda data, plan: True)
+    monkeypatch.setattr(model, "forward_plan_direct", lambda data, plan: model._direct_valence(data, plan, table))
+    got = fso(copy.copy(graph), plan)
+    for key in ("energy", "forces", "stress") + kv.TERMS:
+        a, b = got[key].double(), want[key].double()
+        assert torch.allclose(a, b, rtol=tol, atol=tol * max(float(b.abs().max()), 1e-3)), key
+    assert "stress" not in ForceStressOutput(model)(copy.copy(graph), plan)
+    # a model that returns the strain derivative instead of the stress
+    volume = float(torch.linalg.det(graph.cell[0].double()).abs())
+    virial = {"energy": want["energy"], "forces": want["forces"], "virial": want["stress"] * volume}
+    monkeypatch.setattr(model, "forward_plan_direct", lambda data, plan: dict(virial))
+    assert torch.allclose(fso(copy.copy(graph), plan)["stress"], want["stress"], rtol=1e-12, atol=1e-15)
+    monkeypatch.undo()
+    assert model.forms_plan_forces(graph, plan) == (device == "cuda")
+    assert not model.train().forms_plan_forces(graph, plan)
+    plan.terms = "all"
+    assert not model.forms_plan_forces(graph, plan)
+
+
 def test_glycine_torsion_torsion_term(tmp_path):
     model, pos, z, lib = _protein(tmp_path, GLY_XYZ)
     assert int(model.tortor_index.shape[-1]) == 1
