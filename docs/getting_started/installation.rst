@@ -98,7 +98,7 @@ prints the xnn version and the list of available models.
    print(xnn.__version__)
    print(available_models())
    # ['aimnet2', 'allegro', 'amber', 'amoeba', 'ani', 'bamboo', 'byteff', 'byteff_pol', 'cace', 'charmm',
-   #  'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding', 'equiformer', 'equiformer_v2', 'et', 'gdml', 'gemnet', 'hdnnp',
+   #  'cnn3d', 'd3', 'd4', 'dimenet', 'dimenet++', 'dreiding', 'equiformer', 'equiformer_v2', 'et', 'gdml', 'gemnet', 'gfnff', 'hdnnp',
    #  'hippo', 'mace', 'megnet', 'nequip', 'nnp1g', 'opls', 'painn', 'physnet', 'pm3', 'pm6', 'pm6_org', 'pm7', 'qet', 'qrnn',
    #  'reaxff', 's2cnn', 'schnet', 'se3cnn', 'sgdml', 'spookynet', 'tensornet']
 

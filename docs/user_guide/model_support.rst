@@ -205,6 +205,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - GFN-FF
+     - |O|
+     - |O|
+     - |O|
+     - |Y|
+     - |Y|
+     - |Y|
    * - ET
      - |Y|
      - |Y|
@@ -320,6 +327,12 @@ Why a cell is orange or red:
 - **ByteFF-Pol, LAMMPS (orange).** It exports as TorchScript with the
   parameters of the system it is bound to, for molecules, clusters and
   periodic cells.
+- **GFN-FF, ASE, LAMMPS and MDI (orange).** A model serves the system it is
+  built from: its covalent topology is fixed at the build geometry, while the
+  hydrogen- and halogen-bond rows follow the conformation. The LAMMPS export
+  runs the whole system on one rank, and in a periodic cell it keeps the
+  hydrogen- and halogen-bond rows of the export, valid while every atom stays
+  within half the model's ``skin`` of where they were chosen.
 - **D4, Reference-Path (orange).** See the add-on terms below.
 - **MEGNet, ASE, LAMMPS and MDI (red).** MEGNet predicts one property per
   structure, such as a band gap, rather than a potential energy. It has no
@@ -433,6 +446,8 @@ Notes on individual models:
   eager terms. A stress loss trains on the eager terms. An MD step of a
   classical field with :class:`~xnn.ffnn.models.ReaxFFStepper` is faster than
   with the GPU build of LAMMPS, list rebuilds included.
+- **GFN-FF.** An independent implementation based on the manuscripts. The
+  xtb program served as a black-box oracle for its verification.
 - **Force fields in LAMMPS.** OPLS, AMBER, CHARMM, DREIDING, ByteFF and classical
   ReaxFF deploy as inputs for LAMMPS's own styles
   (:func:`~xnn.ffnn.models.write_lammps_input`), not as a TorchScript file.

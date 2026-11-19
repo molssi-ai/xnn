@@ -845,6 +845,66 @@ Other options, including ``bond_style`` (harmonic / morse), ``angle_style`` and
 ``hbond``, are also available. Set resonance types, such as an amide
 ``C_R``-``N_R``, explicitly.
 
+GFN-FF
+======
+:class:`~xnn.ffnn.models.gfnff.GFNFF` is the general force field of `Spicher et
+al., Angew. Chem. Int. Ed. 59, 15665 (2020)
+<https://doi.org/10.1002/anie.202004239>`_. It needs no atom types and no input
+topology. The model derives the bonds, hybridization, pi systems, charges and
+all parameters from the elements, the positions and the total charge. It covers
+molecules, ions and periodic structures of the elements H to Rn. It is an
+independent implementation based on the paper, verified against the xtb
+program as a black box.
+
+.. code-block:: python
+
+   from xnn.ffnn.models import GFNFF
+
+   model = GFNFF.from_atoms(atoms, charge=0)               # Molecule, ion or periodic ase.Atoms
+   model = GFNFF(numbers, positions, charge=0, cell=cell)  # Lattice vectors in Angstrom, one per row
+
+   model.eval()
+   terms, gradient = model.energy_and_gradient(positions)  # Hartree, Hartree per Angstrom
+
+- A model is bound to the structure it was built from. It evaluates
+  conformations of that structure, with the same atoms in the same order.
+- The bonded terms keep the topology of the build structure. Hydrogen and
+  halogen bonds are chosen again for every conformation, as in xtb. Set
+  ``fixed_lists=True`` to keep those of the build structure instead.
+- A periodic model evaluates each structure in its own cell. For a cell,
+  ``energy_and_gradient`` also returns the gradient with respect to the cell,
+  which gives the stress.
+- As in xtb, different cells of the same crystal can give different energies.
+  In exactly symmetric cells with degenerate pi orbitals, such as some
+  polyacetylene and graphene supercells, the energy depends on round-off. xnn
+  and xtb can then differ by up to about 0.01 Hartree, and xtb itself changes as
+  much when only the atom order changes.
+- By default the model runs fused kernels on CPUs and GPUs, in evaluation and
+  training. They match the eager terms to round-off, including the second
+  derivatives that force and stress training needs. Set ``use_fast=False`` for
+  the eager terms, which are differentiable to any order.
+- ``model.float()`` switches the model to single precision.
+- The element parameters are downloaded from the xtb repository on first use.
+  They are kept in the model cache with a ``LICENSE.txt`` beside them.
+
+The ASE calculator and the MDI engine serve the bound system with forces and
+stress, for molecules and periodic cells. To serve a checkpoint with
+``xnn mdi``, give the structure in the model options of the config:
+``atomic_numbers``, ``positions``, ``charge`` and, for a periodic system,
+``cell``. The model also exports to TorchScript for LAMMPS and other drivers:
+
+.. code-block:: python
+
+   from xnn.common.deploy import export_torchscript_potential
+
+   export_torchscript_potential(model, cutoff=1.0, path="gfnff.pt")
+
+- The exported file needs the whole system on one rank, with the atoms in the
+  build order.
+- A periodic export keeps its hydrogen and halogen bonds while every atom stays
+  within half the ``skin`` of its starting position. Beyond that, a call raises
+  an error. For longer runs, build the model with a larger ``skin``.
+
 AMBER (ff94)
 ============
 :class:`~xnn.ffnn.models.amber.Amber` is the force field of

@@ -27,7 +27,7 @@ xnn offers several benefits out-of-the-box:
   (:ref:`fidelity`). :ref:`model-support` rates their speed against the
   upstream codes.
 - **Classical force fields and semiempirical methods, modernized.** ReaxFF,
-  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO and PM3 / PM6 / PM6-ORG / PM7
+  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO, GFN-FF and PM3 / PM6 / PM6-ORG / PM7
   use the same PyTorch
   interface as the MLIPs, so they train (reparameterize), evaluate and deploy
   the same way, on CPU or GPU.
@@ -153,7 +153,7 @@ Models at a glance
    * - Convolutional neural networks (``cnn``)
      - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
-     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO
+     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF
    * - Semi-empirical quantum mechanics (``sqmnn``)
      - PM3, PM6, PM6-ORG, PM7
    * - Transformer neural networks (``trfnn``)
