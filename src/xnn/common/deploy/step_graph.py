@@ -326,7 +326,8 @@ class StepGraph:
         self._grid_cache = None
         refresh = getattr(self.core, "refresh_cell", None)
         if callable(refresh):
-            refresh(self.plan, self.cell)
+            # the comparison above found the change: the model remakes its terms without reading again
+            refresh(self.plan, self.cell, changed=True)
         if self.shift_bound is None:
             self.shift_bound = self._shift_bound()
 

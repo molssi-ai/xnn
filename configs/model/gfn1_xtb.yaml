@@ -1,0 +1,11 @@
+name: gfn1_xtb
+cutoff: 0.1                   # neighbor-list radius of the data pipeline; the model forms all atom pairs itself
+parameters: gfn1              # parameter set: the published gfn1 values (downloaded from the xtb program on first use) or a parameter file in the xtb format
+electronic_temperature: 300.0 # Fermi smearing temperature of the occupations (K)
+max_iter: 500                 # iteration limit of the self-consistent charges
+accuracy: 1.0                 # convergence of the self-consistent charges, as in xtb (smaller is tighter, down to 0.0001)
+mixing: 0.4                   # damping of the Anderson mixing
+history: 8                    # iterations kept by the Anderson mixing
+use_fast: auto                # fast path: auto, true or false (false = the reference)
+guess: eeq                    # starting charges of the cycle: eeq (charge-equilibration model) or neutral
+trainable: false              # element parameters to train: false, true (the list), all (also EXP, GLOBAL, KPAIR) or a list (LEV, KCN, POLY, GAM, LPAR, GAM3, REPA, REPB, DPOL, QPOL)

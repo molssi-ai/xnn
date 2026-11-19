@@ -230,6 +230,21 @@ def _ewald_alpha(rlen: float, dlen: float, vol: float) -> float:
     return alpha
 
 
+def charge_scaling_terms(q: Tensor, zeff: Tensor, hardness: Tensor, qref: Tensor, ga: float) -> Tuple[Tensor, Tensor]:
+    """The charge scaling ``zeta`` of the reference polarizabilities (eqs 2-4) and its derivative
+    with respect to the charges, each ``(N, 7)``, from the effective nuclear charges ``(N, 1)``, the
+    chemical hardnesses scaled by ``gc`` ``(N, 1)`` and the reference charges plus the effective
+    nuclear charges ``(N, 7)``."""
+    qmod = q[:, None] + zeff
+    negative = qmod < 0.0
+    safe = torch.where(negative, torch.ones_like(qmod), qmod)
+    inner = torch.exp(hardness * (1.0 - qref / safe))
+    zeta = torch.exp(ga * (1.0 - inner))
+    slope = -zeta * ga * inner * hardness * qref / (safe * safe)
+    return (torch.where(negative, torch.full_like(qmod, math.exp(ga)), zeta),
+            torch.where(negative, torch.zeros_like(qmod), slope))
+
+
 def c6_matrix(alpha_iw: Tensor) -> Tensor:
     """Pairwise ``C6`` from dynamic polarizabilities (paper eqs 1, 9).
 
@@ -342,6 +357,10 @@ class DFTD4(nn.Module, FastPathModule):
         and is differentiable, so its forces (from the ``C6``) and its stress
         (``-E_tail / V`` on the diagonal) are consistent with the energy. By
         default ``False``. Molecular structures are unaffected.
+    reference_charges : str, optional
+        The partial charges of the reference systems in the charge scaling:
+        ``"eeq"`` (default, the charge model of D4) or ``"gfn2"`` (GFN2-xTB
+        Mulliken charges, used with GFN2-xTB charges).
 
     Notes
     -----
@@ -409,7 +428,7 @@ class DFTD4(nn.Module, FastPathModule):
                  checkpoint_triplets: bool = True, recompute_pairs: bool = True,
                  triplet_chunk: Optional[int] = None,
                  triplet_cache: Optional[float] = None,
-                 tail_correction: bool = False):
+                 tail_correction: bool = False, reference_charges: str = "eeq"):
         super().__init__()
         # the fast paths (dispersion_fast) are chosen per evaluation by the
         # owning DispersionCorrection; off here, and always under TorchScript
@@ -472,6 +491,11 @@ class DFTD4(nn.Module, FastPathModule):
                 self.register_buffer(name, t)
 
         ref = _load_reference()
+        if reference_charges not in ("eeq", "gfn2"):
+            raise ValueError(f"reference_charges must be 'eeq' or 'gfn2', got {reference_charges!r}")
+        self.reference_charges = str(reference_charges)
+        if reference_charges == "gfn2":
+            ref = dict(ref, refq=ref["refq_gfn2"], refh=ref["refh_gfn2"])
         # element tables, index = atomic number (row 0 unused)
         self.register_buffer("rcov", torch.tensor(
             4.0 / 3.0 * ref["covalent_radius_aa"] / BOHR, dtype=dt), persistent=False)
@@ -975,6 +999,10 @@ class DFTD4(nn.Module, FastPathModule):
             ``W_A,ref zeta(z_A, z_A,ref)`` for the 7 reference slots of each
             atom, shape ``(N, 7)`` (zero in unused slots).
         """
+        return self.gaussian_weights(z, cn) * self.charge_scaling(z, q)
+
+    def gaussian_weights(self, z: Tensor, cn: Tensor) -> Tensor:
+        """Normalized Gaussian weights ``W_A,ref`` of the reference systems (eq 8), ``(N, 7)``."""
         refcn = self.refcn[:, z].t()                                  # (N, 7)
         ngw = self.ngw[:, z].t()
         n_slots = refcn.shape[1]
@@ -982,8 +1010,10 @@ class DFTD4(nn.Module, FastPathModule):
                  < self.nref[z][:, None])
         # sqrt(tiny) of the working precision, as upstream
         eps_norm = 1.0842021724855044e-19 if cn.dtype == torch.float32 else 1.4916681462400413e-154
-        weights = gaussian_reference_weights(cn, refcn, valid, self.wf, ngw, eps_norm, self.max_ngw)
-        # charge scaling of paper eqs 2-4
+        return gaussian_reference_weights(cn, refcn, valid, self.wf, ngw, eps_norm, self.max_ngw)
+
+    def charge_scaling(self, z: Tensor, q: Tensor) -> Tensor:
+        """Charge scaling ``zeta(z_A, z_A,ref)`` of the reference polarizabilities (eqs 2-4), ``(N, 7)``."""
         zi = self.zeff[z][:, None]
         gi = (self.hardness[z] * self.gc)[:, None]
         qmod = q[:, None] + zi
@@ -991,8 +1021,16 @@ class DFTD4(nn.Module, FastPathModule):
         negative = qmod < 0.0
         safe = torch.where(negative, torch.ones_like(qmod), qmod)
         scaled = torch.exp(self.ga * (1.0 - torch.exp(gi * (1.0 - qref / safe))))
-        zeta = torch.where(negative, torch.full_like(qmod, math.exp(self.ga)), scaled)
-        return weights * zeta
+        return torch.where(negative, torch.full_like(qmod, math.exp(self.ga)), scaled)
+
+    def charge_scaling_and_derivative(self, z: Tensor, q: Tensor) -> Tuple[Tensor, Tensor]:
+        """:meth:`charge_scaling` and its derivative with respect to the charges, each ``(N, 7)``."""
+        zi = self.zeff[z][:, None]
+        return charge_scaling_terms(q, zi, (self.hardness[z] * self.gc)[:, None], self.refq[:, z].t() + zi, self.ga)
+
+    def charge_scaling_derivative(self, z: Tensor, q: Tensor) -> Tensor:
+        """Derivative of :meth:`charge_scaling` with respect to the charges, ``(N, 7)``."""
+        return self.charge_scaling_and_derivative(z, q)[1]
 
     def dynamic_polarizabilities(self, z: Tensor, weights: Tensor) -> Tensor:
         """Atom-in-molecule ``alpha_A(i omega)`` on the 23-point grid (eq 7).
@@ -1015,8 +1053,14 @@ class DFTD4(nn.Module, FastPathModule):
         center, so the sum over atoms is the sum over unordered pairs.
         """
         src, dst = edge_index[0], edge_index[1]
-        zi, zj = z[dst], z[src]
         c6 = self.pair_c6(alpha_iw[dst], alpha_iw[src])
+        e_pair = -0.5 * c6 * self.pair_damping(z, edge_index, r)
+        return scatter_sum(e_pair, dst, n_atoms)
+
+    def pair_damping(self, z: Tensor, edge_index: Tensor, r: Tensor) -> Tensor:
+        """BJ-damped radial factor ``sw (s6 / (R^6 + R0^6) + s8 (C8/C6) / (R^8 + R0^8))`` of every
+        edge (bohr), so that the pair energy is ``-C6`` times it, ``(E,)``."""
+        zi, zj = z[edge_index[1]], z[edge_index[0]]
         rr = 3.0 * self.r4r2[zi] * self.r4r2[zj]                     # C8 / C6
         r0 = self.a1 * torch.sqrt(rr) + self.a2
         r2 = r * r
@@ -1024,8 +1068,7 @@ class DFTD4(nn.Module, FastPathModule):
         t6 = 1.0 / (r6 + r0 ** 6)
         t8 = 1.0 / (r8 + r0 ** 8)
         sw = switching_function(r, self.cutoff_pair / self.bohr, self.switch_width_pair / self.bohr)
-        e_pair = -0.5 * c6 * sw * (self.s6 * t6 + self.s8 * rr * t8)
-        return scatter_sum(e_pair, dst, n_atoms)
+        return sw * (self.s6 * t6 + self.s8 * rr * t8)
 
     def tail_integrals(self) -> Tensor:
         """Radial integrals of the two-body term lost to the pair cutoff.

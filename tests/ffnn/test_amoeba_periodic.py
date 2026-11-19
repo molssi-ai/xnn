@@ -1012,6 +1012,154 @@ def test_the_rows_of_a_padded_pair_list_keep_the_padding_apart():
     assert sorted(pair[ptr[4]:].tolist()) == [4, 4, 5, 5, 6, 6]
 
 
+SKEW = CELL + np.array([[0.0, 0.0, 0.0], [0.9, 0.0, 0.0], [0.5, -0.7, 0.0]])
+
+
+@pytest.mark.parametrize("kind", ["coulomb", "r6"])
+def test_kept_cell_terms_carry_the_cell_gradient(kind):
+    """A term of the cells read through its kept Jacobian has the gradient of the term differentiated anew."""
+    cells = torch.tensor(np.stack([SKEW, 1.1 * CELL]), requires_grad=True)
+
+    def fn(c):
+        return ew.mesh_influence(torch.linalg.inv_ex(c)[0], cell_volume(c), [16, 18, 16], 5, 0.4, kind)
+
+    value = fn(cells)
+    probe = torch.randn(value.shape, generator=torch.Generator().manual_seed(3))
+    want = torch.autograd.grad((value * probe).sum(), cells)[0]
+    term = ew._CellTerm.apply(cells, value.detach(), ew.cell_jacobian(fn, cells.detach()))
+    assert torch.equal(term, value)
+    got = torch.autograd.grad((term * probe).sum(), cells)[0]
+    assert torch.allclose(got, want, rtol=1e-10, atol=1e-14 * float(want.abs().max()))
+
+
+@pytest.mark.parametrize("mesh", [[16, 18, 16], [15, 15, 9]])
+def test_the_closed_form_cell_jacobians_match_forward_mode(mesh):
+    """The closed-form Jacobians of the inverse cells, the volumes and the influence functions are those of
+    forward-mode differentiation, in skewed cells, on meshes with and without even axes."""
+    cells = torch.tensor(np.stack([SKEW, 1.1 * CELL - 0.3 * np.eye(3)[[1, 2, 0]]]))
+    assert torch.allclose(ew._inverse_cells(cells), torch.linalg.inv(cells), rtol=1e-13, atol=1e-15)
+    pairs = [(ew._inverse_cells, ew._inverse_jacobian), (cell_volume, ew._volume_jacobian)]
+    for kind in ("coulomb", "r6"):
+        pairs.append((lambda c, kind=kind: ew.mesh_influence(torch.linalg.inv_ex(c)[0], cell_volume(c), mesh, 5,
+                                                              0.4, kind),
+                      lambda c, kind=kind: ew.mesh_influence_jacobian(c, mesh, 5, 0.4, kind)))
+    for fn, derivative in pairs:
+        want = ew.cell_jacobian(fn, cells)
+        value, got = derivative(cells)
+        assert torch.allclose(value, fn(cells), rtol=1e-13, atol=1e-14 * float(value.abs().max()))
+        assert got.shape == want.shape
+        assert torch.allclose(got, want, rtol=1e-10, atol=1e-13 * float(want.abs().max()))
+
+
+def test_a_mesh_plan_keeps_its_cell_terms_with_their_jacobians(monkeypatch):
+    """A mesh plan with a step plan's cache keeps a term of its cells and, for cells with a gradient, its
+    Jacobian; a changed cell refreshes both in place; while a CUDA graph is recorded nothing new is kept."""
+    pos = torch.tensor(BOX[:12])
+    batch = torch.zeros(12, dtype=torch.long)
+    cache: dict = {}
+    cells = torch.tensor(SKEW[None], requires_grad=True)
+    plan = ew.MeshPlan(pos, cells, batch, [16, 16, 16], 5, influence_cache=cache)
+    assert isinstance(plan.volume.grad_fn, torch.autograd.function.BackwardCFunction)
+    got = torch.autograd.grad(plan.volume.sum() + plan.inv.sum() + plan.influence(0.4, "coulomb").sum(), cells)[0]
+    want = torch.autograd.grad(cell_volume(cells).sum() + torch.linalg.inv(cells).sum() + ew.mesh_influence(
+        torch.linalg.inv(cells), cell_volume(cells), [16, 16, 16], 5, 0.4, "coulomb").sum(), cells)[0]
+    assert torch.allclose(got, want, rtol=1e-10, atol=1e-12)
+    kept = {key: (entry[1], entry[2]) for key, entry in cache["terms"].items()}
+    assert len(kept) == 3 and all(jac is not None for _, jac in kept.values())
+    # without a cache the term is evaluated as it is
+    assert torch.equal(ew.MeshPlan(pos, cells, batch, [16, 16, 16], 5).kept(("volume", torch.float64), cell_volume),
+                       cell_volume(cells))
+    # the same terms without a gradient are the kept values
+    plain = ew.MeshPlan(pos, cells.detach(), batch, [16, 16, 16], 5, influence_cache=cache)
+    assert plain.kept(("volume", torch.float64), cell_volume) is kept[("volume", torch.float64)][0]
+    # another cell: values and Jacobians follow in place
+    other = torch.tensor(1.02 * SKEW[None], requires_grad=True)
+    plan = ew.MeshPlan(pos, other, batch, [16, 16, 16], 5, influence_cache=cache)
+    assert all(cache["terms"][key][1] is value and cache["terms"][key][2] is jac for key, (value, jac) in kept.items())
+    got = torch.autograd.grad(plan.volume.sum() + plan.influence(0.4, "coulomb").sum(), other)[0]
+    want = torch.autograd.grad(cell_volume(other).sum() + ew.mesh_influence(
+        torch.linalg.inv(other), cell_volume(other), [16, 16, 16], 5, 0.4, "coulomb").sum(), other)[0]
+    assert torch.allclose(got, want, rtol=1e-10, atol=1e-12)
+    # during a recording a term not kept yet, or kept without its Jacobian, is differentiated as it is
+    monkeypatch.setattr(ew, "_capturing", lambda t: True)
+    fresh: dict = {}
+    plan = ew.MeshPlan(pos, other, batch, [16, 16, 16], 5, influence_cache=fresh)
+    assert fresh["terms"] == {} and plan.volume.grad_fn is not None
+    monkeypatch.setattr(ew, "_capturing", lambda t: False)
+    ew.MeshPlan(pos, other.detach(), batch, [16, 16, 16], 5, influence_cache=fresh).kept(
+        ("volume", torch.float64), cell_volume)
+    monkeypatch.setattr(ew, "_capturing", lambda t: True)
+    plan = ew.MeshPlan(pos, other, batch, [16, 16, 16], 5, influence_cache=fresh)
+    assert fresh["terms"][("volume", torch.float64)][2] is None
+    assert torch.allclose(torch.autograd.grad(plan.volume.sum(), other)[0],
+                          torch.autograd.grad(cell_volume(other).sum(), other)[0])
+
+
+def test_a_refresh_remakes_kept_terms_and_compiles_closed_forms_on_a_gpu(monkeypatch):
+    """A changed cell remakes every kept term and its Jacobian, by forward mode without a closed form; on a
+    GPU a closed form is compiled once per term and reused."""
+    import types
+    cells = torch.tensor(SKEW[None])
+    other = 1.01 * cells
+    batch = torch.zeros(4, dtype=torch.long)
+    volume, jac = ew._volume_jacobian(cells)
+    cache = {"cell": cells.clone(), "terms": {"v": [cell_volume, volume.clone(), jac.clone(), None],
+                                              "w": [cell_volume, volume.clone(), jac.clone(), ew._volume_jacobian],
+                                              "x": [cell_volume, volume.clone(), None, None]}}
+    assert ew.refresh_cell_terms(cache, other, batch)
+    want_value, want_jac = ew._volume_jacobian(other)
+    for key in "vwx":
+        assert torch.allclose(cache["terms"][key][1], want_value, rtol=1e-14, atol=0.0)
+    for key in "vw":
+        assert torch.allclose(cache["terms"][key][2], want_jac, rtol=1e-12, atol=0.0)
+    assert not ew.refresh_cell_terms(cache, other, batch)
+    compiled = []
+
+    def fake_compile(fn, **kw):
+        compiled.append(fn)
+        return fn
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    gpu = types.SimpleNamespace(is_cuda=True)
+    entry = cache["terms"]["w"]
+    for _ in range(2):
+        assert ew._refresher(entry, gpu) is ew._volume_jacobian
+    assert compiled == [ew._volume_jacobian] and ew._refresher(entry, cells) is ew._volume_jacobian
+
+
+def test_the_shift_cell_gradient_kernel_sums_the_pairs_before_the_count():
+    """The kernel of the image shifts' cell gradient (Triton's interpreter on a CPU) is the product of the
+    shifts and the gradient over the pairs before the count."""
+    import os
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
+    from xnn.ffnn.models import amoeba_kernels as km
+    gen = torch.Generator().manual_seed(6)
+    shift = torch.randint(-1, 2, (300, 3), generator=gen).to(torch.float64)
+    g = torch.randn(300, 3, generator=gen, dtype=torch.float64)
+    count = torch.tensor([250], dtype=torch.int32)
+    out = torch.zeros(3, 3, dtype=torch.float64)
+    # two programs of 64 lanes, each striding over the blocks
+    km._shift_cell_grad[(2,)](shift, g, out, count, 2, BLOCK=64)
+    want = shift[:250].T @ g[:250]
+    assert torch.allclose(out, want, rtol=1e-13, atol=1e-13)
+    assert torch.allclose(km.shift_cell_gradient(shift, g, count), want, rtol=1e-13, atol=1e-13)
+    assert torch.allclose(km.shift_cell_gradient(shift, g), shift.T @ g, rtol=1e-13, atol=1e-13)
+
+
+def test_the_jacobian_gradient_sums_per_structure():
+    """The gradient with respect to the Jacobians of a batch is that of every structure on its own."""
+    gen = torch.Generator().manual_seed(9)
+    X, Y = torch.randn(7, 3, 4, generator=gen), torch.randn(7, 4, 3, generator=gen)
+    jac_inv = torch.randn(2, 3, 3, generator=gen)
+    batch = torch.tensor([0, 0, 0, 1, 1, 1, 1])
+    got = ew.jacobian_gradient([(X[:, :, :1], Y[:, :1]), (X[:, :, 1:], Y[:, 1:])], jac_inv, batch, 2)
+    for g in range(2):
+        sel = batch == g
+        want = ew.jacobian_gradient([(X[sel], Y[sel])], jac_inv[g:g + 1], batch[sel] * 0, 1)
+        assert torch.allclose(got[g], want[0], rtol=1e-12, atol=1e-12)
+        assert torch.allclose(want[0], torch.einsum("nbm,nmc->bc", X[sel], Y[sel]) @ jac_inv[g].T)
+
+
 def _walk(cls, device, steps, cutoff=6.3, **kw):
     """Plain steps and steps on a plan along a random walk of the box."""
     ref, model = (ForceStressOutput(_box(cls, cutoff=cutoff, **kw).to(device), compute_stress=True).eval()

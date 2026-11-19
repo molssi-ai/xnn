@@ -12,9 +12,9 @@ PyTorch interface.
 **x** in **xnn** refers to the neural network model architectures: **g** stands
 for graph, **d** for dense, **c** for convolutional, **ff** for classical
 force-fields, **sqm** for semi-empirical quantum mechanics, **trf** for
-transformers, **hyb** for hybrid models, all sharing one data object, one
-trainer and one deployment path. This categorization is reflected in the package
-structure.
+transformers, **hyb** for hybrid models, and **krnn** kernel-based models, all
+sharing one data object, one trainer and one deployment path. This
+categorization is reflected in the package structure.
 
 **Documentation:** https://molssi-ai.github.io/xnn/
 
@@ -165,11 +165,11 @@ Other deployment routes:
 | Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, GemNet (-Q, -T, -dQ, -dT), PaiNN, TensorNet, QET, NequIP, MACE, Allegro, CACE, AIMNet2, MEGNet (single- and multi-fidelity property models) |
 | Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4), QRNN |
 | Convolutional neural networks (`cnn`) | 3D steerable-/ conventional- / spherical-CNN |
-| Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO |
+| Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF |
 | Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
 | Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet, ByteFF, ByteFF-Pol |
 | Kernel regression neural networks (`krnn`) | GDML, sGDML |
-| Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable) |
+| Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable), GFN0-xTB, GFN1-xTB, GFN2-xTB |
 
 Each model is checked against its reference code or paper
 (`notebooks/fidelity_checks/`). See the User Guide on [Model
@@ -201,7 +201,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.28.0},
+  version = {0.29.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

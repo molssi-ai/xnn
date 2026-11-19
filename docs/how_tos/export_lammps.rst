@@ -6,7 +6,7 @@ Export to LAMMPS and TorchScript
 
 SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, NequIP, MACE, Allegro,
 CACE, AIMNet2, ANI, PhysNet, HDNNP, QRNN, ET, Equiformer, EquiformerV2, BAMBOO,
-SpookyNet and PM3 / PM6 / PM6-ORG / PM7 export to a self-contained
+SpookyNet, GFN-FF and PM3 / PM6 / PM6-ORG / PM7 export to a self-contained
 TorchScript file that needs nothing but ``libtorch`` or ``torch.jit.load``: no
 xnn, no Python model code, no config. The scripted models match their eager
 variants to about 1e-15.
@@ -127,6 +127,21 @@ model with a cutoff evaluates periodic cells at least twice the cutoff wide.
 It takes its pairs from the neighbor list, sums the charges and induced
 dipoles by particle mesh Ewald on the model's mesh for each cell, and solves
 the dipoles as the model does.
+
+GFN-FF
+======
+A bound GFN-FF model exports as TorchScript in the same way:
+
+.. code-block:: python
+
+   export_torchscript_potential(model, cutoff=1.0, path="gfnff.pt")
+
+The file holds the topology and parameters of the system the model is bound
+to, so the whole system must be on one rank, with its atoms in the bound order.
+It uses every pair, not the neighbor list. Molecules and clusters choose their
+hydrogen and halogen bonds at every call. A periodic cell keeps the rows of the
+model at export, valid while every atom stays within half the model's ``skin``
+of the positions they were chosen at.
 
 AMOEBA and HIPPO
 ================

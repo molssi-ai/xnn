@@ -845,6 +845,66 @@ Other options, including ``bond_style`` (harmonic / morse), ``angle_style`` and
 ``hbond``, are also available. Set resonance types, such as an amide
 ``C_R``-``N_R``, explicitly.
 
+GFN-FF
+======
+:class:`~xnn.ffnn.models.gfnff.GFNFF` is the general force field of `Spicher et
+al., Angew. Chem. Int. Ed. 59, 15665 (2020)
+<https://doi.org/10.1002/anie.202004239>`_. It needs no atom types and no input
+topology. The model derives the bonds, hybridization, pi systems, charges and
+all parameters from the elements, the positions and the total charge. It covers
+molecules, ions and periodic structures of the elements H to Rn. It is an
+independent implementation based on the paper, verified against the xtb
+program as a black box.
+
+.. code-block:: python
+
+   from xnn.ffnn.models import GFNFF
+
+   model = GFNFF.from_atoms(atoms, charge=0)               # Molecule, ion or periodic ase.Atoms
+   model = GFNFF(numbers, positions, charge=0, cell=cell)  # Lattice vectors in Angstrom, one per row
+
+   model.eval()
+   terms, gradient = model.energy_and_gradient(positions)  # Hartree, Hartree per Angstrom
+
+- A model is bound to the structure it was built from. It evaluates
+  conformations of that structure, with the same atoms in the same order.
+- The bonded terms keep the topology of the build structure. Hydrogen and
+  halogen bonds are chosen again for every conformation, as in xtb. Set
+  ``fixed_lists=True`` to keep those of the build structure instead.
+- A periodic model evaluates each structure in its own cell. For a cell,
+  ``energy_and_gradient`` also returns the gradient with respect to the cell,
+  which gives the stress.
+- As in xtb, different cells of the same crystal can give different energies.
+  In exactly symmetric cells with degenerate pi orbitals, such as some
+  polyacetylene and graphene supercells, the energy depends on round-off. xnn
+  and xtb can then differ by up to about 0.01 Hartree, and xtb itself changes as
+  much when only the atom order changes.
+- By default the model runs fused kernels on CPUs and GPUs, in evaluation and
+  training. They match the eager terms to round-off, including the second
+  derivatives that force and stress training needs. Set ``use_fast=False`` for
+  the eager terms, which are differentiable to any order.
+- ``model.float()`` switches the model to single precision.
+- The element parameters are downloaded from the xtb repository on first use.
+  They are kept in the model cache with a ``LICENSE.txt`` beside them.
+
+The ASE calculator and the MDI engine serve the bound system with forces and
+stress, for molecules and periodic cells. To serve a checkpoint with
+``xnn mdi``, give the structure in the model options of the config:
+``atomic_numbers``, ``positions``, ``charge`` and, for a periodic system,
+``cell``. The model also exports to TorchScript for LAMMPS and other drivers:
+
+.. code-block:: python
+
+   from xnn.common.deploy import export_torchscript_potential
+
+   export_torchscript_potential(model, cutoff=1.0, path="gfnff.pt")
+
+- The exported file needs the whole system on one rank, with the atoms in the
+  build order.
+- A periodic export keeps its hydrogen and halogen bonds while every atom stays
+  within half the ``skin`` of its starting position. Beyond that, a call raises
+  an error. For longer runs, build the model with a larger ``skin``.
+
 AMBER (ff94)
 ============
 :class:`~xnn.ffnn.models.amber.Amber` is the force field of
@@ -1180,7 +1240,53 @@ the self-consistent field.
 ``energy`` is the heat of formation in eV and the outputs also include
 ``heat_of_formation`` (kcal/mol), ``charges`` and ``dipole``. The methods handle
 molecules only. The published parameters are downloaded from the MOPAC sources
-on first use.
+on first use, with a ``LICENSE.txt`` beside them and a one-time warning about
+the license that applies to them.
+
+Tight-binding methods: GFN0-xTB, GFN1-xTB, GFN2-xTB
+===================================================
+:class:`~xnn.sqmnn.models.GFN0`, :class:`~xnn.sqmnn.models.GFN1` and
+:class:`~xnn.sqmnn.models.GFN2` are the extended tight-binding methods of
+Grimme and coworkers. They reproduce the xtb program for molecules with
+elements up to radon. The methods are described in these papers:
+
+- GFN0-xTB: `Pracht et al., ChemRxiv (2019)
+  <https://doi.org/10.26434/chemrxiv.8326202.v1>`_
+- GFN1-xTB: `Grimme et al., J. Chem. Theory Comput. 13, 1989 (2017)
+  <https://doi.org/10.1021/acs.jctc.7b00118>`_
+- GFN2-xTB: `Bannwarth et al., J. Chem. Theory Comput. 15, 1652 (2019)
+  <https://doi.org/10.1021/acs.jctc.8b01176>`_
+
+.. code-block:: python
+
+   from xnn.sqmnn.models import GFN1, GFN2
+
+   model = GFN2()                               # Published parameters
+   model = GFN1(electronic_temperature=1000.0)  # Fermi smearing at 1000 K
+   model = GFN2(trainable=["LEV", "GAM"])       # Refit two element tables
+
+   with open("refit.param", "w") as f:          # Save a refit in the xtb format
+       f.write(model.parameter_text())
+   model = GFN2(parameters="refit.param")       # Load it again
+
+- The ``energy`` output is the total energy in eV. The outputs also include
+  the atomic ``charges`` and each energy term. GFN2-xTB also returns
+  ``atomic_dipoles`` and ``atomic_quadrupoles``.
+- Each structure provides its own ``total_charge`` and ``spin_multiplicity``.
+- The published parameters are downloaded from the xtb sources on first use.
+  The first download shows a license warning and saves a ``LICENSE.txt``
+  beside the parameter files.
+- The ``accuracy`` option controls the convergence of the self-consistent
+  charges, as in xtb. Smaller values converge more tightly. The default is
+  ``1.0``, and the tightest setting is ``0.0001``.
+- The ``scf_converged`` output tells you whether the self-consistent cycle
+  converged. GFN0-xTB has no such cycle, so ``accuracy`` has no effect there.
+- With ``trainable=True``, all element tables become trainable with exact
+  gradients. With ``trainable="all"``, every table is trained, including the
+  Slater exponents and the global parameters. The dispersion parameters always
+  stay fixed.
+- The xtb program can also run a parameter file written by
+  ``parameter_text()``.
 
 Add-ons for any model
 =====================

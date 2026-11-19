@@ -73,8 +73,9 @@ def period(z: int) -> int:
 
 
 def d_shell(z: int) -> int:
-    """Principal quantum number assigned to ``d`` charge distributions (3, 4 or 5)."""
-    return 3 if z <= 30 else (4 if z <= 48 else 5)
+    """Principal quantum number assigned to ``d`` charge distributions (3, 4, 5, or 6 for the p block of the sixth
+    row, where only PM7's bismuth has a ``d`` shell); the ``d`` orbital's own number of :data:`PQN_D`."""
+    return 3 if z <= 30 else (4 if z <= 48 else (5 if z <= 80 else 6))
 
 
 #: ``True`` where the one-center ``sp`` integrals (GSS, GSP, GPP, GP2, HSP) are

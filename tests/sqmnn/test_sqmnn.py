@@ -269,6 +269,27 @@ def test_pair_integrals_at_the_atoms_orbital_counts():
         assert torch.equal(own["gab"], full["gab"])
 
 
+@pytest.mark.parametrize("cls", (PM6, PM7))
+def test_other_cores_attract_only_helium_s_electrons(cls):
+    """Of helium's electrons only the s feel the other cores (its p block keeps U_pp); neon's p shell feels them."""
+    q = cls()._element_quantities([2, 10])
+    vec = torch.tensor([[0.1, 0.2, 1.4], [-0.3, 0.8, 2.5]])
+    out = pair_integrals(q, torch.tensor([0, 0]), torch.tensor([1, 1]), vec, 4, True)
+    he_by_ne, ne_by_he = out["VA"], out["VB"]
+    assert bool((he_by_ne[:, 0, 0] < -1.0).all())
+    assert int(torch.count_nonzero(he_by_ne)) == 2
+    assert float(ne_by_he[:, 1:, 1:].diagonal(dim1=-2, dim2=-1).abs().min()) > 1.0
+
+
+def test_d_charge_distributions_use_the_d_orbital_quantum_number():
+    """The d charge distributions take the principal quantum number of the d orbitals (bismuth's 6d included)."""
+    rare_gases = (2, 10, 18, 36, 54, 86)                         # no d shell in any method
+    for z in range(1, el.MAX_Z + 1):
+        if el.PQN_D[z] > 0 and z not in rare_gases:
+            assert el.d_shell(z) == el.PQN_D[z], z
+    assert el.d_shell(83) == 6
+
+
 def test_pair_kernel_scripts_and_matches_eager():
     """The two-center kernel compiles with TorchScript and gives the eager integrals and their gradients, per
     orbital-count group and padded (H, O, Ti: s, sp and spd atoms)."""
@@ -299,7 +320,9 @@ def test_pair_groups_match_one_padded_group(cls, monkeypatch):
     """Pairs grouped by their atoms' orbital counts give the energies and forces of one padded group."""
     graph = collate([_graph(*FORMAMIDE), _graph(*WATER), _graph([[0, 0, 0], [2.1, 0, 0], [0, 1.6, 0.1]],
                                                                  [22, 17, 1])])
-    model = ForceStressOutput(cls(reuse_density=False))
+    # one plain start: the Ti-Cl-H triangle has two solutions 0.06 eV apart, and which one an annealed start
+    # reaches turns on round-off
+    model = ForceStressOutput(cls(reuse_density=False, scf_starts=((0.0, 0),)))
     monkeypatch.setattr(scf, "GROUP_MIN_PAIRS", 0)
     grouped = model(graph)
     monkeypatch.setattr(scf, "GROUP_MIN_PAIRS", 10 ** 9)
@@ -483,6 +506,14 @@ def test_hydrogen_atom_heat_of_formation(cls):
     """An isolated hydrogen atom has the experimental heat of formation, 52.102 kcal/mol."""
     out = cls()(_graph([[0.0, 0.0, 0.0]], [1], mult=2))
     assert float(out["heat_of_formation"][0]) == pytest.approx(el.ATOM_HEAT[1], abs=1e-9)
+
+
+@pytest.mark.parametrize("cls", (PM6, PM7))
+@pytest.mark.parametrize("z", (2, 10))
+def test_closed_shell_atom_heat_of_formation(cls, z):
+    """An isolated helium or neon atom (no atom pairs, an sp basis) has the experimental heat of formation."""
+    out = cls()(_graph([[0.0, 0.0, 0.0]], [z]))
+    assert float(out["heat_of_formation"][0]) == pytest.approx(el.ATOM_HEAT[z], abs=1e-9)
 
 
 @pytest.mark.parametrize("cls", METHODS)

@@ -18,7 +18,7 @@ matching what you need:
   featurizers and fast paths
 - :mod:`xnn.dnn`: HDNNP (generations 1 to 4), ANI, PhysNet, QRNN, the
   symmetry-function / AEV featurizers and the RuNNer model files
-- :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO and the ``.frc`` force-field reader
+- :mod:`xnn.ffnn`: ReaxFF, OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO, GFN-FF and the ``.frc`` force-field reader
 - :mod:`xnn.trfnn`: ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 and the
   edge attention primitive
 - :mod:`xnn.hybnn`: BAMBOO, SpookyNet, ByteFF, ByteFF-Pol

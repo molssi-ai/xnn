@@ -18,6 +18,7 @@ from xnn.common.models import ForceStressOutput, available_models, build_model
 from xnn.common.models.d4 import _load_reference
 from xnn.common.models.dispersion import HARTREE
 from xnn.common.models.electrostatics import COULOMB_CONSTANT, coulomb_direct
+from xnn.common.models.ops import build_triplets
 from xnn.dnn.models.base import _ElementNetworks
 from xnn.dnn.models.qrnn import (
     C6_UNIT,
@@ -610,6 +611,11 @@ def test_grouped_evaluation_edge_cases():
         z = torch.tensor([6, 1, 9, 1, 8, 1])
         ref = nets(desc, z, extra)
         assert torch.allclose(nets.forward_padded(desc, z, extra, 6), ref, atol=1e-14)
+        for widths in ([3, 1, 1], [4, 2, 7]):
+            assert torch.allclose(nets.forward_padded(desc, z, extra, 0, widths), ref, atol=1e-14)
+        # a block one atom short: its element's last atom (a padding atom in a captured batch) gives zero
+        short = nets.forward_padded(desc, z, extra, 0, [2, 1, 1])
+        assert torch.equal(short[5], torch.zeros(2)) and torch.allclose(short[:5], ref[:5], atol=1e-14)
         nets.fast_active = True
         assert torch.allclose(nets(desc, z, extra), ref, atol=1e-14)
         assert torch.equal(nets(desc, torch.tensor([9, 9, 9, 9, 9, 9]), extra), torch.zeros(6, 2))
@@ -691,6 +697,8 @@ def _padded(model, graphs):
     cap = capacity(planner, planned, len(graphs))
     batch = PaddedCollate(planner, cap)([planned[i] for i in range(len(graphs))])
     assert batch.index_plan["aev_e1"].shape[0] == cap.plan["triplets"]
+    assert set(batch.index_plan) == {"aev_e1", "aev_e2"}
+    assert all(f"element_{z}" in batch.index_sizes for z in model.element_nets.species)
     return batch
 
 
@@ -715,13 +723,27 @@ def test_padded_batch_matches_the_reference():
         assert (pad - ref).abs().max() <= 1e-11 * max(float(ref.abs().max()), 1.0)
 
 
+def test_plan_holds_the_pairs_within_the_angular_cutoff():
+    """The planned triplets are the edge pairs of each center within the angular cutoff."""
+    model = _small()
+    g = _graph(14, seed=3)
+    plan = model.index_planner()(g)
+    r = torch.linalg.norm(g.edge_vectors(), dim=-1)
+    inside = torch.nonzero(r <= model.featurizer.angular.cutoff).squeeze(-1)
+    e1, e2, _ = build_triplets(g.edge_index[:, inside], g.num_nodes)
+    assert len(e1) < len(build_triplets(g.edge_index, g.num_nodes)[0])
+    assert sorted(zip(plan["aev_e1"].tolist(), plan["aev_e2"].tolist())) == sorted(
+        zip(inside[e1].tolist(), inside[e2].tolist()))
+
+
 def test_captured_steps_need_molecules_and_recursive_charges():
     model = _small()
     planner = model.index_planner()
     with pytest.raises(ValueError, match="periodic"):
         planner(_graph(5, seed=1, cell=np.eye(3) * 6.0, pbc=[True, True, True]))
     short = _small(coulomb=False, dispersion=False).index_planner()
-    assert set(short(_graph(5, seed=1, cell=np.eye(3) * 6.0, pbc=[True, True, True]))) == {"aev_e1", "aev_e2"}
+    assert set(short(_graph(5, seed=1, cell=np.eye(3) * 6.0, pbc=[True, True, True]))) == {
+        "aev_e1", "aev_e2", "element_counts"}
     qeq = _small(charge_model="qeq")
     with pytest.raises(ValueError, match="recursive"):
         qeq.index_planner()

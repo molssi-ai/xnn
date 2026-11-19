@@ -49,6 +49,7 @@ class NDDOExport(nn.Module):
     tol_density: float
     tol_energy: float
     restart_gap: float
+    search: int
     reuse_density: bool
     warm_start_distance: float
 
@@ -103,6 +104,7 @@ class NDDOExport(nn.Module):
             float(model.tol_energy)
         self.starts: List[Tuple[float, int]] = [(float(kt), int(n)) for kt, n in model.scf_starts]
         self.restart_gap = float(model.restart_gap)
+        self.search = int(model.search_starts)
         self.reuse_density = bool(model.reuse_density)
         self.warm_start_distance = float(model.warm_start_distance)
         d3 = getattr(model, "d3", None)
@@ -168,7 +170,7 @@ class NDDOExport(nn.Module):
             else:
                 result = scf_with_starts(layout, Hd, W1p, W2p, n_alpha, n_beta, uhf, guess, self.max_iter,
                                          self.tol_density, self.tol_energy, self.starts, self.restart_gap,
-                                         rotate, min_basis)
+                                         rotate, min_basis, self.search)
             self.last_z, self.last_pos, self.last_P = z.clone(), pos.detach().clone(), result.densities.clone()
             self.last_C, self.last_occ = result.orbitals.clone(), result.occupations.clone()
         P = result.densities

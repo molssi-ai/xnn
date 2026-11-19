@@ -14,7 +14,7 @@ from xnn.common.data import structure_to_graph
 from xnn.common.deploy.step_graph import StepGraph
 from xnn.common.models import ForceStressOutput
 from xnn.ffnn.models import Hippo, MolecularTopology, builtin_amoeba, read_amoeba, read_tinker_prm, write_tinker_prm
-from xnn.ffnn.models.amoeba import ion_terms
+from xnn.ffnn.models.amoeba import ion_terms, masked_sum
 from xnn.ffnn.models.amoeba_lammps import write_lammps_amoeba_input
 from xnn.ffnn.models.amoebalib import KCAL_TO_EV
 
@@ -197,6 +197,22 @@ def _star(c_values, x, c0=0.0, pairs_per_ligand=1):
                     torch.tensor([0] + [-1] * (N - 1)), molecule, 1 + n_lig, form="weighted", c0=c0,
                     with_pair=False)
     return float(out["mbct"].sum()), float(out["ct"].sum())
+
+
+def test_masked_sums_are_the_sums_of_the_marked_rows():
+    """A masked sum is the index add of the marked rows, for one column and for several, with its gradient."""
+    gen = torch.Generator().manual_seed(4)
+    index = torch.sort(torch.randint(0, 7, (9000,), generator=gen)).values
+    on = torch.rand(9000, generator=gen) < 0.2
+    for shape in ((9000,), (9000, 3)):
+        values = torch.randn(shape, generator=gen, dtype=torch.float64, requires_grad=True)
+        got = masked_sum(values, index, on, 7)
+        kept = values * (on if values.dim() == 1 else on[:, None])
+        assert torch.allclose(got, torch.zeros_like(got).index_add(0, index, kept), rtol=1e-12, atol=1e-12)
+        probe = torch.randn(got.shape, generator=gen, dtype=torch.float64)
+        grad = torch.autograd.grad((got * probe).sum(), values)[0]
+        assert torch.equal(grad, torch.autograd.grad((torch.zeros_like(got).index_add(0, index, kept) * probe).sum(),
+                                                     values)[0])
 
 
 def test_charge_equilibration_is_the_constrained_minimum():
