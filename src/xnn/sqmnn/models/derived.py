@@ -387,6 +387,8 @@ def element_quantities(z: Sequence[int], p: Dict[str, Tensor]) -> Dict[str, Tens
         uss=g["USS"], upp=g["UPP"], udd=g["UDD"],
         betas=g["BETAS"], betap=g["BETAP"], betad=g["BETAD"],
         tore=col([el.CORE_CHARGE[v] for v in z]),
+        # the other cores attract only the s electrons of helium
+        s_core=col([v == 2 for v in z]),
         dd=dd, qq=qq, rho0=rho0, rho1=rho1, rho2=rho2,
         ddp=torch.stack(ddp, dim=-1), po=torch.stack(po, dim=-1),
         one_center=one_center, eisol=eisol,

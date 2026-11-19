@@ -83,9 +83,11 @@ from .scf import (
     SCFDensity,
     SCFGraphCache,
     _per_device,
-    frontier_gap,
     lowest,
+    needs_restart,
     run_scf,
+    search_guess,
+    search_schedule,
 )
 from .twocenter import pair_tables
 
@@ -193,12 +195,23 @@ class NDDO(InteratomicPotential):
         SCF runs of a cold start, as (initial Fermi temperature in eV,
         annealing iterations); the lowest-energy solution of each structure
         is kept. The default (plain aufbau and two annealing schedules)
-        finds the ground state of open shells and small-gap systems where a
-        single run can settle in an excited aufbau state.
+        finds the ground state of open shells and of closed shells where a
+        single run can settle in an excited aufbau state (cumulenes, ketenes,
+        strained rings).
     restart_gap : float, optional
         The runs after the first of ``scf_starts`` take place when the batch
-        is unrestricted or a structure's first solution has a HOMO-LUMO gap
-        below this (eV); default 3.0. ``float("inf")`` runs them always.
+        is unrestricted, a structure's first run did not converge, or its
+        first solution has a HOMO-LUMO gap below this (eV); default 6.5
+        (excited closed-shell solutions have gaps of 3-6 eV).
+        ``float("inf")`` runs them always.
+    search_starts : int, optional
+        Further SCF runs of a cold start from perturbed initial densities,
+        alternately random orbital occupations (the two spins apart,
+        annealed) and random density noise (plain); deterministic. The
+        lowest solution is kept. They find lower solutions where every
+        other start settles in the same excited one (open shells with
+        degenerate pi orbitals, some transition states); default 0. About
+        6 suffice; a cold start then takes 4-6 times as long.
     use_fast : bool or str, optional
         The fast path (see :meth:`set_use_fast`): on a GPU, a batch composition evaluated before replays CUDA
         graphs. ``"auto"`` (default) and ``True`` take it, ``False`` never.
@@ -230,8 +243,8 @@ class NDDO(InteratomicPotential):
                  response: str = "auto", max_iter: int = 300, tol_density: float = 1e-9,
                  tol_energy: float = 1e-10, corrections: bool = True,
                  reuse_density: bool = True,
-                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 3.0,
-                 use_fast="auto"):
+                 scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 6.5,
+                 search_starts: int = 0, use_fast="auto"):
         super().__init__()
         pset = (parameters if isinstance(parameters, ParameterSet)
                 else read_parameters(parameters or self.default_parameters))
@@ -249,6 +262,7 @@ class NDDO(InteratomicPotential):
         self.reuse_density = bool(reuse_density)
         self.scf_starts = tuple((float(kt), int(n)) for kt, n in scf_starts)
         self.restart_gap = float(restart_gap)
+        self.search_starts = int(search_starts)
         self.set_use_fast(use_fast)
         self._scf_graphs = SCFGraphCache()
         self._plans = _PlanCache()
@@ -483,7 +497,7 @@ class NDDO(InteratomicPotential):
         Options in ``cfg.extra``: ``parameters`` (set name or file),
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
-        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``use_fast``.
+        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``.
         """
 
         from xnn.common.config.options import model_options
@@ -491,7 +505,7 @@ class NDDO(InteratomicPotential):
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
                 "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
-                "restart_gap", "use_fast")
+                "restart_gap", "search_starts", "use_fast")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
     # the calculation
@@ -573,8 +587,14 @@ class NDDO(InteratomicPotential):
                                graph_key=key)
             results = [start(*self.scf_starts[0])]
             # the other runs where the first may have settled in an excited aufbau state
-            if len(self.scf_starts) > 1 and (uhf or bool((frontier_gap(results[0]) < self.restart_gap).any())):
+            if len(self.scf_starts) > 1 and needs_restart(results[0], uhf, self.restart_gap):
                 results += [start(kt, steps) for kt, steps in self.scf_starts[1:]]
+            for i in range(self.search_starts):
+                kicked, spin = search_guess(guess, layout, n_alpha, n_beta, uhf, i)
+                kt, steps = search_schedule(i)
+                results.append(run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, kicked, self.max_iter,
+                                       self.tol_density, self.tol_energy, smearing=kt, smear_steps=steps,
+                                       spin_guess=spin, graph_cache=self._graph_cache(), graph_key=key))
             result = lowest(results)
         self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
         if self._use_response():

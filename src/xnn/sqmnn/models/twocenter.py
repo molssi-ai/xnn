@@ -532,6 +532,17 @@ def pair_integrals(q: Dict[str, Tensor], ea: Tensor, eb: Tensor, vec: Tensor, k:
     return pair_kernel(qt, tab, constants(vec.device, vec.dtype), ea, eb, vec, ka, kb, general, k_b is None, None)
 
 
+def _s_only(V: Tensor, flag: Tensor) -> Tensor:
+    """The core attractions ``V`` ``(P, k, k)`` with all but the ``ss`` element cleared where ``flag`` is set (the
+    atoms whose ``p`` electrons the other cores do not attract: helium)."""
+    k = V.shape[-1]
+    if k == 1:
+        return V
+    # padded from the ss element, without host-built constants (capturable in a CUDA graph)
+    ss = torch.nn.functional.pad(V[:, :1, :1], [0, k - 1, 0, k - 1])
+    return torch.where((flag > 0.5)[:, None, None], ss, V)
+
+
 def pair_kernel(qt: Dict[str, Tensor], tab: Dict[str, Tensor], c: Dict[str, Tensor], ea: Tensor, eb: Tensor,
                 vec: Tensor, ka: int, kb: int, general: bool, padded: bool,
                 s_local: Optional[Tensor]) -> Dict[str, Tensor]:
@@ -567,8 +578,8 @@ def pair_kernel(qt: Dict[str, Tensor], tab: Dict[str, Tensor], c: Dict[str, Tens
         VA = VA + _core_kernel("core_general", tab, ka, dA, rA, po9B, r, True, oa)
     if general and kb == 9:
         VB = VB + _core_kernel("core_general", tab, kb, dB, rB, po9A, r, False, ob)
-    VA = -tore_b[:, None, None] * VA
-    VB = -tore_a[:, None, None] * VB
+    VA = _s_only(-tore_b[:, None, None] * VA, take0(qt["s_core"], ea))
+    VB = _s_only(-tore_a[:, None, None] * VB, take0(qt["s_core"], eb))
     gab = 27.211386245988 / torch.sqrt(r * r + (po9A + po9B) ** 2)      # HARTREE
     if s_local is not None:
         S = s_local
