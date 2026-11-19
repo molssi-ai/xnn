@@ -222,7 +222,11 @@ def pair_vectors(data: AtomicGraph, a: Tensor, b: Tensor, shift: Optional[Tensor
         return vec.to(data.model_dtype)
     if shift is None:
         shift = pair_image_shifts(data, a, b)
-    cells = data.cell.to(vec.dtype).index_select(0, data.batch.index_select(0, a))     # (M, 3, 3)
+    cell = data.cell.to(vec.dtype)
+    if cell.shape[0] == 1:
+        # one cell: a broadcast, whose backward is a sum (a gather's adds every vector into one cell)
+        return (vec + (shift.to(vec.dtype)[:, :, None] * cell[0]).sum(1)).to(data.model_dtype)
+    cells = cell.index_select(0, data.batch.index_select(0, a))     # (M, 3, 3)
     return (vec + (shift[:, :, None] * cells).sum(1)).to(data.model_dtype)
 
 
