@@ -1065,7 +1065,9 @@ def translate(kernel, args: tuple, meta: dict, balanced: bool = False) -> tuple:
                       " : std::lower_bound(work, work + n_programs, W * (tid + 1) / T) - work;",
                       "    for (int64_t p = p0; p < p1; ++p) {"]
         else:
-            lines += ["    const int64_t chunk = std::max<int64_t>(1, n_programs / (16 * (int64_t)T));",
+            # one thread takes all programs in one chunk (no scheduling per chunk, the same order)
+            lines += ["    const int64_t chunk = std::max<int64_t>(1, T == 1 ? n_programs"
+                      " : n_programs / (16 * (int64_t)T));",
                       "    #pragma omp for schedule(dynamic, chunk) nowait",
                       "    for (int64_t p = 0; p < n_programs; ++p) {"]
         lines += ["      const int32_t pid = static_cast<int32_t>(p);", "      (void)pid;"]

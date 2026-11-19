@@ -999,6 +999,22 @@ def _mbct_weighted(c: Tensor, x: Tensor, c0: float) -> Tensor:
     return x * ((1.0 + x) * S2 / (1.0 + x * n_eff) - total)
 
 
+# the entries of the scratch tail of masked_sum
+_SCRATCH = 4096
+
+
+def masked_sum(values: Tensor, index: Tensor, on: Tensor, size: int) -> Tensor:
+    """The rows of ``values`` ``(M,)`` or ``(M, C)`` whose mask ``on`` is set, summed into the ``size``
+    entries ``index`` names. The other rows are added to a scratch tail, each next to its neighbors'
+    entries: on a pair list sorted by atom, the atomic adds of a run of rows into one entry (zeros of
+    the pairs a term skips among them) would run one after the other."""
+    device = index.device
+    scratch = torch.arange(index.shape[0], device=device) % _SCRATCH + size
+    out = torch.zeros((size + _SCRATCH,) + tuple(values.shape[1:]), dtype=values.dtype, device=device)
+    return out.index_add(0, torch.where(on, index, scratch), values)[:size]
+
+
+@fusable
 def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor, N: int, B: int, params,
               ionct_index: Tensor, ionpair_index: Tensor, mbct_index: Tensor, mbct_atom: Tensor, mbct_slot: Tensor,
               molecule: Tensor, n_molecules: int, form: str = "ceq", c0: float = 0.0,
@@ -1043,6 +1059,8 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
     # the charge transfer of every pair from its ionct rows, ion i and ion k (two pieces only for a row of a
     # class with itself: the library has one order of every other pair)
     e_ik, e_ki, row_ik, row_ki = none, none, None, None
+    # the pair terms of every pair as columns, and the pairs that have any: one sum per side for all
+    names, columns, active = [], [], torch.zeros_like(R, dtype=torch.bool)
     if with_ct:
         e_dir = []
         for a, b in ((ca, cb), (cb, ca)):
@@ -1051,9 +1069,11 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
             e_dir.append((torch.where(row >= 0, -params["ionct_a"][r] * torch.exp(-params["ionct_b"][r] * R), none)
                           * weight, row))
         (e_ik, row_ik), (e_ki, row_ki) = e_dir
-        e = e_ik + e_ki
-        out["ct"] = scatter_sum(0.5 * e, i_, N) + scatter_sum(0.5 * e, k_, N)
+        names.append("ct")
+        columns.append(e_ik + e_ki)
+        active = active | (row_ik >= 0) | (row_ki >= 0)
     if with_pair:
+        rep_sum, disp_sum = none, none
         for a, b in ((ca, cb), (cb, ca)):
             row = ionpair_index[a, b]
             on = row >= 0
@@ -1068,8 +1088,17 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
             f6 = 1.0 - torch.exp(-x) * series
             e_rep = torch.where(on, params["ionpair_a"][r_] * torch.exp(-x), none) * weight
             e_disp = torch.where(on, -params["ionpair_c"][r_] * f6 / Rs ** 6, none) * weight
-            out["rep"] = out["rep"] + scatter_sum(0.5 * e_rep, i_, N) + scatter_sum(0.5 * e_rep, k_, N)
-            out["disp"] = out["disp"] + scatter_sum(0.5 * e_disp, i_, N) + scatter_sum(0.5 * e_disp, k_, N)
+            rep_sum, disp_sum, active = rep_sum + e_rep, disp_sum + e_disp, active | on
+        names += ["rep", "disp"]
+        columns += [rep_sum, disp_sum]
+    # the pairs of zero weight (a plan's padding, a run of copies of one pair, among them) add nothing
+    live = weight.detach() != 0
+    if names:
+        half = 0.5 * torch.stack(columns, 1)
+        active = active & live
+        per_atom = masked_sum(half, i_, active, N) + masked_sum(half, k_, active, N)
+        for column, name in enumerate(names):
+            out[name] = per_atom[:, column]
     if not many:
         return out
     # the pair charge transfer of every pair: its row, else HIPPO's two pieces
@@ -1086,7 +1115,8 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
     structure = atom // n
     slot, mol = mbct_slot.index_select(0, atom - structure * n), molecule.index_select(0, atom - structure * n)
     # the (centre, ligand molecule) sums of the batch: the charge transfer and, per pair, its x times it
-    summed = torch.zeros(B * n_ions * n_molecules, dtype=dtype, device=device)
+    entries = B * n_ions * n_molecules
+    summed = torch.zeros(entries, dtype=dtype, device=device)
     weighted = torch.zeros_like(summed)
     for a, b, e_own, row_own in ((i_, k_, e_ik, row_ik), (k_, i_, e_ki, row_ki)):
         s = slot[a]
@@ -1094,14 +1124,16 @@ def ion_terms(i_: Tensor, k_: Tensor, R: Tensor, weight: Tensor, cls_idx: Tensor
         centre = structure[a] * n_ions + s.clamp_min(0)
         key = centre * n_molecules + mol[b]
         e_c = torch.where(take, e_pair, none)
-        summed = summed.index_add(0, key, e_c)
         if per_row:
             xc = x_centre[centre]
             # the row whose ion is this side's atom takes its own x where it has one
             r = row_own.clamp_min(0)
             x_own = torch.where((row_own >= 0) & ionct_x_set[r], params["ionct_x"][r], xc)
             e_own = torch.where(take, e_own, none)
-            weighted = weighted.index_add(0, key, e_own * x_own + (e_c - e_own) * xc)
+            both = masked_sum(torch.stack([e_c, e_own * x_own + (e_c - e_own) * xc], 1), key, take & live, entries)
+            summed, weighted = summed + both[:, 0], weighted + both[:, 1]
+        else:
+            summed = summed + masked_sum(e_c, key, take & live, entries)
     c = (-summed).clamp_min(0.0).view(B * n_ions, n_molecules)
     if form == "weighted":
         e_mb = _mbct_weighted(c, x_centre, c0)
@@ -1155,18 +1187,21 @@ def _plan_vectors(data: AtomicGraph, i: Tensor, k: Tensor, shift: Optional[Tenso
     block in one operation (the pairs of a plan are sorted by that atom) and
     skips the padding by ``count``; with one cell its kernel also adds the
     image shifts' product with the cell and stores the model's precision, so
-    the vectors cost one launch; given the plan's compressed ``rows``, its
+    the vectors cost one launch (a cell that carries a gradient receives one
+    product of the shifts with the vectors' gradient); given the plan's compressed ``rows``, its
     backward sums each atom's row instead (no atomic adds). Otherwise a single
     cell enters as one product rather than a copy per pair."""
     pos = data.pos
-    if kernels and (shift is None or (data.cell.shape[0] == 1 and not data.cell.requires_grad)):
+    if kernels and (shift is None or data.cell.shape[0] == 1):
         cell = None if shift is None else data.cell[0].to(pos.dtype)
         return _kernels().PairDifference.apply(pos, i, k, count, shift, cell, data.model_dtype, rows)
     vec = _kernels().PairDifference.apply(pos, i, k, count) if kernels else _take(pos, k) - _take(pos, i)
     if shift is not None:
         cell = data.cell.to(vec.dtype)
         if cell.shape[0] == 1:
-            vec = vec + shift @ cell[0]
+            # a broadcast product: a matrix product's cell gradient is a split-K product over the pairs, whose
+            # library workspace a recorded CUDA graph does not keep
+            vec = vec + (shift.to(vec.dtype)[:, :, None] * cell[0]).sum(1)
         else:
             vec = vec + (shift[:, :, None] * _take(cell, _take(data.batch, i))).sum(1)
     return vec.to(data.model_dtype)
@@ -1421,6 +1456,36 @@ class _Images:
         return pair_vectors(self.data, a, b)
 
 
+@fusable
+def _direct_outputs(rows: Tensor, e_ref: Tensor, strain: Tensor, grad: Tensor, cell: Tensor,
+                    pbc: Optional[Tensor]) -> tuple:
+    """What an inner step formed directly returns (one compiled block on the fused path): the per-atom
+    energy, the totals of the terms ``(9, 1)`` in float64, the energy, the forces and the stress from the
+    sum ``strain`` ``(3, 3)`` of every bonded vector times its gradient."""
+    stacked = torch.cat([rows, e_ref.reshape(1, -1)])
+    totals = stacked.to(torch.float64).sum(1, keepdim=True)
+    volume = cell_volume(cell.reshape(-1, 3, 3))
+    periodic = volume > 1e-8
+    if pbc is not None:
+        periodic = periodic & pbc.reshape(-1, 3).to(volume.device).any(-1)
+    safe = torch.where(periodic, volume, torch.ones_like(volume))
+    stress = 0.5 * (strain + strain.T)[None] / safe[:, None, None]
+    stress = torch.where(periodic[:, None, None], stress, torch.zeros_like(stress))
+    return stacked.sum(0), totals, totals.sum(0), -grad, stress.to(grad.dtype)
+
+
+@fusable
+def _stacked_vectors(pos: Tensor, cell: Tensor, pa: Tensor, pb: Tensor, shift: Tensor, jumps: Optional[Tensor],
+                     dtype: torch.dtype) -> Tensor:
+    """:func:`~.geometry.pair_vectors` of one cell with the recorded ``shift`` and the ``jumps`` of atoms
+    wrapped since (one compiled block on the fused path)."""
+    if jumps is not None:
+        shift = shift + (jumps.index_select(0, pa) - jumps.index_select(0, pb)).to(shift.dtype)
+    vec = pos.index_select(0, pb) - pos.index_select(0, pa)
+    vec = vec + (shift.to(vec.dtype)[:, :, None] * cell.to(vec.dtype)[0]).sum(1)
+    return vec.to(dtype)
+
+
 def lattice_jumps(pos: Tensor, reference: Tensor, cell: Tensor, batch: Tensor, pbc: Optional[Tensor]) -> Tensor:
     """The whole lattice vectors ``(N, 3)`` by which every atom moved from
     ``reference`` to ``pos``: the rounded fractional displacements along the
@@ -1445,22 +1510,28 @@ def lattice_jumps(pos: Tensor, reference: Tensor, cell: Tensor, batch: Tensor, p
         The jumps in lattice vectors, in the dtype of ``pos``.
     """
     with torch.no_grad():
-        dtype = pos.dtype
-        cell = cell.detach().reshape(-1, 3, 3).to(dtype)
-        # the reciprocal vectors as rows: cross products over the signed volume
-        cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
-                             torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
-        volume = (cell[:, 0] * cross[:, 0]).sum(-1)
-        cells = volume.abs() > 1e-8
-        recip = cross / torch.where(cells, volume, torch.ones_like(volume))[:, None, None]
-        axes = cells[:, None].to(dtype).expand(-1, 3)
-        if pbc is not None:
-            axes = axes * pbc.reshape(-1, 3).to(device=pos.device, dtype=dtype)
-        step = pos.detach() - reference.to(dtype)
-        if recip.shape[0] == 1:
-            return torch.round(step @ recip[0].T) * axes[0]
-        frac = (step[:, None, :] * recip.index_select(0, batch)).sum(-1)
-        return torch.round(frac) * axes.index_select(0, batch)
+        return _lattice_jumps(pos.detach(), reference, cell.detach(), batch, pbc)
+
+
+@fusable
+def _lattice_jumps(pos: Tensor, reference: Tensor, cell: Tensor, batch: Tensor, pbc: Optional[Tensor]) -> Tensor:
+    """:func:`lattice_jumps` of detached tensors (one compiled block on the fused path)."""
+    dtype = pos.dtype
+    cell = cell.reshape(-1, 3, 3).to(dtype)
+    # the reciprocal vectors as rows: cross products over the signed volume
+    cross = torch.stack([torch.linalg.cross(cell[:, 1], cell[:, 2]), torch.linalg.cross(cell[:, 2], cell[:, 0]),
+                         torch.linalg.cross(cell[:, 0], cell[:, 1])], 1)
+    volume = (cell[:, 0] * cross[:, 0]).sum(-1)
+    cells = volume.abs() > 1e-8
+    recip = cross / torch.where(cells, volume, torch.ones_like(volume))[:, None, None]
+    axes = cells[:, None].to(dtype).expand(-1, 3)
+    if pbc is not None:
+        axes = axes * pbc.reshape(-1, 3).to(device=pos.device, dtype=dtype)
+    step = pos - reference.to(dtype)
+    if recip.shape[0] == 1:
+        return torch.round((step[:, None, :] * recip[0]).sum(-1)) * axes[0]
+    frac = (step[:, None, :] * recip.index_select(0, batch)).sum(-1)
+    return torch.round(frac) * axes.index_select(0, batch)
 
 
 def dipole_field(m: Tensor, r: Tensor, D1: Tensor, D2: Tensor) -> Tensor:
@@ -1555,12 +1626,13 @@ def bicubic_interpolate(f, fx, fy, fxy, x, y, x1, x2, y1, y2):
         _BCU_ON[key] = torch.as_tensor(_BCU_WT, dtype=f.dtype, device=f.device)
     wt = _BCU_ON[key]
     packed = torch.cat([f, fx * d1[:, None], fy * d2[:, None], fxy * (d1 * d2)[:, None]], dim=1)
-    c = torch.einsum("ij,mj->mi", wt, packed).reshape(-1, 4, 4)
+    # broadcast products (no matrix products on the step path of a CUDA graph)
+    c = (wt[None] * packed[:, None, :]).sum(-1).reshape(-1, 4, 4)
     t = ((x - x1) / d1)[:, None]
     u = ((y - y1) / d2)[:, None]
     tp = torch.cat([torch.ones_like(t), t, t * t, t * t * t], 1)
     up = torch.cat([torch.ones_like(u), u, u * u, u * u * u], 1)
-    return torch.einsum("mi,mij,mj->m", tp, c, up)
+    return (tp[:, :, None] * c * up[:, None, :]).sum((1, 2))
 
 
 class AmoebaForceField(nn.Module):
@@ -3268,20 +3340,239 @@ class Amoeba(InteratomicPotential):
         # the pair count decides the route as it does for the whole evaluation on this plan
         stand_in = data.pos.new_empty(1, dtype=dtype).expand(int(plan.pairs[0].shape[0]))
         jumps = None
-        if data.cell is not None and plan.reference is not None:
-            jumps = lattice_jumps(data.pos, plan.reference, data.cell, data.batch, data.pbc)
-        with fused(self._fused_active(stand_in)):
-            val = self._valence(data, None, plan.shifts, B, N, plan.image_pairs[:plan.energy_calls], None,
-                                False, jumps)
-        out_terms = val["terms"]
-        out_terms["e_ref"] = self.atom_ref(data.atomic_numbers).squeeze(-1)
-        stacked = torch.stack([v.to(dtype) for v in out_terms.values()])
+        active = self._fused_active(stand_in)
+        with fused(active):
+            if data.cell is not None and plan.reference is not None:
+                jumps = lattice_jumps(data.pos, plan.reference, data.cell, data.batch, data.pbc)
+            table = self._valence_table(plan, B, N) if active and data.pos.is_cuda and not self.training else None
+            if table is not None:
+                from .amoeba_valence import TERMS
+                # the kernels' rows stay stacked: one row per term taken apart would cost a backward each
+                keys = TERMS + ("e_ref",)
+                stacked = torch.cat([self._valence_kernel_rows(data, plan, table, jumps),
+                                     self.atom_ref(data.atomic_numbers).reshape(1, -1).to(dtype)])
+            else:
+                out_terms = self._valence(data, None, plan.shifts, B, N, plan.image_pairs[:plan.energy_calls],
+                                          None, False, jumps)["terms"]
+                out_terms["e_ref"] = self.atom_ref(data.atomic_numbers).squeeze(-1)
+                keys = tuple(out_terms)
+                stacked = torch.stack([v.to(dtype) for v in out_terms.values()])
         node_energy = stacked.sum(0)
         totals = structure_sums(stacked, data.batch, B)
         result = {"node_energy": node_energy, "energy": self.aggregate_energy(node_energy, data)}
-        for t, k in enumerate(out_terms):
+        for t, k in enumerate(keys):
             result[k] = totals[t]
         return result
+
+    def forms_plan_forces(self, data: AtomicGraph, plan: StepPlan) -> bool:
+        """Whether an evaluation on ``plan`` forms its forces and strain derivative itself
+        (:meth:`forward_plan_direct`): an inner step (``terms="valence"``) of one periodic structure on
+        the valence kernels of a GPU.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The structure.
+        plan : StepPlan
+            Its plan.
+
+        Returns
+        -------
+        bool
+            Whether :meth:`forward_plan_direct` serves the evaluation.
+        """
+        if (plan.recording or plan.terms != "valence" or self.training or not data.pos.is_cuda
+                or data.cell is None or data.num_graphs != 1 or plan.reference is None):
+            return False
+        dtype = self.ff.params["bond_k"].dtype
+        stand_in = data.pos.new_empty(1, dtype=dtype).expand(int(plan.pairs[0].shape[0]))
+        return self._fused_active(stand_in) and self._valence_table(plan, 1, data.num_nodes) is not None
+
+    def forward_plan_direct(self, data: AtomicGraph, plan: StepPlan) -> dict[str, Tensor]:
+        """The valence terms of an inner step (see :meth:`forms_plan_forces`) with their forces and
+        strain derivative, formed directly: the kernels' gradient with respect to the bonded vectors is
+        scattered to the atoms, and the strain derivative is the sum of every vector times its gradient
+        (a bonded vector strains with the cell and the positions).
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The structure.
+        plan : StepPlan
+            Its plan.
+
+        Returns
+        -------
+        dict of str to Tensor
+            ``energy``, ``node_energy``, ``forces``, ``virial`` (the strain derivative ``(1, 3, 3)``)
+            and the valence terms' totals.
+        """
+        with torch.no_grad(), fused(True):
+            return self._direct_valence(data, plan, self._valence_table(plan, 1, data.num_nodes))
+
+    def _direct_valence(self, data: AtomicGraph, plan: StepPlan, table) -> dict[str, Tensor]:
+        from . import amoeba_valence as kv
+        dtype = self.ff.params["bond_k"].dtype
+        jumps = lattice_jumps(data.pos, plan.reference, data.cell, data.batch, data.pbc)
+        pa, pb = table.pairs
+        vec = _stacked_vectors(data.pos, data.cell, pa, pb, torch.cat(plan.shifts[:plan.energy_calls]), jumps,
+                               data.model_dtype)
+        rows, gvec, virial = kv.energies_and_gradient(vec, table)
+        # the gradient of every atom summed over its compressed row of vectors: no atomic adds
+        grad = _kernels().PairScatter.apply(gvec, pa, pb, None, data.num_nodes, data.pos.dtype, table.rows)
+        if getattr(table, "e_ref", None) is None:
+            # the reference energies of the plan's atoms, constant with them
+            table.e_ref = self.atom_ref(data.atomic_numbers).reshape(-1).to(dtype).detach()
+        node_energy, totals, energy, forces, stress = _direct_outputs(rows, table.e_ref, virial, grad, data.cell,
+                                                                      data.pbc)
+        out = {"node_energy": node_energy, "energy": energy, "forces": forces, "stress": stress}
+        for t, key in enumerate(kv.TERMS + ("e_ref",)):
+            out[key] = totals[t]
+        return out
+
+    def _valence_kernel_rows(self, data: AtomicGraph, plan: StepPlan, table, jumps: Optional[Tensor]) -> Tensor:
+        """The valence terms per atom on the valence kernels (:mod:`.amoeba_valence`), the rows of
+        :data:`~.amoeba_valence.TERMS` ``(8, N)``, from the plan's bonded vectors in one gather; their
+        gradient reaches the positions and the cell through it."""
+        from . import amoeba_valence as kv
+        pa, pb = table.pairs
+        shift = torch.cat(plan.shifts[:plan.energy_calls])
+        if data.cell is not None and data.cell.shape[0] == 1:
+            vec = _stacked_vectors(data.pos, data.cell, pa, pb, shift, jumps, data.model_dtype)
+        else:
+            if jumps is not None:
+                shift = shift + (jumps.index_select(0, pa) - jumps.index_select(0, pb)).to(shift.dtype)
+            vec = pair_vectors(data, pa, pb, shift=shift)
+        return kv.ValenceTerms.apply(vec, table)
+
+    def _valence_table(self, plan: StepPlan, B: int, N: int):
+        """The :class:`~.amoeba_valence.ValenceTable` of a plan's valence terms, made once per plan (again
+        when a parameter changed), or ``None`` where the kernels do not serve: pi-torsions and
+        torsion-torsion maps, torsion multiplicities above six, a plan without image calls (no cell) or
+        whose image calls do not follow the terms."""
+        P, ff = self.ff.params, self.ff
+        names = ("bond_k", "bond_r0", "angle_k", "angle_theta0", "strbnd_k", "urey_k", "urey_r0", "opbend_k",
+                 "torsion_k")
+        version = tuple(P[k]._version for k in names if k in P) + tuple(
+            p._version for p in self.atom_ref.parameters())
+        kept = plan.__dict__.get("valence_table")
+        if kept is not None and kept[0] == version:
+            return kept[1]
+        table = None
+        if (not (self.pitors_type.numel() or self.tortor_type.numel()) and ff.torsion_nmax <= 6
+                and plan.energy_calls and len(plan.image_pairs) >= plan.energy_calls):
+            with torch.no_grad():
+                table = self._make_valence_table(plan, B, N)
+        plan.__dict__["valence_table"] = (version, table)
+        return table
+
+    def _make_valence_table(self, plan: StepPlan, B: int, N: int):
+        from . import amoeba_valence as kv
+        P, ff, s = self.ff.params, self.ff, self.ff.settings
+        dtype = P["bond_k"].dtype
+        pairs = plan.image_pairs[:plan.energy_calls]
+        device = pairs[0][0].device
+        n = int(self.top_type.shape[0])
+        starts = torch.arange(B, device=device) * n
+        angle_starts = torch.arange(B, device=device) * int(self.angle_index.shape[1])
+
+        def expand(idx: Tensor) -> Tensor:
+            return (idx.to(device).unsqueeze(1) + starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
+        def expand_angles(idx: Tensor) -> Tensor:
+            return (idx.to(device).unsqueeze(1) + angle_starts.view(1, B, 1)).reshape(idx.shape[0], -1)
+
+        def tile(v: Tensor) -> Tensor:
+            return v.to(device).repeat(B)
+
+        def flat(t: Tensor, kind=dtype) -> Tensor:
+            # an absent kind still passes a valid pointer
+            t = t.reshape(-1).to(device=device, dtype=kind).contiguous()
+            return t if t.numel() else torch.zeros(1, dtype=kind, device=device)
+
+        counts = [int(a.shape[0]) for a, _ in pairs]
+        bases = [sum(counts[:k]) for k in range(len(counts))]
+        calls = iter(range(len(counts)))
+        kinds: dict = {}
+
+        def take(count: int, n_calls: int):
+            rows = [next(calls) for _ in range(n_calls)]
+            if any(counts[k] != count for k in rows):
+                raise LookupError
+            return [bases[k] for k in rows]
+
+        try:
+            bi, bt = expand(self.bond_index), tile(self.bond_type)
+            kinds["bond"] = (int(bi.shape[1]), take(int(bi.shape[1]), 1),
+                             [flat(bi[0], torch.long), flat(bi[1], torch.long), flat(P["bond_k"][bt]),
+                              flat(P["bond_r0"][bt])])
+            ai, at, aenv = expand(self.angle_index), tile(self.angle_type), tile(self.angle_env)
+            na = int(ai.shape[1])
+            theta0 = torch.gather(P["angle_theta0"][at], 1, aenv[:, None])[:, 0]
+            rows = take(na, 3 if self._inplane_any else 2)
+            inplane = tile(self.angle_inplane) if self._inplane_any else torch.zeros(na, dtype=torch.bool,
+                                                                                       device=device)
+            kinds["angle"] = (na, (rows + [rows[0]])[:3],
+                              [flat(ai[1], torch.long), flat(P["angle_k"][at]), flat(theta0),
+                               flat(inplane, torch.int32)])
+            ns = 0
+            sb = [flat(torch.zeros(0), torch.long)] + [flat(torch.zeros(0))] * 5
+            rows = [0, 0]
+            if self.strbnd_angle.numel():
+                sbi = expand_angles(self.strbnd_angle.unsqueeze(0))[0]
+                sbt, flip = tile(self.strbnd_type), tile(self.strbnd_flip)
+                a_sel = ai[:, sbi]
+                k = P["strbnd_k"][sbt]
+                ns = int(a_sel.shape[1])
+                rows = take(ns, 2)
+                sb = [flat(a_sel[1], torch.long), flat(torch.where(flip, k[:, 1], k[:, 0])),
+                      flat(torch.where(flip, k[:, 0], k[:, 1])), flat(self._bond_r0_of(a_sel[1], a_sel[0], B)),
+                      flat(self._bond_r0_of(a_sel[1], a_sel[2], B)), flat(_take(theta0, sbi))]
+            kinds["strbnd"] = (ns, rows, sb)
+            nu, ub, rows = 0, [flat(torch.zeros(0), torch.long)] + [flat(torch.zeros(0))] * 2, [0]
+            if self.urey_angle.numel():
+                ubi = expand_angles(self.urey_angle.unsqueeze(0))[0]
+                ubt = tile(self.urey_type)
+                a_sel = ai[:, ubi]
+                nu = int(a_sel.shape[1])
+                rows = take(nu, 1)
+                ub = [flat(a_sel[1], torch.long), flat(P["urey_k"][ubt]), flat(P["urey_r0"][ubt])]
+            kinds["urey"] = (nu, rows, ub)
+            no, ob, rows = 0, [flat(torch.zeros(0), torch.long), flat(torch.zeros(0))], [0, 0, 0]
+            if self.opbend_type.numel():
+                oi, ot = expand(self.opbend_index), tile(self.opbend_type)
+                no = int(oi.shape[1])
+                rows = take(no, 3)
+                ob = [flat(oi[1], torch.long), flat(P["opbend_k"][ot])]
+            kinds["opbend"] = (no, rows, ob)
+            nt, slots, rows = 0, 1, [0, 0, 0]
+            tb = [flat(torch.zeros(0), torch.long), flat(torch.zeros(0)), flat(torch.ones(1), torch.int32),
+                  flat(torch.zeros(0)), flat(torch.zeros(0))]
+            if self.torsion_type.numel():
+                di, dtp = expand(self.torsion_index), tile(self.torsion_type)
+                nt = int(di.shape[1])
+                rows = take(nt, 3)
+                K = P["torsion_k"][dtp] * ff.torsion_mask[dtp]
+                slots = int(K.shape[1])
+                tb = [flat(di[1], torch.long), flat(K), flat(ff.torsion_n[dtp], torch.int32),
+                      flat(ff.torsion_cos[dtp]), flat(ff.torsion_sin[dtp])]
+            kinds["torsion"] = (nt, rows, tb)
+            if next(calls, None) is not None:
+                raise LookupError
+        except LookupError:
+            return None
+        eps = torch.finfo(dtype).eps
+        values = {"tiny": TINY, "deg": DEG, "bond_cubic": float(s["bond-cubic"]),
+                  "bond_quartic": float(s["bond-quartic"]),
+                  **{f"angle_{k}": float(s[f"angle-{k}"]) for k in ("cubic", "quartic", "pentic", "sextic")},
+                  **{f"opbend_{k}": float(s[f"opbend-{k}"]) for k in ("cubic", "quartic", "pentic", "sextic")},
+                  "angle_bound": min(0.9999999999, 1.0 - 4.0 * eps), "opbend_bound": 1.0 - 1e-15}
+        scalars = torch.tensor([values[k] for k in kv.SCALARS], dtype=torch.float64, device=device)
+        table = kv.ValenceTable(N, kinds, scalars, self._inplane_any, str(s["opbendtype"]).upper().startswith("ALL"),
+                                ff.torsion_nmax, slots)
+        table.pairs = (torch.cat([a for a, _ in pairs]), torch.cat([b for _, b in pairs]))
+        table.rows = _kernels().pair_rows(*table.pairs, N)
+        return table
 
     @fusable
     @region("amoeba.valence")
@@ -3681,10 +3972,11 @@ class Amoeba(InteratomicPotential):
             if predictor is not None:
                 predictor.rewind()
 
-    def refresh_cell(self, plan: StepPlan, cells: Tensor) -> bool:
+    def refresh_cell(self, plan: StepPlan, cells: Tensor, changed: bool = False) -> bool:
         """Bring the cell terms the step plan ``plan`` keeps across evaluations (the mesh influence
         functions, inverse cells and volumes of every mesh group) to the cells ``cells`` ``(B, 3, 3)``, in
-        place, so that a recorded step follows a changed cell. Reads the cells on the host.
+        place, so that a recorded step follows a changed cell. Reads the cells on the host, unless the
+        caller found them ``changed``.
 
         Parameters
         ----------
@@ -3692,6 +3984,8 @@ class Amoeba(InteratomicPotential):
             The plan.
         cells : Tensor
             The lattice vectors of the batch as rows.
+        changed : bool, optional
+            Remake every group's terms without comparing its cells, by default ``False``.
 
         Returns
         -------
@@ -3702,11 +3996,12 @@ class Amoeba(InteratomicPotential):
         if not layout:
             return False
         cells = cells.detach().reshape(-1, 3, 3)
-        changed = False
+        found_any = False
         for key in ("groups", "dgroups"):
             for (_, _, bs, _, batch), cache in zip(layout.get(key) or [], layout.get("influence_" + key) or []):
-                changed = refresh_cell_terms(cache, _take(cells, bs), batch) or changed
-        return changed
+                found = refresh_cell_terms(cache, _take(cells, bs), batch, changed)
+                found_any = found_any or found
+        return found_any
 
     def set_dipole_predictor(self, kind: Optional[str], history: int = 6) -> None:
         """Switch the induced-dipole predictor on (``"aspc"``, ``"gear"``,
@@ -4609,7 +4904,9 @@ class Hippo(Amoeba):
             weight = weight * switch
         # the centres' pairs without an ionct row take HIPPO's charge transfer
         many = self.n_mbct > 0
-        ions = ion_terms(i_, k_, R, weight, cls_idx, N, B, ff.params, ff.ionct_index, ff.ionpair_index,
+        # (a plain dict of the ion tables: the fused path compiles the terms as one block)
+        params = {key: value for key, value in ff.params.items() if key.startswith(("ionct_", "ionpair_", "mbct_"))}
+        ions = ion_terms(i_, k_, R, weight, cls_idx, N, B, params, ff.ionct_index, ff.ionpair_index,
                          ff.mbct_index, self.top_mbct_atom, self.top_mbct_slot, self.top_molecule, self.n_molecules,
                          ff.mbct_form, ff.mbct_c0, ff.ionct_x_set, self._class_table("chgtrn_eps") if many else None,
                          self._class_table("chgtrn_alpha") if many else None, bool(ff.ionct_keys),
@@ -5090,7 +5387,9 @@ class _MutualField:
         if len(plans) != 1 or self.mesh_self:
             return False
         g, plan = plans[0]
-        return bool(g["whole"]) and g["normals"] is None and plan.kernels and not plan.cells.requires_grad
+        # cells that carry a gradient stay on the kernels where a step plan keeps their terms
+        return (bool(g["whole"]) and g["normals"] is None and plan.kernels
+                and (not plan.cells.requires_grad or plan._cache is not None))
 
 
 @region("amoeba.pcg")
@@ -5443,8 +5742,13 @@ class _ImplicitInduction(torch.autograd.Function):
                     # coordinates' graph to the positions (lam is a multiple of mu under the shortcut)
                     _, plan = op.plans()[0]
                     scale = -0.5 * op.coulomb if (shortcut and op.polar_dipoles is None) else None
-                    gu = plan.dipole_adjoint(mu_d, lam_d, op.alpha_p, scale)
-                    grads = list(torch.autograd.grad(plan.u, inputs, gu, retain_graph=True, allow_unused=True))
+                    if plan.cells.requires_grad:
+                        # the cell also enters through the Jacobians and the influence function
+                        outs = [plan.u, plan.jac_g, plan.influence(op.alpha_p, "coulomb")]
+                        gs = list(plan.dipole_adjoint(mu_d, lam_d, op.alpha_p, scale, cell=True))
+                    else:
+                        outs, gs = [plan.u], [plan.dipole_adjoint(mu_d, lam_d, op.alpha_p, scale)]
+                    grads = list(torch.autograd.grad(outs, inputs, gs, retain_graph=True, allow_unused=True))
                 else:
                     scalar = (lam_d * op.mesh(mu_d)).sum()
                     grads = list(torch.autograd.grad(scalar, inputs, create_graph=create_graph, retain_graph=True,

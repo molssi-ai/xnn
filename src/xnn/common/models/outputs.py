@@ -150,6 +150,19 @@ class ForceStressOutput(nn.Module):
             if dtype is not None and dtype != data.pos.dtype:
                 data.compute_dtype = dtype
 
+        # a model that forms the forces and strain derivative of an evaluation on a step plan itself
+        # (the inner steps of AMOEBA and HIPPO on their valence kernels): no autograd pass
+        forms_plan_forces = getattr(self.model, "forms_plan_forces", None)
+        if (plan is not None and callable(forms_plan_forces) and not self.training and self.compute_forces
+                and forms_plan_forces(data, plan)):
+            out = self.model.forward_plan_direct(data, plan)
+            virial = out.pop("virial", None)
+            if not (self.compute_stress and data.cell is not None):
+                out.pop("stress", None)
+            elif "stress" not in out:
+                out["stress"] = _stress(virial, data)
+            return out
+
         strain = None
         if self.compute_stress and data.cell is not None:
             strain = torch.zeros((data.num_graphs, 3, 3), dtype=data.pos.dtype,
@@ -157,13 +170,14 @@ class ForceStressOutput(nn.Module):
             sym = 0.5 * (strain + strain.transpose(-1, -2))
             # displace positions and cell by the strain of their structure; one structure needs
             # no gather, and a batch gathers with index_select (an advanced-index gather sorts
-            # every atom's index in its backward and adds them all into the same entries)
+            # every atom's index in its backward and adds them all into the same entries). The
+            # products are broadcast sums: the backward of a matrix product over the atoms is a
+            # split-K product whose library workspace a recorded CUDA graph does not keep
             if data.num_graphs == 1:
-                data.pos = data.pos + data.pos @ sym[0]
+                data.pos = data.pos + (data.pos[:, :, None] * sym[0]).sum(1)
             else:
-                data.pos = data.pos + torch.einsum(
-                    "ni,nij->nj", data.pos, sym.index_select(0, data.batch))
-            data.cell = data.cell + torch.einsum("bij,bjk->bik", data.cell, sym)
+                data.pos = data.pos + (data.pos[:, :, None] * sym.index_select(0, data.batch)).sum(1)
+            data.cell = data.cell + (data.cell[:, :, :, None] * sym[:, None]).sum(2)
 
         if self.compute_forces:
             data.pos.requires_grad_(True)
