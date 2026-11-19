@@ -27,10 +27,10 @@ xnn offers several benefits out-of-the-box:
   (:ref:`fidelity`). :ref:`model-support` rates their speed against the
   upstream codes.
 - **Classical force fields and semiempirical methods, modernized.** ReaxFF,
-  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO, PM3 / PM6 / PM6-ORG / PM7 and
-  GFN0-xTB / GFN1-xTB / GFN2-xTB use the same PyTorch
-  interface as the MLIPs, so they train (reparameterize), evaluate and deploy
-  the same way, on CPU or GPU.
+  OPLS, DREIDING, AMBER, CHARMM, AMOEBA, HIPPO, GFN-FF, PM3 / PM6 / PM6-ORG
+  / PM7 and GFN0-xTB / GFN1-xTB / GFN2-xTB use the same PyTorch interface as the
+  MLIPs, so they train (reparameterize), evaluate and deploy the same way, on
+  CPU or GPU.
 - **One pipeline.** Shared data object, config schema, trainer and
   deployment to ASE, LAMMPS and the MolSSI Driver Interface.
 - **Access pre-trained models and benchmark data in one line.** ``from_pretrained()`` loads
@@ -153,7 +153,7 @@ Models at a glance
    * - Convolutional neural networks (``cnn``)
      - SE(3) steerable CNN, 3D CNN, spherical CNN
    * - Classical force fields (``ffnn``)
-     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO
+     - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF
    * - Semi-empirical quantum mechanics (``sqmnn``)
      - PM3, PM6, PM6-ORG, PM7, GFN0-xTB, GFN1-xTB, GFN2-xTB
    * - Transformer neural networks (``trfnn``)

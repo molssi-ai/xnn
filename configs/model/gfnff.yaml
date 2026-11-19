@@ -1,0 +1,11 @@
+name: gfnff
+cutoff: 1.0               # neighbor-list radius of the input graphs in A; the model evaluates all pairs and ignores the list
+atomic_numbers: null      # atomic numbers of the molecule, e.g. [8, 1, 1]
+positions: null           # positions in A that define the topology, e.g. [[0.0, 0.0, 0.0], ...]
+charge: 0                 # total charge of the molecule
+use_fast: auto            # auto, true or false: fused kernels (same numbers, forces only) or the eager terms
+skin: 1.0                 # margin in A of the hydrogen- and halogen-bond candidates of each conformation
+fixed_lists: false        # keep the hydrogen- and halogen-bond rows of the given structure instead
+# GFN-FF (Spicher & Grimme, Angew. Chem. Int. Ed. 59, 15665, 2020) generates the whole force field
+# from the structure given here; every structure evaluated later must be a conformation of it.
+# The element parameters are downloaded on first use into the model cache.

@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from test_amoeba_periodic import BOX, CELL, Z, _box
+from test_amoeba_periodic import BOX, CELL, SKEW, Z, _box
+from xnn.common import cpu_kernels
 from xnn.common.data import structure_to_graph
 from xnn.common.deploy.step_graph import StepGraph
 from xnn.common.models import ForceStressOutput
@@ -58,7 +59,7 @@ def test_steps_follow_a_changing_cell(cls, stress, device):
     """Steps whose cell changes (a barostat scaling the molecules' centers with the box, then a cell that
     shrinks without the atoms) equal fresh evaluations at every step: the plan's mesh terms follow the cell,
     replayed steps included, and the pair list is rebuilt once the images may have moved past the skin.
-    Without the stress the cell carries no gradient and the plan keeps its mesh terms across steps."""
+    The plan keeps its mesh terms across steps, with the stress together with their cell derivatives."""
     ref, model = (ForceStressOutput(_box(cls), compute_stress=stress).to(device).eval() for _ in range(2))
     stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
     rng = np.random.default_rng(7)
@@ -88,6 +89,33 @@ def test_steps_follow_a_changing_cell(cls, stress, device):
     if device == "cuda":
         assert stepper.replays > 0
 
+
+
+@pytest.mark.parametrize("cls", (Amoeba, Hippo))
+@pytest.mark.parametrize("device,fast", [
+    ("cpu", False),
+    pytest.param("cpu", True, marks=pytest.mark.skipif(not cpu_kernels.available(), reason="needs a C++ compiler")),
+    pytest.param("cuda", True, marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="records on a GPU"))])
+def test_the_stress_on_a_plan_follows_a_skewed_changing_cell(cls, device, fast):
+    """In a skewed cell that changes, the energy, forces and stress of steps on a plan equal the reference's,
+    whole and split into inner and outer terms: the cell's terms are kept with their Jacobians, and on the
+    kernels the mesh's Jacobian gradient comes in closed form."""
+    ref = ForceStressOutput(_box(cls, use_fast=False), compute_stress=True).to(device).eval()
+    model = ForceStressOutput(_box(cls, use_fast=fast), compute_stress=True).to(device).eval()
+    stepper = StepGraph(model, 6.3, skin=0.5, warmup=2)
+    velocity = np.random.default_rng(13).normal(scale=0.002, size=BOX.shape)
+    frac = BOX @ np.linalg.inv(CELL)
+    for step in range(6):
+        cell = SKEW * (1.0 + 0.002 * max(step - 3, 0))
+        s = {"pos": torch.tensor(frac @ cell + step * velocity, device=device),
+             "atomic_numbers": torch.tensor(Z, device=device), "cell": torch.tensor(cell, device=device),
+             "pbc": torch.ones(3, dtype=torch.bool, device=device)}
+        got, want = stepper(s), ref(structure_to_graph(s, 6.3, device=device))
+        for key in ("energy", "forces", "stress"):
+            assert torch.allclose(got[key], want[key].detach(), rtol=1e-9, atol=1e-7), (key, step)
+    slow, quick = stepper(s, terms="nonbonded"), stepper(s, terms="valence")
+    for key in ("energy", "forces", "stress"):
+        assert torch.allclose(slow[key] + quick[key], want[key].detach(), rtol=1e-9, atol=1e-7), key
 
 
 VALENCE_TERMS = ("e_bond", "e_angle", "e_strbnd", "e_urey", "e_opbend", "e_torsion", "e_pitors", "e_tortor", "e_ref")

@@ -8,4 +8,5 @@ response: auto            # exact SCF response in the parameter gradients: auto 
 max_iter: 300             # SCF iteration limit
 tol_density: 1.0e-9       # SCF convergence: largest density change
 tol_energy: 1.0e-10       # SCF convergence: energy change (eV)
-restart_gap: 3.0          # the extra SCF starts of a cold start run when a first solution's HOMO-LUMO gap is below this (eV)
+restart_gap: 6.5          # the extra SCF starts of a cold start run when the first run did not converge or its HOMO-LUMO gap is below this (eV)
+search_starts: 0          # further SCF runs of a cold start from perturbed initial densities; the lowest solution is kept (about 6 find hard ground states at 4-6 times the cost)

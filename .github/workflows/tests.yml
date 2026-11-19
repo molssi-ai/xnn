@@ -44,7 +44,7 @@ jobs:
         # a pull request is compared with its base branch and a push to dev with
         # main, so everything not yet on main is tested again on each push
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           base: main
           # A shard runs when its own sources or tests change, when a family it

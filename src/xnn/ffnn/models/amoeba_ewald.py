@@ -56,6 +56,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
+from torch.autograd.function import once_differentiable
 
 from xnn.common.models.ops import cell_volume
 from xnn.common.models.pme import bspline_weights, mesh_wavevectors, spline_moduli
@@ -489,10 +490,20 @@ def mesh_influence(inv: Tensor, volume: Tensor, mesh: List[int], order: int, alp
 def _influence_kernel(frequencies: List[Tensor], inv: Tensor, scale: Tensor, moduli: Tensor, alpha: float,
                       kind: str) -> Tensor:
     """The influence function :func:`mesh_influence` on the Miller indices ``frequencies`` (one per axis)."""
+    kvec = _wave_vectors(frequencies, inv)
+    return _influence_of_k2((kvec * kvec).sum(-1), scale, moduli, alpha, kind)
+
+
+def _wave_vectors(frequencies: List[Tensor], inv: Tensor) -> Tensor:
+    """The wave vectors of the Miller indices ``frequencies`` (one per axis), ``(G, K1, K2, H3, 3)``."""
     grid = torch.meshgrid(frequencies[0], frequencies[1], frequencies[2], indexing="ij")
     miller = torch.stack(grid, dim=-1)                                    # (K1, K2, H3, 3)
-    kvec = 2.0 * math.pi * torch.einsum("xyzc,gdc->gxyzd", miller, inv)
-    k2sq = (kvec * kvec).sum(-1)                                           # (G, K1, K2, H3)
+    # k_d = 2 pi sum_c m_c (h^-1)_dc, by broadcasting (no matrix product: see mesh_influence_jacobian)
+    return 2.0 * math.pi * (miller[None, :, :, :, None, :] * inv[:, None, None, None]).sum(-1)
+
+
+def _influence_of_k2(k2sq: Tensor, scale: Tensor, moduli: Tensor, alpha: float, kind: str) -> Tensor:
+    """The influence function from the squared wave vectors ``(G, K1, K2, H3)``."""
     if kind == "coulomb":
         m2 = k2sq / (4.0 * math.pi * math.pi)
         safe = torch.where(m2 > 0, m2, torch.ones_like(m2))
@@ -503,37 +514,168 @@ def _influence_kernel(frequencies: List[Tensor], inv: Tensor, scale: Tensor, mod
     return scale * (math.pi ** 1.5) * alpha ** 3 / 3.0 * f * moduli
 
 
+def _influence_slope(k2sq: Tensor, g: Tensor, scale: Tensor, moduli: Tensor, alpha: float, kind: str) -> Tensor:
+    """The derivative of :func:`_influence_of_k2` with respect to ``k^2`` (``g`` its value), elementwise:
+    ``g (-1 / (4 alpha^2) - 1 / k^2)`` for ``"coulomb"`` (zero at ``k = 0``) and ``scale pi^(3/2) alpha / 4
+    (sqrt(pi) b erfc(b) - exp(-b^2)) B`` for ``"r6"``."""
+    if kind == "coulomb":
+        safe = torch.where(k2sq > 0, k2sq, torch.ones_like(k2sq))
+        return torch.where(k2sq > 0, g * (-0.25 / (alpha * alpha) - 1.0 / safe), torch.zeros_like(g))
+    b = torch.sqrt(k2sq + 1e-30) / (2.0 * alpha)
+    df = math.sqrt(math.pi) * b * torch.erfc(b) - torch.exp(-b * b)
+    return scale * (math.pi ** 1.5) * alpha / 4.0 * df * moduli
+
+
 def mesh_influence_of(inv: Tensor, volume: Tensor, mesh: List[int], moduli: Tensor, alpha: float,
                       kind: str) -> Tensor:
     """:func:`mesh_influence` with the spline moduli ``moduli`` ``(K_1, K_2, K_3)`` given (a scriptable form)."""
-    dtype, device = inv.dtype, inv.device
+    half = moduli[:, :, :mesh[2] // 2 + 1]
+    # the inverse transforms run unscaled (norm="forward"), so the 1 / (K1 K2 K3) of the
+    # inverse FFT is folded in here: one multiply fewer per transform
+    scale = (1.0 / volume)[:, None, None, None]
+    sets = _miller_sets(mesh, inv.dtype, inv.device)
+    g = _influence_kernel(sets[0], inv, scale, half, alpha, kind)
+    if len(sets) == 2:
+        g = 0.5 * (g + _influence_kernel(sets[1], inv, scale, half, alpha, kind))
+    return g
+
+
+def _miller_sets(mesh: List[int], dtype: torch.dtype, device: torch.device) -> List[List[Tensor]]:
+    """The Miller indices of the half spectrum per axis, and for a mesh with an even axis a second
+    set: a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors differ in
+    a non-orthogonal cell. The two aliases are averaged, the symmetric kernel the full complex
+    transform applies through its real part."""
     k1, k2, k3 = mesh[0], mesh[1], mesh[2]
     h3 = k3 // 2 + 1
     axes = [torch.fft.fftfreq(k1, d=1.0 / k1, dtype=dtype, device=device),
             torch.fft.fftfreq(k2, d=1.0 / k2, dtype=dtype, device=device),
             torch.fft.fftfreq(k3, d=1.0 / k3, dtype=dtype, device=device)[:h3]]
-    half = moduli[:, :, :h3]
-    # the inverse transforms run unscaled (norm="forward"), so the 1 / (K1 K2 K3) of the
-    # inverse FFT is folded in here: one multiply fewer per transform
+    if not (k1 % 2 == 0 or k2 % 2 == 0 or k3 % 2 == 0):
+        return [axes]
+    flipped: List[Tensor] = []
+    for a, k in zip(axes, [k1, k2, k3]):
+        flipped.append(torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a)
+    return [axes, flipped]
+
+
+def mesh_influence_jacobian(cells: Tensor, mesh: List[int], order: int, alpha: float, kind: str) -> tuple:
+    """:func:`mesh_influence` of the cells ``(G, 3, 3)`` and its derivative with respect to the nine
+    entries of every structure's cell, ``(9, G, K_1, K_2, K_3 // 2 + 1)``, in closed form: the function depends on
+    the cell ``h`` through the volume and the squared wave vectors, with ``d k^2 / d h_ab = -2 k_b
+    (k h^-1)_a`` and ``d (1 / V) / d h_ab = -(h^-1)_ba / V``; its derivative with respect to ``k^2``
+    is elementwise (:func:`_influence_slope`). Elementwise and broadcast operations only: no matrix
+    product, whose library workspace a later graph recording would release."""
+    mesh = [int(k) for k in mesh]
+    inv, volume = _inverse_cells(cells), cell_volume(cells)
+    half = _moduli(mesh, order, inv.dtype, inv.device)[:, :, :mesh[2] // 2 + 1]
     scale = (1.0 / volume)[:, None, None, None]
-    g = _influence_kernel(axes, inv, scale, half, alpha, kind)
-    # a Nyquist index of an even axis stands for both -K/2 and +K/2, whose wave vectors
-    # differ in a non-orthogonal cell: the two aliases are averaged, the symmetric kernel
-    # the full complex transform applies through its real part
-    if k1 % 2 == 0 or k2 % 2 == 0 or k3 % 2 == 0:
-        flipped: List[Tensor] = []
-        for a, k in zip(axes, [k1, k2, k3]):
-            flipped.append(torch.where(a == -(k // 2), torch.full_like(a, k // 2), a) if k % 2 == 0 else a)
-        g = 0.5 * (g + _influence_kernel(flipped, inv, scale, half, alpha, kind))
-    return g
+    transposed = inv.transpose(1, 2)[:, None, None, None]
+    sets = _miller_sets(mesh, inv.dtype, inv.device)
+    value, out = None, None
+    for frequencies in sets:
+        kvec = _wave_vectors(frequencies, inv)
+        k2sq = (kvec * kvec).sum(-1)
+        g = _influence_of_k2(k2sq, scale, half, alpha, kind)
+        slope = _influence_slope(k2sq, g, scale, half, alpha, kind)
+        # w_a = sum_d k_d (h^-1)_da
+        w = (kvec[..., :, None] * inv[:, None, None, None]).sum(-2)
+        jac = (-g[..., None, None] * transposed
+               - 2.0 * slope[..., None, None] * w[..., :, None] * kvec[..., None, :])
+        value, out = (g, jac) if out is None else (value + g, out + jac)
+    if len(sets) == 2:
+        value, out = 0.5 * value, 0.5 * out
+    return value, out.permute(4, 5, 0, 1, 2, 3).reshape(9, *out.shape[:4])
 
 
-def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
+def _inverse_jacobian(cells: Tensor) -> tuple:
+    """The inverse cells and ``d (h^-1)_dc / d h_ab = -(h^-1)_da (h^-1)_bc``, ``(9, G, 3, 3)``."""
+    inv = _inverse_cells(cells)
+    # (a, b, g, d, c) = -inv[g, d, a] inv[g, b, c], by broadcasting
+    outer = -(inv.permute(2, 0, 1)[:, None, :, :, None] * inv.permute(1, 0, 2)[None, :, :, None, :])
+    return inv, outer.reshape(9, *inv.shape)
+
+
+def _volume_jacobian(cells: Tensor) -> tuple:
+    """The volumes and ``d V / d h_ab = V (h^-1)_ba`` of every cell, ``(9, G)``."""
+    volume = cell_volume(cells)
+    scaled = volume[:, None, None] * _inverse_cells(cells).transpose(1, 2)
+    return volume, scaled.permute(1, 2, 0).reshape(9, -1)
+
+
+def _inverse_cells(cells: Tensor) -> Tensor:
+    """The inverses of cells ``(G, 3, 3)`` (lattice vectors as rows) from their cofactors: the columns of
+    ``h^-1`` are the cross products of the other two rows over the triple product. Elementwise, so no
+    library call (a 3 x 3 LU per cell costs a solver launch sequence) and no matrix product."""
+    a, b, c = cells[:, 0], cells[:, 1], cells[:, 2]
+    cols = torch.stack([torch.linalg.cross(b, c), torch.linalg.cross(c, a), torch.linalg.cross(a, b)], -1)
+    return cols / (a * cols[..., 0]).sum(-1)[:, None, None]
+
+
+def _capturing(t: Tensor) -> bool:
+    """Whether a CUDA graph is being recorded on the device of ``t``."""
+    return t.is_cuda and torch.cuda.is_current_stream_capturing()
+
+
+def cell_jacobian(fn, cells: Tensor) -> Tensor:
+    """The derivative of ``fn(cells)`` ``(G, ...)`` with respect to the nine entries of every structure's own
+    cell ``(G, 3, 3)``, ``(9, G, ...)``, by forward-mode differentiation (one pass over the nine directions)."""
+    basis = torch.eye(9, dtype=cells.dtype, device=cells.device).reshape(9, 1, 3, 3).expand(9, *cells.shape)
+    return torch.func.vmap(lambda t: torch.func.jvp(fn, (cells,), (t,))[1])(basis)
+
+
+class _CellTerm(torch.autograd.Function):
+    """A quantity of the cells alone ``(G, ...)`` read from a step plan's cache: the kept ``value``, whose
+    gradient reaches the cells through the kept Jacobian ``(9, G, ...)`` (:func:`cell_jacobian`) in one
+    reduction, where differentiating the quantity anew would evaluate it at every step."""
+
+    @staticmethod
+    def forward(ctx, cells, value, jacobian):
+        ctx.save_for_backward(jacobian)
+        ctx.shape = cells.shape
+        return value.view_as(value)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, g):
+        (jacobian,) = ctx.saved_tensors
+        G = int(jacobian.shape[1])
+        out = (jacobian.reshape(9, G, -1) * g.reshape(1, G, -1).to(jacobian.dtype)).sum(-1)
+        return (out if G == 1 else out.t()).reshape(ctx.shape), None, None
+
+
+def jacobian_gradient(parts: list, jac_inv: Tensor, batch: Tensor, groups: int) -> Tensor:
+    """The gradient of a mesh sum with respect to the Jacobians ``J`` ``(G, 3, 3)`` of its structures, at
+    fixed scaled coordinates: the Cartesian multipoles and derivatives enter and leave the mesh through
+    ``J`` alone, so it is ``(sum_n X_n Y_n) J^-T`` over ``parts``, pairs ``(X, Y)`` of a Cartesian
+    quantity ``(N, 3, m)`` and the gradient of the sum with respect to it ``(N, m, 3)`` (a dipole and
+    the gradient at it, a symmetrized quadrupole and the Hessian at it)."""
+    X = torch.cat([x for x, _ in parts], 2)
+    Y = torch.cat([y for _, y in parts], 1)
+    # broadcast sums, no matrix products: a product over the atoms is a split-K product whose library
+    # workspace a recorded CUDA graph does not keep
+    XY = (X[:, :, :, None] * Y[:, None]).sum(2)                         # (N, 3, 3)
+    if groups == 1:
+        M = XY.sum(0, keepdim=True)
+    else:
+        M = torch.zeros(groups, 3, 3, dtype=X.dtype, device=X.device).index_add_(0, batch, XY)
+    return (M[:, :, None, :] * jac_inv[:, None, :, :]).sum(-1)
+
+
+def _refresher(entry: list, cells: Tensor):
+    """The closed form of a kept term (its value and Jacobian), compiled once per term on a GPU."""
+    if not cells.is_cuda:
+        return entry[3]
+    if len(entry) < 5:
+        entry.append(torch.compile(entry[3], dynamic=False))
+    return entry[4]
+
+
+def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor, changed: bool = False) -> bool:
     """Bring the cell terms a step plan keeps for one mesh group (the ``influence_cache`` of
     :class:`MeshPlan`: inverse cells, volumes, per-atom inverses and influence functions) to the cells
     ``cells`` ``(G, 3, 3)``, in place, so that a recorded step that reads them follows a changed cell
     (constant-pressure dynamics). ``batch`` gives the structure of every atom of the group. Reads the cells
-    on the host; returns whether they had changed.
+    on the host, unless the caller found them ``changed``; returns whether they had changed.
 
     Parameters
     ----------
@@ -543,6 +685,8 @@ def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
         Lattice vectors as rows ``(G, 3, 3)``.
     batch : Tensor
         Structure of every atom ``(N,)``, from zero to ``G - 1``.
+    changed : bool, optional
+        Remake the terms without comparing the cells (a read of the device), by default ``False``.
 
     Returns
     -------
@@ -553,10 +697,10 @@ def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
     if kept is None:
         return False
     cells = cells.detach().to(kept.dtype)
-    if torch.equal(kept, cells):
+    if not changed and torch.equal(kept, cells):
         return False
     with torch.no_grad():
-        inv = torch.linalg.inv_ex(cells)[0]
+        inv = _inverse_cells(cells)
         volume = cell_volume(cells)
         for key, value in cache.items():
             if isinstance(key, tuple) and key[0] == "geometry":
@@ -567,6 +711,20 @@ def refresh_cell_terms(cache: dict, cells: Tensor, batch: Tensor) -> bool:
             if isinstance(key, tuple) and key[0] != "geometry":
                 alpha, kind, mesh, order, _ = key
                 value.copy_(mesh_influence(inv, volume, list(mesh), order, alpha, kind))
+        # the terms kept with their cell derivative (see MeshPlan.kept); on a GPU a closed form runs compiled,
+        # once per term: a barostat changes the cell every few steps, and the eager operations on whole
+        # spectra are some seventy launches per term
+        for entry in cache.get("terms", {}).values():
+            fn, value, jacobian, derivative = entry[:4]
+            if jacobian is None:
+                value.copy_(fn(cells))
+            elif derivative is None:
+                value.copy_(fn(cells))
+                jacobian.copy_(cell_jacobian(fn, cells))
+            else:
+                v, j = _refresher(entry, cells)(cells)
+                value.copy_(v)
+                jacobian.copy_(j)
         kept.copy_(cells)
     return True
 
@@ -653,12 +811,18 @@ class MeshPlan:
         # changed cell brings them up to date in place (refresh_cell_terms), where a recorded step reads them
         geometry = ("geometry", tuple(self.mesh), dtype)
         fixed = influence_cache is not None and not cells.requires_grad
-        if fixed and not (cells.is_cuda and torch.cuda.is_current_stream_capturing()):
+        if influence_cache is not None and not _capturing(cells):
             refresh_cell_terms(influence_cache, cells, batch)
         if fixed and geometry in influence_cache:
             inv, inv_n, self.volume = influence_cache[geometry]
+        elif influence_cache is not None and cells.requires_grad:
+            # cells that carry a gradient (the stress): the kept terms with their kept cell derivatives
+            inv = self.kept(("inverse", dtype), _inverse_cells, _inverse_jacobian)
+            self.volume = self.kept(("volume", dtype), cell_volume, _volume_jacobian)
+            # one structure: a broadcast, whose backward is a sum (a gather's adds every atom into one entry)
+            inv_n = inv.expand(int(batch.shape[0]), 3, 3) if self.groups == 1 else inv.index_select(0, batch)
         else:
-            inv = torch.linalg.inv_ex(cells)[0]                                   # (G, 3, 3)
+            inv = _inverse_cells(cells)                                           # (G, 3, 3)
             # gathers by index_select: their backward adds atomically, without sorting the indices
             inv_n = inv.index_select(0, batch)
             self.volume = cell_volume(cells)
@@ -678,11 +842,45 @@ class MeshPlan:
             self.u = u
             self.tables = km.spline_tables(u.detach(), self.mesh, self.order)
             self.jac_g = (inv * sizes).contiguous()                          # (G, 3, 3): J of every structure
+            # the kernels read the Jacobians as constants; their inverse serves the cell gradient
+            self.jac_c = self.jac_g.detach()
+            self.jac_inv = cells.detach() / sizes[:, None]
             self._zero = self.tables[0].new_zeros(self.tables[0].shape[0])    # the absent charges of a pass
             self._paired: Optional[tuple] = None
             return
         w, dw, d2w, self.flat, self.start = mesh_layout(u, sizes, batch, self.mesh, self.order)
         self._splines = (w, dw, d2w)                                        # (N, 3, p) each
+
+    def kept(self, key: tuple, fn, derivative=None) -> Tensor:
+        """``fn(cells)``, a quantity of the cells alone ``(G, ...)``: with a step plan's cache it is kept
+        across evaluations, and for cells that carry a gradient it is kept with its Jacobian, through
+        which the gradient reaches the cells (:class:`_CellTerm`). ``derivative(cells)`` gives the
+        quantity and its Jacobian ``(9, G, ...)`` in closed form; without it forward-mode differentiation
+        gives the Jacobian (:func:`cell_jacobian`). The Jacobian is not made while a CUDA graph is recorded;
+        the quantity is then differentiated as it is."""
+        cache, cells = self._cache, self.cells
+        if cache is None:
+            return fn(cells)
+        capturing = _capturing(cells)
+        terms = cache.setdefault("terms", {})
+        if key not in terms:
+            if capturing:
+                return fn(cells)
+            with torch.no_grad():
+                terms[key] = [fn, fn(cells.detach()), None, derivative]
+            cache.setdefault("cell", cells.detach().clone())
+        entry = terms[key]
+        if not cells.requires_grad:
+            return entry[1]
+        if entry[2] is None:
+            if capturing:
+                return fn(cells)
+            with torch.no_grad():
+                entry[2] = (entry[3](cells.detach())[1] if entry[3] is not None
+                            else cell_jacobian(fn, cells.detach()))
+        # (a first use inside the solve, which runs without gradients, still reaches the cells)
+        with torch.enable_grad():
+            return _CellTerm.apply(cells, entry[1], entry[2])
 
     def stencils(self, second: bool = False) -> dict:
         """The 3D spline weights ``"0"``, their first derivatives ``"a_"`` and, with
@@ -703,6 +901,12 @@ class MeshPlan:
         if (key not in self._influence and self._cache is not None and shared in self._cache
                 and not self.cells.requires_grad):
             self._influence[key] = self._cache[shared]
+        if key not in self._influence and self._cache is not None and self.cells.requires_grad:
+            mesh, order = list(self.mesh), self.order
+            self._influence[key] = self.kept(
+                ("influence",) + shared,
+                lambda c: mesh_influence(_inverse_cells(c), cell_volume(c), mesh, order, alpha, kind),
+                lambda c: mesh_influence_jacobian(c, mesh, order, alpha, kind))
         if key not in self._influence:
             g = mesh_influence(self.inv, self.volume, self.mesh, self.order, alpha, kind)
             self._influence[key] = g
@@ -735,11 +939,12 @@ class MeshPlan:
         n = w.shape[0]
         zeros = w.new_zeros
         order = 2 if Q is not None else (1 if d is not None else 0)
-        if not self.cells.requires_grad:
-            # the Jacobians are constants: Cartesian multipoles in, Cartesian derivatives out
+        if not self.cells.requires_grad or self._cache is not None:
+            # Cartesian multipoles in, Cartesian derivatives out; on a step plan the gradient with respect
+            # to Jacobians that follow the cell (the stress) comes in closed form
             phi, dphi, hess = km.MeshConvolutionCartesian.apply(
                 self.u, self._zero if q is None else q, d, Q, self.jac_g, self.batch, self.influence(alpha, "coulomb"),
-                w, start, self.mesh, self.groups, order, 2 if hessian else 1)
+                w, start, self.mesh, self.groups, order, 2 if hessian else 1, self.jac_inv)
             return phi, dphi, hess if hessian else None
         c0 = zeros(n) if q is None else q
         c1 = zeros(n, 3) if d is None else vecmat(d, self.jac)
@@ -769,10 +974,10 @@ class MeshPlan:
         from . import amoeba_kernels as km
         w, start = self.tables
         k1, k2, k3 = self.mesh
-        grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh, self.groups, 1,
+        grid = km.spread_cartesian(self._zero, d, None, self.jac_c, w, start, self.batch, self.mesh, self.groups, 1,
                                    guard)
-        pot = mesh_irfftn(mesh_rfftn(grid) * self.influence(alpha, "coulomb"), (k1, k2, k3))
-        return km.gather_field(pot, self.jac_g, w, start, self.batch, self.mesh, acc, d, coef, guard)
+        pot = mesh_irfftn(mesh_rfftn(grid) * self.influence(alpha, "coulomb").detach(), (k1, k2, k3))
+        return km.gather_field(pot, self.jac_c, w, start, self.batch, self.mesh, acc, d, coef, guard)
 
     def paired_field_into(self, d: Tensor, alpha: float, acc: Tensor, coef: float,
                           guard: Optional[Tensor] = None) -> Tensor:
@@ -784,8 +989,8 @@ class MeshPlan:
             w, start = self.tables
             self._paired = (float(alpha), torch.cat([w, w]), torch.cat([start, start]),
                             torch.cat([self.batch, self.batch + self.groups]),
-                            torch.cat([self.jac_g, self.jac_g]).contiguous(),
-                            self.influence(alpha, "coulomb").repeat(2, 1, 1, 1),
+                            torch.cat([self.jac_c, self.jac_c]).contiguous(),
+                            self.influence(alpha, "coulomb").detach().repeat(2, 1, 1, 1),
                             self._zero.new_zeros(2 * self._zero.shape[0]))
         _, w, start, batch, jac, influence, zero = self._paired
         k1, k2, k3 = self.mesh
@@ -793,28 +998,46 @@ class MeshPlan:
         pot = mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
         return km.gather_field(pot, jac, w, start, batch, self.mesh, acc, d, coef, guard)
 
-    def dipole_adjoint(self, mu: Tensor, lam: Tensor, alpha: float, scale: Optional[float] = None) -> Tensor:
+    def dipole_adjoint(self, mu: Tensor, lam: Tensor, alpha: float, scale: Optional[float] = None,
+                       cell: bool = False):
         """The gradient with respect to the scaled coordinates of ``sum(lam . E(mu))``, the mesh field of
         dipoles ``mu`` probed by ``lam`` (the mesh part of the induction's implicit backward), as the
         backward of the mesh convolution forms it but without the gathers that term does not need: the
         potentials of ``mu`` and of the probes, then one adjoint kernel. With ``lam`` equal to ``scale``
-        times ``mu`` one spread and FFT pair serves both."""
+        times ``mu`` one spread and FFT pair serves both. With ``cell`` the gradients with respect to
+        the Jacobians ``jac_g`` and to the influence function are returned too (the cell's part of the
+        term), from one more gather per potential."""
         from . import amoeba_kernels as km
         w, start = self.tables
         k1, k2, k3 = self.mesh
-        influence = self.influence(alpha, "coulomb")
+        influence = self.influence(alpha, "coulomb").detach()
+        jac = self.jac_c
 
         def potential(d):
-            grid = km.spread_cartesian(self._zero, d, None, self.jac_g, w, start, self.batch, self.mesh,
-                                       self.groups, 1)
-            return mesh_irfftn(mesh_rfftn(grid) * influence, (k1, k2, k3))
+            grid = km.spread_cartesian(self._zero, d, None, jac, w, start, self.batch, self.mesh, self.groups, 1)
+            spectrum = mesh_rfftn(grid)
+            return grid, spectrum, mesh_irfftn(spectrum * influence, (k1, k2, k3))
 
-        pot = potential(mu)
+        grid, spectrum, pot = potential(mu)
         # the field is minus the potential's gradient: the probes are -lam
         probe = -lam
-        psi = -scale * pot if scale is not None else potential(probe)
-        return km.adjoint_cartesian(pot, (self._zero, probe, None), 1, psi, (self._zero, mu, None), 1, self.jac_g,
-                                    w, start, self.batch, self.mesh)
+        if scale is not None:
+            probe_grid, psi = -scale * grid, -scale * pot
+        else:
+            probe_grid, _, psi = potential(probe)
+        gu = km.adjoint_cartesian(pot, (self._zero, probe, None), 1, psi, (self._zero, mu, None), 1, jac,
+                                  w, start, self.batch, self.mesh)
+        if not cell:
+            return gu
+        at_mu = km.gather_cartesian(pot, jac, w, start, self.batch, self.mesh, 1)[1]
+        at_probe = -scale * at_mu if scale is not None else km.gather_cartesian(psi, jac, w, start, self.batch,
+                                                                                self.mesh, 1)[1]
+        g_jac = jacobian_gradient([(mu[:, :, None], at_probe[:, None, :]), (probe[:, :, None], at_mu[:, None, :])],
+                                  self.jac_inv, self.batch, self.groups)
+        with torch.enable_grad():
+            inf = influence.detach().requires_grad_(True)
+            g_influence = torch.autograd.grad(mesh_irfftn(spectrum * inf, (k1, k2, k3)), inf, probe_grid)[0]
+        return gu, g_jac, g_influence
 
     @region("mesh.dispersion")
     def dispersion(self, c: Tensor, alpha: float) -> Tensor:

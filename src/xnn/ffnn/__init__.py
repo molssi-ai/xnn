@@ -12,7 +12,8 @@ generates its valence terms from per-atom rules, AMBER (Cornell et al.
 1995, ff94) and CHARMM22 (MacKerell et al. 1998) assign their charges from
 residue templates, and AMOEBA (Ren and Ponder 2003; Ponder et al. 2010; Shi
 et al. 2013) and HIPPO (Rackers et al. 2021) are the polarizable atomic
-multipole force fields with induced dipoles.
+multipole force fields with induced dipoles. GFN-FF (Spicher and Grimme
+2020) generates its topology and all parameters from the structure alone.
 
 Parameter libraries for the whole family are read from the MolSSI/SEAMM
 ``.frc`` force-field format (:mod:`xnn.ffnn.common.frc`), which also

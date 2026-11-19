@@ -781,17 +781,22 @@ def scf_solve(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs,
 def scf_with_starts(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, n_alpha: Tensor,
                     n_beta: Tensor, unrestricted: bool, guess: Tensor, max_iter: int, tol_density: float,
                     tol_energy: float, starts: List[Tuple[float, int]], restart_gap: float,
-                    pseudo_diagonalization: float, min_basis: int) -> SCFResult:
+                    pseudo_diagonalization: float, min_basis: int, search: int = 0) -> SCFResult:
     """The SCF from each start ``(smearing, smeared iterations)`` where the first may have settled in an
-    excited aufbau state (unrestricted, or a frontier gap below ``restart_gap``), per structure the converged
-    result of lowest energy (:func:`lowest`); the rule of :class:`~.nddo.NDDO`."""
+    excited aufbau state (:func:`needs_restart`), then from ``search`` perturbed starts (:func:`search_guess`),
+    per structure the converged result of lowest energy (:func:`lowest`); the rule of :class:`~.nddo.NDDO`."""
     results = [scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, guess, max_iter, tol_density,
                          tol_energy, 8, starts[0][0], starts[0][1], None, pseudo_diagonalization, min_basis)]
-    if len(starts) > 1 and (unrestricted or bool((frontier_gap(results[0]) < restart_gap).any())):
+    if len(starts) > 1 and needs_restart(results[0], unrestricted, restart_gap):
         for kt, steps in starts[1:]:
             results.append(scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, guess, max_iter,
                                      tol_density, tol_energy, 8, kt, steps, None, pseudo_diagonalization,
                                      min_basis))
+    for i in range(search):
+        start, spin = search_guess(guess, layout, n_alpha, n_beta, unrestricted, i)
+        kt, steps = search_schedule(i)
+        results.append(scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, start, max_iter, tol_density,
+                                 tol_energy, 8, kt, steps, spin, pseudo_diagonalization, min_basis))
     return lowest(results)
 
 
@@ -889,7 +894,10 @@ def _converged(loop: SCFLoop, layout: Layout, H: Tensor, W1: Dict[str, Tensor], 
                rotate: float) -> Tuple[SCFResult, Optional[Tensor]]:
     """The converged quantities of the iterations of :func:`_iterate`, and the aufbau density of the converged
     Fock matrix where a rotated solution has another occupation (else ``None``)."""
-    converged = (loop.dP < tol_density) & (loop.dE < tol_energy) & (it >= smear_steps)
+    converged = (loop.dP < tol_density) & (loop.dE < tol_energy)
+    if it < smear_steps:
+        # not "& (it >= smear_steps)": TorchScript makes the flags integers with a Python bool
+        converged = torch.zeros_like(converged)
     P = loop.P.clone()
     F = _fock(layout, H, W1, W2, P, unrestricted)
     e_el = _electronic_energy(H, F, P, unrestricted)
@@ -992,6 +1000,58 @@ def frontier_gap(result: SCFResult) -> Tensor:
     homo = torch.where(occupied, eps, torch.full_like(eps, -pad)).amax(-1)
     lumo = torch.where(occupied | (eps > 0.5 * pad), torch.full_like(eps, pad), eps).amin(-1)
     return (lumo - homo).amin(0)
+
+
+def search_schedule(index: int) -> Tuple[float, int]:
+    """Fermi temperature (eV) and annealing iterations of search start ``index`` (:func:`search_guess`): the
+    occupation kicks anneal, the density kicks run plain."""
+    return (1.0, 80) if index % 2 == 0 else (0.0, 0)
+
+
+def _hash_noise(seed: int, salt: float, numel: int, like: Tensor) -> Tensor:
+    """``numel`` values in [-1, 1): the fractional part of a scaled sine of the index, the same on every device."""
+    i = torch.arange(numel, dtype=torch.float64, device=like.device)
+    x = torch.sin(i * 12.9898 + float(seed) * 78.233 + salt) * 43758.5453
+    return ((x - torch.floor(x)) * 2.0 - 1.0).to(like.dtype)
+
+
+def _kicked_occupations(d: Tensor, valid: Tensor, count: Tensor, seed: int, salt: float) -> Tensor:
+    """Orbital occupations ``d`` ``(B, n)`` scaled by ``1 + u`` (``u`` of :func:`_hash_noise`) and renormalized to
+    ``count`` electrons per structure."""
+    u = _hash_noise(seed, salt, d.shape[0] * d.shape[1], d).reshape(d.shape)
+    k = d * (1.0 + u) * valid
+    total = k.sum(-1, keepdim=True)
+    return k * (count.to(d.dtype)[:, None] / torch.where(total > 0.0, total, torch.ones_like(total)))
+
+
+def search_guess(guess: Tensor, layout: Layout, n_alpha: Tensor, n_beta: Tensor, unrestricted: bool,
+                 index: int) -> Tuple[Tensor, Optional[Tensor]]:
+    """The starting densities of search start ``index`` (seed ``index // 2``), deterministic: an even start scales
+    each orbital's occupation of ``guess`` by a factor in [0, 2) and renormalizes to the electron count (an
+    unrestricted one then scales each spin's share of it again, the two spins apart), an odd one adds symmetric
+    noise of amplitude 0.3 to ``guess``. Returns the total density and, of an unrestricted even start, the spin
+    densities (else ``None``: the split of the total)."""
+    B, n = guess.shape[0], guess.shape[-1]
+    seed = index // 2
+    valid = layout.valid.to(guess.dtype)
+    if index % 2 == 1:
+        N = _hash_noise(seed, 0.0, B * n * n, guess).reshape(B, n, n)
+        N = 0.5 * (N + N.transpose(-1, -2)) * valid[:, :, None] * valid[:, None, :]
+        return guess + 0.3 * N, None
+    d = _kicked_occupations(torch.diagonal(guess, dim1=-2, dim2=-1) * valid, valid, n_alpha + n_beta, seed, 0.0)
+    if not unrestricted:
+        return torch.diag_embed(d), None
+    # each spin kicked again from the kicked total: the wider spread reaches more open-shell states
+    a = _kicked_occupations(d, valid, n_alpha, seed, 17.0)
+    b = _kicked_occupations(d, valid, n_beta, seed, 18.0)
+    return torch.diag_embed(a + b), torch.stack([torch.diag_embed(a), torch.diag_embed(b)])
+
+
+def needs_restart(first: SCFResult, unrestricted: bool, restart_gap: float) -> bool:
+    """Whether a cold start runs its further starts after ``first``: unrestricted, a structure not converged, or a
+    frontier gap below ``restart_gap`` (eV), where the first run may have settled in an excited aufbau state."""
+    return (unrestricted or not bool(first.converged.all())
+            or bool((frontier_gap(first) < restart_gap).any()))
 
 
 def lowest(results: List[SCFResult]) -> SCFResult:

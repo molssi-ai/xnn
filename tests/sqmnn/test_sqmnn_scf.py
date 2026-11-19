@@ -17,8 +17,12 @@ import torch
 
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput
-from xnn.sqmnn.models import PM6, nddo, scf
+from xnn.sqmnn.models import PM6, PM7, nddo, scf
 
+CCH = (np.array([[0.67291273451353, 0.0, 0.0], [-0.53840317956358, 0.0, 0.0], [-1.60293110389655, 0.0, 0.0]]),
+       [6, 6, 1])
+FCCH = (np.array([[0.0, 0.0, -0.09544399299461], [0.0, 0.0, -1.28414890887293], [0.0, 0.0, 1.18037991640086],
+                  [0.0, 0.0, -2.34586283337243]]), [6, 6, 9, 1])
 WATER = (np.array([[0.0, 0.0, 0.12], [0.0, 0.76, -0.47], [0.05, -0.75, -0.49]]), [8, 1, 1])
 FORMAMIDE = (np.array([[0, 0.42, 0], [1.2, 0.5, 0.02], [-0.72, -0.73, 0], [-0.55, 1.36, 0.01],
                        [-1.73, -0.69, 0.05], [-0.27, -1.63, -0.03]]), [6, 8, 7, 1, 1, 1])
@@ -236,6 +240,135 @@ def test_lowest_takes_the_converged_lower_energy_per_structure():
     assert best.electronic.tolist() == [-3.0, -2.0] and best.converged.tolist() == [True, True]
     assert best.densities[0, :, 0, 0].tolist() == [1.0, 0.0] and best.iterations == 8
     assert scf.lowest([first, result([-1.0, -2.0], [True, True], 1.0)]) is first
+
+
+def test_restart_rule():
+    """A cold start restarts when unrestricted, not converged or of a small frontier gap, and otherwise not."""
+    def result(gap, converged):
+        z = torch.zeros(1, 1, 3, 3)
+        return scf.SCFResult(z, z, torch.tensor([[[-10.0, -5.0, -5.0 + gap]]]), torch.tensor([[[2.0, 2.0, 0.0]]]),
+                             5, torch.tensor([converged]), torch.tensor([-1.0]))
+    assert not scf.needs_restart(result(8.0, True), False, 6.5)
+    assert scf.needs_restart(result(8.0, True), True, 6.5)
+    assert scf.needs_restart(result(8.0, False), False, 6.5)
+    assert scf.needs_restart(result(4.0, True), False, 6.5)
+    assert not scf.needs_restart(result(4.0, True), False, 3.0)
+
+
+def test_excited_closed_shell_solution_restarts():
+    """PM7 fluoroacetylene: the plain first run settles in an excited closed-shell solution (gap about 3.2 eV); the
+    default rule restarts and reaches MOPAC's ground state, about 250 kcal/mol lower."""
+    g = _graph(*FCCH)
+    old = float(PM7(restart_gap=3.0, reuse_density=False)(g)["heat_of_formation"][0])
+    new = float(PM7(reuse_density=False)(g)["heat_of_formation"][0])
+    every = float(PM7(restart_gap=float("inf"), reuse_density=False)(g)["heat_of_formation"][0])
+    assert old - new > 200.0
+    assert abs(new - every) < 1e-8
+    assert abs(new - 24.29451) < 1e-3                           # MOPAC's heat of formation
+
+
+def test_unconverged_first_run_restarts(monkeypatch):
+    """A first run that did not converge brings the further starts even at a large gap."""
+    calls = []
+    real = nddo.run_scf
+
+    def counted(*args, fail_first=False, **kwargs):
+        res = real(*args, **kwargs)
+        calls.append(kwargs.get("smearing"))
+        if fail_first and len(calls) == 1:
+            res = res._replace(converged=torch.zeros_like(res.converged))
+        return res
+    g = _graph(*WATER)
+    monkeypatch.setattr(nddo, "run_scf", counted)
+    PM6(reuse_density=False)(g)
+    assert len(calls) == 1
+    calls.clear()
+    monkeypatch.setattr(nddo, "run_scf", partial(counted, fail_first=True))
+    out = PM6(reuse_density=False)(g)
+    assert len(calls) == 3 and bool(out["scf_converged"].all())
+
+
+def test_run_stopped_while_annealing_is_not_converged():
+    """A run whose iteration limit ends inside the annealing schedule is not converged, whatever its last change."""
+    out = PM6(reuse_density=False, max_iter=10, scf_starts=((1.0, 80),))(_graph(*WATER))
+    assert out["scf_converged"].dtype == torch.bool and not bool(out["scf_converged"].any())
+
+
+def _first_scf_inputs(monkeypatch, graph):
+    """Layout, electron counts, unrestricted flag and initial guess of a model's first SCF run of ``graph``."""
+    seen = []
+    real = nddo.run_scf
+
+    def spy(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, *args, **kwargs):
+        seen.append((layout, n_alpha, n_beta, uhf, guess))
+        return real(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, *args, **kwargs)
+    monkeypatch.setattr(nddo, "run_scf", spy)
+    PM6(reuse_density=False)(graph)
+    monkeypatch.setattr(nddo, "run_scf", real)
+    return seen[0]
+
+
+@pytest.mark.parametrize("open_shell", (False, True))
+def test_search_guesses_keep_electron_counts(monkeypatch, open_shell):
+    """The perturbed starts are deterministic, symmetric, zero on the padding, and the occupation kicks hold each
+    structure's electrons of each spin."""
+    mols = ([_graph(*CCH, mult=2), _graph(*METHYL, mult=2)] if open_shell
+            else [_graph(*WATER), _graph(*FORMAMIDE)])
+    layout, na, nb, uhf, guess = _first_scf_inputs(monkeypatch, collate(mols))
+    assert uhf == open_shell
+    real = layout.valid.to(guess.dtype)
+    pad = 1.0 - real[:, :, None] * real[:, None, :]
+    for i in range(4):
+        start, spin = scf.search_guess(guess, layout, na, nb, uhf, i)
+        again, _ = scf.search_guess(guess, layout, na, nb, uhf, i)
+        assert torch.equal(start, again) and not torch.allclose(start, guess)
+        assert torch.allclose(start, start.transpose(-1, -2), rtol=0.0, atol=1e-15)
+        assert float((start * pad).abs().max()) == 0.0
+        trace = start.diagonal(dim1=-2, dim2=-1).sum(-1)
+        if i % 2 == 0:
+            assert torch.allclose(trace, (na + nb).to(trace.dtype), rtol=1e-12)
+            if uhf:
+                spins = spin.diagonal(dim1=-2, dim2=-1).sum(-1)
+                assert torch.allclose(spins, torch.stack([na, nb]).to(trace.dtype), rtol=1e-12)
+                assert torch.allclose(spin.sum(0), start)
+            else:
+                assert spin is None
+        else:
+            assert spin is None
+        assert scf.search_schedule(i) == ((1.0, 80) if i % 2 == 0 else (0.0, 0))
+
+
+def test_search_starts_reach_the_ground_state():
+    """PM7 ethynyl radical: every default start puts the minority-spin electron in a sigma orbital; the search
+    starts reach MOPAC's ground state, about 21 kcal/mol lower, alone and in a batch."""
+    g = _graph(*CCH, mult=2)
+    plain = float(PM7(reuse_density=False)(g)["heat_of_formation"][0])
+    found = float(PM7(reuse_density=False, search_starts=6)(g)["heat_of_formation"][0])
+    assert plain - found > 20.0
+    assert abs(found - 141.952795) < 1e-3                          # MOPAC's heat of formation
+    water = float(PM7(reuse_density=False)(_graph(*WATER))["heat_of_formation"][0])
+    both = PM7(reuse_density=False, search_starts=6)(collate([g, _graph(*WATER)]))["heat_of_formation"]
+    assert abs(float(both[0]) - found) < 1e-6 and abs(float(both[1]) - water) < 1e-6
+
+
+def test_exported_potential_runs_the_search_starts(tmp_path):
+    """The TorchScript export (and its core called eagerly) runs its model's search starts and gives the eager
+    model's energy."""
+    from xnn.common.deploy import export_torchscript_potential
+    eager = ForceStressOutput(PM7(reuse_density=False, search_starts=6)).eval()
+    ref = eager(_graph(*CCH, mult=2))
+    assert abs(float(ref["heat_of_formation"][0]) - 141.952795) < 1e-3
+    core = PM7(search_starts=6).export_core()
+    _, node_energy, _ = core.node_features_energy_charges(
+        torch.tensor(CCH[1]), torch.zeros((2, 0), dtype=torch.long), torch.zeros((0, 3)), torch.tensor(CCH[0]),
+        torch.zeros((3, 3)), torch.zeros(3, dtype=torch.bool), 0.0, 2.0)
+    assert abs(float(node_energy.sum()) - float(ref["energy"].sum())) < 1e-9
+    path = export_torchscript_potential(PM7(search_starts=6).eval(), cutoff=10.0, path=str(tmp_path / "m.pt"),
+                                        spin_multiplicity=2.0)
+    scripted = torch.jit.load(path)
+    with torch.jit.optimized_execution(False):
+        out = scripted(torch.tensor(CCH[0]), torch.tensor(CCH[1]))
+    assert abs(float(out["energy"]) - float(ref["energy"].sum())) < 1e-9
 
 
 def test_caches_start_empty_in_copies():

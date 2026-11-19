@@ -13,6 +13,7 @@ from .classical_step import ClassicalStepper
 from .dreiding import Dreiding, DreidingForceField
 from .dreidinglib import TORSION_RULES, DreidingLibrary, hybridization, read_dreiding, torsion_rule
 from .ffield import FFieldLibrary, read_ffield, template_library
+from .gfnff import GFNFF
 from .lammps_input import lammps_input, write_lammps_input
 from .opls import OPLS, OPLSForceField
 from .oplslib import OPLSLibrary, builtin_library, fourier_to_rb, rb_to_fourier, read_opls
@@ -32,5 +33,5 @@ __all__ = ["ClassicalStepper", "lammps_input", "write_lammps_input", "FFieldLibr
            "place_charmm_impropers", "Charmm", "CharmmForceField", "AmoebaLibrary",
            "read_amoeba", "builtin_amoeba", "read_tinker_prm", "write_tinker_prm",
            "read_tinker_xyz", "write_tinker_xyz", "write_lammps_amoeba_input", "Amoeba", "Hippo",
-           "AmoebaForceField", "DipolePredictor",
+           "AmoebaForceField", "DipolePredictor", "GFNFF",
            "StepPlan"]

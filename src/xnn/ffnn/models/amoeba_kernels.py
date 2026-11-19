@@ -36,6 +36,7 @@ from .amoeba_ewald import (
     _second_stencils,
     _stencil_coefficients,
     _stencil_potential,
+    jacobian_gradient,
     mesh_convolve,
     mesh_irfftn,
     mesh_layout,
@@ -54,6 +55,8 @@ NP = len(PARAMS) + 1          # plus the exchange-polarization use flag
 SCALARS = ("coulomb", "inv_sqrt_pi", "alpha_e", "alpha_p", "alpha_d", "rep_taper", "rep_cutoff", "ct_taper",
            "ct_cutoff", "disp_taper", "disp_cutoff", "cutoff", "ewald_cutoff", "disp_ewald_cutoff")
 TILE, WARPS = 64, 2
+# the reduction of the image shifts' cell gradient: block width and the most programs that add to the result
+SHIFT_BLOCK, SHIFT_PROGRAMS = 512, 432
 # the mutual field: one program per atom walks the pairs of its row in chunks of this many
 ROWS_CHUNK, ROWS_WARPS = 64, 2
 # in float64 the pair kernels run as one launch per term group (the permanent electrostatics, the
@@ -1594,6 +1597,40 @@ def _pair_vectors(pos_ptr, i_ptr, k_ptr, s_ptr, cell_ptr, out_ptr, n_pairs, SHIF
 
 
 @triton.jit
+def _shift_cell_grad(s_ptr, g_ptr, out_ptr, n_ptr, programs, BLOCK: tl.constexpr):
+    """``out (3, 3) += sum_e s[e] (x) g[e]`` over the pairs before the count: the gradient of the image
+    shifts' product with the one cell, in float64. Each of the ``programs`` strides over the blocks with
+    its sums in registers and adds them once (one add per block into nine addresses would serialize)."""
+    n = tl.load(n_ptr)
+    lane = tl.arange(0, BLOCK).to(tl.int64)
+    a00 = tl.zeros((BLOCK,), tl.float64)
+    a01, a02, a10, a11, a12, a20, a21, a22 = a00, a00, a00, a00, a00, a00, a00, a00
+    start = (tl.program_id(0) * BLOCK).to(tl.int64)
+    while start < n:
+        e = start + lane
+        m = e < n
+        gx = tl.load(g_ptr + e * 3, mask=m, other=0.0).to(tl.float64)
+        gy = tl.load(g_ptr + e * 3 + 1, mask=m, other=0.0).to(tl.float64)
+        gz = tl.load(g_ptr + e * 3 + 2, mask=m, other=0.0).to(tl.float64)
+        s0 = tl.load(s_ptr + e * 3, mask=m, other=0.0).to(tl.float64)
+        s1 = tl.load(s_ptr + e * 3 + 1, mask=m, other=0.0).to(tl.float64)
+        s2 = tl.load(s_ptr + e * 3 + 2, mask=m, other=0.0).to(tl.float64)
+        a00, a01, a02 = a00 + s0 * gx, a01 + s0 * gy, a02 + s0 * gz
+        a10, a11, a12 = a10 + s1 * gx, a11 + s1 * gy, a12 + s1 * gz
+        a20, a21, a22 = a20 + s2 * gx, a21 + s2 * gy, a22 + s2 * gz
+        start += programs * BLOCK
+    tl.atomic_add(out_ptr + 0, tl.sum(a00, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 1, tl.sum(a01, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 2, tl.sum(a02, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 3, tl.sum(a10, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 4, tl.sum(a11, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 5, tl.sum(a12, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 6, tl.sum(a20, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 7, tl.sum(a21, 0), sem="relaxed")
+    tl.atomic_add(out_ptr + 8, tl.sum(a22, 0), sem="relaxed")
+
+
+@triton.jit
 def _pair_scatter(g_ptr, i_ptr, k_ptr, out_ptr, n_ptr, BLOCK: tl.constexpr):
     """``out[k] += g`` and ``out[i] -= g`` over the pairs: the backward of ``pos[k] - pos[i]``, the
     i side (sorted) with one add per block and atom."""
@@ -1652,17 +1689,34 @@ def _rows_scatter(ptr_ptr, pair_ptr, other_ptr, i_ptr, g_ptr, out_ptr, n_ptr, CH
     tl.store(out_ptr + a * 3 + 2, tl.sum(sz, 0))
 
 
+def shift_cell_gradient(shift: Tensor, g: Tensor, count=None) -> Tensor:
+    """``sum_e shift[e] (x) g[e]`` ``(3, 3)`` in float64 over the pairs before ``count`` (all without it): the
+    gradient of the image shifts' product with the one cell. One Triton launch on a GPU (no matrix
+    product, whose library workspace a recorded CUDA graph does not keep), a product on a CPU."""
+    M = int(shift.shape[0])
+    if not g.is_cuda:
+        n = M if count is None else int(count)
+        return shift[:n].to(torch.float64).t() @ g[:n].to(torch.float64)
+    acc = torch.zeros(3, 3, dtype=torch.float64, device=g.device)
+    if M:
+        programs = min(triton.cdiv(M, SHIFT_BLOCK), SHIFT_PROGRAMS)
+        _shift_cell_grad[(programs,)](shift.contiguous(), g.contiguous(), acc, _count(count, M, g.device), programs,
+                                      BLOCK=SHIFT_BLOCK, num_warps=4)
+    return acc
+
+
 class PairDifference(torch.autograd.Function):
     """``pos[k] - pos[i]`` ``(M, 3)`` of the pairs, plus ``shift @ cell`` of their image shifts
     ``(M, 3)`` with the one cell ``(3, 3)`` when given, computed in the precision of ``pos`` and
     stored in ``dtype`` (the model's) by one kernel, with the gradient scattered back to the atoms
     by one kernel (``index_add`` serializes the adds of a list sorted by atom), over the compressed
-    ``rows`` of the pairs (:func:`pair_rows`) when given. Differentiable in the positions only, any
-    number of times (its gradient is :class:`PairScatter`); ``count`` as in :func:`pairs_forward`."""
+    ``rows`` of the pairs (:func:`pair_rows`) when given. Differentiable in the positions, any
+    number of times (its gradient is :class:`PairScatter`), and in the cell (one product of the
+    shifts with the incoming gradient); ``count`` as in :func:`pairs_forward`."""
 
     @staticmethod
     def forward(ctx, pos, i_, k_, count=None, shift=None, cell=None, dtype=None, rows=None):
-        ctx.save_for_backward(i_, k_)
+        ctx.save_for_backward(i_, k_, *(() if shift is None else (shift,)))
         ctx.count, ctx.n, ctx.dtype, ctx.rows = count, int(pos.shape[0]), pos.dtype, rows
         M = int(i_.shape[0])
         out = torch.empty(M, 3, dtype=dtype or pos.dtype, device=pos.device)
@@ -1675,9 +1729,14 @@ class PairDifference(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g):
-        i_, k_ = ctx.saved_tensors
+        i_, k_ = ctx.saved_tensors[:2]
         out = PairScatter.apply(g.contiguous(), i_, k_, ctx.count, ctx.n, ctx.dtype, ctx.rows)
-        return out, None, None, None, None, None, None, None
+        g_cell = None
+        if len(ctx.needs_input_grad) > 5 and ctx.needs_input_grad[5]:
+            # the vectors hold shift @ cell: a reduction over the pairs before the count (no matrix product,
+            # whose library workspace a recorded CUDA graph does not keep)
+            g_cell = shift_cell_gradient(ctx.saved_tensors[2], g, ctx.count).to(ctx.dtype)
+        return out, None, None, None, None, g_cell, None, None
 
 
 class PairScatter(torch.autograd.Function):
@@ -3338,7 +3397,8 @@ class MeshConvolution(torch.autograd.Function):
 # the same mesh pass with the Jacobian of the scaled coordinates applied in registers: Cartesian
 # multipoles in, the potential with its Cartesian gradient and Hessian out, and the gradients of the
 # multipoles returned in Cartesian form. It serves whenever the cell carries no gradient (the
-# Jacobian is then a constant of the evaluation); the fractional pass above keeps the stress exact.
+# Jacobian is then a constant of the evaluation) and on a step plan, where the gradient with respect
+# to the Jacobians comes in closed form; elsewhere the fractional pass above gives the stress.
 
 @triton.jit
 def _jac(j_ptr, batch, m):
@@ -3760,25 +3820,28 @@ def adjoint_cartesian(grid_a: Tensor, set_a: tuple, order_a: int, grid_b: Tensor
 class MeshConvolutionCartesian(torch.autograd.Function):
     """:class:`MeshConvolution` on Cartesian multipoles ``q``, ``d``, ``Q`` with the Jacobians of the
     structures applied inside the kernels; returns the potential, its gradient and its Hessian at the
-    atoms. The Jacobians are constants (no cell gradient): the fractional function serves the stress.
-    A backward that keeps its graph runs the eager stencils of the reference, as there."""
+    atoms. With the inverse Jacobians ``jac_inv`` the gradient with respect to Jacobians that follow the
+    cell is returned too (:func:`~.amoeba_ewald.jacobian_gradient`); without them the Jacobians are
+    constants. A backward that keeps its graph runs the eager stencils of the reference, as there."""
 
     @staticmethod
-    def forward(ctx, u, q, d, Q, jac, batch, influence, w, start, mesh, groups, order, deriv):
+    def forward(ctx, u, q, d, Q, jac, batch, influence, w, start, mesh, groups, order, deriv, jac_inv=None):
         k1, k2, k3 = (int(k) for k in mesh)
         grid = spread_cartesian(q, d, Q, jac, w, start, batch, mesh, groups, order)
         spectrum = mesh_rfftn(grid)
         pot = mesh_irfftn(spectrum * influence, (k1, k2, k3))
         phi, grad, hess = gather_cartesian(pot, jac, w, start, batch, mesh, deriv)
+        # with the inverse Jacobians also the Cartesian derivatives, for the gradient with respect to the Jacobians
         ctx.save_for_backward(u, q, d if d is not None else q, Q if Q is not None else q, jac, batch, influence, w,
-                              start, spectrum, pot)
+                              start, spectrum, pot, *(() if jac_inv is None else (jac_inv, grad, hess)))
         ctx.mesh, ctx.groups, ctx.order, ctx.deriv = list(mesh), int(groups), int(order), int(deriv)
         ctx.has = (d is not None, Q is not None)
+        ctx.extra = (None,) * (jac_inv is not None)
         return phi, grad, hess
 
     @staticmethod
     def backward(ctx, g_phi, g_grad, g_hess):
-        u, q, d, Q, jac, batch, influence, w, start, spectrum, pot = ctx.saved_tensors
+        u, q, d, Q, jac, batch, influence, w, start, spectrum, pot = ctx.saved_tensors[:11]
         mesh, order, deriv = ctx.mesh, ctx.order, ctx.deriv
         k1, k2, k3 = mesh
         has_d, has_Q = ctx.has
@@ -3786,7 +3849,7 @@ class MeshConvolutionCartesian(torch.autograd.Function):
             sources = (q, d if has_d else None, Q.reshape(-1, 3, 3) if has_Q else None)
             out = _mesh_eager(u, sources, influence, batch, mesh, ctx.groups, order, deriv, int(w.shape[-1]), jac)
             g_out = tuple(torch.zeros_like(x) if g is None else g for g, x in zip((g_phi, g_grad, g_hess), out))
-            return _twice(ctx, (u, q, d, Q, jac, batch, influence), out, g_out, 6)
+            return _twice(ctx, (u, q, d, Q, jac, batch, influence), out, g_out, 6) + ctx.extra
         # the spread kernel symmetrizes its quadrupole sources: the Hessian gradient goes in as it is
         g_set = (g_phi.contiguous(), g_grad if deriv >= 1 else None, g_hess if deriv >= 2 else None)
         g_grid = spread_cartesian(g_set[0], g_set[1], g_set[2], jac, w, start, batch, mesh, ctx.groups, deriv)
@@ -3801,8 +3864,23 @@ class MeshConvolutionCartesian(torch.autograd.Function):
                 inf = influence.detach().requires_grad_(True)
                 pot_ = mesh_irfftn(spectrum * inf, (k1, k2, k3))
                 g_influence = torch.autograd.grad(pot_, inf, g_grid)[0]
-        return (gu, gq, gd if (has_d and order >= 1) else None, gQ if (has_Q and order >= 2) else None, None, None,
-                g_influence, None, None, None, None, None, None)
+        g_jac = None
+        if ctx.needs_input_grad[4] and ctx.extra:
+            jac_inv, grad, hess = ctx.saved_tensors[11:]
+            parts = []
+            if has_d and order >= 1:
+                parts.append((d[:, :, None], gd[:, None, :]))
+            if has_Q and order >= 2:
+                Qs = Q.reshape(-1, 3, 3)
+                parts.append((Qs + Qs.transpose(1, 2), gQ))
+            if deriv >= 1 and g_grad is not None:
+                parts.append((g_grad[:, :, None], grad[:, None, :]))
+            if deriv >= 2 and g_hess is not None:
+                parts.append((g_hess + g_hess.transpose(1, 2), hess))
+            if parts:
+                g_jac = jacobian_gradient(parts, jac_inv, batch, ctx.groups)
+        return (gu, gq, gd if (has_d and order >= 1) else None, gQ if (has_Q and order >= 2) else None, g_jac, None,
+                g_influence, None, None, None, None, None, None) + ctx.extra
 
 
 # the conjugate-gradient iteration of the induction solve on the device: the operator application

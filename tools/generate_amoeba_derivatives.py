@@ -11,7 +11,7 @@ another device function becomes a call of its tangent twin, specialized to the a
 tangents. Inexact constants of the derivative rules come from the scope of the function (the derivative of
 ``erfc`` takes ``inv_sqrt_pi``), never from float32 literals.
 
-    python tools/generate_amoeba_derivatives.py [--target amoeba|classical|reaxff|atm] [--out <module>]
+    python tools/generate_amoeba_derivatives.py [--target amoeba|classical|reaxff|atm|gfnff] [--out <module>]
 """
 import argparse
 import ast
@@ -67,6 +67,18 @@ def _mul(a, b):
     if a is ZERO or b is ZERO or _is_zero_literal(a) or _is_zero_literal(b):
         return ZERO
     return _bin(a, ast.Mult(), b)
+
+
+def _reads_target(call, stmts, pointers) -> bool:
+    """Whether ``stmts`` load from a pointer (a name in ``pointers`` or ending in ``_ptr``) that the store
+    ``call`` writes to."""
+    if not (isinstance(call, ast.Call) and call.args):
+        return False
+    target = {n.id for n in ast.walk(call.args[0])
+              if isinstance(n, ast.Name) and (n.id in pointers or n.id.endswith("_ptr"))}
+    loads = (n for st in stmts for n in ast.walk(st)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "load")
+    return any(isinstance(m, ast.Name) and m.id in target for n in loads for m in ast.walk(n.args[0]) if n.args)
 
 
 def _call(func: str, *args, **kw):
@@ -438,6 +450,24 @@ class Tangent:
             gauss = _call("libdevice.exp", ast.UnaryOp(op=ast.USub(), operand=_bin(copy.deepcopy(u), ast.Mult(),
                                                                                     copy.deepcopy(u))))
             return _mul(_mul(_mul(_num(-2.0), _name("inv_sqrt_pi")), gauss), t)
+        if short == "erf":
+            u = e.args[0]
+            t = self.d(u)
+            if t is ZERO:
+                return ZERO
+            if not self._in_scope("inv_sqrt_pi"):
+                raise NotImplementedError("erf needs inv_sqrt_pi in scope")
+            gauss = _call("tl.exp", ast.UnaryOp(op=ast.USub(), operand=_bin(copy.deepcopy(u), ast.Mult(),
+                                                                             copy.deepcopy(u))))
+            return _mul(_mul(_mul(_num(2.0), _name("inv_sqrt_pi")), gauss), t)
+        if short in ("sin", "cos"):
+            u = e.args[0]
+            t = self.d(u)
+            if t is ZERO:
+                return ZERO
+            if short == "sin":
+                return _mul(_call("tl.cos", copy.deepcopy(u)), t)
+            return _neg(_mul(_call("tl.sin", copy.deepcopy(u)), t))
         if short == "pow":
             a, b = e.args
             ta, tb = self.d(a), self.d(b)
@@ -580,6 +610,15 @@ class Tangent:
                 self.diff.add(name)
                 value = t if isinstance(s.op, ast.Add) else ast.UnaryOp(op=ast.USub(), operand=t)
                 return [s, ast.Assign(targets=[ast.Name(id=name + "_t", ctx=ast.Store())], value=value, lineno=0)]
+            if isinstance(s.op, ast.Mult):
+                # ``a *= v``: the tangent from the value of ``a`` before the product
+                if t is ZERO and name not in self.diff:
+                    return [s]
+                tname = ast.Name(id=name + "_t", ctx=ast.Store())
+                first = _mul(_name(name + "_t"), copy.deepcopy(s.value)) if name in self.diff else ZERO
+                value = _add(first, _mul(_name(name), t))
+                self.diff.add(name)
+                return [ast.Assign(targets=[tname], value=value, lineno=0), s]
             raise NotImplementedError(ast.dump(s))
         if isinstance(s, ast.Expr):
             call = s.value
@@ -595,7 +634,9 @@ class Tangent:
                 new = _call(self.reg.tangent(short, mask), *args)
                 new.keywords = copy.deepcopy(call.keywords)
                 return [ast.Expr(value=new)]
-            return [s] + self.side_effect(s.value)
+            tangent = self.side_effect(s.value)
+            # the tangent first when it reads what the store overwrites (``x[i] = f(x[i])``)
+            return tangent + [s] if _reads_target(s.value, tangent, self.pointers) else [s] + tangent
         if isinstance(s, ast.If):
             before = set(self.diff)
             known = set(self.assigned)
@@ -1072,10 +1113,14 @@ from triton.language.extra import libdevice
 def generate(requests, kernels=(), reverse=(), reverse_tangents=(), target="amoeba", bool_aware=False) -> str:
     """The module source for the tangent twins ``requests`` ((function name, mask) pairs) and the tangent
     kernels ``kernels`` ((kernel name, pointers with tangents) pairs) of ``target`` (``"amoeba"``: the AMOEBA
-    and HIPPO kernels; ``"classical"``: the kernels of the classical force fields; ``"reaxff"`` and ``"atm"``:
-    those of ReaxFF and of the D3 and D4 three-body term)."""
+    and HIPPO kernels; ``"classical"``: the kernels of the classical force fields; ``"reaxff"``, ``"atm"`` and
+    ``"gfnff"``: those of ReaxFF, of the D3 and D4 three-body term and of GFN-FF)."""
     models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
-    if target == "atm":
+    if target == "gfnff":
+        # the fused GFN-FF kernels and their device functions
+        sources = {"": [((models / "gfnff_kernels.py").read_text(), None)]}
+        header, home, bounds = GFNFF_HEADER, ".gfnff_kernels", None
+    elif target == "atm":
         # the three-body kernels of D3 and D4 and their device functions
         atm = Path(__file__).resolve().parents[1] / "src/xnn/common/models/dispersion_fast/atm.py"
         sources = {"": [(atm.read_text(), {"_switch", "_pair_mask", "_atm_forward", "_atm_backward"})]}
@@ -1281,13 +1326,60 @@ ATM_KERNELS = [
     ("_atm_backward", _ATM_INPUTS + ("gvec_ptr", "gc6_ptr", "gfa_ptr", "gfb_ptr")),
 ]
 
+GFNFF_HEADER = '''"""Derivatives of the fused GFN-FF kernels
+
+Generated by ``tools/generate_amoeba_derivatives.py --target gfnff`` from the kernels of
+:mod:`xnn.ffnn.models.gfnff_kernels` (do not edit by hand; regenerate). ``<kernel>_t`` is the tangent of a kernel
+along the positions (and the cell): loads through each pointer of its request read the tangents ``<pointer>_t``, and
+its stores and adds write their tangents there. Run in the order of an evaluation, they give the directional
+derivative of the gradient, the Hessian-vector product of a force loss.
+"""
+# ruff: noqa: E501, F841
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+'''
+
+# the tangent kernels of GFN-FF: every kernel of an evaluation along every buffer that follows the geometry
+GFNFF_KERNELS = [
+    ("_pair_first", ("x_ptr", "cnt_ptr", "mat_ptr")),
+    ("_atom_terms", ("cnt_ptr", "lcn_ptr", "dl_ptr", "rhs_ptr", "dxl_ptr", "s_ptr", "ds_ptr")),
+    ("_solve_small", ("mat_ptr", "rhs_ptr", "fac_ptr", "sol_ptr", "dxl_ptr", "glog_ptr")),
+    ("_bonds", ("x_ptr", "lcn_ptr", "g_ptr", "glog_ptr")),
+    ("_angles", ("x_ptr", "g_ptr")),
+    ("_torsions", ("x_ptr", "g_ptr")),
+    ("_inversions", ("x_ptr", "g_ptr")),
+    ("_triples", ("x_ptr", "g_ptr")),
+    ("_hb_bonded", ("x_ptr", "g_ptr")),
+    ("_hb_loose", ("x_ptr", "g_ptr")),
+    ("_halogen_bonds", ("x_ptr", "g_ptr")),
+    ("_pair_second", ("x_ptr", "c6_ptr", "dc_ptr", "q_ptr", "g_ptr", "glog_ptr")),
+    ("_count_gradient", ("x_ptr", "dl_ptr", "glog_ptr", "g_ptr")),
+    ("_p_prepare", ("pos_ptr", "cell_ptr", "x_ptr", "geo_ptr")),
+    ("_p_counts", ("x_ptr", "geo_ptr", "cnt_ptr", "cg_ptr")),
+    ("_p_expand", ("lcn_ptr", "lcne_ptr")),
+    ("_p_phases", ("x_ptr", "gv_ptr", "cs_ptr")),
+    ("_p_ewald", ("x_ptr", "geo_ptr", "gv_ptr", "gw_ptr", "cs_ptr", "mat_ptr", "pg_ptr")),
+    ("_p_solve", ("mat_ptr", "rhs_ptr", "fac_ptr", "sol_ptr", "uu_ptr", "w_ptr", "dxl_ptr", "glog_ptr")),
+    ("_p_dispersion", ("x_ptr", "geo_ptr", "s_ptr", "ds_ptr", "g_ptr", "vir_ptr", "glog_ptr")),
+    ("_p_repulsion", ("x_ptr", "geo_ptr", "g_ptr", "vir_ptr")),
+    ("_p_pair_gradient", ("pg_ptr", "q_ptr", "w_ptr", "g_ptr", "vir_ptr")),
+    ("_p_fold", ("x_ptr", "gb_ptr", "glb_ptr", "g_ptr", "glog_ptr", "vir_ptr")),
+    ("_p_count_gradient", ("cg_ptr", "dl_ptr", "glog_ptr", "g_ptr", "vir_ptr")),
+    ("_p_finish", ("pos_ptr", "cell_ptr", "g_ptr", "vir_ptr", "out_ptr")),
+]
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     models = Path(__file__).resolve().parents[1] / "src/xnn/ffnn/models"
-    ap.add_argument("--target", choices=("amoeba", "classical", "reaxff", "atm"), default="amoeba")
+    ap.add_argument("--target", choices=("amoeba", "classical", "reaxff", "atm", "gfnff"), default="amoeba")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    if args.target == "atm":
+    if args.target == "gfnff":
+        out = args.out or str(models / "gfnff_tangents.py")
+        text = generate((), GFNFF_KERNELS, target="gfnff")
+    elif args.target == "atm":
         out = args.out or str(models.parents[1] / "common/models/dispersion_fast/atm_tangents.py")
         text = generate((), ATM_KERNELS, target="atm")
     elif args.target == "reaxff":
