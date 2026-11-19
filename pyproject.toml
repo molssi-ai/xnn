@@ -159,7 +159,7 @@ where = ["src"]
 # the registry of pre-trained models (from_pretrained / list_models)
 "xnn.common.models.hub" = ["*.json"]
 # force-field parameter files in the SEAMM .frc format (OPLS-AA, ReaxFF ...)
-"xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*"]
+"xnn.ffnn" = ["data/*.frc", "data/reaxff/*.frc", "data/*.md", "data/LICENSE-*", "data/gfnff_tables.json"]
 
 # coverage (the Tests workflow): the derivative kernels written by
 # tools/generate_amoeba_derivatives.py and tools/generate_amoeba_ladders.py are
@@ -169,6 +169,7 @@ omit = [
     "*/xnn/ffnn/models/amoeba_tangents.py",
     "*/xnn/ffnn/models/classical_tangents.py",
     "*/xnn/ffnn/models/reaxff_tangents.py",
+    "*/xnn/ffnn/models/gfnff_tangents.py",
     "*/xnn/ffnn/models/amoeba_ladders.py",
     "*/xnn/common/models/dispersion_fast/atm_tangents.py",
 ]
