@@ -160,6 +160,33 @@ learned ``sigma`` per term (`Kendall et al., Proc. IEEE CVPR, 7482 (2018)
   ``loss_sigmas``.
 - It needs a single head and does not combine with ``trainer.cuda_graph``.
 
+Reaction energies
+=================
+A reaction energy is a difference of the energies of several structures. Give
+the reactions to the trainer as a :class:`~xnn.common.train.ReactionSet` and
+set a weight:
+
+.. code-block:: python
+
+   from xnn.common.data.hub import load_dataset
+   from xnn.common.train import ReactionSet, Trainer
+
+   data = load_dataset("gmtkn55", subsets=["W4-11", "S22"], closed_shell=True)
+   reactions = ReactionSet.from_gmtkn55(data, wtmad2=True)
+   cfg.optim.reaction_weight = 1.0
+   trainer = Trainer(cfg, train_set, val_set, reactions=reactions, val_reactions=reactions)
+
+- Each training step adds the loss of ``optim.reaction_batch_size`` reactions
+  (16 by default), drawn in turn from a shuffled order.
+- The term is the mean squared error of the reaction energies in eV. With
+  ``wtmad2=True`` each set's errors are scaled as in WTMAD-2.
+- Validation reports ``val/reaction_mae`` and ``val/reaction_rmse`` in eV.
+- ``ReactionSet(structures, records)`` takes reactions of your own: each
+  record lists the ``species`` names, their ``stoichiometry`` and the
+  ``reference`` energy.
+- The term runs in ordinary single-process steps, not with
+  ``trainer.cuda_graph`` or several GPUs.
+
 Captured steps and fast paths
 =============================
 Models with a fast path train through it when ``use_fast`` takes it (see

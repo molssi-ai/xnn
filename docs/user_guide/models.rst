@@ -1295,6 +1295,7 @@ elements up to radon. The methods are described in these papers:
   stay fixed.
 - The xtb program can also run a parameter file written by
   ``parameter_text()``.
+- Hessians are exact, see :ref:`howto-hessians`.
 
 Add-ons for any model
 =====================

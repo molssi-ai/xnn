@@ -61,3 +61,13 @@ The semiempirical methods (PM3, PM6, PM6-ORG, PM7) give exact Hessians and
 exact parameter gradients of such losses. Their self-consistent density then
 follows the positions as well. These functions switch this on for their own
 evaluations, and ``position_response=True`` keeps it on for every call.
+
+Tight-binding methods
+=====================
+GFN0-xTB, GFN1-xTB and GFN2-xTB also give exact Hessians and exact parameter
+gradients of curvature losses, with the same functions.
+
+- The Hessian is as accurate as the converged charges. Use a tight
+  ``accuracy``, for example ``GFN2(accuracy=1e-4)``.
+- With ``create_graph=True`` the evaluation runs without the fast path's
+  kernels, which have no third derivatives.
