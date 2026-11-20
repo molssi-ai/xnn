@@ -164,8 +164,6 @@ class GFN(InteratomicPotential):
     #: :meth:`energy_gradient` gives a gradient whose derivatives are exact (:func:`xnn.common.models.hessian`
     #: takes it).
     exact_second_derivatives = False
-    #: Its Hessians are exact but not differentiable once more (no parameter gradients of curvatures).
-    differentiable_hessian = False
     #: Shell-resolved third-order term (GFN2) instead of the atomic one (GFN1).
     shell_third_order = False
     #: Anisotropic electrostatics and exchange-correlation (GFN2).
@@ -469,7 +467,7 @@ class GFN(InteratomicPotential):
 
     # the calculation
 
-    def energy_gradient(self, data: AtomicGraph) -> Tuple[Tensor, Tensor]:
+    def energy_gradient(self, data: AtomicGraph, create_graph: bool = False) -> Tuple[Tensor, Tensor]:
         """The positions and the gradient of the energy with its graph, whose derivatives are exact.
 
         The free energy is stationary in the self-consistent density, so its gradient is the derivative
@@ -483,6 +481,10 @@ class GFN(InteratomicPotential):
         ----------
         data : AtomicGraph
             The structures.
+        create_graph : bool, optional
+            The Hessian will be differentiated once more (parameter gradients of curvatures): the
+            evaluation takes the reference's functions, whose derivatives go to any order (the fast
+            path's kernels stop at the second); default ``False``.
 
         Returns
         -------
@@ -493,12 +495,18 @@ class GFN(InteratomicPotential):
         pos = data.pos if data.pos.requires_grad else data.pos.detach().requires_grad_(True)
         explicit, density = pos.view_as(pos), pos.view_as(pos)
         self.__dict__["_density_positions"] = density
+        use_fast = self.use_fast
+        if create_graph:
+            self.use_fast = False
+            self.__dict__["_second_order_density"] = True
         try:
             with torch.enable_grad():
                 energy = self(dataclasses.replace(data, pos=explicit))["energy"]
                 (grad,) = torch.autograd.grad(energy.sum(), explicit, create_graph=True)
         finally:
             self.__dict__.pop("_density_positions", None)
+            self.__dict__.pop("_second_order_density", None)
+            self.use_fast = use_fast
         return pos, grad
 
     def forward(self, data: AtomicGraph) -> Dict[str, Tensor]:
@@ -901,8 +909,22 @@ class GFN(InteratomicPotential):
         x_in = x.detach().clone().requires_grad_(True)
         x_out = density(x_in)[3]
 
+        if self.__dict__.get("_second_order_density", False):
+            # derivatives to second order (parameter gradients of Hessians): with M = (1 - dg/dx)^-1 at the
+            # solution, x1 = x with the adjoint M^T (exact first derivatives, linear in the incoming gradient)
+            # and the step x2 = x1 + M (g(x1) - x1), whose second derivatives are those of the solution (the
+            # residual and its first derivative vanish there, so M enters as a constant)
+            eye = torch.eye(x_out.numel(), dtype=x_out.dtype, device=x_out.device)
+            rows = [torch.autograd.grad(x_out, x_in, e, retain_graph=True, allow_unused=True)[0] for e in eye]
+            J = torch.stack([torch.zeros_like(x_out) if r is None else r for r in rows])
+            M = torch.linalg.inv(eye - J)
+            x1 = x_out.clone()
+            x1.register_hook(lambda v: M.transpose(0, 1) @ v)
+            x2 = x1 + M @ (density(x1)[3] - x1)
+            return density(x2)[:3]
+
         def adjoint(v: Tensor) -> Tensor:
-            scale = float(v.abs().max())
+            scale = float(v.detach().abs().max())
             if scale == 0.0:
                 return v
             y, ys, rs = v, [], []
@@ -1290,6 +1312,141 @@ def _fermi_channels(eps: Tensor, n_alpha: Tensor, n_beta: Tensor, kt: float, n_a
     return torch.sigmoid(-(ee - mu[:, :, None]) / kt) * has[:, :, None], mu
 
 
+#: Levels closer than this (hartree) take the derivative limits of the divided differences.
+_NEAR = 1e-8
+
+
+def _divided1(lam: Tensor, v: Tensor, dv: Tensor) -> Tensor:
+    """First divided differences ``[v_i, v_j]`` ``(B, n, n)`` of a function with values ``v`` and derivatives
+    ``dv`` at the levels ``lam`` ``(B, n)`` (the mean derivative for close levels)."""
+    d = lam[:, :, None] - lam[:, None, :]
+    near = d.abs() < _NEAR
+    return torch.where(near, 0.5 * (dv[:, :, None] + dv[:, None, :]),
+                       (v[:, :, None] - v[:, None, :]) / torch.where(near, torch.ones_like(d), d))
+
+
+def _divided2(lam: Tensor, v: Tensor, dv: Tensor, d2v: Tensor) -> Tensor:
+    """Second divided differences ``[v_i, v_k, v_j]`` ``(B, n, n, n)`` (indices ``i, k, j``), with the limits of
+    two and three close levels."""
+    d1 = _divided1(lam, v, dv)
+    dij = lam[:, :, None, None] - lam[:, None, None, :]
+    dik = lam[:, :, None, None] - lam[:, None, :, None]
+    far_ij, far_ik = dij.abs() >= _NEAR, dik.abs() >= _NEAR
+    general = (d1[:, :, :, None] - d1[:, None, :, :]) / torch.where(far_ij, dij, torch.ones_like(dij))
+    pair = (dv[:, :, None, None] - d1[:, :, :, None]) / torch.where(far_ik, dik, torch.ones_like(dik))
+    triple = (d2v[:, :, None, None] + d2v[:, None, :, None] + d2v[:, None, None, :]) / 6.0
+    return torch.where(far_ij, general, torch.where(far_ik, pair, triple))
+
+
+def _fermi_derivatives(fs: Tensor, kt: float) -> Tuple[Tensor, Tensor]:
+    """The first and second derivatives of Fermi occupations ``fs`` in their level, at a fixed Fermi level."""
+    if kt <= 0:
+        return torch.zeros_like(fs), torch.zeros_like(fs)
+    d1 = -fs * (1.0 - fs) / kt
+    return d1, -d1 * (1.0 - 2.0 * fs) / kt
+
+
+def _sym(M: Tensor) -> Tensor:
+    return 0.5 * (M + M.transpose(-1, -2))
+
+
+def _spectral_gradient(eps: Tensor, U: Tensor, f: Tensor, level: Tensor, kt: float, gP: Optional[Tensor],
+                       gW: Optional[Tensor], gts: Optional[Tensor]) -> Tensor:
+    """The gradient in ``F`` of ``<gP, P> + <gW, W> + gts T S_el`` (see :class:`_SpectralDensity`)."""
+    Ut = U.transpose(-1, -2)
+    A = None if gP is None else Ut @ _sym(gP) @ U
+    B = None if gW is None else Ut @ _sym(gW) @ U
+    gap = eps[:, :, None] - eps[:, None, :]
+    near = gap.abs() < _NEAR
+    gap = torch.where(near, torch.ones_like(gap), gap)
+
+    def quotient(a: Tensor, slope: Tensor) -> Tensor:
+        equal = 0.5 * (slope[:, :, None] + slope[:, None, :])
+        return torch.where(near, equal, (a[:, :, None] - a[:, None, :]) / gap)
+
+    M = torch.zeros_like(gap)
+    diagonal = torch.zeros_like(eps)
+    for s in range(2):
+        fs = f[:, s]
+        slope = -fs * (1.0 - fs) / kt if kt > 0 else torch.zeros_like(fs)      # df / d eps at a fixed level
+        total = slope.sum(-1, keepdim=True)
+        share = torch.where(total != 0, slope / torch.where(total != 0, total, torch.ones_like(total)),
+                            torch.zeros_like(slope))
+        moved = torch.zeros_like(total[:, 0])                                   # gradient in the Fermi level
+        if A is not None:
+            M = M + quotient(fs, slope) * A
+            moved = moved - (A.diagonal(dim1=-2, dim2=-1) * slope).sum(-1)
+        if B is not None:
+            M = M + quotient(fs * eps, fs + eps * slope) * B
+            moved = moved - (B.diagonal(dim1=-2, dim2=-1) * eps * slope).sum(-1)
+        if gts is not None:
+            entropy = (eps - level[:, s, None]) * slope
+            diagonal = diagonal + gts[:, None] * entropy
+            moved = moved - gts * entropy.sum(-1)
+        diagonal = diagonal + moved[:, None] * share
+    return _sym(U @ (M + torch.diag_embed(diagonal)) @ Ut)
+
+
+def _spectral_second(eps: Tensor, U: Tensor, f: Tensor, level: Tensor, kt: float, gP: Optional[Tensor],
+                     gW: Optional[Tensor], gts: Optional[Tensor], gG: Tensor):
+    """The derivatives of ``<gG, G>``, ``G`` the gradient of :func:`_spectral_gradient`: in ``F`` (the second
+    derivative of ``L = <gP, P> + <gW, W> + gts T S_el`` along ``gG``) and in ``gP``, ``gW``, ``gts`` (the
+    first-order changes of ``P``, ``W`` and ``T S_el`` along ``gG``).
+
+    Each spin channel contributes ``L_s(F, mu_s(F))`` with the matrix functions ``a = f(e - mu)``,
+    ``b = e f(e - mu)``, the trace of ``t = -kT H(f(e - mu))`` and the Fermi level fixed by
+    ``tr f(F - mu) = N``. In the eigenbasis the second derivatives take the second divided differences of
+    ``a`` and ``b``, the first of ``t'``, ``df / dmu`` and ``f'``, and the first and second derivatives of
+    ``mu``.
+    """
+    Ut = U.transpose(-1, -2)
+    zero = torch.zeros_like(U)
+    A = zero if gP is None else Ut @ _sym(gP) @ U
+    B = zero if gW is None else Ut @ _sym(gW) @ U
+    g = torch.zeros_like(eps[:, 0]) if gts is None else gts.to(eps.dtype)
+    E = Ut @ _sym(gG) @ U
+    Ad, Bd, Ed = (M.diagonal(dim1=-2, dim2=-1) for M in (A, B, E))
+    G = torch.zeros_like(U)
+    dP, dW = torch.zeros_like(U), torch.zeros_like(U)
+    dT = torch.zeros_like(eps[:, 0])
+    for s in range(2):
+        fs = f[:, s]
+        f1, f2 = _fermi_derivatives(fs, kt)
+        x = eps - level[:, s, None]
+        tp, tpp = x * f1, f1 + x * f2                                           # t' and t''
+        S1 = f1.sum(-1)
+        ok = S1 != 0
+        inv = torch.where(ok, 1.0 / torch.where(ok, S1, torch.ones_like(S1)), torch.zeros_like(S1))
+        share = f1 * inv[:, None]
+        dmu = (f1 * Ed).sum(-1) * inv                                           # d mu along gG
+        # the first-order changes: the gradients in gP, gW and gts
+        a1 = _divided1(eps, fs, f1)
+        b1 = _divided1(eps, eps * fs, fs + eps * f1)
+        dP = dP + a1 * E - torch.diag_embed(f1 * dmu[:, None])
+        dW = dW + b1 * E - torch.diag_embed(eps * f1 * dmu[:, None])
+        dT = dT + (tp * (Ed - dmu[:, None])).sum(-1)
+        # the second derivative at the fixed Fermi level
+        a2 = _divided2(eps, fs, f1, f2)
+        b2 = _divided2(eps, eps * fs, fs + eps * f1, 2.0 * f1 + eps * f2)
+        X = torch.einsum("bikj,bik,bij->bkj", a2, E, A) + torch.einsum("bikj,bik,bij->bkj", b2, E, B)
+        G = G + X + X.transpose(-1, -2) + g[:, None, None] * _divided1(eps, tp, tpp) * E
+        # the terms of the moving Fermi level
+        K = (_divided1(eps, -f1, -f2) * A + _divided1(eps, -eps * f1, -(f1 + eps * f2)) * B
+             - torch.diag_embed(g[:, None] * tpp))
+        kE = (K * E).sum((-1, -2))
+        L_mu = -(f1 * Ad + eps * f1 * Bd + g[:, None] * tp).sum(-1)
+        L_mumu = (f2 * Ad + eps * f2 * Bd + g[:, None] * tpp).sum(-1)
+        c_fmu = -(f2 * Ed).sum(-1)
+        c_mumu = f2.sum(-1)
+        d2mu = (_divided1(eps, f1, f2) * E + torch.diag_embed((c_fmu + c_mumu * dmu)[:, None] * share
+                                                               - dmu[:, None] * f2)) * inv[:, None, None]
+        moving = (dmu[:, None, None] * K + torch.diag_embed((kE + L_mumu * dmu)[:, None] * share)
+                  + L_mu[:, None, None] * d2mu)
+        G = G + torch.where(ok[:, None, None], moving, torch.zeros_like(moving))
+    rot = lambda M: U @ M @ Ut                                                  # noqa: E731
+    return _sym(rot(G)), rot(_sym(dP)), rot(_sym(dW)), dT
+
+
 class _SpectralDensity(torch.autograd.Function):
     """Density ``U f U^T``, energy-weighted density ``U (f eps) U^T`` and ``T S_el`` of a symmetric
     matrix ``F`` with eigenvalues ``eps``, eigenvectors ``U`` and Fermi occupations ``f`` (two spin
@@ -1298,56 +1455,47 @@ class _SpectralDensity(torch.autograd.Function):
     The backward pass is first-order perturbation theory: a spectral function ``a(eps)`` responds to
     ``dF`` with ``U [D * (U^T dF U)] U^T``, ``D_ij = (a_i - a_j) / (eps_i - eps_j)`` (its derivative
     for equal levels), and the Fermi level moves with the levels so that the electron number stays,
-    ``d mu = sum_k f'_k d eps_k / sum_k f'_k``.
+    ``d mu = sum_k f'_k d eps_k / sum_k f'_k``. Under ``create_graph`` it is :class:`_SpectralResponse`,
+    differentiable once more.
     """
 
     @staticmethod
     def forward(ctx, F, eps, U, f, level, kt):
         ctx.set_materialize_grads(False)
-        ctx.save_for_backward(eps, U, f, level)
+        ctx.save_for_backward(F, eps, U, f, level)
         ctx.kt = kt
         occ = f.sum(1)
         Ut = U.transpose(-1, -2)
         return (U * occ[:, None, :]) @ Ut, (U * (occ * eps)[:, None, :]) @ Ut, _electronic_entropy(f, kt)
 
     @staticmethod
-    @once_differentiable
     def backward(ctx, gP, gW, gts):
-        eps, U, f, level = ctx.saved_tensors
-        kt = ctx.kt
-        Ut = U.transpose(-1, -2)
-        A = None if gP is None else Ut @ (0.5 * (gP + gP.transpose(-1, -2))) @ U
-        B = None if gW is None else Ut @ (0.5 * (gW + gW.transpose(-1, -2))) @ U
-        gap = eps[:, :, None] - eps[:, None, :]
-        near = gap.abs() < 1e-8
-        gap = torch.where(near, torch.ones_like(gap), gap)
+        F, eps, U, f, level = ctx.saved_tensors
+        if torch.is_grad_enabled():
+            g = _SpectralResponse.apply(F, gP, gW, gts, eps, U, f, level, ctx.kt)
+        else:
+            g = _spectral_gradient(eps, U, f, level, ctx.kt, gP, gW, gts)
+        return g, None, None, None, None, None
 
-        def quotient(a: Tensor, slope: Tensor) -> Tensor:
-            equal = 0.5 * (slope[:, :, None] + slope[:, None, :])
-            return torch.where(near, equal, (a[:, :, None] - a[:, None, :]) / gap)
 
-        M = torch.zeros_like(gap)
-        diagonal = torch.zeros_like(eps)
-        for s in range(2):
-            fs = f[:, s]
-            slope = -fs * (1.0 - fs) / kt if kt > 0 else torch.zeros_like(fs)      # df / d eps at a fixed level
-            total = slope.sum(-1, keepdim=True)
-            share = torch.where(total != 0, slope / torch.where(total != 0, total, torch.ones_like(total)),
-                                torch.zeros_like(slope))
-            moved = torch.zeros_like(total[:, 0])                                   # gradient in the Fermi level
-            if A is not None:
-                M = M + quotient(fs, slope) * A
-                moved = moved - (A.diagonal(dim1=-2, dim2=-1) * slope).sum(-1)
-            if B is not None:
-                M = M + quotient(fs * eps, fs + eps * slope) * B
-                moved = moved - (B.diagonal(dim1=-2, dim2=-1) * eps * slope).sum(-1)
-            if gts is not None:
-                entropy = (eps - level[:, s, None]) * slope
-                diagonal = diagonal + gts[:, None] * entropy
-                moved = moved - gts * entropy.sum(-1)
-            diagonal = diagonal + moved[:, None] * share
-        G = U @ (M + torch.diag_embed(diagonal)) @ Ut
-        return 0.5 * (G + G.transpose(-1, -2)), None, None, None, None, None
+class _SpectralResponse(torch.autograd.Function):
+    """The gradient of :class:`_SpectralDensity` as a function of ``F`` and the incoming gradients, whose
+    backward pass is second-order perturbation theory (:func:`_spectral_second`)."""
+
+    @staticmethod
+    def forward(ctx, F, gP, gW, gts, eps, U, f, level, kt):
+        ctx.save_for_backward(eps, U, f, level, gP, gW, gts)
+        ctx.kt = kt
+        return _spectral_gradient(eps, U, f, level, kt, gP, gW, gts)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, gG):
+        eps, U, f, level, gP, gW, gts = ctx.saved_tensors
+        dF, dP, dW, dT = _spectral_second(eps, U, f, level, ctx.kt, gP, gW, gts, gG)
+        need = ctx.needs_input_grad
+        return (dF if need[0] else None, dP if need[1] else None, dW if need[2] else None,
+                dT if need[3] else None, None, None, None, None, None)
 
 
 def _all_pairs(batch: Tensor) -> Tuple[Tensor, Tensor]:

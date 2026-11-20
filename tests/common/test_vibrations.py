@@ -205,3 +205,12 @@ def test_models_with_approximate_second_derivatives_warn():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         hessian_vector_product(_bent_model(), _graph(pos, z), torch.ones(3, 3))
+
+
+def test_hessians_that_cannot_be_differentiated_once_more_refuse_create_graph():
+    """A model whose Hessians are not differentiable once more refuses ``create_graph``."""
+    model = _bent_model()
+    model.differentiable_hessian = False
+    hessian(model, _graph(*BENT))
+    with pytest.raises(NotImplementedError, match="create_graph=False"):
+        hessian_vector_product(model, _graph(*BENT), torch.ones(3, 3, dtype=torch.float64), create_graph=True)

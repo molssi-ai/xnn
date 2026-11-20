@@ -10,9 +10,10 @@ Units are those of the models: energies in eV, positions in Angstrom, masses in 
 
 Models whose energies come from a self-consistent density tell these functions how to get exact second
 derivatives: a ``position_response`` attribute is switched on during the evaluation (see
-:func:`exact_curvature`), or an ``energy_gradient(data)`` method returns the positions and a gradient whose
-derivatives are exact. ``differentiable_hessian = False`` marks Hessians that cannot be differentiated once
-more, and ``exact_second_derivatives = False`` a model whose plain autograd Hessian is approximate (a warning).
+:func:`exact_curvature`), or an ``energy_gradient(data, create_graph)`` method returns the positions and a
+gradient whose derivatives are exact (``create_graph`` tells it the Hessian will be differentiated once more).
+``differentiable_hessian = False`` marks Hessians that cannot be differentiated once more, and
+``exact_second_derivatives = False`` a model whose plain autograd Hessian is approximate (a warning).
 """
 from __future__ import annotations
 
@@ -78,7 +79,7 @@ def _energy_gradient(model: nn.Module, data: AtomicGraph, create_graph: bool = F
     own = getattr(model, "energy_gradient", None)
     if callable(own):
         # a model that forms a gradient with exact derivatives itself (the tight-binding methods)
-        return own(data)
+        return own(data, create_graph)
     approximate = sorted({type(m).__name__ for m in model.modules()
                           if getattr(m, "exact_second_derivatives", True) is False})
     if approximate:

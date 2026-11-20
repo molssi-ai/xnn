@@ -522,7 +522,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
 LOSS_TERMS = {"energy_mse": "energy_weight", "force_mse": "force_weight", "stress_mse": "stress_weight",
               "dipole_mse": "dipole_weight", "polarizability_mse": "polarizability_weight",
               "charge_mse": "charge_weight", "les_dipole_mse": "les_dipole_weight",
-              "les_charge_mse": "les_charge_weight", "property_mse": "property_weight"}
+              "les_charge_mse": "les_charge_weight", "property_mse": "property_weight",
+              "reaction_mse": "reaction_weight"}
 
 
 class UncertaintyWeights(torch.nn.Module):

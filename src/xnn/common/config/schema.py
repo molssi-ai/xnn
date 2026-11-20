@@ -211,6 +211,13 @@ class OptimConfig:
         Weight of the property term: the ``properties`` output of a property
         model (MEGNet) against the ``properties`` labels, without division by
         the atom count. Defaults to ``0.0``.
+    reaction_weight : float
+        Weight of the reaction-energy term: the errors of reaction energies
+        (differences of the energies of several structures, a
+        :class:`~xnn.common.train.reactions.ReactionSet` given to the
+        trainer), in eV squared. Defaults to ``0.0``.
+    reaction_batch_size : int
+        Reactions per training step of that term. Defaults to ``16``.
     scheduler : str
         Learning-rate scheduler (``none`` / ``cosine`` / ``plateau``). MACE uses
         ``ReduceLROnPlateau``. Defaults to ``"plateau"``.
@@ -229,6 +236,8 @@ class OptimConfig:
         Per-term override of ``huber_delta`` for the force term.
     huber_delta_stress : float, optional
         Per-term override of ``huber_delta`` for the stress term.
+    huber_delta_reactions : float, optional
+        Per-term override of ``huber_delta`` for the reaction-energy term.
     optimizer : str
         ``"adam"`` (default; ``weight_decay`` is an L2 penalty), ``"amsgrad"``
         (Adam with the AMSGrad maximum of the second moment, whose steps
@@ -287,11 +296,14 @@ class OptimConfig:
     les_dipole_weight: float = 0.0     # > 0 trains the LES latent dipole on dipole labels
     les_charge_weight: float = 0.0     # > 0 trains the LES latent charges on charges labels
     property_weight: float = 0.0       # > 0 trains a property model (MEGNet) on properties labels
+    reaction_weight: float = 0.0       # > 0 trains on reaction energies (a ReactionSet given to the trainer)
+    reaction_batch_size: int = 16      # reactions per training step
     scheduler: str = "plateau"         # none / cosine / plateau (MACE: ReduceLROnPlateau)
     huber_delta: float = 0.0           # > 0 clips the loss tails; 0 = squared error
     huber_delta_energy: Optional[float] = None   # per-term overrides of huber_delta
     huber_delta_forces: Optional[float] = None
     huber_delta_stress: Optional[float] = None
+    huber_delta_reactions: Optional[float] = None
     optimizer: str = "adam"            # adam / amsgrad / adamw (decoupled weight decay)
     clip_grad: float = 0.0             # max gradient norm per step; 0 = no clipping
     ema_decay: float = 0.0             # > 0: exponential moving average of the weights for validation and checkpoints

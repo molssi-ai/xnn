@@ -4,8 +4,8 @@ With the density's response to the positions, autograd Hessians equal central di
 forces (closed and open shells), the Hessian-vector products of a batch equal those of its structures, and the
 parameter gradients of a loss on mode curvatures equal finite differences in the parameters. The constants of
 the acetylenic, dispersion and hydrogen-bond corrections train, their scripted forms agree with the host forms,
-and the exported core carries their values. The tight-binding methods give exact Hessians (not differentiable
-once more).
+and the exported core carries their values. The tight-binding methods give exact Hessians and parameter gradients
+of curvatures (second-order response of the smeared density and of the self-consistent charges).
 """
 import numpy as np
 import pytest
@@ -282,15 +282,20 @@ def test_tight_binding_hessian_matches_finite_differences(cls, system, mult):
     assert float((_plain_hessian(_tight(cls), _graph(pos, z, mult)) - H).abs().max()) > 1.0
 
 
-def test_tight_binding_energy_gradient_and_limits():
-    """The gradient of ``energy_gradient`` is the negative force and leaves no state behind; a wrapped model
-    takes the plain autograd Hessian with a warning, and the Hessians cannot be differentiated once more."""
+def test_tight_binding_energy_gradient_and_wrapped_models():
+    """The gradient of ``energy_gradient`` is the negative force and leaves no state behind (also with
+    ``create_graph``, which takes the reference's functions for the evaluation); a wrapped model takes the plain
+    autograd Hessian with a warning."""
     pos, z = WATER
     model = _tight(GFN0)
     x, g = model.energy_gradient(_graph(pos, z))
     forces = ForceStressOutput(model)(_graph(pos, z))["forces"]
     assert torch.allclose(g.detach(), -forces, rtol=0.0, atol=1e-10)
     assert "_density_positions" not in model.__dict__ and "_state" not in model.__dict__
+    fast = model.use_fast
+    _, g2 = model.energy_gradient(_graph(pos, z), create_graph=True)
+    assert torch.allclose(g2.detach(), g.detach(), rtol=0.0, atol=1e-10)
+    assert model.use_fast == fast and "_second_order_density" not in model.__dict__
 
     class Wrapped(torch.nn.Module):
         def __init__(self, inner):
@@ -302,8 +307,77 @@ def test_tight_binding_energy_gradient_and_limits():
 
     with pytest.warns(RuntimeWarning, match="approximate"):
         hessian(Wrapped(_tight(GFN1)), _graph(pos, z))
-    with pytest.raises(NotImplementedError, match="create_graph=False"):
-        hessian_vector_product(model, _graph(pos, z), torch.ones(3, 3), create_graph=True)
+
+
+@pytest.mark.parametrize("cls,system,mult,group,index", [(GFN1, WATER, None, "GAM", 8),
+                                                         (GFN2, WATER, None, "DPOL", 8),
+                                                         (GFN2, METHYL, 2.0, "LEV", (6, 0)),
+                                                         (GFN0, WATER, None, "LEV", (8, 1))])
+def test_tight_binding_curvature_loss_parameter_gradients(cls, system, mult, group, index):
+    """The parameter gradient of a loss on curvatures along fixed modes equals finite differences: the
+    self-consistent charges and moments to second order and the smeared density's second-order response."""
+    pos, z = system
+    (H,) = hessian(_tight(cls), _graph(pos, z, mult))
+    U = harmonic_analysis(H, torch.as_tensor(pos), atomic_numbers=torch.as_tensor(z))["displacements"]
+
+    def loss(model, create_graph):
+        hu = hessian_vector_product(model, _graph(pos, z, mult), U, create_graph=create_graph)
+        return (torch.linspace(0.5, 1.5, U.shape[0]) * (U * hu).sum((1, 2))).sum()
+
+    model = _tight(cls, trainable=[group])
+    loss(model, True).backward()
+    grad = float(getattr(model, f"table_{group}").grad[index])
+    h, fd = 1e-4, []
+    for s in (1, -1):
+        m = _tight(cls, trainable=[group])
+        with torch.no_grad():
+            getattr(m, f"table_{group}")[index] += s * h
+        fd.append(float(loss(m, False)))
+    assert grad == pytest.approx((fd[0] - fd[1]) / (2 * h), rel=1e-6)
+
+
+@pytest.mark.parametrize("split,n_alpha,n_beta,kt", [(0.0, 2.0, 2.0, 0.02), (0.0, 3.0, 1.0, 0.02),
+                                                     (1e-3, 2.0, 2.0, 0.02), (0.05, 2.0, 2.0, 0.0)])
+def test_smeared_density_second_order_response(split, n_alpha, n_beta, kt):
+    """The first and second derivatives of the smeared density, energy-weighted density and entropy (with the
+    Fermi levels of two spin channels) equal central differences, also at levels degenerate across a Fermi
+    level, and of integer occupations at zero temperature."""
+    from xnn.sqmnn.models import xtb
+    n = 7
+    rng = np.random.default_rng(2)
+    Q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    lam = np.sort(rng.normal(size=n)) * 0.2
+    lam[1], lam[2], lam[3] = lam[3], lam[3] + split, lam[3] - split
+    lam[4] = lam[5]
+    F0 = torch.tensor((Q * lam) @ Q.T)[None]
+    E1, E2, gP, gW = (0.5 * (M + M.transpose(-1, -2)) for M in torch.tensor(rng.normal(size=(4, 1, n, n))))
+    gts = torch.tensor([0.7])
+    na, nb = torch.tensor([n_alpha]), torch.tensor([n_beta])
+
+    def parts(F):
+        eps, U = torch.linalg.eigh(F)
+        f, level = xtb._fermi_channels(eps, na, nb, kt, [n])
+        return eps, U, f, level
+
+    def scalar(F):
+        P, W, ts = xtb._SpectralDensity.apply(F, *parts(F), kt)
+        return float((gP * P).sum() + (gW * W).sum() + (gts * ts).sum())
+
+    def first(F):
+        return xtb._spectral_gradient(*parts(F), kt, gP, gW, gts)
+
+    h = 1e-6
+    fd1 = (scalar(F0 + h * E1) - scalar(F0 - h * E1)) / (2 * h)
+    assert float((first(F0) * E1).sum()) == pytest.approx(fd1, rel=1e-7)
+    dF, dP, dW, dT = xtb._spectral_second(*parts(F0), kt, gP, gW, gts, E2)
+    fd2 = float(((first(F0 + h * E1) - first(F0 - h * E1)) / (2 * h) * E2).sum())
+    assert float((dF * E1).sum()) == pytest.approx(fd2, rel=1e-6)
+    # the changes along E2: the gradients in gP, gW and gts
+    plus = xtb._SpectralDensity.apply(F0 + h * E2, *parts(F0 + h * E2), kt)
+    minus = xtb._SpectralDensity.apply(F0 - h * E2, *parts(F0 - h * E2), kt)
+    jvp = [(a - b) / (2 * h) for a, b in zip(plus, minus)]
+    assert torch.allclose(dP, jvp[0], rtol=0.0, atol=1e-6) and torch.allclose(dW, jvp[1], rtol=0.0, atol=1e-6)
+    assert float(dT) == pytest.approx(float(jvp[2]), rel=1e-6, abs=1e-9)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
@@ -313,3 +387,31 @@ def test_tight_binding_hessian_on_gpu():
     (ref,) = hessian(_tight(GFN2), _graph(pos, z))
     (H,) = hessian(_tight(GFN2).cuda(), _graph(pos, z, device="cuda"))
     assert torch.allclose(H.cpu(), ref, rtol=0.0, atol=1e-8)
+
+
+def test_reaction_energy_loss_parameter_gradients():
+    """The parameter gradient of a reaction-energy loss of PM7 (species energies of several structures combined
+    by their coefficients) equals finite differences."""
+    from xnn.common.train import ReactionSet
+    dimer = np.vstack([WATER[0], WATER[0] + [2.9, 0.1, 0.2]])
+    structures = [{"name": "water", "pos": WATER[0], "atomic_numbers": WATER[1]},
+                  {"name": "dimer", "pos": dimer, "atomic_numbers": WATER[1] * 2},
+                  {"name": "formamide", "pos": FORMAMIDE[0], "atomic_numbers": FORMAMIDE[1]}]
+    reactions = ReactionSet(structures, [
+        {"species": ["dimer", "water"], "stoichiometry": [1, -2], "reference": -5.0},
+        {"species": ["formamide", "water"], "stoichiometry": [1, -1], "reference": 2.0, "scale": 2.0}],
+        units="kcal/mol")
+
+    def loss(model):
+        return reactions.loss(reactions.species_energies(model, 0.1))
+
+    model = PM7(trainable=["USS", "BETAP"], tol_density=1e-12, tol_energy=1e-13)
+    loss(model).backward()
+    for group, z in (("USS", 8), ("BETAP", 7)):
+        h, fd = 1e-5, []
+        for s in (1, -1):
+            m = PM7(trainable=["USS", "BETAP"], tol_density=1e-12, tol_energy=1e-13)
+            with torch.no_grad():
+                m.params[group][z] += s * h
+            fd.append(float(loss(m)))
+        assert float(model.params[group].grad[z]) == pytest.approx((fd[0] - fd[1]) / (2 * h), rel=1e-6)
