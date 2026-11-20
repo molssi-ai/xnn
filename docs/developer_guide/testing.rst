@@ -31,7 +31,7 @@ What the tests check
   agreement with the reference to float64 round-off, and to float32 round-off
   in single precision. The reference is the upstream code under identical
   weights where one exists (MACE, NequIP, Allegro, CACE, AIMNet2, DimeNet,
-  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, QET, MEGNet, ET, Equiformer, EquiformerV2, PhysNet,
+  GemNet, SpookyNet, SchNet, PaiNN, TensorNet, QET, MEGNet, CGCNN, ET, Equiformer, EquiformerV2, PhysNet,
   ANI, the spherical CNN, HDNNP against the RuNNer executable when
   ``XNN_RUNNER`` points to it,
   BAMBOO, ByteFF, ByteFF-Pol, GDML, sGDML, LES, D3, D4), the reference program (OpenMM for OPLS, LAMMPS for ReaxFF,
@@ -81,6 +81,24 @@ Put a new test file in the folder of the family it tests. Put it in
 ``tests/common/`` when it tests shared code or uses models of several families.
 Keep file names unique across the folders, because test files import helpers
 from each other by name.
+
+Tests on a GPU
+==============
+The workflow runs on CPUs. Tests that need a CUDA device (CUDA graphs, GPU
+kernels, fast paths against the reference on the device) skip there, so run
+them on a GPU machine before a release and after changes to the fast paths.
+Every such test carries the marker ``gpu``. ``tests/conftest.py`` adds it to
+each test that skips exactly when no CUDA device is present, with a skip reason
+that names the GPU or CUDA:
+
+.. code-block:: bash
+
+   pytest -m gpu tests/       # only the tests that need a CUDA device
+   pytest tests/ -rs          # the whole suite, listing the tests that skipped
+
+Give a test that needs a CUDA device a skip reason that says so, such as
+``"needs a GPU"``. Where you can, also test its logic on a CPU, for example the
+stage dispatch of a graphed loop on launched stages.
 
 Conventions for new code
 ========================

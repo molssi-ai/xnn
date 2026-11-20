@@ -62,6 +62,25 @@ exact parameter gradients of such losses. Their self-consistent density then
 follows the positions as well. These functions switch this on for their own
 evaluations, and ``position_response=True`` keeps it on for every call.
 
+The acetylenic C-C term
+=======================
+PM6, PM7 and PM6-ORG add 12 kcal/mol to every C-C bond shorter than 1.21
+Angstrom and switch this off by 1.33 Angstrom. The switch is steep, so a C=C
+bond near 1.33 Angstrom has a stretching frequency that changes quickly with
+its length. For fits to curvatures, a smooth and wider switch helps.
+
+.. code-block:: python
+
+   model = PM7(yne_switch="smooth",
+               correction_constants={"YNE": [12.0, 1.21, 1.45]},
+               trainable=["YNE", "USS", "BETAS"])
+
+- ``yne_switch="smooth"`` makes the Hessian change smoothly with the bond length.
+- ``correction_constants`` sets the energy and the start and end of the switch.
+  With ``"YNE"`` in ``trainable``, the fit refines them.
+- To check a Hessian by finite differences where a bond is inside the switch,
+  use small steps of about 1e-4 Angstrom.
+
 Tight-binding methods
 =====================
 GFN0-xTB, GFN1-xTB and GFN2-xTB also give exact Hessians and exact parameter

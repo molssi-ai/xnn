@@ -395,6 +395,57 @@ MatGL's pretrained models load with one call:
   the band gaps.
 - The weights of the pre-trained models keep MatGL's BSD-3-Clause license.
 
+CGCNN
+=====
+:class:`~xnn.gnn.models.cgcnn.CGCNN` is the crystal graph network of `Xie and
+Grossman, Phys. Rev. Lett. 120, 145301 (2018)
+<https://doi.org/10.1103/PhysRevLett.120.145301>`_. It predicts one property per
+crystal from the 12 nearest neighbors of every atom.
+
+.. code-block:: yaml
+
+   model:
+     name: cgcnn
+     cutoff: 8.0
+   optim:
+     property_weight: 1.0
+
+Each training structure carries its target in ``properties``:
+
+.. code-block:: python
+
+   {"pos": pos, "atomic_numbers": z, "cell": cell, "properties": -1.4}
+
+- CGCNN predicts no energy, so it gives no forces.
+- The atom features come from the authors' element table, which is downloaded
+  on first use. Set ``atom_features: onehot`` to learn one vector per element
+  instead.
+- Set ``classification: true`` for a two-class task. The output is then the
+  probability of the second class.
+- For predictions, pass ``max_neighbors=model.max_neighbors`` to
+  ``structure_to_graph``. The graphs then keep the same 12 neighbors as in
+  training.
+
+The authors' pretrained models load with one call:
+
+.. code-block:: python
+
+   from xnn.common.data import structure_to_graph
+   from xnn.gnn.models import CGCNN
+
+   model = CGCNN.from_foundation("cgcnn-formation-energy-per-atom")   # or cgcnn-band-gap, ...
+   s = {"pos": pos, "atomic_numbers": z, "cell": cell}
+   graph = structure_to_graph(s, model.cutoff, max_neighbors=model.max_neighbors)
+   print(model(graph)["properties"])                                   # eV/atom
+
+- The available models are ``cgcnn-formation-energy-per-atom``,
+  ``cgcnn-final-energy-per-atom``, ``cgcnn-band-gap``, ``cgcnn-efermi``,
+  ``cgcnn-bulk-moduli``, ``cgcnn-shear-moduli``, ``cgcnn-poisson-ratio`` and
+  ``cgcnn-semi-metal-classification``.
+- The bulk and shear moduli are given in log10(GPa).
+- The classification model gives the probability that a crystal is a metal.
+- The weights and the element table keep the authors' MIT license.
+
 SE(3) steerable CNN and 3D CNN
 ==============================
 :class:`~xnn.cnn.models.steerable.SteerableCNN` is the rotation-equivariant
@@ -1248,6 +1299,9 @@ the license that applies to them.
   for PM7 ``"DISP"`` (dispersion scale and damping) and ``"HBOND"``
   (hydrogen-bond scales and O...O energy). They are not part of a MOPAC
   parameter file.
+- ``correction_constants`` sets the values of these constants, and
+  ``yne_switch="smooth"`` gives the acetylenic term a switch with smooth
+  Hessians.
 - Hessians and their parameter gradients are exact, see
   :ref:`howto-hessians`.
 

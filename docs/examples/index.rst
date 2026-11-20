@@ -178,6 +178,18 @@ QM9 subset at a short budget.
    MEGNet on Materials Project formation energies <nb/examples/gnn/megnet/megnet_formation_energy>
    Multi-fidelity MEGNet: band gaps from cheap and accurate data <nb/examples/gnn/megnet/megnet_multifidelity_band_gap>
 
+CGCNN (gnn)
+===========
+CGCNN on the Materials Project crystals of the MEGNet paper: training on
+formation energies at a short budget, next to the authors' pretrained model,
+then their pretrained bulk-modulus model and metal/semiconductor classifier.
+
+.. example-toctree::
+   :caption: CGCNN (gnn)
+
+   CGCNN on Materials Project formation energies, with the authors' pretrained
+   models <nb/examples/gnn/cgcnn/cgcnn_formation_energy>
+
 QET (gnn)
 =========
 
@@ -550,6 +562,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
    PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
    QET against MatGL: the published MatPES potential, charged cells and an applied potential <nb/fidelity_checks/gnn/qet/qet_verification>
+   CGCNN against the authors' code: the crystal graph, one convolution, training mode and the eight published models <nb/fidelity_checks/gnn/cgcnn/cgcnn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
    ET and TensorNet, block by block: the papers' equations and the TorchMD-Net reference implementation <nb/fidelity_checks/trfnn/et/torchmdnet_verification>
    Equiformer, block by block: the authors' implementation in float64 and float32, and the speed of a training step <nb/fidelity_checks/trfnn/equiformer/equiformer_verification>
@@ -605,6 +618,7 @@ gradients and timings.
    TensorNet fast path: parity with the reference <nb/parity_checks/gnn/tensornet/tensornet_parity>
    QET fast path: parity with the reference <nb/parity_checks/gnn/qet/qet_parity>
    MEGNet fast path: parity with the reference <nb/parity_checks/gnn/megnet/megnet_parity>
+   CGCNN fast path: parity with the reference <nb/parity_checks/gnn/cgcnn/cgcnn_parity>
    ANI fast path: parity with the reference <nb/parity_checks/dnn/ani/ani_parity>
    PhysNet fast path: parity with the reference <nb/parity_checks/dnn/physnet/physnet_parity>
    HDNNP fast paths: parity with the reference (GPU and CPU) <nb/parity_checks/dnn/hdnnp/hdnnp_parity>

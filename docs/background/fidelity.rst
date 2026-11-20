@@ -98,6 +98,9 @@ Agreement with the upstream codes under identical weights:
   1e-14 in float64 and to float32 round-off, at every fidelity, for crystals,
   molecules and batches. Disordered sites match the paper's code (`megnet 1.3.2
   <https://github.com/materialyzeai/megnet>`_) as closely as possible.
+- **CGCNN** (`txie-93/cgcnn <https://github.com/txie-93/cgcnn>`_): the
+  eight published models, and their network with random weights, agree
+  to about 1e-15 in float64 and to float32 round-off.
 - **Equiformer and EquiformerV2**
   (`atomicarchitects/equiformer <https://github.com/atomicarchitects/equiformer>`_;
   `fairchem-core 1.10 <https://github.com/facebookresearch/fairchem>`_): built

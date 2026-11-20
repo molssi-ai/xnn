@@ -23,7 +23,7 @@ dataclass object holding one structure or a batch of structures.
    graph.charges                                   # (N,) partial-charge targets, optional
    graph.external_potential                        # (N,) applied potential in V (QET), optional
    graph.total_charge, graph.spin_multiplicity     # (B,), optional; neutral / closed shell if None
-   graph.properties                                # (B,) or (B, k) property targets (MEGNet), optional
+   graph.properties                                # (B,) or (B, k) property targets (MEGNet, CGCNN), optional
    graph.state                                     # (B,) labels or (B, d) features (MEGNet), optional
    graph.site_species, graph.site_occupancy        # (N, K) disordered sites (MEGNet), optional
    graph.weight, graph.head                        # (B,) loss weight and readout head, optional
@@ -57,7 +57,7 @@ The input format is a plain dictionary representing each **structure**:
        "external_potential": ..., # (N,) applied potential, V; optional (QET)
        "total_charge": 0.0,       # Or "charge"; optional
        "spin_multiplicity": 1,    # Optional
-       "properties": 1.1,         # Property target, such as a band gap (MEGNet); optional
+       "properties": 1.1,         # Property target, such as a band gap (MEGNet, CGCNN); optional
        "state": 2,                # Global state: an integer label or a list of floats (MEGNet); optional
        "occupancies": ...,        # One {element: fraction} per site, for disordered sites (MEGNet); optional
        "weight": 1.0,             # Per-structure loss weight, optional

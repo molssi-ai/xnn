@@ -15,7 +15,7 @@ contraction of MACE and NequIP (where we use `cuEquivariance
 <https://github.com/NVIDIA/cuEquivariance>`_), the equivariant linear layers,
 element self-connections and radial networks of MACE, the continuous-filter
 convolution of SchNet, the message block of PaiNN, the embedding and interaction layers of
-TensorNet (and of QET's TensorNet trunk), the blocks and readouts of MEGNet, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
+TensorNet (and of QET's TensorNet trunk), the blocks and readouts of MEGNet, the network of CGCNN up to the pooling, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
 ET's attention layers, the transformer blocks of Equiformer and EquiformerV2
@@ -85,6 +85,8 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`
 - MEGNet: :data:`xnn.gnn.fast.megnet.AUTO_POLICY`,
   :data:`xnn.gnn.fast.megnet.AUTO_POLICY_TRAINING`
+- CGCNN: :data:`xnn.gnn.fast.cgcnn.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.cgcnn.AUTO_POLICY_TRAINING`
 - AIMNet2: :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY`,
   :data:`xnn.gnn.fast.aimnet2.AUTO_POLICY_TRAINING`
 - GemNet: :data:`xnn.gnn.fast.gemnet.AUTO_POLICY`,
@@ -263,7 +265,9 @@ What to expect from fast implementations
   TorchScript does.
 - **Compilation.** The TensorNet fast path compiles its atom-wise steps with
   ``torch.compile`` on the first evaluation in each precision (seconds to a
-  minute). Later evaluations of any system size reuse them. MEGNet does the same. SpookyNet's
+  minute). Later evaluations of any system size reuse them. MEGNet does the same. CGCNN compiles its
+  stage once for each of three size classes (below 8192 bonds, below 65,536, and above), so that each is
+  tuned for graphs of its size. SpookyNet's
   compiled block takes about a minute the first time. The compiled blocks of
   Equiformer and EquiformerV2 also compile on their first evaluation.
 
@@ -322,28 +326,43 @@ uncaptured, because launches are a small part of them.
 Semiempirical methods
 =====================
 PM3, PM6, PM6-ORG and PM7 have no separate kernels. On a GPU the model replays
-CUDA graphs of its own launches instead. From the third evaluation of a batch
-composition (the same atoms, charges and spins), it replays the SCF iterations
-and the integral build with its derivatives:
+CUDA graphs of its own launches instead: the integral build with the core-core
+terms, the SCF iterations, the density response, and the energies, charges and
+dipoles from the densities, each with its derivatives. The corrections
+(peptide torsions, hydrogen bonds, dispersion and the like: small terms found by
+searches per molecule) run on the host.
+
+A batch is padded to the sizes of a bucket. Ghost atoms without orbitals or
+core charge fill up the atoms, the atom pairs and the basis functions, and
+their terms are cleared. A batch goes into a kept bucket that holds it with at
+most twice each size. Otherwise it starts a bucket of its sizes rounded up to
+2, 3 or 4 times a power of two. Every batch of a bucket replays the same
+graphs, so shuffled training batches of other molecules replay them too. A
+bucket records its graphs at its third evaluation, which takes a few tenths of
+a second:
 
 .. code-block:: python
 
-   from xnn.sqmnn.models import PM7
+   from xnn.sqmnn.models import PM7, nddo
 
    model = PM7().to("cuda").eval()      # use_fast="auto": graphs from the third evaluation
    model.set_use_fast(False)            # always launched
+   nddo.BUCKETS["cuda"] = False         # graphs per batch composition, without padding
 
 The eigenvalue problem runs between the replays. The results equal those of
 launched evaluations up to round-off. In a molecular dynamics run or a geometry
 optimization on a GPU, each SCF starts from the previous step's orbitals and
-rotates them from its first iteration. That saves one diagonalization per step. Gradients taken with ``create_graph``
-(Hessians, force training) and their gradients replay graphs of their own,
-recorded at the next evaluation after the first such gradient. With trainable
-parameters the build is replayed from the parameters and the density response
+rotates them from its first iteration. That saves one diagonalization per step.
+Gradients taken with ``create_graph`` (Hessians, force training) and their
+gradients replay graphs of their own, recorded at the next evaluation after the
+first such gradient. With trainable parameters the build is replayed from the
+parameters, those of the core-core terms included, and the density response
 from graphs of its iterations, so a force-loss training step runs on the graphs
-too. Each recording takes a few tenths of a second. A
-composition that only recurs after many others, as in a training set cycled
-through in epochs, is never recorded.
+too.
+
+On an A100, shuffled PM7 energy and force training of small CHNO molecules in
+float64 runs about 1.5 times as fast as on 8 CPU cores at batch sizes 1, 64 and
+122, 1.6 times as fast at batch size 8 and 1.8 times as fast at batch size 32.
 
 Molecular dynamics with classical force fields
 ==============================================
