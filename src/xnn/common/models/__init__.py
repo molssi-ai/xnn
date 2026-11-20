@@ -15,6 +15,7 @@ from .les import EwaldSummation, LatentEwald
 from .ops import build_triplets, scatter_sum
 from .outputs import ForceStressOutput
 from .registry import add_dispersion, available_models, build_model, register_model
+from .vibrations import exact_curvature, harmonic_analysis, hessian, hessian_vector_product
 
 __all__ = [
     "InteratomicPotential",
@@ -23,6 +24,10 @@ __all__ = [
     "add_dispersion",
     "available_models",
     "ForceStressOutput",
+    "hessian",
+    "hessian_vector_product",
+    "harmonic_analysis",
+    "exact_curvature",
     "scatter_sum",
     "build_triplets",
     "EwaldSummation",

@@ -5,6 +5,7 @@ trainable: []             # parameter groups to refit, e.g. [USS, BETAS, ZS, ALP
 unrestricted: false       # spin-unrestricted SCF also for closed shells (open shells are always unrestricted)
 corrections: true         # the method's post-SCF and molecular-mechanics corrections
 response: auto            # exact SCF response in the parameter gradients: auto (training), always, never
+position_response: false  # the SCF density also follows the positions: exact Hessians and their parameter gradients (hessian functions switch it on themselves)
 max_iter: 300             # SCF iteration limit
 tol_density: 1.0e-9       # SCF convergence: largest density change
 tol_energy: 1.0e-10       # SCF convergence: energy change (eV)

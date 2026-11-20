@@ -1088,6 +1088,16 @@ def _electronic_energy(H: Tensor, F: Tensor, P: Tensor, unrestricted: bool) -> T
     return 0.5 * (P[0] * (H + F[0])).sum((-1, -2))
 
 
+def two_electron_fock(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, P: Tensor,
+                      unrestricted: bool) -> Tensor:
+    """The two-electron parts ``G(P)`` ``(S, B, n, n)`` of the Fock matrices of densities ``P`` (linear in ``P``)."""
+    if unrestricted:
+        tot = P[0] + P[1]
+        return torch.stack([two_electron(layout, W1, W2, tot, P[s], 1.0, False) for s in range(2)])
+    p = P[0]
+    return two_electron(layout, W1, W2, p, p, 0.5, True).unsqueeze(0)
+
+
 def fock_matrices(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, P: Tensor,
                   unrestricted: bool) -> Tensor:
     """Fock matrices ``(S, B, n, n)`` of densities ``P`` ``(S, B, n, n)`` (differentiable)."""
@@ -1133,12 +1143,7 @@ class CPHFLoop:
         return torch.matmul(self.C, torch.matmul(Uov + Uov.transpose(-1, -2), self.C.transpose(-1, -2)))
 
     def _G(self, Z: Tensor) -> Tensor:
-        if self.unrestricted:
-            tot = Z[0] + Z[1]
-            return torch.stack([two_electron(self.layout, self.W1, self.W2, tot, Z[s], 1.0, False)
-                                for s in range(2)])
-        z0 = Z[0]
-        return two_electron(self.layout, self.W1, self.W2, z0, z0, 0.5, True).unsqueeze(0)
+        return two_electron_fock(self.layout, self.W1, self.W2, Z, self.unrestricted)
 
     def _A(self, u: Tensor) -> Tensor:
         # A u = (D / w) u + [G(z(u))]_ov with z(u) = from_mo(u)
@@ -1233,6 +1238,112 @@ class CPHFGraphs:
         self.graphs[stage].replay()
 
 
+def _cphf(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, result: SCFResult, gP: Tensor,
+          unrestricted: bool, tol: float, graphs: Optional[CPHFGraphs] = None) -> CPHFLoop:
+    """The coupled-perturbed equations of the converged ``result`` for the density gradient ``gP``, solved by
+    :class:`CPHFLoop` (replayed from ``graphs`` when given)."""
+    C, eps, occ = result.orbitals, result.energies, result.occupations
+    if graphs is not None:
+        loop = graphs.load(W1, W2, C, eps, occ, gP)
+        run = graphs.run
+    else:
+        loop = CPHFLoop(layout, W1, W2, C, eps, occ, gP, unrestricted)
+
+        def run(stage: str) -> None:
+            getattr(loop, stage)()
+    run("start")
+    for _ in range(200):
+        run("step")
+        if float(loop.res) < tol:
+            break
+    unstable = loop.unstable
+    if bool(unstable.any()):
+        warnings.warn(f"the SCF solution of structure(s) {unstable.nonzero().flatten().tolist()} "
+                      "is not a minimum; their density response is incomplete", RuntimeWarning, stacklevel=3)
+    return loop
+
+
+def _projectors(P: Tensor, valid: Tensor, unrestricted: bool) -> Tuple[Tensor, Tensor]:
+    """The occupied ``D`` and virtual ``Q = 1 - D`` projectors (on the real basis functions) of converged
+    densities ``P`` ``(S, B, n, n)``."""
+    D = P if unrestricted else 0.5 * P
+    return D, torch.diag_embed(valid.to(P.dtype)).unsqueeze(0) - D
+
+
+def response_operator(layout: Layout, F: Tensor, P: Tensor, W1: Tensor, W2: Tensor, X: Tensor,
+                      unrestricted: bool) -> Tensor:
+    """The linearized SCF equations of converged densities as a symmetric operator on ``X`` ``(S, B, n, n)``.
+
+    With the projectors ``D``, ``Q`` of :func:`_projectors` and ``Y = Q X D`` (the occupied-to-virtual part),
+    ``M X = Q (F Y - Y F + G(w (Y + Y^T))) D + X - Y``, ``w`` the occupation of an orbital and ``G`` the
+    two-electron part of the Fock matrix. The first-order density change of a Fock perturbation ``dF`` is
+    ``w (Y + Y^T)`` with ``M Y = -Q dF D``. Every input enters differentiably, so solutions of ``M`` can be
+    differentiated again (:class:`ResponseSolve`).
+    """
+    D, Q = _projectors(P, layout.valid, unrestricted)
+    Y = torch.matmul(Q, torch.matmul(X, D))
+    w = 1.0 if unrestricted else 2.0
+    G = two_electron_fock(layout, pack_one_center(W1), pack_pairs(layout, W2), w * (Y + Y.transpose(-1, -2)),
+                          unrestricted)
+    inner = torch.matmul(F, Y) - torch.matmul(Y, F) + G
+    return torch.matmul(Q, torch.matmul(inner, D)) + X - Y
+
+
+def _alias(t: Tensor, create_graph: bool) -> Tensor:
+    """A new node for ``t`` (its partial derivatives exclude the paths that reach ``t`` otherwise), connected to
+    ``t``'s graph under ``create_graph``."""
+    if create_graph and t.requires_grad:
+        return t.view_as(t)
+    return t.detach().requires_grad_(True)
+
+
+class ResponseSolve(torch.autograd.Function):
+    """``X = M^-1 b`` for the operator ``M`` of :func:`response_operator`, differentiable to any order.
+
+    The forward pass solves the occupied-virtual part by the conjugate gradients of :class:`CPHFLoop` (the
+    rest of ``M`` is the identity). ``M`` is symmetric, so the backward pass is another solve,
+    ``lambda = M^-1 gX``, and the gradients of ``F``, ``P`` and the integrals are those of
+    ``-<lambda, M X>`` at fixed ``lambda`` and ``X``: made of differentiable operations, they give the
+    second and higher derivatives of the SCF density (implicit differentiation of the SCF equations).
+    """
+
+    @staticmethod
+    def forward(ctx, b, F, P, W1, W2, result: SCFResult, layout: Layout, unrestricted: bool, tol: float):
+        D, Q = _projectors(P, layout.valid, unrestricted)
+        inside = torch.matmul(Q, torch.matmul(b, D))
+        w = 1.0 if unrestricted else 2.0
+        # the CPHF loop solves A u = -[C^T sym(g) C]_ov with M = w A; [C^T sym(Q b D) C]_ia = (C^T b C)_ai / 2
+        loop = _cphf(layout, pack_one_center(W1), pack_pairs(layout, W2), result, (-2.0 / w) * inside,
+                     unrestricted, tol)
+        C = result.orbitals
+        X = torch.matmul(C, torch.matmul(loop.u.transpose(-1, -2), C.transpose(-1, -2))) + (b - inside)
+        ctx.save_for_backward(F, P, W1, W2, X)
+        ctx.result, ctx.layout, ctx.unrestricted, ctx.tol = result, layout, unrestricted, tol
+        return X
+
+    @staticmethod
+    def backward(ctx, gX):
+        F, P, W1, W2, X = ctx.saved_tensors
+        lam = ResponseSolve.apply(gX, F, P, W1, W2, ctx.result, ctx.layout, ctx.unrestricted, ctx.tol)
+        need = ctx.needs_input_grad[1:5]
+        grads = [None, None, None, None]
+        if any(need):
+            create = torch.is_grad_enabled()
+            with torch.enable_grad():
+                xs = [_alias(t, create) if n else t.detach() for t, n in zip((F, P, W1, W2), need)]
+                MX = response_operator(ctx.layout, xs[0], xs[1], xs[2], xs[3], X if create else X.detach(),
+                                       ctx.unrestricted)
+                wrt = [x for x, n in zip(xs, need) if n]
+                out = torch.autograd.grad(((lam if create else lam.detach()) * MX).sum(), wrt,
+                                          create_graph=create, allow_unused=True)
+            it = iter(out)
+            for i, n in enumerate(need):
+                if n:
+                    g = next(it)
+                    grads[i] = None if g is None else -g
+        return lam, grads[0], grads[1], grads[2], grads[3], None, None, None, None
+
+
 class SCFDensity(torch.autograd.Function):
     """Converged densities as a function of ``H``, ``W1`` and ``W2``.
 
@@ -1240,13 +1351,18 @@ class SCFDensity(torch.autograd.Function):
     (computed outside, passed through ``ctx``); the backward pass solves the
     coupled-perturbed SCF equations in the occupied-virtual space by
     preconditioned conjugate gradients and returns the gradients with respect
-    to the core Hamiltonian and the two-electron integrals.
+    to the core Hamiltonian and the two-electron integrals. Under
+    ``create_graph`` the backward pass is formed of differentiable operations
+    (:class:`ResponseSolve` on the Fock matrix of the returned densities), so
+    the densities are differentiable to any order: Hessians of the energy, and
+    parameter gradients of Hessians, are exact.
     """
 
     @staticmethod
     def forward(ctx, H, W1, W2, result: SCFResult, layout: Layout, unrestricted: bool,
                 tol: float, graph_cache: Optional[SCFGraphCache] = None, graph_key: tuple = ()):
-        ctx.save_for_backward(H, W1, W2)
+        P = result.densities.clone()
+        ctx.save_for_backward(H, W1, W2, P)
         ctx.result, ctx.layout, ctx.unrestricted, ctx.tol = result, layout, unrestricted, tol
         ctx.graphs = None
         C = result.orbitals
@@ -1259,50 +1375,47 @@ class SCFDensity(torch.autograd.Function):
             ctx.graphs = graph_cache.get(key, lambda: CPHFGraphs(layout, W1p, W2p, C, result.energies,
                                                                  result.occupations, torch.zeros_like(C),
                                                                  unrestricted))
-        return result.densities.clone()
+        return P
 
     @staticmethod
     def backward(ctx, gP):
-        H, W1, W2 = ctx.saved_tensors
+        if torch.is_grad_enabled():
+            return SCFDensity._differentiable_backward(ctx, gP)
+        H, W1, W2, _ = ctx.saved_tensors
         res, layout, uhf = ctx.result, ctx.layout, ctx.unrestricted
-        C, eps, occ = res.orbitals, res.energies, res.occupations
         with torch.no_grad():
             W1d, W2d = W1.detach(), W2.detach()
-            W1p, W2p = pack_one_center(W1d), pack_pairs(layout, W2d)
-            gP = gP.detach()
-            graphs = ctx.graphs
-            if graphs is not None:
-                loop = graphs.load(W1p, W2p, C, eps, occ, gP)
-                run = graphs.run
-            else:
-                loop = CPHFLoop(layout, W1p, W2p, C, eps, occ, gP, uhf)
-
-                def run(stage: str) -> None:
-                    getattr(loop, stage)()
-            run("start")
-            for _ in range(200):
-                run("step")
-                if float(loop.res) < ctx.tol:
-                    break
-            unstable = loop.unstable
-            if bool(unstable.any()):
-                warnings.warn(f"the SCF solution of structure(s) {unstable.nonzero().flatten().tolist()} "
-                              "is not a minimum; their density response is incomplete", RuntimeWarning,
-                              stacklevel=2)
+            loop = _cphf(layout, pack_one_center(W1d), pack_pairs(layout, W2d), res, gP.detach(), uhf, ctx.tol,
+                         ctx.graphs)
             z = loop.from_mo(loop.u)          # dL/dF (AO), one per spin
         # dL/dH = sum over spins of z; dL/dW from <z, G_W(P)>
         gH = z.sum(0)
         with torch.enable_grad():
             W1g = W1d.clone().requires_grad_(True)
             W2g = W2d.clone().requires_grad_(True)
-            P = res.densities
-            if uhf:
-                tot = P[0] + P[1]
-                one, groups = pack_one_center(W1g), pack_pairs(layout, W2g)
-                Gs = torch.stack([two_electron(layout, one, groups, tot, P[s], 1.0, False) for s in range(2)])
-            else:
-                p0 = P[0]
-                Gs = two_electron(layout, pack_one_center(W1g), pack_pairs(layout, W2g), p0, p0, 0.5,
-                                  True).unsqueeze(0)
+            Gs = two_electron_fock(layout, pack_one_center(W1g), pack_pairs(layout, W2g), res.densities, uhf)
             gW1, gW2 = torch.autograd.grad((Gs * z).sum(), (W1g, W2g), allow_unused=True)
         return gH, gW1, gW2, None, None, None, None, None, None
+
+    @staticmethod
+    def _differentiable_backward(ctx, gP):
+        """The backward pass under ``create_graph``: ``dL/dF = -sym(Z)`` with ``M Z = 2 w Q sym(gP) D``
+        (:func:`response_operator` at the returned densities), in differentiable operations."""
+        H, W1, W2, P = ctx.saved_tensors
+        layout, uhf = ctx.layout, ctx.unrestricted
+        F = H + two_electron_fock(layout, pack_one_center(W1), pack_pairs(layout, W2), P, uhf)
+        D, Q = _projectors(P, layout.valid, uhf)
+        w = 1.0 if uhf else 2.0
+        rhs = (2.0 * w) * torch.matmul(Q, torch.matmul(0.5 * (gP + gP.transpose(-1, -2)), D))
+        Z = ResponseSolve.apply(rhs, F, P, W1, W2, ctx.result, layout, uhf, ctx.tol)
+        z = -0.5 * (Z + Z.transpose(-1, -2))
+        need = ctx.needs_input_grad[:3]
+        gH = z.sum(0) if need[0] else None
+        gW = [None, None]
+        if need[1] or need[2]:
+            Ws = [_alias(W, True) if n else W.detach() for W, n in zip((W1, W2), need[1:])]
+            Gs = two_electron_fock(layout, pack_one_center(Ws[0]), pack_pairs(layout, Ws[1]), P, uhf)
+            wrt = [W for W, n in zip(Ws, need[1:]) if n]
+            out = iter(torch.autograd.grad((Gs * z).sum(), wrt, create_graph=True, allow_unused=True))
+            gW = [next(out) if n else None for n in need[1:]]
+        return gH, gW[0], gW[1], None, None, None, None, None, None

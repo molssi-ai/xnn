@@ -47,6 +47,12 @@ converged density is in addition returned by :class:`~.scf.SCFDensity`, whose
 backward pass solves the coupled-perturbed equations: the parameter gradients
 of the forces, charges and dipoles are then exact as well.
 
+With ``position_response`` the density is in addition a function of the
+positions, differentiable to any order. Second derivatives of the energy taken
+by autograd (Hessians, Hessian-vector products, see
+:func:`xnn.common.models.hessian_vector_product`) are then exact, and so are
+their parameter gradients.
+
 Scope: molecules (no periodic images); closed-shell RHF, and UHF for open
 shells (``spin_multiplicity`` > 1, or an odd electron count).
 """
@@ -74,6 +80,7 @@ from .core import (
     make_plan,
     table_key,
 )
+from .corrections import DISPERSION, HBOND, YNE
 from .derived import element_quantities
 from .graphed import GraphedFunction, replay, synchronizes
 from .integrals import constants, device_constant, take0
@@ -92,6 +99,7 @@ from .scf import (
 from .twocenter import pair_tables
 
 _ELEMENT_NAMES = ELEMENT_PARAMETERS + GAUSSIAN_PARAMETERS
+_CORRECTION_CONSTANTS = {"YNE": YNE, "DISP": DISPERSION, "HBOND": HBOND}
 _N_GLOBALS = 61
 #: Atom pairs per block of the two-center integral evaluation.
 @dataclass
@@ -172,14 +180,26 @@ class NDDO(InteratomicPotential):
     trainable : sequence of str, optional
         Parameter groups to refit: per-element names (``"USS"``, ``"BETAS"``,
         ``"ZS"``, ``"GSS"``, ``"FN11"``, ...), ``"ALPB"``/``"XFAC"`` (the
-        diatomic core-core tables), ``"PAR"`` (the global parameters), or
-        ``"all"``. Empty (default) freezes the published method.
+        diatomic core-core tables), ``"PAR"`` (the global parameters),
+        the constants of the corrections (not part of a MOPAC parameter file):
+        ``"YNE"`` (the acetylenic C-C correction of PM6, PM7 and PM6-ORG: its
+        energy and the distances where its switch starts and ends), ``"DISP"``
+        and ``"HBOND"`` (the scale and damping of the PM7 dispersion, the
+        scales and O...O energy of the PM7 hydrogen bonds), or ``"all"``.
+        Empty (default) freezes the published method.
     unrestricted : bool, optional
         Force spin-unrestricted SCF even for closed shells (default: only
         open shells are unrestricted).
     response : str, optional
         ``"auto"`` (default): exact density response in training mode when
         parameters require gradients; ``"always"`` / ``"never"``.
+    position_response : bool, optional
+        Make the SCF density a function of the positions as well, so that
+        second derivatives of the energy (Hessians) and their parameter
+        gradients are exact; default ``False`` (forces need only the density
+        itself). :func:`xnn.common.models.hessian` and
+        :func:`~xnn.common.models.hessian_vector_product` switch it on for
+        their own evaluations.
     max_iter, tol_density, tol_energy : optional
         SCF iteration limit and convergence thresholds (density, eV).
     corrections : bool, optional
@@ -230,6 +250,8 @@ class NDDO(InteratomicPotential):
     #: torsion barrier of PM3 (kcal/mol).
     correction_kind = 0
     peptide_barrier = 0.0
+    #: The constants of the corrections that ``trainable`` may name (see :meth:`correction_constants`).
+    correction_groups = ()
     #: The core-core form (see :mod:`~.core`): 0 that of PM6, PM7 and PM6-ORG, 1 that of PM3.
     core_form = 0
     #: Largest atomic displacement (Angstrom) since the previous call for which
@@ -244,7 +266,7 @@ class NDDO(InteratomicPotential):
                  tol_energy: float = 1e-10, corrections: bool = True,
                  reuse_density: bool = True,
                  scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 6.5,
-                 search_starts: int = 0, use_fast="auto"):
+                 search_starts: int = 0, use_fast="auto", position_response: bool = False):
         super().__init__()
         pset = (parameters if isinstance(parameters, ParameterSet)
                 else read_parameters(parameters or self.default_parameters))
@@ -256,6 +278,7 @@ class NDDO(InteratomicPotential):
         if response not in ("auto", "always", "never"):
             raise ValueError("response must be 'auto', 'always' or 'never'")
         self.response = response
+        self.position_response = bool(position_response)
         self.max_iter, self.tol_density, self.tol_energy = int(max_iter), float(tol_density), float(tol_energy)
         self.use_corrections = bool(corrections)
         self.last_scf = None
@@ -290,17 +313,22 @@ class NDDO(InteratomicPotential):
 
         groups = set(trainable or ())
         if "all" in groups:
-            groups = set(_ELEMENT_NAMES) | set(PAIR_PARAMETERS) | {"PAR"}
-        unknown = groups - set(_ELEMENT_NAMES) - set(PAIR_PARAMETERS) - {"PAR"}
+            groups = set(_ELEMENT_NAMES) | set(PAIR_PARAMETERS) | {"PAR"} | set(self.correction_groups)
+        unknown = groups - set(_ELEMENT_NAMES) - set(PAIR_PARAMETERS) - {"PAR"} - set(self.correction_groups)
         if unknown:
             raise ValueError(f"unknown trainable groups {sorted(unknown)}")
         self.trainable_groups = tuple(sorted(groups))
         self.register_buffer("element_table", table)
         self.register_buffer("pair_table", pairs)
         self.register_buffer("global_table", glob)
+        # fixed in MOPAC, so not part of a parameter set or of the state of an untrained model
+        for name, values in _CORRECTION_CONSTANTS.items():
+            self.register_buffer(f"constants_{name}", torch.tensor(values, dtype=torch.float64), persistent=False)
         self.params = nn.ParameterDict()
         for name in self.trainable_groups:
-            if name in _ELEMENT_NAMES:
+            if name in _CORRECTION_CONSTANTS:
+                self.params[name] = nn.Parameter(getattr(self, f"constants_{name}").clone())
+            elif name in _ELEMENT_NAMES:
                 self.params[name] = nn.Parameter(table[_ELEMENT_NAMES.index(name)].clone())
             elif name in PAIR_PARAMETERS:
                 self.params[name] = nn.Parameter(pairs[PAIR_PARAMETERS.index(name)].clone())
@@ -325,6 +353,12 @@ class NDDO(InteratomicPotential):
     def global_parameters(self) -> Tensor:
         """The ``PARn`` values ``(61,)`` (index ``n``)."""
         return self.params["PAR"] if "PAR" in self.params else self.global_table
+
+    def correction_constants(self, name: str) -> Tensor:
+        """The constants of a correction, the trainable copy if any: ``"YNE"`` (see
+        :data:`~.corrections.YNE`), ``"DISP"`` (:data:`~.corrections.DISPERSION`) or ``"HBOND"``
+        (:data:`~.corrections.HBOND`)."""
+        return self.params[name] if name in self.params else getattr(self, f"constants_{name}")
 
     def parameter_set(self) -> ParameterSet:
         """The current parameters as a :class:`ParameterSet` (for MOPAC export)."""
@@ -497,7 +531,8 @@ class NDDO(InteratomicPotential):
         Options in ``cfg.extra``: ``parameters`` (set name or file),
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
-        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``.
+        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``,
+        ``position_response``.
         """
 
         from xnn.common.config.options import model_options
@@ -505,7 +540,7 @@ class NDDO(InteratomicPotential):
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
                 "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
-                "restart_gap", "search_starts", "use_fast")
+                "restart_gap", "search_starts", "use_fast", "position_response")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
     # the calculation
@@ -540,10 +575,16 @@ class NDDO(InteratomicPotential):
 
         q_values = [v for _, v in _tensor_leaves(q)]
         trained = any(v.requires_grad for v in q_values)
+        # the density as a function of the positions: the integrals of the energy enter the SCF density (their
+        # derivatives to any order, so built eagerly)
+        exact = self.position_response and torch.is_grad_enabled()
         if pos.is_cuda and self._graph_cache() is not None:
             plan.uses += 1
-        graph = (self._build_graph(plan, "train", build, q, [pos, *q_values]) if trained
-                 else self._build_graph(plan, "eval", build, q, [pos]))
+        if exact:
+            graph = None
+        else:
+            graph = (self._build_graph(plan, "train", build, q, [pos, *q_values]) if trained
+                     else self._build_graph(plan, "eval", build, q, [pos]))
         if graph is not None and trained:
             W2, r_pair, gab, H, W1 = replay(graph, [pos, *q_values])
         elif graph is not None:
@@ -597,7 +638,9 @@ class NDDO(InteratomicPotential):
                                        spin_guess=spin, graph_cache=self._graph_cache(), graph_key=key))
             result = lowest(results)
         self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
-        if self._use_response():
+        if exact:
+            P = SCFDensity.apply(H, W1, W2, result, layout, uhf, 1e-10)
+        elif self._use_response():
             pos_fixed = pos.detach()
             response = self._build_graph(plan, "response", build, q, [pos_fixed, *q_values]) if trained else None
             if response is not None:

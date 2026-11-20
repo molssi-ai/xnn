@@ -79,6 +79,9 @@ class NDDOExport(nn.Module):
                     self.tables[table_key(ka, kb, general)] = pair_tables(q, ka, kb, general, device, dtype)
         self.c: Dict[str, Tensor] = constants(device, dtype)
         self.correction_data: Dict[str, Tensor] = correction_tables(device)
+        self.yne = model.correction_constants("YNE").detach().to(device, dtype)
+        self.disp = model.correction_constants("DISP").detach().to(device, dtype)
+        self.hbond = model.correction_constants("HBOND").detach().to(device, dtype)
         self.occ_d = torch.tensor(el.OCC_D, device=device)
         self.shells = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2], device=device)
         self.occ_ref = torch.tensor([[el.OCC_S[v], el.OCC_P[v] / 3.0, el.OCC_D[v] / 5.0] for v in uz], dtype=dtype,
@@ -177,7 +180,8 @@ class NDDOExport(nn.Module):
         corr = torch.zeros(n, dtype=dtype, device=device)
         if self.use_corrections:
             corr = batch_corrections(self.correction_kind, torch.jit.annotate(List[int], z.tolist()), pos, batch,
-                                     1, self.correction_data, self.peptide_barrier)
+                                     1, self.correction_data, self.peptide_barrier, self.yne, self.disp,
+                                     self.hbond)
             d3 = self.d3
             if d3 is not None:
                 same = batch.unsqueeze(0) == batch.unsqueeze(1)
