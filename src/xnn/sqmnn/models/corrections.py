@@ -4,7 +4,7 @@
   safety factors), the connectivity the corrections are defined on;
 * :func:`peptide_torsion` -- the ``k sin^2(phi)`` barrier added to every
   ``X-N-C=O`` torsion of an amide (all PM methods except PM6-ORG);
-* :func:`yne_correction` -- 12 kcal/mol per acetylenic C-C bond, switched
+* :func:`yne_correction` -- 12 kcal/mol per acetylenic C-C bond (trainable), switched
   off smoothly between 1.21 and 1.33 Angstrom (PM6, PM7, PM6-ORG);
 * :func:`nsp2_correction` -- stabilization of planar secondary and tertiary
   amine nitrogens, ``-0.5 exp(-10 (2 pi - sum of angles))`` (PM6, eq 12 of
@@ -232,7 +232,8 @@ def _np_pm7_hbond_tables(z: Sequence[int], x: np.ndarray):
     A, B = A[keep], B[keep]
     scale = _NP_HB_SCALE[zz]
     return dict(ahb=t[keep], atoms=atoms[keep], flags=flags[keep], shifts=_NP_HB_SHIFTS[kind[keep]],
-                s_c=0.5 * (scale[A] + scale[B]), oo=(zz[A] == 8) & (zz[B] == 8))
+                s_c=0.5 * (scale[A] + scale[B]), oo=(zz[A] == 8) & (zz[B] == 8),
+                n_n=(zz[A] == 7).astype(np.float64) + (zz[B] == 7))
 
 
 def correction_tables(device: torch.device) -> Dict[str, Tensor]:
@@ -402,10 +403,25 @@ def peptide_torsion(z: List[int], pos: Tensor, barrier: float) -> Tensor:
     return out
 
 
-def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]]) -> Tensor:
-    """12 kcal/mol per C-C bond shorter than 1.21 Angstrom, smoothly to zero at 1.33."""
+#: The acetylenic correction of PM6, PM7 and PM6-ORG: energy per bond (kcal/mol) and the distances (Angstrom)
+#: where its switch starts and ends.
+YNE = (12.0, 1.21, 1.33)
+#: The PM7 dispersion constants: the scale and the steepness and radius factor of the damping.
+DISPERSION = (2.286419, 15.450118, 1.226593)
+#: The PM7 hydrogen-bond constants: the scales of N and O ends (kcal/mol Angstrom^2 / Hartree) and the energy of
+#: the short-range O...O term (kcal/mol).
+HBOND = (-0.171271 * 0.529177210903 ** 2, -0.098822 * 0.529177210903 ** 2, 2.5)
+
+
+def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optional[Tensor] = None) -> Tensor:
+    """``yne[0]`` kcal/mol (12) per C-C bond shorter than ``yne[1]`` Angstrom (1.21), switched to zero at
+    ``yne[2]`` (1.33) by a polynomial with continuous first and second derivatives; differentiable in ``yne``
+    (default :data:`YNE`)."""
     out = pos.new_zeros(len(z))
-    rmin, rmax = 1.21, 1.33
+    c = _exact([12.0, 1.21, 1.33], pos.device) if yne is None else yne       # YNE (no globals in TorchScript)
+    c = c.to(pos.dtype)
+    height, rmin, rmax = c[0], c[1], c[2]
+    lo, hi = float(rmin), float(rmax)
     for i in range(len(z)):
         if z[i] != 6:
             continue
@@ -414,13 +430,13 @@ def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]]) -> Tensor:
                 continue
             r = _distance(pos, i, j)
             rv = float(r)
-            if rv < rmin:
-                out = _at(out, i, torch.full((1,), 12.0, dtype=pos.dtype, device=pos.device))
-            elif rv < rmax:
+            if rv < lo:
+                out = _at(out, i, height.reshape(1))
+            elif rv < hi:
                 x = (r - rmin) / (rmax - rmin)
                 f = (1.0 - 10.0 * x ** 3 + 15.0 * x ** 4 - 6.0 * x ** 5
                      + (-5.0 + 25.0 * x) * (x ** 3 - 3.0 * x ** 4 + 3.0 * x ** 5 - x ** 6))
-                out = _at(out, i, 12.0 * f)
+                out = _at(out, i, height * f)
     return out
 
 
@@ -505,13 +521,20 @@ def dispersion_energy(ops: TorchOps, p: Tensor, ia: Tensor, ib: Tensor, r0: Tens
 
 
 def pm7_dispersion(z: List[int], pos: Tensor, bonds: List[List[int]], tables: Dict[str, Tensor],
-                   alpha: float = 15.450118, s: float = 1.226593, scale: float = 2.286419) -> Tensor:
+                   alpha: float = 15.450118, s: float = 1.226593, scale: float = 2.286419,
+                   constants: Optional[Tensor] = None) -> Tensor:
     """PM7 dispersion (Jurecka-type damped C6/R^6, Stewart 2013), per atom (kcal/mol).
 
     ``E = -scale sum_ij C6_ij / R^6 / (1 + exp(-alpha (R / (s R0) - 1)))`` over
     the pairs of elements with data; carbon's C6 is 0.95 with four bonds and
-    1.65 otherwise; Slater-Kirkwood combination of the C6 values.
+    1.65 otherwise; Slater-Kirkwood combination of the C6 values. ``constants``
+    (``scale``, ``alpha``, ``s``; see :data:`DISPERSION`) replace the three
+    numbers, differentiably when they require gradients.
     """
+    if constants is not None:
+        if not torch.jit.is_scripting() and constants.requires_grad:
+            return _trained_dispersion(z, pos, bonds, constants)
+        scale, alpha, s = float(constants[0]), float(constants[1]), float(constants[2])
     t = _dispersion_tables(z, bonds, tables, pos.device) if torch.jit.is_scripting() else _host_dispersion(z, bonds,
                                                                                                          pos)
     if t is None:
@@ -521,6 +544,17 @@ def pm7_dispersion(z: List[int], pos: Tensor, bonds: List[List[int]], tables: Di
     if torch.jit.is_scripting():
         return dispersion_energy(TorchOps(), pos, ia, ib, r0, c6ab, n, alpha, s, scale)
     return _on_host_dispersion(pos, ia, ib, r0, c6ab, n, alpha, s, scale)
+
+
+@torch.jit.unused
+def _trained_dispersion(z: List[int], pos: Tensor, bonds: List[List[int]], constants: Tensor) -> Tensor:
+    """:func:`pm7_dispersion` in its PyTorch form, differentiable in the ``constants``."""
+    t = _host_dispersion(z, bonds, pos)
+    if t is None:
+        return pos.new_zeros(len(z))
+    ia, ib, r0, c6ab = t
+    c = constants.to(pos.dtype)
+    return dispersion_energy(TorchOps(), pos, ia, ib, r0, c6ab, len(z), c[1], c[2], c[0])
 
 
 @torch.jit.unused
@@ -703,12 +737,15 @@ def _pm7_hbond_tables(z: List[int], x: Tensor, tables: Dict[str, Tensor]) -> Opt
     out: Dict[str, Tensor] = {
         "ahb": t[keep], "atoms": atoms[keep], "flags": flags[keep],
         "shifts": tables["hb_angles"].to(device)[kind[keep]],
-        "s_c": 0.5 * (scale[A] + scale[B]), "oo": (zz[A] == 8) & (zz[B] == 8)}
+        "s_c": 0.5 * (scale[A] + scale[B]), "oo": (zz[A] == 8) & (zz[B] == 8),
+        "n_n": (zz[A] == 7).to(torch.float64) + (zz[B] == 7).to(torch.float64)}
     return out
 
 
-def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Optional[Tensor]:
-    """The PM7 hydrogen-bond energies per atom (a term of :func:`~.tape.host_term`; ``None`` without bonds)."""
+def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
+                     constants: Optional[List[float]] = None) -> Optional[Tensor]:
+    """The PM7 hydrogen-bond energies per atom (a term of :func:`~.tape.host_term`; ``None`` without bonds),
+    with the ``constants`` of :data:`HBOND` when given."""
     deg = math.pi / 180.0
     x = ops.host(pos)
     t = _pm7_hbond_tables(z, x, tables) if torch.jit.is_scripting() else _host_tables(0, z, x, ops.host_arrays)
@@ -716,6 +753,11 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
         return None
     ahb, atoms, flags = ops.array(t["ahb"], pos), ops.array(t["atoms"], pos), ops.array(t["flags"], pos)
     shifts, s_c, oo = ops.array(t["shifts"], pos), ops.array(t["s_c"], pos), ops.array(t["oo"], pos)
+    oo_energy = 2.5
+    if constants is not None:
+        n_n = ops.array(t["n_n"], pos)
+        s_c = 0.5 * (constants[0] * n_n + constants[1] * (2.0 - n_n))
+        oo_energy = constants[2]
     last = ops.bools([False, True], pos)
     A, H, B = ahb[:, 0], ahb[:, 1], ahb[:, 2]
     cos_hb = -ops.cos_angle(pos, A, H, B)
@@ -760,7 +802,7 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     cos2 = cos_hb * cos_hb
     e = s_c / (rab * rab) * cos2 * (1.0 - (1.0 - prod) * (1.0 - prod)) * hartree_kcal * damping
     short = ops.clamp(rab - 2.67, 0.0)
-    e = e - ops.where(oo, 2.5 * ops.exp(-80.0 * (short * short)) * (cos2 * cos2), 0.0)
+    e = e - ops.where(oo, oo_energy * ops.exp(-80.0 * (short * short)) * (cos2 * cos2), 0.0)
     # only the bonds that take part enter the sum (and its derivatives)
     kept = ops.nonzero(keep)
     if len(kept) == 0:
@@ -768,7 +810,7 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     return ops.index_add(len(z), H[kept], e[kept])
 
 
-def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor:
+def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Optional[Tensor] = None) -> Tensor:
     """PM7 hydrogen-bond correction, per hydrogen atom (kcal/mol).
 
     The third-generation correction of Korth (J. Chem. Theory Comput. 6, 3808,
@@ -783,17 +825,39 @@ def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor:
     side from their hybridization targets, plus an extra short-range O...O
     term. The groups and reference atoms are chosen on the detached geometry;
     the energies of all hydrogen bonds are evaluated together (on the host, see
-    :func:`~.tape.host_term`).
+    :func:`~.tape.host_term`). ``constants`` (see :data:`HBOND`) replace the
+    scales of the ends and the energy of the O...O term, differentiably when
+    they require gradients.
     """
     if torch.jit.is_scripting():
-        e = pm7_hbond_energy(TorchOps(), z, pos, tables)
+        c: Optional[List[float]] = None
+        if constants is not None:
+            c = [float(constants[0]), float(constants[1]), float(constants[2])]
+        e = pm7_hbond_energy(TorchOps(), z, pos, tables, c)
         return e if e is not None else pos.new_zeros(len(z))
-    return _on_host(0, z, pos, tables)
+    if constants is None:
+        return _on_host(0, z, pos, tables)
+    return _host_hbond(z, pos, tables, constants)
 
 
 @torch.jit.unused
-def _on_host(kind: int, z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor:
-    """A term on the host tape (see :func:`~.tape.host_term`): 0 PM7 hydrogen bonds, 1 H4, 2 H-H repulsion."""
+def _host_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Tensor) -> Tensor:
+    """:func:`pm7_hbond` with ``constants`` on the host tape."""
+    if not constants.requires_grad:
+        return _on_host(0, z, pos, tables, constants.tolist())
+    # the energy is linear in the constants: one evaluation per constant at unit value
+    unit = [_on_host(0, z, pos, tables, [1.0 if j == i else 0.0 for j in range(3)]) for i in range(3)]
+    c = constants.to(pos.dtype)
+    return c[0] * unit[0] + c[1] * unit[1] + c[2] * unit[2]
+
+
+@torch.jit.unused
+def _on_host(kind: int, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
+             constants: Optional[List[float]] = None) -> Tensor:
+    """A term on the host tape (see :func:`~.tape.host_term`): 0 PM7 hydrogen bonds (with ``constants``), 1 H4,
+    2 H-H repulsion."""
+    if kind == 0:
+        return host_term(lambda ops, p: pm7_hbond_energy(ops, z, p, tables, constants), pos)
     energy = (pm7_hbond_energy, h4_energy, lambda ops, z_, p, t_: hh_energy(ops, z_, p))[kind]
     return host_term(lambda ops, p: energy(ops, z, p, tables), pos)
 
@@ -1058,26 +1122,29 @@ def hh_repulsion(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor
 
 
 def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor],
-                          peptide_barrier: float) -> Tensor:
+                          peptide_barrier: float, yne: Optional[Tensor] = None,
+                          dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None) -> Tensor:
     """The corrections of one molecule per atom (kcal/mol) of a method (``kind``: 0 PM3, 1 PM6, 2 PM7,
-    3 PM6-ORG without its D3 term)."""
+    3 PM6-ORG without its D3 term); ``yne``, ``dispersion`` and ``hbond`` the constants of
+    :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's)."""
     if kind == 0:
         return peptide_torsion(z, p, peptide_barrier)
     bonds = bond_topology(z, p, tables)
     barrier = 2.5 if kind == 1 else (3.1595 if kind == 2 else 0.0)
-    out = peptide_torsion(z, p, barrier) + yne_correction(z, p, bonds)
+    out = peptide_torsion(z, p, barrier) + yne_correction(z, p, bonds, yne)
     if kind == 1:
         out = out + nsp2_correction(z, p, bonds)
     if kind == 2:
         out = out + si_o_h_correction(z, p, bonds)
-        out = out + pm7_dispersion(z, p, bonds, tables) + pm7_hbond(z, p, tables)
+        out = out + pm7_dispersion(z, p, bonds, tables, constants=dispersion) + pm7_hbond(z, p, tables, hbond)
     if kind == 3:
         out = out + h4_hbond(z, p, tables) + hh_repulsion(z, p, tables)
     return out
 
 
 def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n_struct: int,
-                      tables: Dict[str, Tensor], peptide_barrier: float) -> Tensor:
+                      tables: Dict[str, Tensor], peptide_barrier: float, yne: Optional[Tensor] = None,
+                      dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None) -> Tensor:
     """:func:`structure_corrections` of every structure of a batch, per atom."""
     out = pos.new_zeros(pos.shape[0])
     for b in range(n_struct):
@@ -1088,5 +1155,6 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
         zb: List[int] = []
         for i in ids:
             zb.append(z_all[i])
-        out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier))
+        out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier, yne,
+                                                                dispersion, hbond))
     return out

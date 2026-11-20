@@ -159,6 +159,9 @@ class GFN(InteratomicPotential):
     """
 
     method = ""
+    #: Second derivatives in the positions lack the response of the electronic density, so autograd Hessians are
+    #: approximate (:func:`xnn.common.models.hessian` warns).
+    exact_second_derivatives = False
     #: Shell-resolved third-order term (GFN2) instead of the atomic one (GFN1).
     shell_third_order = False
     #: Anisotropic electrostatics and exchange-correlation (GFN2).
