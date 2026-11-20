@@ -242,6 +242,14 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "width": "gamma",
         "is_sigma_train": "trainable_widths",
     },
+    # CGCNN (txie-93/cgcnn) argument spellings
+    "cgcnn": {
+        "atom_fea_len": "n_features",
+        "n_conv": "n_interactions",
+        "radius": "cutoff",
+        "max_num_nbr": "max_neighbors",
+        "dmin": "rbf_start",
+    },
     # MatGL MEGNet constructor spellings; MatGL's gauss_width is the exponent gamma
     "megnet": {
         "dim_node_embedding": "n_features",
