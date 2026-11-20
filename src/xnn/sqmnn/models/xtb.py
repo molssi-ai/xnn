@@ -30,6 +30,7 @@ separate Fermi levels for the alpha and beta electrons.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -159,9 +160,12 @@ class GFN(InteratomicPotential):
     """
 
     method = ""
-    #: Second derivatives in the positions lack the response of the electronic density, so autograd Hessians are
-    #: approximate (:func:`xnn.common.models.hessian` warns).
+    #: Second derivatives of the energy by plain autograd lack the response of the electronic density;
+    #: :meth:`energy_gradient` gives a gradient whose derivatives are exact (:func:`xnn.common.models.hessian`
+    #: takes it).
     exact_second_derivatives = False
+    #: Its Hessians are exact but not differentiable once more (no parameter gradients of curvatures).
+    differentiable_hessian = False
     #: Shell-resolved third-order term (GFN2) instead of the atomic one (GFN1).
     shell_third_order = False
     #: Anisotropic electrostatics and exchange-correlation (GFN2).
@@ -465,9 +469,43 @@ class GFN(InteratomicPotential):
 
     # the calculation
 
+    def energy_gradient(self, data: AtomicGraph) -> Tuple[Tensor, Tensor]:
+        """The positions and the gradient of the energy with its graph, whose derivatives are exact.
+
+        The free energy is stationary in the self-consistent density, so its gradient is the derivative
+        at a fixed density (with the overlap term of the energy-weighted density). The energy is formed
+        with two aliases of the positions, one for the explicit dependences and one for the density
+        (a function of the positions through the self-consistent equations, see
+        :meth:`_responsive_density`); the gradient is taken in the first. Differentiated once more
+        through both, it gives the exact Hessian.
+
+        Parameters
+        ----------
+        data : AtomicGraph
+            The structures.
+
+        Returns
+        -------
+        tuple of Tensor
+            The positions (a tensor requiring gradients; ``data.pos`` itself when it does) and the
+            gradient ``(N, 3)`` in eV / Angstrom, differentiable in them.
+        """
+        pos = data.pos if data.pos.requires_grad else data.pos.detach().requires_grad_(True)
+        explicit, density = pos.view_as(pos), pos.view_as(pos)
+        self.__dict__["_density_positions"] = density
+        try:
+            with torch.enable_grad():
+                energy = self(dataclasses.replace(data, pos=explicit))["energy"]
+                (grad,) = torch.autograd.grad(energy.sum(), explicit, create_graph=True)
+        finally:
+            self.__dict__.pop("_density_positions", None)
+        return pos, grad
+
     def forward(self, data: AtomicGraph) -> Dict[str, Tensor]:
         """Total energies (eV), charges and moments of a batch of molecules."""
-        if self._on_host(data):
+        # the density at positions of its own (an alias of the positions, see energy_gradient)
+        density_pos = self.__dict__.get("_density_positions") if torch.is_grad_enabled() else None
+        if density_pos is None and self._on_host(data):
             twin = self._host_model()
             out = twin(data.to("cpu"))
             self.last_scf = twin.last_scf
@@ -521,7 +559,14 @@ class GFN(InteratomicPotential):
         self.last_scf = res
         P, W, ts = res["P"], res["W"], res["ts"]
         fixed = S.detach()
-        if self.trainable and self.training and torch.is_grad_enabled():
+        if density_pos is not None:
+            # the density as a function of the positions (and of trained parameters)
+            pos_s = density_pos.to(dtype) / BOHR
+            still = self._integrals(basis, pos_s, n_struct)
+            fixed = still[0]
+            P, W, ts = self._responsive_density(z, zl, pos_s, batch, basis, *still, n0, n_alpha, n_beta, n_struct,
+                                                res["x"])
+        elif self.trainable and self.training and torch.is_grad_enabled():
             # training: the density follows the parameters through the self-consistent solution
             still = (fixed, DA.detach(), QA.detach())
             if basis.alpha.requires_grad:
@@ -832,20 +877,21 @@ class GFN(InteratomicPotential):
         n_shell, n_atoms = n0.shape[0], int(basis.ao_atom.max()) + 1
         kt = KB_AU * self.electronic_temperature
 
-        def fock(xx: Tensor) -> Tensor:
+        def fock(xx: Tensor, c: dict) -> Tensor:
             if self.multipoles:
                 mu = xx[n_shell:n_shell + 3 * n_atoms].view(n_atoms, 3)
                 theta = xx[n_shell + 3 * n_atoms:].view(n_atoms, 6)
             else:
                 mu, theta = xx.new_zeros(n_atoms, 3), xx.new_zeros(n_atoms, 6)
-            return self._fock(xx[:n_shell], mu, theta, basis, ctx, ortho, left, h0)
+            return self._fock(xx[:n_shell], mu, theta, basis, c, ortho, left, h0)
 
         with torch.no_grad():
-            eps, U = torch.linalg.eigh(fock(x))
+            # on a copy of the context: matrices it caches here would be constants for the density below
+            eps, U = torch.linalg.eigh(fock(x, dict(ctx)))
             f, level = _fermi_channels(eps, n_alpha, n_beta, kt, basis.n_ao)
 
         def density(xx: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-            Po, Wo, ts = _SpectralDensity.apply(fock(xx), eps, U, f, level, kt)
+            Po, Wo, ts = _SpectralDensity.apply(fock(xx, ctx), eps, U, f, level, kt)
             # back to the atomic orbitals: L^-T M L^-1 of the symmetric matrices
             P = ortho.back(ortho.back(Po).transpose(-1, -2)).transpose(-1, -2)
             W = ortho.back(ortho.back(Wo).transpose(-1, -2)).transpose(-1, -2)
@@ -2054,10 +2100,11 @@ class GFN0(GFN):
         return self._state["cn"]
 
     def _responsive_density(self, *args):
-        """As in :class:`GFN`, with the charges and coordination numbers of the charge model at fixed
-        positions: constants, or functions of the trained parameters of the charge model."""
+        """As in :class:`GFN`, with the charges and coordination numbers of the charge model at the
+        density's positions: functions of them when they carry gradients (see :meth:`energy_gradient`),
+        else constants, or functions of the trained parameters of the charge model."""
         state = self._state
-        if set(self.trainable) & set(self.charge_tables):
+        if args[2].requires_grad or set(self.trainable) & set(self.charge_tables):
             self._begin(args[0], args[2], args[3], args[11], state["charge"])
         else:
             self.__dict__["_state"] = {k: (v.detach() if isinstance(v, Tensor) else v) for k, v in state.items()}

@@ -1,10 +1,11 @@
-"""NDDO semiempirical methods (sqmnn): exact second derivatives and trainable correction constants.
+"""Semiempirical methods (sqmnn): exact second derivatives and trainable correction constants.
 
 With the density's response to the positions, autograd Hessians equal central differences of the analytic
 forces (closed and open shells), the Hessian-vector products of a batch equal those of its structures, and the
 parameter gradients of a loss on mode curvatures equal finite differences in the parameters. The constants of
 the acetylenic, dispersion and hydrogen-bond corrections train, their scripted forms agree with the host forms,
-and the exported core carries their values.
+and the exported core carries their values. The tight-binding methods give exact Hessians (not differentiable
+once more).
 """
 import numpy as np
 import pytest
@@ -13,13 +14,14 @@ import torch
 from test_sqmnn_forms import ACETYLENE, _hbond_cluster, _scripted_branches
 from xnn.common.data import collate, structure_to_graph
 from xnn.common.models import ForceStressOutput, harmonic_analysis, hessian, hessian_vector_product
-from xnn.sqmnn.models import PM3, PM6, PM6ORG, PM7
+from xnn.sqmnn.models import GFN0, GFN1, GFN2, PM3, PM6, PM6ORG, PM7
 from xnn.sqmnn.models import corrections as cr
 
 WATER = (np.array([[0.0, 0.0, 0.12], [0.0, 0.76, -0.47], [0.05, -0.75, -0.49]]), [8, 1, 1])
 FORMAMIDE = (np.array([[0, 0.42, 0], [1.2, 0.5, 0.02], [-0.72, -0.73, 0], [-0.55, 1.36, 0.01],
                        [-1.73, -0.69, 0.05], [-0.27, -1.63, -0.03]]), [6, 8, 7, 1, 1, 1])
 METHYL = (np.array([[0, 0, 0.02], [1.08, 0, 0], [-0.54, 0.94, 0.01], [-0.55, -0.93, 0]]), [6, 1, 1, 1])
+CO2 = (np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.17], [0.0, 0.0, -1.17]]), [6, 8, 8])
 # an acetylene in the switching range of the acetylenic term next to a hydrogen-bonded water dimer
 CLUSTER = ([1, 6, 6, 1, 8, 1, 1, 8, 1, 1],
            np.array([[0, 0, -1.695], [0, 0, -0.635], [0, 0, 0.635], [0, 0, 1.695], [4.0, 0, 0], [4.96, 0, 0.1],
@@ -255,3 +257,59 @@ def test_trained_dispersion_and_hydrogen_bonds_are_twice_differentiable():
     lone = cr.pm7_dispersion([8], torch.zeros(1, 3), [[]], tables, constants=torch.tensor(cr.DISPERSION,
                                                                                           requires_grad=True))
     assert float(lone.abs().sum()) == 0.0
+
+
+def _tight(cls, **options):
+    """A tight-binding model whose cycle converges far below the default (differences of its forces)."""
+    model = cls(accuracy=1e-4, **options)
+    model.charge_convergence = 1e-8
+    return model
+
+
+@pytest.mark.parametrize("cls,system,mult", [(GFN0, FORMAMIDE, None), (GFN1, CO2, None), (GFN2, WATER, None),
+                                             (GFN2, METHYL, 2.0)])
+def test_tight_binding_hessian_matches_finite_differences(cls, system, mult):
+    """The Hessian of the tight-binding methods (the density follows the positions through the self-consistent
+    charges and moments) equals Richardson-extrapolated central differences of the forces, for a linear molecule
+    and an open shell too; without the density response it does not."""
+    pos, z = system
+    model = _tight(cls)
+    (H,) = hessian(model, _graph(pos, z, mult))
+    h = 2e-4
+    fd = (4.0 * _fd_hessian(model, pos, z, mult, h / 2) - _fd_hessian(model, pos, z, mult, h)) / 3.0
+    assert torch.allclose(H, H.T, rtol=0.0, atol=1e-8)
+    assert torch.allclose(H, fd, rtol=0.0, atol=1e-6)
+    assert float((_plain_hessian(_tight(cls), _graph(pos, z, mult)) - H).abs().max()) > 1.0
+
+
+def test_tight_binding_energy_gradient_and_limits():
+    """The gradient of ``energy_gradient`` is the negative force and leaves no state behind; a wrapped model
+    takes the plain autograd Hessian with a warning, and the Hessians cannot be differentiated once more."""
+    pos, z = WATER
+    model = _tight(GFN0)
+    x, g = model.energy_gradient(_graph(pos, z))
+    forces = ForceStressOutput(model)(_graph(pos, z))["forces"]
+    assert torch.allclose(g.detach(), -forces, rtol=0.0, atol=1e-10)
+    assert "_density_positions" not in model.__dict__ and "_state" not in model.__dict__
+
+    class Wrapped(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, data):
+            return self.inner(data)
+
+    with pytest.warns(RuntimeWarning, match="approximate"):
+        hessian(Wrapped(_tight(GFN1)), _graph(pos, z))
+    with pytest.raises(NotImplementedError, match="create_graph=False"):
+        hessian_vector_product(model, _graph(pos, z), torch.ones(3, 3), create_graph=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_tight_binding_hessian_on_gpu():
+    """The Hessian of GFN2-xTB on a GPU (small batches otherwise run on the host) is the CPU one."""
+    pos, z = FORMAMIDE
+    (ref,) = hessian(_tight(GFN2), _graph(pos, z))
+    (H,) = hessian(_tight(GFN2).cuda(), _graph(pos, z, device="cuda"))
+    assert torch.allclose(H.cpu(), ref, rtol=0.0, atol=1e-8)

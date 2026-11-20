@@ -7,6 +7,12 @@ be trained. :func:`harmonic_analysis` turns a Hessian into harmonic frequencies,
 zero-point energy.
 
 Units are those of the models: energies in eV, positions in Angstrom, masses in u.
+
+Models whose energies come from a self-consistent density tell these functions how to get exact second
+derivatives: a ``position_response`` attribute is switched on during the evaluation (see
+:func:`exact_curvature`), or an ``energy_gradient(data)`` method returns the positions and a gradient whose
+derivatives are exact. ``differentiable_hessian = False`` marks Hessians that cannot be differentiated once
+more, and ``exact_second_derivatives = False`` a model whose plain autograd Hessian is approximate (a warning).
 """
 from __future__ import annotations
 
@@ -62,10 +68,17 @@ def exact_curvature(model: nn.Module) -> Iterator[nn.Module]:
             m.position_response = v
 
 
-def _energy_gradient(model: nn.Module, data: AtomicGraph):
+def _energy_gradient(model: nn.Module, data: AtomicGraph, create_graph: bool = False):
     """The positions (a leaf requiring gradients) and the energy gradient with its graph."""
     while isinstance(model, ForceStressOutput):
         model = model.model
+    if create_graph and getattr(model, "differentiable_hessian", True) is False:
+        raise NotImplementedError(f"the Hessians of {type(model).__name__} cannot be differentiated once more "
+                                  "(parameter gradients of curvatures); use create_graph=False")
+    own = getattr(model, "energy_gradient", None)
+    if callable(own):
+        # a model that forms a gradient with exact derivatives itself (the tight-binding methods)
+        return own(data)
     approximate = sorted({type(m).__name__ for m in model.modules()
                           if getattr(m, "exact_second_derivatives", True) is False})
     if approximate:
@@ -122,7 +135,7 @@ def hessian_vector_product(model: nn.Module, data: AtomicGraph, v: Tensor, creat
         hu = hessian_vector_product(model, graph, u, create_graph=True)
         curvatures = (u * hu).sum((1, 2))
     """
-    pos, grad = _energy_gradient(model, data)
+    pos, grad = _energy_gradient(model, data, create_graph)
     if v.dim() == 2:
         return _directional(pos, grad, v, create_graph, create_graph)
     k = v.shape[0]
@@ -149,7 +162,7 @@ def hessian(model: nn.Module, data: AtomicGraph, create_graph: bool = False) -> 
         columns ordered atom by atom (``x``, ``y``, ``z`` of the first atom
         first).
     """
-    pos, grad = _energy_gradient(model, data)
+    pos, grad = _energy_gradient(model, data, create_graph)
     batch, n_struct = data.batch, data.num_graphs
     counts = torch.bincount(batch, minlength=n_struct)
     start = torch.cumsum(counts, 0) - counts
