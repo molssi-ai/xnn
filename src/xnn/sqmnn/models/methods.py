@@ -49,7 +49,8 @@ class _PM6Family(NDDO):
 
 def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
     return batch_corrections(model.correction_kind, data.atomic_numbers.tolist(), pos, data.batch, data.num_graphs,
-                             correction_tables(pos.device), model.peptide_barrier)
+                             correction_tables(pos.device), model.peptide_barrier, model.correction_constants("YNE"),
+                             model.correction_constants("DISP"), model.correction_constants("HBOND"))
 
 
 @register_model("pm3")
@@ -76,6 +77,7 @@ class PM6(_PM6Family):
     default_parameters = "pm6"
     method = "PM6"
     correction_kind = 1
+    correction_groups = ("YNE",)
 
     def corrections(self, data, pos):
         return _corrections(self, data, pos)
@@ -93,6 +95,7 @@ class PM7(_PM6Family):
     default_parameters = "pm7"
     method = "PM7"
     correction_kind = 2
+    correction_groups = ("YNE", "DISP", "HBOND")
     average_missing_pairs = True
     feather = True
 
@@ -114,6 +117,7 @@ class PM6ORG(_PM6Family):
     default_parameters = "pm6_org"
     method = "PM6-ORG"
     correction_kind = 3
+    correction_groups = ("YNE",)
     feather = True
 
     def __init__(self, *args, **kwargs):

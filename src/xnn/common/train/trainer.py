@@ -309,6 +309,14 @@ class Trainer:
         :class:`~xnn.common.train.callbacks.ModelCheckpoint` and, as
         ``cfg.trainer`` asks, an ``EarlyStopping`` and a ``ProgressBar`` are
         added unless one of the same type is given.
+    reactions : ReactionSet or None, optional
+        Reactions whose energies train the model with ``optim.reaction_weight``
+        (:mod:`~xnn.common.train.reactions`): each training step adds the loss of
+        ``optim.reaction_batch_size`` of them, drawn in turn from a shuffled order.
+        Single-process ordinary steps only.
+    val_reactions : ReactionSet or None, optional
+        Reactions scored at every validation (``val/reaction_mae``,
+        ``val/reaction_rmse`` in eV, and ``val/reaction_mse``, the loss term).
 
     Attributes
     ----------
@@ -368,7 +376,7 @@ class Trainer:
                  test_set: AtomicDataset | None = None,
                  replay_set: AtomicDataset | None = None,
                  train_batch_sampler=None, val_batch_sampler=None,
-                 test_batch_sampler=None, logger=None, callbacks=None):
+                 test_batch_sampler=None, logger=None, callbacks=None, reactions=None, val_reactions=None):
         from ..finetune.freeze import freeze_parameters
         from ..finetune.heads import find_multihead, label_head
         from ..finetune.reference import reference_markers
@@ -577,6 +585,59 @@ class Trainer:
         for cb in defaults:
             if not any(isinstance(c, type(cb)) for c in self.callbacks):
                 self.callbacks.append(cb)
+        self._setup_reactions(reactions, val_reactions)
+
+    def _setup_reactions(self, reactions, val_reactions) -> None:
+        """Keep the reaction sets and, with ``optim.reaction_weight > 0``, the endless batches of the training
+        reactions."""
+        o = self.cfg.optim
+        self.reactions, self.val_reactions = reactions, val_reactions
+        self._reaction_batches = None
+        if o.reaction_weight > 0:
+            if reactions is None or len(reactions) == 0:
+                raise ValueError("optim.reaction_weight > 0 needs reactions (a ReactionSet)")
+            if self._graph_mode or self.distributed:
+                raise ValueError("the reaction-energy term runs in ordinary single-process steps "
+                                 "(not with trainer.cuda_graph or in distributed training)")
+            if o.reaction_batch_size < 1:
+                raise ValueError(f"optim.reaction_batch_size must be positive, got {o.reaction_batch_size}")
+            self._reaction_batches = self._cycle_reactions()
+
+    def _cycle_reactions(self):
+        """Mini-batches of the training reactions without end, a new shuffled order per pass."""
+        o = self.cfg.optim
+        n = 0
+        while True:
+            yield from self.reactions.batches(o.reaction_batch_size, shuffle=True, seed=self.cfg.seed + n)
+            n += 1
+
+    def _potential(self, train: bool):
+        """The bare potential of the training (or evaluation) module: energies without forces."""
+        module = self.module if train else self.eval_module
+        while isinstance(module, ForceStressOutput):
+            module = module.model
+        return module
+
+    def _reaction_term(self, reactions, train: bool):
+        """The reaction-energy loss of ``reactions`` and the predicted minus reference energies (eV)."""
+        o = self.cfg.optim
+        cutoff = float(getattr(self._base, "cutoff", None) or self.cfg.model.cutoff)
+        energies = reactions.species_energies(self._potential(train), cutoff, self.cfg.data.batch_size, self.device)
+        delta = o.huber_delta if o.huber_delta_reactions is None else o.huber_delta_reactions
+        return reactions.loss(energies, delta), reactions.errors(energies.detach())
+
+    def _reaction_metrics(self, metrics: dict) -> dict:
+        """``metrics`` with those of the validation reactions; a trained reaction term enters the ``"loss"``."""
+        self.model.eval()
+        with torch.no_grad():
+            loss, err = self._reaction_term(self.val_reactions, False)
+        err = err.double()
+        out = dict(metrics, reaction_mse=float(loss), reaction_mae=float(err.abs().mean()),
+                   reaction_rmse=float(err.pow(2).mean().sqrt()))
+        weight = self.cfg.optim.reaction_weight
+        if weight > 0:
+            out["loss"] = out.get("loss", 0.0) + weight * float(loss)
+        return out
 
     def _make_loss_weights(self, o):
         """The learned scales of the loss terms (``optim.loss_weighting: uncertainty``), or ``None``."""
@@ -1014,6 +1075,15 @@ class Trainer:
             counts=counts, parts=parts)
         if self.tcfg.metrics:
             self._error_metrics(pred, data, logs, counts)
+        if train and self._reaction_batches is not None:
+            batch = next(self._reaction_batches)
+            r_loss, _ = self._reaction_term(batch, True)
+            loss = loss + o.reaction_weight * r_loss
+            logs["reaction_mse"] = float(r_loss.detach())
+            counts["reaction_mse"] = (float(len(batch)), o.reaction_weight)
+            logs["loss"] = float(loss.detach())
+            if parts is not None:
+                parts["reaction_mse"] = o.reaction_weight * r_loss
         if train and self.loss_weights is not None:
             # the objective of the learned scales; the logged loss stays the fixed-weight sum
             loss = self.loss_weights(parts)
@@ -1208,6 +1278,8 @@ class Trainer:
                 self.model.eval()
                 # forces need grad even at eval -> no torch.no_grad()
                 va = self._dataset_metrics(self._step(d, False) for d in self.val_loader)
+            if self.val_reactions is not None and ((epoch + 1) % t.val_every_n_epochs == 0 or last):
+                va = self._reaction_metrics(va)
             metrics = {"epoch": epoch, "lr": lr, **{f"train/{k}": v for k, v in tr.items()},
                        **{f"val/{k}": v for k, v in va.items()}}
 

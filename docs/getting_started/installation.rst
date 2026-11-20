@@ -80,6 +80,8 @@ CUDA 12 driver):
 
    uv sync --extra all
 
+On macOS, uv installs the standard torch build from PyPI instead.
+
 torchani 2.9.0 (the ``ani`` extra) declares ``torch<=2.13``, so pip installs
 an older torch with it. It runs on torch 2.14 as well, and the uv environment
 uses 2.14.1.

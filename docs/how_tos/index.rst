@@ -20,6 +20,7 @@ machine as explained in :ref:`installation` guide.
    benchmark_models
    use_upstream_configs
    ase_md
+   hessians
    export_lammps
    fast_paths
    forcefield_files

@@ -1243,6 +1243,14 @@ molecules only. The published parameters are downloaded from the MOPAC sources
 on first use, with a ``LICENSE.txt`` beside them and a one-time warning about
 the license that applies to them.
 
+- ``trainable`` also accepts the constants of the corrections: ``"YNE"`` (the
+  acetylenic C-C term: its energy and the start and end of its switch), and
+  for PM7 ``"DISP"`` (dispersion scale and damping) and ``"HBOND"``
+  (hydrogen-bond scales and O...O energy). They are not part of a MOPAC
+  parameter file.
+- Hessians and their parameter gradients are exact, see
+  :ref:`howto-hessians`.
+
 Tight-binding methods: GFN0-xTB, GFN1-xTB, GFN2-xTB
 ===================================================
 :class:`~xnn.sqmnn.models.GFN0`, :class:`~xnn.sqmnn.models.GFN1` and
@@ -1287,6 +1295,7 @@ elements up to radon. The methods are described in these papers:
   stay fixed.
 - The xtb program can also run a parameter file written by
   ``parameter_text()``.
+- Hessians are exact, see :ref:`howto-hessians`.
 
 Add-ons for any model
 =====================
