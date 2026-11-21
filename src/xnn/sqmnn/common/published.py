@@ -107,7 +107,7 @@ def source_file(file: str, cache_dir: Optional[Union[str, Path]] = None) -> Path
     """
     from ...common.data.hub._download import download_file, md5sum
     from ...common.models.hub.cache import offline, resolve_cache_dir
-    from .provenance import write_license_note
+    from ...common.models.hub.provenance import write_license_note
 
     dest = resolve_cache_dir(cache_dir) / "sqmnn" / f"mopac-{RELEASE.lstrip('v')}" / file
     note = (dest.parent, "MOPAC", RELEASE, "https://github.com/openmopac/mopac", "Apache-2.0",

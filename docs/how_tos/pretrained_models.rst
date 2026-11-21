@@ -10,7 +10,8 @@ AIMNet2), models trained with xnn, Zenodo uploads and local checkpoints, all can
 be loaded through the same function call and the same cache. MatGL's TensorNet,
 QET and MEGNet models load with ``TensorNet.from_foundation()``,
 ``QET.from_foundation()`` and ``MEGNet.from_foundation()``, and a local MatGL
-directory of any of them loads with ``from_pretrained()``. The
+directory of any of them loads with ``from_pretrained()``. The pretrained
+CGCNN models load with ``CGCNN.from_foundation()``. The
 ``notebooks/examples/common/models/pretrained_models_tutorial.ipynb`` notebook provides a
 runnable version of this page.
 

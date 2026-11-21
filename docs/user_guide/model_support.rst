@@ -79,6 +79,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - CGCNN
+     - |N|
+     - |N|
+     - |N|
+     - |Y|
+     - |Y|
+     - |Y|
    * - NequIP
      - |Y|
      - |Y|
@@ -348,9 +355,9 @@ Why a cell is orange or red:
   hydrogen- and halogen-bond rows of the export, valid while every atom stays
   within half the model's ``skin`` of where they were chosen.
 - **D4, Reference-Path (orange).** See the add-on terms below.
-- **MEGNet, ASE, LAMMPS and MDI (red).** MEGNet predicts one property per
-  structure, such as a band gap, rather than a potential energy. It has no
-  forces for molecular dynamics.
+- **MEGNet and CGCNN, ASE, LAMMPS and MDI (red).** These models predict one
+  property per structure, such as a band gap, rather than a potential energy.
+  They have no forces for molecular dynamics.
 - **GDML and sGDML, LAMMPS (red).** Each model serves one molecule with its atoms in a fixed order. They
   run molecular dynamics through ASE and MDI.
 

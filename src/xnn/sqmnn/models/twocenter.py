@@ -581,17 +581,21 @@ def pair_kernel(qt: Dict[str, Tensor], tab: Dict[str, Tensor], c: Dict[str, Tens
     VA = _s_only(-tore_b[:, None, None] * VA, take0(qt["s_core"], ea))
     VB = _s_only(-tore_a[:, None, None] * VB, take0(qt["s_core"], eb))
     gab = 27.211386245988 / torch.sqrt(r * r + (po9A + po9B) ** 2)      # HARTREE
+    # pairs beyond 15 A have no overlap; theirs is evaluated at 1 bohr and cleared, since at the true distance the
+    # auxiliary integrals overflow (a far pair of different exponents) and their derivatives would not be finite
+    near = r_ang * r_ang < 225.0
     if s_local is not None:
         S = s_local
     else:
+        r_near = torch.where(near, r, torch.ones_like(r))
         name = "ov/" + str(ka) + "/" + str(kb)
         U, D = tab[name + "/la"].shape[0], tab[name + "/polys"].shape[-1]
         if vec.is_cuda or vec.shape[0] <= max(1, 2097152 // (U * D * D)):       # _BATCHED_OVERLAP_SIZE
-            S = _overlap_kernel(qt, tab, c, ea, eb, r, ka, kb)
+            S = _overlap_kernel(qt, tab, c, ea, eb, r_near, ka, kb)
         else:
             # above the batch size a CPU evaluates the overlaps per shell combination
-            S = _overlaps_host(qt, tab, c, ea, eb, r, ka, kb)
-    S = torch.where((r_ang * r_ang < 225.0)[:, None, None], S, torch.zeros_like(S))
+            S = _overlaps_host(qt, tab, c, ea, eb, r_near, ka, kb)
+    S = torch.where(near[:, None, None], S, torch.zeros_like(S))
     # rotate to the molecular frame
     TAt, TBt = TA.transpose(-1, -2), TB.transpose(-1, -2)
     S = torch.matmul(TAt, torch.matmul(S, TB))

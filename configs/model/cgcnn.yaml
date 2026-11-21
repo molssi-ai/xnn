@@ -1,0 +1,28 @@
+# CGCNN (Xie and Grossman, Phys. Rev. Lett. 2018): every option at its default; the paper's
+# choices are the commented block at the end.
+name: cgcnn
+cutoff: 8.0                       # neighbor search radius
+n_features: 64                    # atom feature width
+n_interactions: 3                 # convolutions
+n_rbf: 41                         # Gaussians expanding the bond lengths
+extra:
+  max_neighbors: 12               # nearest neighbors per atom; null: all within the cutoff
+  rbf_start: 0.0                  # first Gaussian center
+  rbf_max: null                   # last Gaussian center; null: the cutoff
+  gamma: null                     # Gaussian exponent, exp(-gamma (r - mu)^2); null: 1 / spacing^2
+  readout_sizes: [128]            # hidden layers after the pooling
+  normalization: batch            # batch normalization in every convolution; null: none
+  residual_activation: true       # softplus after every residual sum
+  n_outputs: 1                    # properties per crystal
+  classification: false           # two classes; properties is the probability of the second
+  dropout: null                   # after the first hidden layer; null: 0.5 for a classifier, else 0
+  atom_features: cgcnn            # element features: cgcnn (the authors' table), onehot, or a JSON file
+  n_elements: 101                 # rows of the onehot table, indexed by atomic number
+  property_scale: 1.0             # output standardization, scale * y + shift
+  property_shift: 0.0
+  weight_init: torch              # xavier_uniform / xavier_normal / glorot_orthogonal / he_orthogonal / torch
+
+# The convolution of the paper (eq. 5):
+#   extra:
+#     normalization: null
+#     residual_activation: false

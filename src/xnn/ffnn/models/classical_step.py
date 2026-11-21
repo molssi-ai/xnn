@@ -16,6 +16,7 @@ from torch import Tensor
 
 from xnn.common.data import structure_to_graph
 from xnn.common.data.neighborlist import cell_grid, unique_pairs
+from xnn.common.models.fast import graph_capture
 
 from .classical_fast import exclusion_rows, image_shifts
 from .geometry import TINY, pair_image_shifts
@@ -514,7 +515,7 @@ class ClassicalStepper:
             graph = torch.cuda.CUDAGraph()
             self.stream.wait_stream(current)
             # the backward pass runs in autograd's worker thread: errors are checked per thread
-            with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
+            with graph_capture(graph, stream=self.stream, capture_error_mode="thread_local"):
                 self.energy, self.forces = self._run()
             current.wait_stream(self.stream)
             self.cuda_graph = graph

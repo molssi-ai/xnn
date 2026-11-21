@@ -42,15 +42,26 @@ class _PM6Family(NDDO):
     #: Gaussian steric terms of the H, C, N, O and S pairs in the scale factors (PM6-ORG).
     steric_pairs = False
 
-    def core_core(self, za, zb, r, gab, tore_a, tore_b):
-        return pm6_core_core(self.core_parameters(), za, zb, r, gab, tore_a, tore_b, self.average_missing_pairs,
-                             self.steric_pairs)
+    def core_core(self, za, zb, r, gab, tore_a, tore_b, params=None):
+        return pm6_core_core(self.core_parameters() if params is None else params, za, zb, r, gab, tore_a, tore_b,
+                             self.average_missing_pairs, self.steric_pairs)
 
 
 def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
+    constants = [model.correction_constants(name) for name in ("YNE", "DISP", "HBOND")]
+    if pos.is_cuda and model._graph_cache() is not None:
+        # on the fast path of a GPU the terms (small, with host searches per molecule) run on the host: the
+        # positions and constants go there in one copy, the per-atom result comes back in one (with derivatives)
+        flat = torch.cat([pos.reshape(-1)] + [c.to(pos.dtype) for c in constants]).cpu()
+        parts = flat.split([pos.numel()] + [c.numel() for c in constants])
+        ids = torch.stack([data.atomic_numbers.long(), data.batch.long()]).cpu()
+        out = batch_corrections(model.correction_kind, ids[0].tolist(), parts[0].view(pos.shape), ids[1],
+                                data.num_graphs, correction_tables(torch.device("cpu")), model.peptide_barrier,
+                                *parts[1:], model.yne_switch == "smooth")
+        return out.to(pos.device)
     return batch_corrections(model.correction_kind, data.atomic_numbers.tolist(), pos, data.batch, data.num_graphs,
-                             correction_tables(pos.device), model.peptide_barrier, model.correction_constants("YNE"),
-                             model.correction_constants("DISP"), model.correction_constants("HBOND"))
+                             correction_tables(pos.device), model.peptide_barrier, *constants,
+                             model.yne_switch == "smooth")
 
 
 @register_model("pm3")
@@ -63,8 +74,8 @@ class PM3(NDDO):
     core_form = 1
     peptide_barrier = 7.1853
 
-    def core_core(self, za, zb, r, gab, tore_a, tore_b):
-        return pm3_core_core(self.core_parameters(), za, zb, r, gab, tore_a, tore_b)
+    def core_core(self, za, zb, r, gab, tore_a, tore_b, params=None):
+        return pm3_core_core(self.core_parameters() if params is None else params, za, zb, r, gab, tore_a, tore_b)
 
     def corrections(self, data, pos):
         return _corrections(self, data, pos)

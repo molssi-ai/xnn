@@ -3,7 +3,8 @@
 The TorchScript branches of the corrections (run eagerly) give the energies and gradients of the host forms
 (NumPy searches, reverse-mode tape); the operations of the host tape give the values and gradients of their
 PyTorch form; the core of the exported potential, called eagerly, gives the eager model's energies and charges;
-the per-shell overlaps of a CPU equal the batched ones; and the correction formulas reach their published values.
+the per-shell overlaps of a CPU equal the batched ones; pairs far beyond the overlap range have finite derivatives;
+and the correction formulas reach their published values.
 """
 import math
 import types
@@ -13,6 +14,7 @@ import pytest
 import torch
 
 from xnn.common.data import structure_to_graph
+from xnn.common.models import ForceStressOutput
 from xnn.sqmnn.models import PM3, PM6, PM6ORG, PM7, twocenter
 from xnn.sqmnn.models import corrections as cr
 from xnn.sqmnn.models.core import _org_scale, _pm6_scale
@@ -318,6 +320,20 @@ def test_b_integrals_by_recursion_against_quadrature():
     eta, w = np.polynomial.legendre.leggauss(80)
     want = np.array([[np.sum(w * eta ** k * np.exp(-tv * eta)) for k in range(6)] for tv in t.tolist()])
     assert np.allclose(got.numpy(), want, rtol=1e-12, atol=0.0)
+
+
+@pytest.mark.parametrize("z, pos, mult", [
+    ([8, 1, 1, 1, 1], WATER[0].tolist() + [[300.0, 0.0, 0.0], [300.74, 0.0, 0.0]], 1.0),
+    ([6, 1], [[0.0, 0.0, 0.0], [1500.0, 0.0, 0.0]], 2.0)])
+def test_far_pairs_have_finite_derivatives(z, pos, mult):
+    """Pairs far beyond the overlap range (where the auxiliary integrals of their exponents would overflow) give
+    finite forces and finite parameter gradients of an energy and force loss."""
+    model = PM7(trainable=["USS", "BETAS", "BETAP", "ZS", "ZP", "GSS"], use_fast=False)
+    out = ForceStressOutput(model).train()(_graph(pos, z, mult=mult))
+    assert torch.isfinite(out["forces"]).all()
+    (out["energy"].pow(2).sum() + out["forces"].pow(2).sum()).backward()
+    for name, p in model.named_parameters():
+        assert torch.isfinite(p.grad).all(), name
 
 
 def test_pm6_org_steric_scale_of_cc_and_osi_pairs():

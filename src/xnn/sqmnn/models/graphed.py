@@ -14,6 +14,8 @@ from typing import Callable, List, Optional, Sequence
 import torch
 from torch import Tensor
 
+from xnn.common.models.fast import graph_capture
+
 
 def _side_stream_runs(work: Callable[[], object], times: int = 2) -> None:
     """Launch ``work`` on a side stream before a capture (the allocator and the libraries settle there)."""
@@ -83,14 +85,14 @@ class GraphedFunction:
                 torch.autograd.grad(diff, gin, [torch.ones_like(o) for o in diff], allow_unused=True)
         _side_stream_runs(work)
         self.forward_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.forward_graph):
+        with graph_capture(self.forward_graph):
             self.outs = tuple(self.fn(*self.static))
         self.diff_index = [j for j, o in enumerate(self.outs) if o.requires_grad]
         self.cot = [torch.zeros_like(self.outs[j]) for j in self.diff_index]
         self.vjp_graph = None
         if self.diff_index and gin:
             self.vjp_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.vjp_graph):
+            with graph_capture(self.vjp_graph):
                 g = torch.autograd.grad([self.outs[j] for j in self.diff_index], gin, self.cot, retain_graph=True,
                                         allow_unused=True)
                 self.grad_in = _zeros_for_none(g, gin)
@@ -118,7 +120,7 @@ class GraphedFunction:
             _side_stream_runs(work)
             self.cot2 = cot2
             self.vjp2_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.vjp2_graph):
+            with graph_capture(self.vjp2_graph):
                 g = torch.autograd.grad(diff, gin, cot2, create_graph=True, retain_graph=True, allow_unused=True)
                 self.grad2 = _zeros_for_none(g, gin)
             self.live_index = [i for i, x in enumerate(self.grad2) if x.requires_grad]
@@ -126,7 +128,7 @@ class GraphedFunction:
             self.hvp_graph = None
             if self.live_index:
                 self.hvp_graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(self.hvp_graph):
+                with graph_capture(self.hvp_graph):
                     h = torch.autograd.grad([self.grad2[i] for i in self.live_index], gin + cot2, self.cot3,
                                             retain_graph=True, allow_unused=True)
                     self.grad3 = _zeros_for_none(h, gin + cot2)
@@ -149,11 +151,18 @@ def replay(graph: GraphedFunction, inputs: Sequence[Tensor]) -> tuple:
     return _Replay.apply(graph, *inputs)
 
 
+def _alias(x: Tensor, grad: bool) -> Tensor:
+    """An input of the launched function: an alias of ``x`` where it requires gradients (the partial derivative
+    of the function in it, still connected to ``x`` for higher derivatives: the paths through other inputs that
+    depend on ``x``, such as integrals of the positions, do not reach the alias), else a leaf that requires them
+    where ``grad``."""
+    return x.view_as(x) if x.requires_grad else x.detach().requires_grad_(grad)
+
+
 def _launched_vjp(graph: GraphedFunction, inputs: Sequence[Tensor], cots: Sequence[Tensor], create_graph: bool):
     """The gradients of the inputs that require them, from the launched function (the reference)."""
     with torch.enable_grad():
-        xs = [x if x.requires_grad else x.detach().requires_grad_(i in graph.grad_index)
-              for i, x in enumerate(inputs)]
+        xs = [_alias(x, i in graph.grad_index) for i, x in enumerate(inputs)]
         outs = graph.fn(*xs)
         gin = [xs[i] for i in graph.grad_index]
         g = torch.autograd.grad([outs[j] for j in graph.diff_index], gin, cots, create_graph=create_graph,
@@ -237,9 +246,8 @@ def _launched_hvp(graph: GraphedFunction, inputs: Sequence[Tensor], cots: Sequen
     to the inputs that require them and to the cotangents."""
     create = torch.is_grad_enabled()
     with torch.enable_grad():
-        xs = [x if x.requires_grad else x.detach().requires_grad_(i in graph.grad_index)
-              for i, x in enumerate(inputs)]
-        cs = [c if c.requires_grad else c.detach().requires_grad_(True) for c in cots]
+        xs = [_alias(x, i in graph.grad_index) for i, x in enumerate(inputs)]
+        cs = [_alias(c, True) for c in cots]
         outs = graph.fn(*xs)
         g_in = [xs[i] for i in graph.grad_index]
         g = torch.autograd.grad([outs[j] for j in graph.diff_index], g_in, cs, create_graph=True, allow_unused=True)

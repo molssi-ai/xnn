@@ -32,7 +32,7 @@ import torch
 from torch import Tensor, nn
 
 from ..data import AtomicGraph, collate
-from ..models.fast import capture_preparation
+from ..models.fast import capture_preparation, graph_capture
 from ..train.graphed import Capacity, _inputs, index_planner, padding_structure
 
 #: Timed ordinary evaluations of the first input, at most: the capture goes ahead at the first one no
@@ -324,7 +324,7 @@ class GraphedEvaluation:
             self.graph = torch.cuda.CUDAGraph()
             # TorchScript blocks (e3nn's spherical harmonics) compile fused kernels after their
             # profiling runs, and a capture cannot load a kernel: they run unfused here
-            with torch.cuda.graph(self.graph), torch.jit.fuser("none"), capture_preparation():
+            with graph_capture(self.graph), torch.jit.fuser("none"), capture_preparation():
                 self.out = self.model(self.static)
             # recording does not run the evaluation: replay it for this input
             self.graph.replay()

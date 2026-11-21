@@ -16,6 +16,7 @@ from torch import Tensor
 
 from xnn.common.data import structure_to_graph
 from xnn.common.data.neighborlist import unique_pairs
+from xnn.common.models.fast import graph_capture
 from xnn.common.models.ops import build_triplets, gather_rows, scatter_sum
 
 from .classical_step import _shortest_width
@@ -584,12 +585,12 @@ class ReaxFFStepper:
         if capture and self.steps >= self.warmup:
             matrix, solve, step = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
             self.stream.wait_stream(current)
-            with torch.cuda.graph(matrix, stream=self.stream):
+            with graph_capture(matrix, stream=self.stream):
                 self._matrix()
-            with torch.cuda.graph(solve, stream=self.stream):
+            with graph_capture(solve, stream=self.stream):
                 self._solve(self.chunk)
             # the backward pass runs in autograd's worker thread: errors are checked per thread
-            with torch.cuda.graph(step, stream=self.stream, capture_error_mode="thread_local"):
+            with graph_capture(step, stream=self.stream, capture_error_mode="thread_local"):
                 self.energy, self.forces, self.q = self._energy()
             current.wait_stream(self.stream)
             self.graphs = (matrix, solve, step)

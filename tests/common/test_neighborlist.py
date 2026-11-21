@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from xnn.common.data import build_neighbor_list, structure_to_graph
+from xnn.common.data import AtomicDataset, build_neighbor_list, nearest_edges, structure_to_graph
 
 
 @pytest.fixture(autouse=True)
@@ -115,3 +115,21 @@ def test_molecular_shifts_are_zero():
     edge_index, shifts = build_neighbor_list(torch.tensor(pos), 3.0, None, None)
     assert torch.all(shifts == 0)
     assert edge_index.shape[0] == 2
+
+
+def test_max_neighbors_keeps_the_nearest_grouped_by_atom():
+    """``max_neighbors`` keeps the k shortest edges of every atom, grouped by atom, in graphs and datasets."""
+    pos, cell = _rng_crystal(n=12, L=5.0, seed=3)
+    s = {"pos": pos, "atomic_numbers": [8] * 12, "cell": cell, "pbc": [True] * 3}
+    full = structure_to_graph(s, 6.0)
+    dist = full.edge_vectors().norm(dim=-1)
+    keep, per_atom = nearest_edges(dist, full.edge_index[1], 12, 5)
+    g = structure_to_graph(s, 6.0, max_neighbors=5)
+    assert per_atom == 5 and torch.equal(g.edge_index, full.edge_index[:, keep])
+    assert torch.equal(g.cell_shifts, full.cell_shifts[keep])
+    assert torch.equal(g.edge_index[1], torch.arange(12).repeat_interleave(5))
+    assert torch.equal(structure_to_graph(s, 6.0, max_neighbors=10 ** 6).edge_index, full.edge_index)
+    lone = structure_to_graph({"pos": np.zeros((1, 3)), "atomic_numbers": [8]}, 6.0, max_neighbors=5)
+    assert lone.edge_index.shape == (2, 0)
+    ds = AtomicDataset([s], 6.0, max_neighbors=5)
+    assert torch.equal(ds[0].edge_index, g.edge_index) and AtomicDataset([s], 6.0).max_neighbors is None

@@ -151,7 +151,7 @@ def parameter_file(method: str, cache_dir: Optional[Union[str, Path]] = None) ->
     """
     from ...common.data.hub._download import download_file, md5sum
     from ...common.models.hub.cache import offline, resolve_cache_dir
-    from .provenance import write_license_note
+    from ...common.models.hub.provenance import write_license_note
 
     file = _FILES[method]
     dest = resolve_cache_dir(cache_dir) / "sqmnn" / f"xtb-{RELEASE.lstrip('v')}" / file
