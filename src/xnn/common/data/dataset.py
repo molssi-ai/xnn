@@ -15,11 +15,11 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from .atomic_data import AtomicGraph
-from .neighborlist import build_neighbor_list
+from .neighborlist import build_neighbor_list, nearest_edges
 
 
 def structure_to_graph(
-    s: dict, cutoff: float, device: Optional[torch.device] = None
+    s: dict, cutoff: float, device: Optional[torch.device] = None, max_neighbors: Optional[int] = None
 ) -> AtomicGraph:
     """Build a single-structure :class:`AtomicGraph` from a dict of arrays.
 
@@ -64,6 +64,10 @@ def structure_to_graph(
         ``None``, which builds on the CPU as before -- the right choice when
         the graph is being cached by a dataset rather than fed straight to a
         model.
+    max_neighbors : int, optional
+        Keep only the nearest ``max_neighbors`` neighbors of every atom within
+        the cutoff, grouped by atom (the graph of CGCNN). Defaults to ``None``,
+        every neighbor within the cutoff.
 
     Returns
     -------
@@ -106,6 +110,15 @@ def structure_to_graph(
            (torch.ones(3, dtype=torch.bool) if cell is not None else None))
 
     edge_index, cell_shifts = build_neighbor_list(pos, cutoff, cell, pbc)
+    if max_neighbors is not None and edge_index.shape[1] > 0:
+        # lengths in float64, so that the choice does not depend on the dtype of the run
+        p = pos.to(torch.float64)
+        vec = p.index_select(0, edge_index[1]) - p.index_select(0, edge_index[0])
+        if cell is not None:
+            vec = vec + cell_shifts.to(torch.float64) @ cell.to(torch.float64)
+        keep, _ = nearest_edges(vec.norm(dim=-1), edge_index[1], pos.shape[0], int(max_neighbors))
+        if keep is not None:
+            edge_index, cell_shifts = edge_index[:, keep], cell_shifts[keep]
 
     n = pos.shape[0]
     charge = s.get("total_charge", s.get("charge"))
@@ -243,6 +256,11 @@ class AtomicDataset(Dataset):
         :func:`structure_to_graph`.
     cutoff : float
         Neighbor cutoff radius used when building each graph.
+    max_neighbors : int, optional
+        Keep only the nearest ``max_neighbors`` neighbors of every atom (see
+        :func:`structure_to_graph`). Defaults to ``None``; the trainer sets it
+        from a model that selects its neighbors (CGCNN), so that the choice is
+        made once, when the graphs are built.
 
     Attributes
     ----------
@@ -250,11 +268,14 @@ class AtomicDataset(Dataset):
         The wrapped structure dicts.
     cutoff : float
         Neighbor cutoff radius.
+    max_neighbors : int or None
+        Nearest neighbors kept per atom.
     """
 
-    def __init__(self, structures: list[dict], cutoff: float):
+    def __init__(self, structures: list[dict], cutoff: float, max_neighbors: Optional[int] = None):
         self.structures = structures
         self.cutoff = cutoff
+        self.max_neighbors = max_neighbors
         self._cache: dict[int, AtomicGraph] = {}
 
     @classmethod
@@ -342,7 +363,8 @@ class AtomicDataset(Dataset):
             The single-structure graph at ``idx``.
         """
         if idx not in self._cache:
-            self._cache[idx] = structure_to_graph(self.structures[idx], self.cutoff)
+            self._cache[idx] = structure_to_graph(self.structures[idx], self.cutoff,
+                                                  max_neighbors=getattr(self, "max_neighbors", None))
         return self._cache[idx]
 
 

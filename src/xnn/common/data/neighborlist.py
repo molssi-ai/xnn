@@ -19,7 +19,7 @@ from __future__ import annotations
 import itertools
 import math
 import warnings
-from typing import Optional
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -504,3 +504,49 @@ def build_neighbor_list(
         # pos = wrapped + offset @ cell, so shift_unwrapped = shift + o_src - o_dst.
         cell_shifts = cell_shifts + offsets[j_idx] - offsets[i_idx]
     return edge_index, cell_shifts
+
+
+def nearest_edges(dist: Union[Tensor, Callable[[], Tensor]], dst: Tensor, num_nodes: int,
+                  k: int) -> Tuple[Optional[Tensor], Optional[int]]:
+    """The edges to the ``k`` nearest neighbors of every receiving atom.
+
+    Parameters
+    ----------
+    dist : Tensor or callable
+        Edge lengths ``(E,)``, or a function without arguments that returns
+        them, called only when edges have to be dropped.
+    dst : Tensor
+        Receiving atom of every edge ``(E,)``.
+    num_nodes : int
+        Number of atoms.
+    k : int
+        Neighbors kept per atom; an atom with fewer keeps all of them.
+
+    Returns
+    -------
+    keep : Tensor or None
+        Indices of the kept edges, grouped by receiving atom and, where an
+        atom had more than ``k``, by length (edges of equal length keep their
+        order in the neighbor list); ``None`` keeps every edge where it is (with
+        ``per_atom``, the edges are already grouped by receiving atom).
+    per_atom : int or None
+        The number of kept edges of every atom when it is the same for all:
+        the kept edges are then a table of ``per_atom`` rows per atom.
+    """
+    if dst.numel() == 0:
+        return None, None
+    counts = torch.zeros(num_nodes, dtype=torch.long, device=dst.device).index_add_(0, dst, torch.ones_like(dst))
+    lo, hi = torch.aminmax(counts)
+    grouped = (dst[1:] >= dst[:-1]).all()
+    lo, hi, grouped = torch.stack([lo, hi, grouped.long()]).tolist()     # one host synchronization
+    if hi <= k:
+        if lo < hi:
+            return None, None
+        return (None if grouped else torch.sort(dst, stable=True).indices), hi
+    if callable(dist):
+        dist = dist()
+    order = torch.sort(dist.detach(), stable=True).indices
+    order = order.index_select(0, torch.sort(dst.index_select(0, order), stable=True).indices)
+    first = torch.cumsum(counts, 0) - counts
+    rank = torch.arange(order.numel(), device=dst.device) - first.index_select(0, dst.index_select(0, order))
+    return order[rank < k], (k if lo >= k else None)
