@@ -5,7 +5,8 @@
 * :func:`peptide_torsion` -- the ``k sin^2(phi)`` barrier added to every
   ``X-N-C=O`` torsion of an amide (all PM methods except PM6-ORG);
 * :func:`yne_correction` -- 12 kcal/mol per acetylenic C-C bond (trainable), switched
-  off smoothly between 1.21 and 1.33 Angstrom (PM6, PM7, PM6-ORG);
+  off smoothly between 1.21 and 1.33 Angstrom (PM6, PM7, PM6-ORG), by MOPAC's polynomial
+  or by a switch with continuous derivatives of every order;
 * :func:`nsp2_correction` -- stabilization of planar secondary and tertiary
   amine nitrogens, ``-0.5 exp(-10 (2 pi - sum of angles))`` (PM6, eq 12 of
   the PM6 paper);
@@ -413,10 +414,12 @@ DISPERSION = (2.286419, 15.450118, 1.226593)
 HBOND = (-0.171271 * 0.529177210903 ** 2, -0.098822 * 0.529177210903 ** 2, 2.5)
 
 
-def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optional[Tensor] = None) -> Tensor:
+def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optional[Tensor] = None,
+                   smooth: bool = False) -> Tensor:
     """``yne[0]`` kcal/mol (12) per C-C bond shorter than ``yne[1]`` Angstrom (1.21), switched to zero at
     ``yne[2]`` (1.33) by a polynomial with continuous first and second derivatives; differentiable in ``yne``
-    (default :data:`YNE`)."""
+    (default :data:`YNE`). With ``smooth`` the switch is ``1 / (1 + exp(1 / (1 - x) - 1 / x))`` of the fraction
+    ``x`` of the range, whose derivatives of every order are continuous and vanish at both ends."""
     out = pos.new_zeros(len(z))
     c = _exact([12.0, 1.21, 1.33], pos.device) if yne is None else yne       # YNE (no globals in TorchScript)
     c = c.to(pos.dtype)
@@ -430,12 +433,15 @@ def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optio
                 continue
             r = _distance(pos, i, j)
             rv = float(r)
-            if rv < lo:
+            if rv <= lo:
                 out = _at(out, i, height.reshape(1))
             elif rv < hi:
                 x = (r - rmin) / (rmax - rmin)
-                f = (1.0 - 10.0 * x ** 3 + 15.0 * x ** 4 - 6.0 * x ** 5
-                     + (-5.0 + 25.0 * x) * (x ** 3 - 3.0 * x ** 4 + 3.0 * x ** 5 - x ** 6))
+                if smooth:
+                    f = torch.sigmoid(1.0 / x - 1.0 / (1.0 - x))
+                else:
+                    f = (1.0 - 10.0 * x ** 3 + 15.0 * x ** 4 - 6.0 * x ** 5
+                         + (-5.0 + 25.0 * x) * (x ** 3 - 3.0 * x ** 4 + 3.0 * x ** 5 - x ** 6))
                 out = _at(out, i, height * f)
     return out
 
@@ -1123,15 +1129,17 @@ def hh_repulsion(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor
 
 def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor],
                           peptide_barrier: float, yne: Optional[Tensor] = None,
-                          dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None) -> Tensor:
+                          dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
+                          smooth_yne: bool = False) -> Tensor:
     """The corrections of one molecule per atom (kcal/mol) of a method (``kind``: 0 PM3, 1 PM6, 2 PM7,
     3 PM6-ORG without its D3 term); ``yne``, ``dispersion`` and ``hbond`` the constants of
-    :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's)."""
+    :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's);
+    ``smooth_yne`` the smooth switch of :func:`yne_correction`."""
     if kind == 0:
         return peptide_torsion(z, p, peptide_barrier)
     bonds = bond_topology(z, p, tables)
     barrier = 2.5 if kind == 1 else (3.1595 if kind == 2 else 0.0)
-    out = peptide_torsion(z, p, barrier) + yne_correction(z, p, bonds, yne)
+    out = peptide_torsion(z, p, barrier) + yne_correction(z, p, bonds, yne, smooth_yne)
     if kind == 1:
         out = out + nsp2_correction(z, p, bonds)
     if kind == 2:
@@ -1144,7 +1152,8 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
 
 def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n_struct: int,
                       tables: Dict[str, Tensor], peptide_barrier: float, yne: Optional[Tensor] = None,
-                      dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None) -> Tensor:
+                      dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
+                      smooth_yne: bool = False) -> Tensor:
     """:func:`structure_corrections` of every structure of a batch, per atom."""
     out = pos.new_zeros(pos.shape[0])
     for b in range(n_struct):
@@ -1156,5 +1165,5 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
         for i in ids:
             zb.append(z_all[i])
         out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier, yne,
-                                                                dispersion, hbond))
+                                                                dispersion, hbond, smooth_yne))
     return out

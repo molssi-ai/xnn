@@ -289,9 +289,7 @@ def _org_scale(params: Dict[str, Tensor], za: Tensor, zb: Tensor, r: Tensor, x: 
     base = 1.0 + 2.0 * x * torch.exp(-a * (r + 0.0003 * r ** 6))
     hx = 1.0 + 2.0 * x * torch.exp(-a * r * r)
     scale = base
-    # only the forms of the element pairs present (one transfer)
     codes = torch.minimum(za, zb) * 256 + torch.maximum(za, zb)
-    present = torch.jit.annotate(List[int], torch.unique(codes).tolist())
     # (code, form): the steric parameters (n1, n2, n3) of each pair, on base or on hx
     forms: List[Tuple[int, int, int, int, int]] = [
         (1 * 256 + 1, 0, 16, 17, 18), (1 * 256 + 6, 1, 19, 11, 12), (1 * 256 + 7, 1, 38, 39, 40),
@@ -299,6 +297,12 @@ def _org_scale(params: Dict[str, Tensor], za: Tensor, zb: Tensor, r: Tensor, x: 
         (6 * 256 + 7, 0, 35, 36, 37), (6 * 256 + 8, 0, 20, 21, 22), (6 * 256 + 16, 0, 29, 30, 31),
         (7 * 256 + 8, 0, 26, 27, 28), (7 * 256 + 16, 0, 41, 42, 43), (8 * 256 + 8, 0, 32, 33, 34),
         (8 * 256 + 14, 3, 0, 0, 0), (8 * 256 + 16, 0, 23, 24, 25)]
+    # on a CPU only the forms of the element pairs present (one transfer); on a GPU every form, selected per pair
+    # (no host synchronization, the same for every batch of a bucket's graphs)
+    if codes.is_cuda:
+        present = [f[0] for f in forms]
+    else:
+        present = torch.jit.annotate(List[int], torch.unique(codes).tolist())
     for code, kind, n1, n2, n3 in forms:
         if code not in present:
             continue
@@ -353,11 +357,14 @@ def electron_counts(tore: Tensor, batch: Tensor, n_struct: int, charge: Tensor, 
         mult = torch.round(multiplicity.to(dtype)).long()
     else:
         mult = 1 + (n_e % 2)
-    if bool(((n_e + mult - 1) % 2 != 0).any()):
+    # both checks in one read from the device
+    flags = torch.jit.annotate(List[bool], torch.stack([((n_e + mult - 1) % 2 != 0).any(),
+                                                        (mult != 1).any()]).tolist())
+    if flags[0]:
         raise ValueError("spin multiplicity inconsistent with the electron count")
     n_alpha = (n_e + mult - 1) // 2
     n_beta = (n_e - mult + 1) // 2
-    uhf = unrestricted or bool((mult != 1).any())
+    uhf = unrestricted or flags[1]
     return n_e, n_alpha, n_beta, uhf
 
 

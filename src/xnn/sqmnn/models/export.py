@@ -44,6 +44,7 @@ class NDDOExport(nn.Module):
     use_corrections: bool
     correction_kind: int
     peptide_barrier: float
+    smooth_yne: bool
     unrestricted: bool
     max_iter: int
     tol_density: float
@@ -102,6 +103,7 @@ class NDDOExport(nn.Module):
         self.use_corrections = bool(model.use_corrections)
         self.correction_kind = int(model.correction_kind)
         self.peptide_barrier = float(model.peptide_barrier)
+        self.smooth_yne = model.yne_switch == "smooth"
         self.unrestricted = bool(model.unrestricted)
         self.max_iter, self.tol_density, self.tol_energy = int(model.max_iter), float(model.tol_density), \
             float(model.tol_energy)
@@ -181,7 +183,7 @@ class NDDOExport(nn.Module):
         if self.use_corrections:
             corr = batch_corrections(self.correction_kind, torch.jit.annotate(List[int], z.tolist()), pos, batch,
                                      1, self.correction_data, self.peptide_barrier, self.yne, self.disp,
-                                     self.hbond)
+                                     self.hbond, self.smooth_yne)
             d3 = self.d3
             if d3 is not None:
                 same = batch.unsqueeze(0) == batch.unsqueeze(1)
