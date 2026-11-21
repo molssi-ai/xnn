@@ -30,6 +30,7 @@ import torch
 from torch import Tensor
 
 from ..data import AtomicGraph, collate
+from ..models.fast import graph_capture
 
 #: The atomic number of the padding atoms.
 PADDING_Z = 1
@@ -374,7 +375,7 @@ class GraphedStep:
             torch.cuda.current_stream(self.device).wait_stream(side)
         else:
             self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.graph):
+            with graph_capture(self.graph):
                 self.out = self.body(self.static)
             # recording does not run the step: replay it for this batch
             self.graph.replay()

@@ -237,6 +237,25 @@ _CAPTURE = {"depth": 0}
 
 
 @contextlib.contextmanager
+def graph_capture(graph: "torch.cuda.CUDAGraph", **kwargs) -> Iterator[None]:
+    """``torch.cuda.graph(graph, **kwargs)`` (``pool``, ``stream``, ``capture_error_mode``) with the cuBLAS
+    workspaces cleared before and after the recording.
+
+    cuBLAS keeps a workspace per handle and stream, made at its first use and kept. Cleared, a workspace that
+    the recording needs is made in the graph's memory pool and lives as long as the graph. A workspace kept from
+    elsewhere (from launches, or from another graph's pool) could be freed while the graph still wrote into it:
+    every recording starts by releasing the allocator's free memory, so a later recording or launch could reuse
+    it. A workspace made in the pool must not serve launches outside the graph either.
+    """
+    torch._C._cuda_clearCublasWorkspaces()
+    try:
+        with torch.cuda.graph(graph, **kwargs):
+            yield
+    finally:
+        torch._C._cuda_clearCublasWorkspaces()
+
+
+@contextlib.contextmanager
 def capture_preparation() -> Iterator[None]:
     """A context in which an evaluation is warmed up for or recorded into a CUDA graph.
 
@@ -314,6 +333,36 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
     callable
         ``fn`` with the same arguments and outputs.
     """
+    forward, vjp_function = _vjp_parts(fn, n_inputs, n_constants, dynamic, options)
+
+    class Stage(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *xs):
+            ctx.save_for_backward(*xs[:n_inputs])
+            ctx.consts = xs[n_inputs:]
+            with separate_shapes():
+                return forward(*xs)
+
+        @staticmethod
+        def backward(ctx, *grads):
+            g = vjp_function.apply(*ctx.saved_tensors, *ctx.consts, *_dense(grads))
+            return (*g, *([None] * n_constants))
+
+    def apply(*xs):
+        out = Stage.apply(*xs)
+        return out[0] if len(out) == 1 else out
+
+    return apply
+
+
+def _vjp_parts(fn: Callable[..., Any], n_inputs: int, n_constants: int, dynamic: bool,
+               options: Optional[dict]) -> tuple:
+    """The compiled ``fn`` (returning a tuple) and an autograd function of its vector-Jacobian product.
+
+    The autograd function maps ``(inputs, constants, one cotangent per output)`` to one gradient per
+    input. It differentiates ``fn`` at its own copies of the inputs, so no path of a graph around them
+    enters, and its backward (the compiled product of second order) makes it differentiable once more.
+    """
     from torch.func import vjp
 
     m = n_inputs + n_constants
@@ -366,18 +415,87 @@ def compile_twice_differentiable(fn: Callable[..., Any], n_inputs: int,
                                              *_dense(cotangents))
             return (*g_inputs, *([None] * n_constants), *g_grads)
 
+    return forward, Grad
+
+
+def _detached_copy(x: torch.Tensor) -> torch.Tensor:
+    """``x`` detached as a leaf that needs a gradient, with the dynamic sizes and size hints given to the
+    compiler for ``x`` (:func:`torch._dynamo.mark_dynamic`). The sizes of a parameter stay static, as the
+    compiler keeps those of the parameters it is given (kernels specialized to the layer widths)."""
+    y = x.detach().requires_grad_(True)
+    if isinstance(x, torch.nn.Parameter) and not getattr(x, "_dynamo_dynamic_indices", None):
+        torch._dynamo.mark_static(y)
+        return y
+    hints = getattr(x, "_dynamo_hint_overrides", {})
+    for dim in getattr(x, "_dynamo_dynamic_indices", ()):
+        if dim in hints:
+            torch._dynamo.mark_dynamic(y, dim, hint_override=hints[dim])
+        else:
+            torch._dynamo.mark_dynamic(y, dim)
+    return y
+
+
+def compile_differentiable(fn: Callable[..., Any], n_inputs: int, n_constants: int = 0,
+                           dynamic: bool = True, options: Optional[dict] = None) -> Callable[..., Any]:
+    """``fn`` compiled by :func:`torch.compile`, with a fast first derivative and a second one on request.
+
+    :func:`compile_twice_differentiable` recomputes ``fn`` inside every backward pass, the price of a
+    backward that can itself be differentiated. Here the forward pass keeps the compiled graph of
+    ``fn`` (as :func:`torch.compile` does), and a backward pass runs its compiled backward. A backward
+    pass that builds a graph (``create_graph=True``), or a second backward pass through the same graph
+    (``retain_graph=True``), takes the vector-Jacobian product of :func:`compile_twice_differentiable`,
+    which agrees with the compiled backward to rounding; second derivatives stay available.
+
+    Parameters
+    ----------
+    fn : callable
+        A function of ``n_inputs`` tensors returning a tensor or a tuple of tensors, written in
+        differentiable torch operations.
+    n_inputs : int
+        The number of its tensor arguments that are differentiated.
+    n_constants : int, optional
+        The number of further arguments, after the inputs, that are not differentiated. Default 0.
+    dynamic : bool, optional
+        Compile with symbolic sizes (default) or for the sizes of the first call.
+    options : dict, optional
+        Inductor options of the compiled functions.
+
+    Returns
+    -------
+    callable
+        ``fn`` with the same arguments and outputs.
+    """
+    once = torch.compile(fn, dynamic=dynamic, options=options)
+    _, vjp_function = _vjp_parts(fn, n_inputs, n_constants, dynamic, options)
+
     class Stage(torch.autograd.Function):
         @staticmethod
         def forward(ctx, *xs):
+            ins = [_detached_copy(x) if x.requires_grad else x for x in xs[:n_inputs]]
+            # traced with shared size symbols: without them inductor reduces the rows of the backward slowly
+            with torch.enable_grad():
+                out = once(*ins, *xs[n_inputs:])
+            outs = tuple(out) if isinstance(out, (tuple, list)) else (out,)
             ctx.save_for_backward(*xs[:n_inputs])
             ctx.consts = xs[n_inputs:]
-            with separate_shapes():
-                return forward(*xs)
+            ctx.ins, ctx.outs = ins, outs
+            ctx.wanted = [i for i, x in enumerate(ins) if x.requires_grad]
+            return tuple(o.detach() for o in outs)
 
         @staticmethod
         def backward(ctx, *grads):
-            g = Grad.apply(*ctx.saved_tensors, *ctx.consts, *_dense(grads))
-            return (*g, *([None] * n_constants))
+            grads = _dense(grads)
+            if torch.is_grad_enabled() or ctx.outs is None:
+                # a backward that is itself differentiated, or a second one (the compiled backward runs once and
+                # gives its buffers to its own computation): the vector-Jacobian product, the same to rounding
+                g = vjp_function.apply(*ctx.saved_tensors, *ctx.consts, *grads)
+                return (*g, *([None] * n_constants))
+            got = torch.autograd.grad(ctx.outs, [ctx.ins[i] for i in ctx.wanted], grads, allow_unused=True)
+            ctx.ins = ctx.outs = None
+            result = [None] * (n_inputs + n_constants)
+            for i, g in zip(ctx.wanted, got):
+                result[i] = g
+            return tuple(result)
 
     def apply(*xs):
         out = Stage.apply(*xs)

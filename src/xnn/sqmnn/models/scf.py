@@ -27,6 +27,8 @@ from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 import torch
 from torch import Tensor
 
+from xnn.common.models.fast import graph_capture
+
 PAD_ENERGY = 1.0e4   # diagonal of the padding orbitals (eV)
 # below this many pairs, all pairs form one group padded to the largest orbital count (fewer, larger operations),
 # per device type (measured crossovers; a GPU is bound by kernel launches longer)
@@ -44,11 +46,16 @@ WARM_ORBITALS = {"cpu": False, "cuda": True}
 CAPTURE_AFTER = 2
 
 
+def _host_eigh(n: int) -> bool:
+    """Whether the eigenvalue problems of ``n`` basis functions on a GPU are solved on the host."""
+    return n <= 200
+
+
 def eigh(A: Tensor) -> Tuple[Tensor, Tensor]:
     """``torch.linalg.eigh`` of symmetric matrices; on a GPU those of up to 200 basis functions on the host
     (LAPACK, with the two transfers, is faster there than cusolver's solver of one matrix at a time; it is
     never inside a CUDA graph)."""
-    if A.is_cuda and A.shape[-1] <= 200:
+    if A.is_cuda and _host_eigh(A.shape[-1]):
         e, v = torch.linalg.eigh(A.cpu())
         return e.to(A.device), v.to(A.device)
     return torch.linalg.eigh(A)
@@ -93,6 +100,8 @@ class Layout:
         self.valid = valid
         self.group_min_pairs = group_min_pairs
         self.padded_pairs = False
+        # one padded group of all pairs whatever the orbital counts (the shapes of a bucket, see layout_tensors)
+        self.fixed = False
         # caches (typed for TorchScript, which takes attribute types from these values)
         self._groups = torch.jit.annotate(Optional[List[Tuple[int, int, Tensor, Tensor, Tensor]]], None)
         self._group_maps = torch.jit.annotate(Optional[List[Dict[str, Tensor]]], None)
@@ -184,6 +193,13 @@ class Layout:
         """The pairs by the orbital counts of their atoms: ``(ka, kb, rows, atoms A, atoms B)`` per group; below
         :attr:`group_min_pairs` pairs one group of all, padded to ``k`` (:attr:`padded_pairs`)."""
         groups = self._groups
+        if groups is None and self.fixed:
+            self.padded_pairs = True
+            rows = torch.arange(self.pair_a.shape[0], device=self.pair_a.device)
+            made_fixed: List[Tuple[int, int, Tensor, Tensor, Tensor]] = [(self.k, self.k, rows, self.pair_a,
+                                                                           self.pair_b)]
+            self._groups = made_fixed
+            return made_fixed
         if groups is None:
             n_orb = (self.ao < self.n_basis).sum(1)
             key = n_orb[self.pair_a] * 16 + n_orb[self.pair_b]
@@ -230,6 +246,81 @@ class Layout:
 
 
 PackedPairs = List[Tuple[int, int, Dict[str, Tensor], Tensor, Tensor]]
+
+_MAP_KEYS = ("aa", "bb", "ab", "acc_a", "acc_b")
+
+
+def layout_tensors(layout: Layout) -> List[Tensor]:
+    """Every index tensor of a layout of fixed shapes (:attr:`Layout.fixed`), its maps included: the inputs of
+    the graphs of a bucket, which replay for any batch of its shapes (see :func:`layout_from_tensors`)."""
+    group = layout.pair_groups()[0]
+    maps = layout.pair_group_maps()[0]
+    if layout._atom_index is None:
+        layout._atom_index = layout.flat(layout.atom_struct[:, None, None], layout.ao[:, :, None],
+                                         layout.ao[:, None, :]).reshape(-1)
+    return ([layout.atom_struct, layout.ao, layout.pair_a, layout.pair_b, layout.valid, layout._atom_index,
+             layout._dense_map(True), group[2]] + [maps[key] for key in _MAP_KEYS])
+
+
+def layout_from_tensors(n_struct: int, n_basis: int, k: int, tensors: List[Tensor]) -> Layout:
+    """A layout of fixed shapes on the tensors of :func:`layout_tensors` (nothing derived from their values, so
+    that it works inside a CUDA graph capture)."""
+    atom_struct, ao, pair_a, pair_b, valid, atom_index, dense, rows = tensors[:8]
+    layout = Layout(n_struct, n_basis, k, atom_struct, ao, pair_a, pair_b, valid)
+    layout.fixed = True
+    layout.padded_pairs = True
+    layout._groups = [(k, k, rows, pair_a, pair_b)]
+    layout._group_maps = [dict(zip(_MAP_KEYS, tensors[8:]))]
+    layout._atom_index = atom_index
+    layout._dense_grouped = layout._dense_padded = dense
+    return layout
+
+
+IndexSpec = List[Tuple[int, int, List[int], torch.dtype]]
+
+
+def pack_index(tensors: List[Tensor]) -> Tuple[Tensor, IndexSpec]:
+    """Tensors in one byte buffer (the wider types first, so that every one stays aligned) and the offsets,
+    sizes, shapes and types of :func:`unpack_index`: one copy moves them all."""
+    spec: IndexSpec = [(0, 0, [], torch.uint8) for _ in tensors]
+    parts: List[Tensor] = []
+    offset = 0
+    for i in sorted(range(len(tensors)), key=lambda j: -tensors[j].element_size()):
+        t = tensors[i]
+        raw = t.contiguous().reshape(-1).view(torch.uint8)
+        spec[i] = (offset, int(raw.numel()), list(t.shape), t.dtype)
+        parts.append(raw)
+        offset += int(raw.numel())
+    return torch.cat(parts), spec
+
+
+def unpack_index(buffer: Tensor, spec: IndexSpec) -> List[Tensor]:
+    """The tensors of :func:`pack_index` as views of ``buffer``."""
+    return [buffer[o:o + n].view(dtype).view(shape) for o, n, shape, dtype in spec]
+
+
+def static_layout(layout: Layout) -> Layout:
+    """A copy of a fixed-shape layout on buffers of its own (filled by :func:`load_layout`)."""
+    return layout_from_tensors(layout.n_struct, layout.n_basis, layout.k,
+                               [t.clone() for t in layout_tensors(layout)])
+
+
+def load_layout(dst: Layout, src: Layout) -> None:
+    """Copy the index tensors of ``src`` into the buffers of ``dst`` (layouts of the same shapes)."""
+    for a, b in zip(layout_tensors(dst), layout_tensors(src)):
+        a.copy_(b)
+
+
+def _fixed_shapes(layout: Layout, H: Tensor, filled: int,
+                  blocks: List[Optional[int]]) -> Tuple[int, List[Optional[int]]]:
+    """The occupied orbital count and the per-spin shared counts of an SCF; for a fixed-shape layout (a bucket)
+    every orbital and no shared count, so that nothing depends on the batch's electrons."""
+    if not layout.fixed:
+        return filled, blocks
+    shared = torch.jit.annotate(List[Optional[int]], [])
+    for _ in blocks:
+        shared.append(None)
+    return int(H.shape[-1]), shared
 
 
 def pack_pairs(layout: Layout, W2: Tensor) -> PackedPairs:
@@ -554,6 +645,10 @@ class SCFLoop:
         self.C = self._put(self.C, self.C_new)
         self.occ = self._put(self.occ, self.occ_new)
 
+    def changes(self) -> List[float]:
+        """The largest density and energy changes of the last iteration, on the host."""
+        return torch.jit.annotate(List[float], torch.stack([self.dP.max(), self.dE.max()]).tolist())
+
 
 class SCFGraphs:
     """CUDA graphs of the stages of :class:`SCFLoop` for one batch composition (shapes, layout, electrons).
@@ -561,18 +656,33 @@ class SCFGraphs:
     The loop runs on fixed buffers; :meth:`load` copies a new evaluation's core Hamiltonian, integrals and guess
     into them and :meth:`run` replays a stage instead of launching its kernels, so an iteration costs a few
     replays and one host synchronization. The eigenvalue problem (not capturable) runs between the replays.
-    Replays compute exactly what the stages compute when launched.
+    Replays compute exactly what the stages compute when launched. ``occupy_commit`` (aufbau occupations, the
+    new state and the largest changes in :attr:`check`) is the end of a diagonalizing iteration in one replay; the
+    eigenvalue problems the host solves (:func:`eigh`) go through pinned host buffers.
     """
 
-    STAGES = ("fock_step", "rotate_step", "occupy", "commit")
+    STAGES = ("fock_step", "rotate_step", "occupy", "commit", "occupy_commit")
 
     def __init__(self, layout: Layout, H: Tensor, W1: dict, W2: PackedPairs, n_occ: Tensor, weight: float,
                  unrestricted: bool, diis_size: int, filled: int, blocks):
         self.H = H.clone()
         self.W1 = {key: v.clone() for key, v in W1.items()}
-        self.W2 = [(ka, kb, maps, Wc.clone(), Wx.clone()) for ka, kb, maps, Wc, Wx in W2]
-        self.loop = SCFLoop(layout, self.H, self.W1, self.W2, n_occ.clone(), weight, unrestricted, diis_size,
-                            filled, blocks, static=True)
+        # a layout of fixed shapes (a bucket) is read from buffers that each evaluation fills
+        self.layout = static_layout(layout) if layout.fixed else None
+        maps = self.layout.pair_group_maps() if self.layout is not None else [m for _, _, m, _, _ in W2]
+        self.W2 = [(ka, kb, mg, Wc.clone(), Wx.clone()) for (ka, kb, _, Wc, Wx), mg in zip(W2, maps)]
+        self.loop = SCFLoop(self.layout if self.layout is not None else layout, self.H, self.W1, self.W2,
+                            n_occ.clone(), weight, unrestricted, diis_size, filled, blocks, static=True)
+        self.check = H.new_zeros([2])
+        self.host_check = torch.empty(2, dtype=H.dtype, pin_memory=True)
+        # the energy changes of an iteration, kept when the next Fock step runs ahead (see _GraphedLoop)
+        self.dE_kept = self.loop.dE.clone()
+        self.host: Optional[Tuple[Tensor, Tensor, Tensor]] = None
+        if _host_eigh(H.shape[-1]):
+            self.host = tuple(torch.empty(x.shape, dtype=x.dtype, pin_memory=True)
+                              for x in (self.loop.Fx, self.loop.eps, self.loop.C_new))
+        stages = {stage: getattr(self.loop, stage) for stage in self.STAGES[:-1]}
+        stages["occupy_commit"] = self._occupy_commit
         self.graphs: Dict[str, torch.cuda.CUDAGraph] = {}
         pool = torch.cuda.graph_pool_handle()
         side = torch.cuda.Stream()
@@ -580,19 +690,50 @@ class SCFGraphs:
         with torch.cuda.stream(side):
             # warm-up launches on a side stream before the capture
             self.loop.start(self.loop.P)
-            for stage in self.STAGES:
-                getattr(self.loop, stage)()
+            for run in stages.values():
+                run()
         torch.cuda.current_stream().wait_stream(side)
-        for stage in self.STAGES:
+        for stage, run in stages.items():
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, pool=pool):
-                getattr(self.loop, stage)()
+            with graph_capture(g, pool=pool):
+                run()
             self.graphs[stage] = g
 
+    def _occupy_commit(self) -> None:
+        self.loop.occupy()
+        self.loop.commit()
+        self.check.copy_(torch.stack([self.loop.dP.max(), self.loop.dE.max()]))
+        self.dE_kept.copy_(self.loop.dE)
+
+    def diagonalize(self, prefetched: bool = False) -> None:
+        """The eigenpairs of the loop's ``Fx`` into its buffers: on the host through the pinned buffers (one
+        synchronization, none where ``Fx`` is already there; the copies back are asynchronous, and the next use
+        of the buffers follows the next synchronization), else on the GPU."""
+        if self.host is None:
+            self.loop.diagonalize()
+            return
+        F, e, v = self.host
+        if not prefetched:
+            F.copy_(self.loop.Fx, non_blocking=True)
+            if self.loop.Fx.is_cuda:
+                torch.cuda.current_stream().synchronize()
+        torch.linalg.eigh(F, out=(e, v))
+        self.loop.eps.copy_(e, non_blocking=True)
+        self.loop.C_new.copy_(v, non_blocking=True)
+
     def load(self, H: Tensor, W1: dict, W2: PackedPairs, P: Tensor, C: Optional[Tensor] = None,
-             occ: Optional[Tensor] = None) -> SCFLoop:
+             occ: Optional[Tensor] = None, layout: Optional[Layout] = None, n_occ: Optional[Tensor] = None) -> SCFLoop:
         """Copy the inputs of a new evaluation into the buffers and start the loop from the density ``P`` (and
-        the orbitals ``C`` with occupations ``occ`` where given)."""
+        the orbitals ``C`` with occupations ``occ`` where given); a bucket's graphs also take its ``layout`` and
+        electron counts ``n_occ``."""
+        if self.layout is not None and layout is not None:
+            load_layout(self.layout, layout)
+        if n_occ is not None:
+            loop = self.loop
+            loop.n_occ.copy_(n_occ)
+            # the occupy graph reads the aufbau occupations of the electron counts from this buffer
+            if loop.aufbau is not None:
+                loop.aufbau.copy_(_occupations(loop.eps, loop.n_occ, loop.weight))
         self.H.copy_(H)
         for key, v in self.W1.items():
             if key in W1:
@@ -649,32 +790,70 @@ class SCFGraphCache:
 
 
 class _GraphedLoop:
-    """The stages of an :class:`SCFLoop` replayed from its :class:`SCFGraphs` (the state is the loop's)."""
+    """The stages of an :class:`SCFLoop` replayed from its :class:`SCFGraphs` (the state is the loop's).
+
+    The end of a diagonalizing iteration (occupations, new state, changes) is one replay, and the next
+    iteration's Fock step runs right after it: its Fock matrices travel to the host with the changes, so that an
+    iteration waits for the device once. The step runs ahead also after the last iteration, where it changes only
+    what the converged quantities do not read but the energy changes, kept for them (:attr:`dE`).
+    """
 
     def __init__(self, graphs: "SCFGraphs"):
         self.graphs = graphs
         self.loop = graphs.loop
+        # whether the last occupy replay committed the new state too (and left the changes in graphs.check)
+        self.committed = False
+        # whether the next Fock step ran already, and whether its Fock matrices are on the host
+        self.ahead = False
+        self.prefetched = False
 
     def __getattr__(self, name):
         return getattr(self.loop, name)
 
+    @property
+    def dE(self) -> Tensor:
+        return self.graphs.dE_kept if self.ahead else self.loop.dE
+
     def fock_step(self) -> None:
+        if self.ahead:
+            self.ahead = False
+            return
+        self.prefetched = False
         self.graphs.run("fock_step")
 
     def rotate_step(self) -> None:
         self.graphs.run("rotate_step")
 
     def diagonalize(self) -> None:
-        self.loop.diagonalize()
+        self.graphs.diagonalize(self.prefetched)
+        self.prefetched = False
 
     def occupy(self, kt: float = 0.0) -> None:
         if kt > 0.0:
             self.loop.occupy(kt)
-        else:
-            self.graphs.run("occupy")
+            return
+        # aufbau occupations, then the commit that follows them in every iteration, in one replay
+        g = self.graphs
+        g.run("occupy_commit")
+        self.committed = True
+        if g.host is not None:
+            g.run("fock_step")
+            g.host[0].copy_(self.loop.Fx, non_blocking=True)
+            self.ahead = self.prefetched = True
+        g.host_check.copy_(g.check, non_blocking=True)
+
+    def changes(self) -> List[float]:
+        if self.committed:
+            if self.graphs.check.is_cuda:
+                torch.cuda.current_stream().synchronize()
+            return self.graphs.host_check.tolist()
+        return self.loop.changes()
 
     def commit(self) -> None:
-        self.graphs.run("commit")
+        if self.committed:
+            self.committed = False
+        else:
+            self.graphs.run("commit")
 
 
 def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs], n_alpha: Tensor, n_beta: Tensor,
@@ -740,6 +919,7 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
         W1p = pack_one_center(W1.detach()) if isinstance(W1, Tensor) else W1
         W2p = pack_pairs(layout, W2.detach()) if isinstance(W2, Tensor) else W2
         P, n_occ, weight, filled, blocks = scf_start(guess, n_alpha, n_beta, unrestricted, spin_guess)
+        filled, blocks = _fixed_shapes(layout, H, filled, blocks)
         rotate = pseudo_diagonalization if H.shape[-1] >= _per_device(PSEUDO_MIN_BASIS, H.device) else 0.0
         if not (_per_device(WARM_ORBITALS, H.device) and smear_steps == 0 and rotate > 0.0):
             orbitals = occupations = None
@@ -753,7 +933,7 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
             return scf_solve(layout, H, W1p, W2p, n_alpha, n_beta, unrestricted, guess, max_iter, tol_density,
                              tol_energy, diis_size, smearing, smear_steps, spin_guess, pseudo_diagonalization,
                              _per_device(PSEUDO_MIN_BASIS, H.device), orbitals, occupations)
-        graphs.load(H, W1p, W2p, P, orbitals, occupations)
+        graphs.load(H, W1p, W2p, P, orbitals, occupations, layout, n_occ)
         return solve_scf(_GraphedLoop(graphs), layout, H, W1p, W2p, n_occ, weight, unrestricted, diis_size, filled,
                          blocks, max_iter, tol_density, tol_energy, smearing, smear_steps, rotate,
                          orbitals is not None)
@@ -768,6 +948,7 @@ def scf_solve(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs,
     ``min_basis`` basis functions on, rotating the given ``orbitals`` (with their ``occupations``) from the
     first iteration where it is on and nothing is smeared."""
     P, n_occ, weight, filled, blocks = scf_start(guess, n_alpha, n_beta, unrestricted, spin_guess)
+    filled, blocks = _fixed_shapes(layout, H, filled, blocks)
     rotate = pseudo_diagonalization if H.shape[-1] >= min_basis else 0.0
     if smear_steps != 0 or rotate == 0.0:
         orbitals = occupations = None
@@ -856,7 +1037,7 @@ def _iterate(loop: SCFLoop, max_iter: int, smear_steps: int, smearing: float, ro
         if not rotated:
             loop.diagonalize()
             loop.occupy(kt)
-            values = torch.jit.annotate(List[float], torch.stack([loop.dP.max(), loop.dE.max()]).tolist())
+            values = loop.changes()
             change, de_max = values[0], values[1]
         loop.commit()
         have_orbitals = True
@@ -1204,24 +1385,54 @@ class CPHFGraphs:
                  occ: Tensor, gP: Tensor, unrestricted: bool):
         self.W1 = {key: v.clone() for key, v in W1.items()}
         self.W2 = [(ka, kb, maps, Wc.clone(), Wx.clone()) for ka, kb, maps, Wc, Wx in W2]
-        self.loop = CPHFLoop(layout, self.W1, self.W2, C.clone(), eps.clone(), occ.clone(), gP.clone(),
+        self.layout = static_layout(layout) if layout.fixed else None
+        if self.layout is not None:
+            self.W2 = [(ka, kb, mg, Wc, Wx) for (ka, kb, _, Wc, Wx), mg in zip(self.W2,
+                                                                            self.layout.pair_group_maps())]
+        self.loop = CPHFLoop(self.layout if self.layout is not None else layout, self.W1, self.W2, C.clone(),
+                             eps.clone(), occ.clone(), gP.clone(),
                              unrestricted, static=True)
+        # the state a step starts from (see step_pair)
+        self.kept_u, self.kept_unstable = self.loop.u.clone(), self.loop.unstable.clone()
+        self.kept_res = self.loop.res.clone()
+        stages = {"start": self.loop.start, "step": self._step}
         self.graphs: Dict[str, torch.cuda.CUDAGraph] = {}
         pool = torch.cuda.graph_pool_handle()
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
-            for stage in self.STAGES:
-                getattr(self.loop, stage)()
+            for run in stages.values():
+                run()
         torch.cuda.current_stream().wait_stream(side)
-        for stage in self.STAGES:
+        for stage, run in stages.items():
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, pool=pool):
-                getattr(self.loop, stage)()
+            with graph_capture(g, pool=pool):
+                run()
             self.graphs[stage] = g
 
+    def _step(self) -> None:
+        loop = self.loop
+        self.kept_u.copy_(loop.u)
+        self.kept_unstable.copy_(loop.unstable)
+        self.kept_res.copy_(loop.res)
+        loop.step()
+
+    def step_pair(self, tol: float) -> bool:
+        """Two conjugate-gradient steps and one read of both residuals; whether the iterations stop (where the
+        first step met ``tol``, the solution and flags of that step: where a step-by-step loop stops)."""
+        self.run("step")
+        self.run("step")
+        first, second = torch.stack([self.kept_res, self.loop.res]).tolist()
+        if first < tol:
+            self.loop.u.copy_(self.kept_u)
+            self.loop.unstable.copy_(self.kept_unstable)
+            return True
+        return second < tol
+
     def load(self, W1: Dict[str, Tensor], W2: PackedPairs, C: Tensor, eps: Tensor, occ: Tensor,
-             gP: Tensor) -> CPHFLoop:
+             gP: Tensor, layout: Optional[Layout] = None) -> CPHFLoop:
+        if self.layout is not None and layout is not None:
+            load_layout(self.layout, layout)
         for key, v in self.W1.items():
             if key in W1:
                 v.copy_(W1[key])
@@ -1244,7 +1455,7 @@ def _cphf(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, result: SCFRes
     :class:`CPHFLoop` (replayed from ``graphs`` when given)."""
     C, eps, occ = result.orbitals, result.energies, result.occupations
     if graphs is not None:
-        loop = graphs.load(W1, W2, C, eps, occ, gP)
+        loop = graphs.load(W1, W2, C, eps, occ, gP, layout)
         run = graphs.run
     else:
         loop = CPHFLoop(layout, W1, W2, C, eps, occ, gP, unrestricted)
@@ -1252,10 +1463,16 @@ def _cphf(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, result: SCFRes
         def run(stage: str) -> None:
             getattr(loop, stage)()
     run("start")
-    for _ in range(200):
-        run("step")
-        if float(loop.res) < tol:
-            break
+    if graphs is not None:
+        # two replayed steps per read of the residuals (the same solution as one step per read)
+        for _ in range(100):
+            if graphs.step_pair(tol):
+                break
+    else:
+        for _ in range(200):
+            run("step")
+            if float(loop.res) < tol:
+                break
     unstable = loop.unstable
     if bool(unstable.any()):
         warnings.warn(f"the SCF solution of structure(s) {unstable.nonzero().flatten().tolist()} "

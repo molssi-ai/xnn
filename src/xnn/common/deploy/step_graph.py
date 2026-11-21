@@ -19,6 +19,7 @@ from torch import Tensor, nn
 
 from ..data import structure_to_graph
 from ..data.neighborlist import cell_grid, half_list, small_cell, unique_pairs
+from ..models.fast import graph_capture
 
 # the phases of the fixed-length solves, in the order of a plan's ``needed`` counts
 PHASES = ("forward", "adjoint")
@@ -504,7 +505,7 @@ class StepGraph:
         self.valence_steps += 1
         if self.stream is not None and self.valence_steps >= 2:
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
+            with graph_capture(graph, stream=self.stream, capture_error_mode="thread_local"):
                 outputs = self._run("valence")
             self.valence_graph, self.valence_outputs = graph, outputs
             self.recordings += 1
@@ -737,7 +738,7 @@ class StepGraph:
         if callable(checks):
             # its kernel is built before the capture (no kernel is loaded during one); last stays pos
             checks(self.pos, self.last, steps=self._ahead())
-        with torch.cuda.graph(graph, stream=self.stream, capture_error_mode="thread_local"):
+        with graph_capture(graph, stream=self.stream, capture_error_mode="thread_local"):
             outputs = self._run()
             flag = due = status = None
             if callable(checks):
