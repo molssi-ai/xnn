@@ -426,6 +426,13 @@ class Trainer:
                 ds.cutoff = float(model_cutoff)
                 if hasattr(ds, "_cache"):
                     ds._cache.clear()
+            # a model that keeps only its nearest neighbors (CGCNN): choose them once, when the graphs are built
+            k = getattr(base, "max_neighbors", None)
+            if (ds is not None and isinstance(k, int) and hasattr(ds, "max_neighbors")
+                    and ds.max_neighbors is None):
+                ds.max_neighbors = k
+                if hasattr(ds, "_cache"):
+                    ds._cache.clear()
 
         o = cfg.optim
         self._head_weights = {}

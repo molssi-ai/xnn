@@ -1,4 +1,4 @@
-"""A provenance note next to parameter files downloaded into the model cache.
+"""A provenance note next to files of other programs downloaded into the model cache.
 
 xnn does not ship the parameters of other programs. It downloads them on first
 use and writes ``LICENSE.txt`` beside them, which names the program, the
