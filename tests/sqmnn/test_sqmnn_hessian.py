@@ -3,10 +3,13 @@
 With the density's response to the positions, autograd Hessians equal central differences of the analytic
 forces (closed and open shells), the Hessian-vector products of a batch equal those of its structures, and the
 parameter gradients of a loss on mode curvatures equal finite differences in the parameters. The constants of
-the acetylenic, dispersion and hydrogen-bond corrections train, their scripted forms agree with the host forms,
-and the exported core carries their values. The tight-binding methods give exact Hessians and parameter gradients
+the acetylenic, dispersion and hydrogen-bond corrections can be set and train, the acetylenic switch has a smooth
+form, their scripted forms agree with the host forms, and the exported core carries their values and switch. The
+tight-binding methods give exact Hessians and parameter gradients
 of curvatures (second-order response of the smeared density and of the self-consistent charges).
 """
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -257,6 +260,108 @@ def test_trained_dispersion_and_hydrogen_bonds_are_twice_differentiable():
     lone = cr.pm7_dispersion([8], torch.zeros(1, 3), [[]], tables, constants=torch.tensor(cr.DISPERSION,
                                                                                           requires_grad=True))
     assert float(lone.abs().sum()) == 0.0
+
+
+def _yne_pair(r, constants, smooth):
+    """The acetylenic term of a C-C pair at distance ``r`` (a scalar tensor)."""
+    zero = torch.zeros((), dtype=r.dtype)
+    pos = torch.stack([torch.zeros(3, dtype=r.dtype), torch.stack([zero, zero, r])])
+    return cr.yne_correction([6, 6], pos, [[1], [0]], constants, smooth).sum()
+
+
+def test_smooth_yne_switch():
+    """The smooth switch is 12 below and 0 above its range and half way in its middle; its derivatives of the
+    first three orders vanish at both ends; its gradients in the distance and in the constants equal finite
+    differences."""
+    c = torch.tensor(cr.YNE)
+    assert float(_yne_pair(torch.tensor(1.27), c, True)) == pytest.approx(6.0, abs=1e-12)
+    assert float(_yne_pair(torch.tensor(1.27), c, False)) == pytest.approx(7.40625, abs=1e-12)
+    assert float(_yne_pair(torch.tensor(1.20), c, True)) == 12.0
+    assert float(_yne_pair(torch.tensor(1.34), c, True)) == 0.0
+    r = torch.tensor(1.21 + 1e-15, requires_grad=True)
+    (g,) = torch.autograd.grad(_yne_pair(r, c, True), r)
+    assert float(g) == 0.0
+    for r0 in (1.21 + 1e-3, 1.33 - 1e-3):
+        r = torch.tensor(r0, requires_grad=True)
+        d = _yne_pair(r, c, True)
+        for _ in range(3):
+            (d,) = torch.autograd.grad(d, r, create_graph=True)
+            assert abs(float(d)) < 1e-20, r0
+    # the polynomial's third derivative jumps at the end of the range
+    r = torch.tensor(1.33 - 1e-6, requires_grad=True)
+    d = _yne_pair(r, c, False)
+    for _ in range(3):
+        (d,) = torch.autograd.grad(d, r, create_graph=True)
+    assert abs(float(d)) > 1e5
+    r = torch.tensor(1.30, requires_grad=True)
+    cc = c.clone().requires_grad_(True)
+    e = _yne_pair(r, cc, True)
+    (dr,) = torch.autograd.grad(e, r, create_graph=True)
+    (d2,) = torch.autograd.grad(dr, r, retain_graph=True)
+    (dc,) = torch.autograd.grad(e, cc)
+    h, fd = 1e-6, []
+    for s in (1, -1):
+        rr = torch.tensor(1.30 + s * h, requires_grad=True)
+        fd.append(float(torch.autograd.grad(_yne_pair(rr, c, True), rr)[0]))
+    assert float(d2) == pytest.approx((fd[0] - fd[1]) / (2 * h), rel=1e-6)
+    for i in range(3):
+        fd = []
+        for s in (1, -1):
+            shifted = c.clone()
+            shifted[i] += s * h
+            fd.append(float(_yne_pair(torch.tensor(1.30), shifted, True)))
+        assert float(dc[i]) == pytest.approx((fd[0] - fd[1]) / (2 * h), rel=1e-6), i
+
+
+def test_yne_switch_and_correction_constants_options():
+    """``yne_switch`` and ``correction_constants`` change the heat of formation by the terms' difference, build
+    from a config, reach the exported core and reject unknown values."""
+    from xnn.common.config import from_dict
+    from xnn.common.models import build_model
+
+    z, pos = ACETYLENE                                   # C-C 1.27 Angstrom, the middle of the switch
+    graph = _graph(pos, z)
+    hof = PM6(reuse_density=False)(graph)["heat_of_formation"]
+    smooth = PM6(reuse_density=False, yne_switch="smooth")(graph)["heat_of_formation"]
+    assert float(smooth - hof) == pytest.approx(6.0 - 7.40625, abs=1e-9)
+    wide = {"YNE": [12.0, 1.21, 1.45]}
+    model = PM6(reuse_density=False, yne_switch="smooth", correction_constants=wide, trainable=["YNE"])
+    assert model.params["YNE"].tolist() == wide["YNE"]
+    expect = 12.0 / (1.0 + math.exp(1.0 / 0.75 - 1.0 / 0.25)) - 7.40625
+    assert float(model(graph)["heat_of_formation"] - hof) == pytest.approx(expect, abs=1e-9)
+
+    built = build_model(from_dict({"model": {"name": "pm7", "yne_switch": "smooth",
+                                             "correction_constants": wide}}).model)
+    assert built.yne_switch == "smooth" and built.correction_constants("YNE").tolist() == wide["YNE"]
+    zc, xc = CLUSTER
+    core = built.export_core()
+    edges, vec = torch.zeros((2, 0), dtype=torch.long), torch.zeros((0, 3))
+    _, node_energy, _ = core.node_features_energy_charges(torch.tensor(zc), edges, vec, torch.tensor(xc),
+                                                          torch.zeros((3, 3)), torch.zeros(3, dtype=torch.bool),
+                                                          0.0, 1.0)
+    built.reuse_density = False
+    eager = built(_graph(xc, zc))
+    assert float((eager["energy"] - PM7(reuse_density=False)(_graph(xc, zc))["energy"]).abs()) > 1e-4
+    assert torch.allclose(node_energy, eager["node_energy"].detach(), rtol=0.0, atol=1e-10)
+
+    with pytest.raises(ValueError, match="yne_switch"):
+        PM7(yne_switch="steep")
+    with pytest.raises(ValueError, match="no correction constants"):
+        PM3(correction_constants={"YNE": [12.0, 1.21, 1.33]})
+    with pytest.raises(ValueError, match="take 3 values"):
+        PM7(correction_constants={"DISP": [1.0, 2.0]})
+
+
+def test_exact_hessian_with_the_smooth_yne_switch():
+    """With the smooth switch and a C-C bond inside its range the Hessian equals Richardson-extrapolated central
+    differences of the forces."""
+    z = [1, 6, 6, 1]
+    pos = np.array([[0.02, 0.01, -1.71], [0, 0, -0.65], [0, 0, 0.65], [-0.01, 0.02, 1.71]])   # C-C 1.30
+    model = PM7(tol_density=1e-12, tol_energy=1e-13, yne_switch="smooth")
+    (H,) = hessian(model, _graph(pos, z))
+    h = 1e-4
+    fd = (4.0 * _fd_hessian(model, pos, z, None, h / 2) - _fd_hessian(model, pos, z, None, h)) / 3.0
+    assert torch.allclose(H, fd, rtol=0.0, atol=1e-5)
 
 
 def _tight(cls, **options):

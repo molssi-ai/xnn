@@ -117,7 +117,7 @@ def test_download_provenance_note(tmp_path):
     import shutil
     import warnings
 
-    from xnn.sqmnn.common.provenance import NOTE, ParameterLicenseWarning, write_license_note
+    from xnn.common.models.hub.provenance import NOTE, ParameterLicenseWarning, write_license_note
     cached = xtb_published.parameter_file("gfn2")
     assert "LGPL-3.0" in (cached.parent / NOTE).read_text()
     folder = tmp_path / "sqmnn" / f"xtb-{xtb_published.RELEASE.lstrip('v')}"
