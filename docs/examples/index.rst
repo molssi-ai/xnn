@@ -187,8 +187,7 @@ then their pretrained bulk-modulus model and metal/semiconductor classifier.
 .. example-toctree::
    :caption: CGCNN (gnn)
 
-   CGCNN on Materials Project formation energies, with the authors' pretrained
-   models <nb/examples/gnn/cgcnn/cgcnn_formation_energy>
+   CGCNN on Materials Project formation energies, with the authors' pretrained models <nb/examples/gnn/cgcnn/cgcnn_formation_energy>
 
 QET (gnn)
 =========
