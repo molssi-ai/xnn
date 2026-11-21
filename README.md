@@ -162,7 +162,7 @@ Other deployment routes:
 | Family | Models |
 |---|---|
 | Generic add-ons (`common`) | LES long-range electrostatics (k-space or particle-mesh sum; optionally charge-constrained or charge-equilibrated; latent charges and dipoles trainable on labels); D3 (zero, BJ, mzero, op damping) and D4 dispersion |
-| Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, GemNet (-Q, -T, -dQ, -dT), PaiNN, TensorNet, QET, NequIP, MACE, Allegro, CACE, AIMNet2, MEGNet (single- and multi-fidelity property models) |
+| Graph neural networks (`gnn`) | SchNet, DimeNet, DimeNet++, GemNet (-Q, -T, -dQ, -dT), PaiNN, TensorNet, QET, NequIP, MACE, Allegro, CACE, AIMNet2, MEGNet (single- and multi-fidelity) and CGCNN (property models) |
 | Dense neural networks (`dnn`) | ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4), QRNN |
 | Convolutional neural networks (`cnn`) | 3D steerable-/ conventional- / spherical-CNN |
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF |
@@ -201,7 +201,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.30.0},
+  version = {0.31.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```
