@@ -169,7 +169,7 @@ Other deployment routes:
 | Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
 | Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet, ByteFF, ByteFF-Pol |
 | Kernel regression neural networks (`krnn`) | GDML, sGDML |
-| Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable), GFN0-xTB, GFN1-xTB, GFN2-xTB |
+| Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable), GFN0-xTB, GFN1-xTB, GFN2-xTB, DFTB1, DFTB2 (SCC-DFTB), DFTB3 |
 
 Each model is checked against its reference code or paper
 (`notebooks/fidelity_checks/`). See the User Guide on [Model
@@ -201,7 +201,7 @@ If you use xnn in your work, please cite it as:
   author  = {Mostafanejad, Mohammad},
   title   = {xnn: Machine-learning interatomic potentials for molecules and materials},
   year    = {2026},
-  version = {0.31.0},
+  version = {0.32.0},
   url     = {https://github.com/molssi-ai/xnn}
 }
 ```

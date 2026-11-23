@@ -13,7 +13,7 @@ The *x* in **xnn** stands for the architecture family: graph neural networks
 (``gnn``), dense neural networks (``dnn``), convolutional neural networks on
 voxel grids (``cnn``), classical force field neural networks (``ffnn``),
 semiempirical quantum mechanics (``sqmnn``), transformers (``trfnn``), hybrid models
-(``hybnn``) and kernel regression (``krnn``).
+(``hybnn``) and kernel-based models (``krnn``).
 Every model is implemented using the same PyTorch ``nn.Module`` interface. Thus,
 one data object, one trainer and one deployment path serve all model families.
 
@@ -160,7 +160,7 @@ Models at a glance
      - ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2
    * - Hybrid neural networks (``hybnn``)
      - BAMBOO, SpookyNet, ByteFF, ByteFF-Pol
-   * - Kernel regression (``krnn``)
+   * - Kernel-based neural networks (``krnn``)
      - GDML, sGDML
    * - Add-ons for any model (``common``)
      - LES long-range electrostatics, D3 and D4 dispersion
