@@ -155,7 +155,7 @@ Models at a glance
    * - Classical force fields (``ffnn``)
      - ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF
    * - Semi-empirical quantum mechanics (``sqmnn``)
-     - PM3, PM6, PM6-ORG, PM7, GFN0-xTB, GFN1-xTB, GFN2-xTB
+     - PM3, PM6, PM6-ORG, PM7, GFN0-xTB, GFN1-xTB, GFN2-xTB, DFTB1, DFTB2 (SCC-DFTB), DFTB3
    * - Transformer neural networks (``trfnn``)
      - ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2
    * - Hybrid neural networks (``hybnn``)

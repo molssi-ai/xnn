@@ -1351,6 +1351,49 @@ elements up to radon. The methods are described in these papers:
   ``parameter_text()``.
 - Hessians are exact, see :ref:`howto-hessians`.
 
+Density-functional tight binding: DFTB1, DFTB2, DFTB3
+=====================================================
+:class:`~xnn.sqmnn.models.DFTB1`, :class:`~xnn.sqmnn.models.DFTB2` and
+:class:`~xnn.sqmnn.models.DFTB3` are the density-functional tight-binding
+methods of the DFTB+ program (`Hourahine et al., J. Chem. Phys. 152, 124101
+(2020) <https://doi.org/10.1063/1.5143190>`_), for molecules and periodic
+cells.
+
+- DFTB1 has no self-consistent charges: `Porezag et al., Phys. Rev. B 51,
+  12947 (1995) <https://doi.org/10.1103/PhysRevB.51.12947>`_
+- DFTB2 (SCC-DFTB) adds self-consistent charges: `Elstner et al., Phys. Rev. B
+  58, 7260 (1998) <https://doi.org/10.1103/PhysRevB.58.7260>`_
+- DFTB3 adds third-order charge terms: `Gaus, Cui and Elstner, J. Chem. Theory
+  Comput. 7, 931 (2011) <https://doi.org/10.1021/ct100684s>`_
+
+.. code-block:: python
+
+   from xnn.sqmnn.models import DFTB2, DFTB3
+
+   model = DFTB3()                           # The 3ob-3-1 set
+   model = DFTB2()                           # The mio-1-1 set
+   model = DFTB2(parameters="ob2-1-1")       # Long-range corrected exchange
+   model = DFTB3(parameters="my_skfiles")    # A folder of .skf files
+
+- The outputs are the total ``energy`` (eV), the atomic ``charges`` and each
+  energy term. ``scf_converged`` reports whether the charges converged.
+- Cells are evaluated at the Gamma point, with stress. ``kpoints=(4, 4, 4)``
+  samples a k-point grid instead.
+- Options: ``dispersion`` adds D3 or D4 (with ``"hh_repulsion": True`` for
+  DFTB3-D3H5), ``h5=True`` the H5 hydrogen-bond correction,
+  ``spin_constants`` collinear spin, ``onsite_correction`` the onsite
+  correction and ``orbital_potential`` DFTB+U (with spin). The ob2-1-1 set
+  turns on long-range corrected exchange and ``range_separation`` changes it.
+- ``trainable=True`` trains the integral tables, repulsive splines, orbital
+  energies and Hubbard parameters. ``model.write_set("folder")`` saves them as
+  ``.skf`` files that DFTB+ also reads.
+- ``export_torchscript_potential`` deploys any model to LAMMPS and MDI.
+- On a GPU, the fast path (``use_fast``, on by default) runs the integrals on
+  fused kernels. The first use compiles them, which takes up to a few minutes.
+- The sets mio-1-1, 3ob-3-1, ob2-1-1, pbc-0-3 and matsci-0-3 download on first
+  use. They are licensed CC BY-SA 4.0. Cite the papers named in each set's
+  README.
+
 Add-ons for any model
 =====================
 These wrappers add additional physical terms or corrections to any model
