@@ -168,7 +168,7 @@ Other deployment routes:
 | Force field neural networks (`ffnn`) | ReaxFF / ReaxFF-nn, OPLS-AA / L-OPLS, DREIDING / X6, AMBER (ff94), CHARMM22, AMOEBA, HIPPO, GFN-FF |
 | Transformer neural networks (`trfnn`) | ET (the TorchMD-Net equivariant transformer), Equiformer, EquiformerV2 |
 | Hybrid neural networks (`hybnn`) | BAMBOO, SpookyNet, ByteFF, ByteFF-Pol |
-| Kernel regression neural networks (`krnn`) | GDML, sGDML |
+| Kernel-based neural networks (`krnn`) | GDML, sGDML |
 | Semiempirical quantum mechanics neural networks (`sqmnn`) | PM3, PM6, PM6-ORG, PM7 (classics or trainable), GFN0-xTB, GFN1-xTB, GFN2-xTB, DFTB1, DFTB2 (SCC-DFTB), DFTB3 |
 
 Each model is checked against its reference code or paper
