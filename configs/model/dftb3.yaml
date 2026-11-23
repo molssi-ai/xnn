@@ -1,0 +1,24 @@
+name: dftb3
+cutoff: 0.1                   # neighbor-list radius of the data pipeline; the model forms all atom pairs itself
+parameters: 3ob-3-1           # Slater-Koster set: mio-1-1, 3ob-3-1, ob2-1-1, pbc-0-3 or matsci-0-3 (downloaded on first use) or a folder of .skf files
+max_angular_momentum: null    # highest shell per element, e.g. {C: p, S: d}; null takes the values the set recommends
+scc: true                     # self-consistent charges, which the third-order terms need
+shell_resolved: false         # one charge and Hubbard parameter per shell; works only without the full third order
+third_order: full             # third-order charge terms: full, onsite (on-site terms only) or null (none, as in DFTB2)
+hubbard_derivatives: null     # Hubbard derivatives per element (hartree per electron); null takes the set's values
+damping_exponent: null        # exponent of the damped hydrogen gamma function; null takes the value the set recommends
+electronic_temperature: 0.0   # Fermi smearing temperature of the occupations (K); 0 fills the lowest orbitals
+scc_tolerance: 1.0e-5         # the cycle ends when no charge changes by more than this between iterations
+max_iter: 100                 # iteration limit of the self-consistent charges
+mixing: 0.4                   # damping of the Anderson mixing
+history: 8                    # iterations kept by the Anderson mixing
+dispersion: null              # D3 or D4 dispersion, e.g. {model: d3, damping: bj, s8: 3.209, a1: 0.746, a2: 4.191}; hh_repulsion: true adds the D3H5 H-H term; null for none
+h5: null                      # H5 hydrogen-bond correction of gamma: true for the published values, or a dict of them; null for none
+spin_constants: null          # collinear spin polarization: spin constants W per element (one value, or the shell matrix); null for none
+trainable: false              # parameters to train: tables, repulsive, onsite, hubbard (or true for all); write_set saves them as .skf files
+range_separation: null        # long-range corrected exchange (LC-DFTB) with this omega (1/bohr); null takes the set's value (ob2), false turns it off
+exchange_cutoff: null         # periodic cells: distance (bohr) from which the long-range exchange is dropped; null takes the radius of the sphere inscribed in the cell
+kpoints: null                 # periodic cells: Monkhorst-Pack grid [n1, n2, n3] or {grid: [...], shift: [...]}; null samples the Gamma point
+onsite_correction: null       # onsite correction constants per element, {uu: [...], ud: [...]} over shell pairs; null for none
+orbital_potential: null       # DFTB+U on spin-polarized runs: {functional: fll or psic, shells: {Ti: [{shells: [2], uj: 0.1}]}}; null for none
+use_fast: auto                # fast path: small batches on a GPU run on the host (auto or true); false keeps them on the GPU
