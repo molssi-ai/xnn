@@ -13,7 +13,8 @@ the Fock matrix is assembled from atom blocks:
 
 (spin-unrestricted: the Coulomb term from the total density and the
 exchange terms, without the factor 1/2, from each spin density).
-Convergence is accelerated with Pulay's DIIS on the commutator ``FP - PF``.
+Convergence is accelerated with Pulay's DIIS on the commutator ``FP - PF``. A run that stops improving goes
+on with plain level-shifted iterations (see :func:`solve_scf`).
 
 :class:`SCFDensity` returns the converged densities as a differentiable
 function of the core Hamiltonian and the two-electron integrals: its
@@ -28,6 +29,21 @@ import torch
 from torch import Tensor
 
 from xnn.common.models.fast import graph_capture
+
+from .bond_order import (
+    BondOrder,
+    cloned,
+    fock_host,
+    kernel,
+    kernel_at,
+    kernel_host,
+    linearized,
+    linearized_host,
+    total_density,
+    with_values,
+)
+from .bond_order import fock as bond_order_fock
+from .bond_order import load as load_bond_order
 
 PAD_ENERGY = 1.0e4   # diagonal of the padding orbitals (eV)
 # below this many pairs, all pairs form one group padded to the largest orbital count (fewer, larger operations),
@@ -44,6 +60,11 @@ WARM_ORBITALS = {"cpu": False, "cuda": True}
 # evaluations of a batch composition launched before its CUDA graphs are captured (a capture costs about as much
 # as ten replays save, so compositions met once or twice never pay for one)
 CAPTURE_AFTER = 2
+# iterations without a new smallest density change (after the smeared ones) after which a run counts as stalled and
+# goes on with level-shifted iterations (see solve_scf); 0 never
+STALL_PATIENCE = 40
+# the shift (eV) of the virtual orbitals in those iterations
+LEVEL_SHIFT = 1.0
 
 
 def _host_eigh(n: int) -> bool:
@@ -556,8 +577,9 @@ class SCFLoop:
 
     def __init__(self, layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, n_occ: Tensor,
                  weight: float, unrestricted: bool, diis_size: int, filled: int, blocks: List[Optional[int]],
-                 static: bool = False):
+                 static: bool = False, bond_order: Optional[BondOrder] = None):
         self.layout = layout
+        self.bond_order = bond_order
         self.H = H
         self.W1 = W1
         self.W2 = W2
@@ -583,6 +605,8 @@ class SCFLoop:
         self.dP = H.new_zeros([B])
         self.dE = H.new_zeros([B])
         self.flag = torch.zeros([], dtype=torch.bool, device=H.device)
+        # the level shift of the virtual orbitals (eV): a stalled run's continuation, see solve_scf
+        self.shift = 0.0
         # on a GPU the device-side form (that of the graphs), so that replays and launches compute the same numbers
         self.diis = DIIS(B, [S, n, n], S * n * n, diis_size, H.dtype, H.device, static or H.is_cuda)
 
@@ -603,13 +627,17 @@ class SCFLoop:
         self.diis.reset()
 
     def fock_step(self) -> None:
-        F = _fock(self.layout, self.H, self.W1, self.W2, self.P, self.unrestricted)
-        energy = _electronic_energy(self.H, F, self.P, self.unrestricted)
+        F, energy = _fock_energy(self.layout, self.H, self.W1, self.W2, self.P, self.unrestricted, self.bond_order)
+        if self.shift > 0.0:
+            # the virtual orbitals of the current density raised (the same solutions, smaller steps)
+            F = F + self.shift * _projectors(self.P, self.layout.valid, self.unrestricted)[1]
         # F and P are symmetric: P F = (F P)^T
         FP = _bmm(F, self.P)
         err = FP - FP.transpose(-1, -2)
         self.Fx = self._put(self.Fx, self.diis.extrapolate(F.transpose(0, 1), err.transpose(0, 1)).transpose(0, 1))
-        self.dE = self._put(self.dE, (energy - self.e_old).abs())
+        # changes within the round-off of the energy (16 units in its last place) count as none
+        de = (energy - self.e_old).abs() - 3.552713678800501e-15 * energy.abs()
+        self.dE = self._put(self.dE, de.clamp(min=0.0))
         self.e_old.copy_(energy)
 
     def _changes(self, C: Tensor, occ: Tensor, m: Optional[int]) -> None:
@@ -664,15 +692,17 @@ class SCFGraphs:
     STAGES = ("fock_step", "rotate_step", "occupy", "commit", "occupy_commit")
 
     def __init__(self, layout: Layout, H: Tensor, W1: dict, W2: PackedPairs, n_occ: Tensor, weight: float,
-                 unrestricted: bool, diis_size: int, filled: int, blocks):
+                 unrestricted: bool, diis_size: int, filled: int, blocks, bond_order: Optional[BondOrder] = None):
         self.H = H.clone()
         self.W1 = {key: v.clone() for key, v in W1.items()}
         # a layout of fixed shapes (a bucket) is read from buffers that each evaluation fills
         self.layout = static_layout(layout) if layout.fixed else None
         maps = self.layout.pair_group_maps() if self.layout is not None else [m for _, _, m, _, _ in W2]
         self.W2 = [(ka, kb, mg, Wc.clone(), Wx.clone()) for (ka, kb, _, Wc, Wx), mg in zip(W2, maps)]
+        self.bond_order = cloned(bond_order) if bond_order is not None else None
         self.loop = SCFLoop(self.layout if self.layout is not None else layout, self.H, self.W1, self.W2,
-                            n_occ.clone(), weight, unrestricted, diis_size, filled, blocks, static=True)
+                            n_occ.clone(), weight, unrestricted, diis_size, filled, blocks, static=True,
+                            bond_order=self.bond_order)
         self.check = H.new_zeros([2])
         self.host_check = torch.empty(2, dtype=H.dtype, pin_memory=True)
         # the energy changes of an iteration, kept when the next Fock step runs ahead (see _GraphedLoop)
@@ -722,12 +752,15 @@ class SCFGraphs:
         self.loop.C_new.copy_(v, non_blocking=True)
 
     def load(self, H: Tensor, W1: dict, W2: PackedPairs, P: Tensor, C: Optional[Tensor] = None,
-             occ: Optional[Tensor] = None, layout: Optional[Layout] = None, n_occ: Optional[Tensor] = None) -> SCFLoop:
+             occ: Optional[Tensor] = None, layout: Optional[Layout] = None, n_occ: Optional[Tensor] = None,
+             bond_order: Optional[BondOrder] = None) -> SCFLoop:
         """Copy the inputs of a new evaluation into the buffers and start the loop from the density ``P`` (and
         the orbitals ``C`` with occupations ``occ`` where given); a bucket's graphs also take its ``layout`` and
-        electron counts ``n_occ``."""
+        electron counts ``n_occ``, and the pairs of the bond-order term."""
         if self.layout is not None and layout is not None:
             load_layout(self.layout, layout)
+        if bond_order is not None and self.bond_order is not None:
+            load_bond_order(self.bond_order, bond_order)
         if n_occ is not None:
             loop = self.loop
             loop.n_occ.copy_(n_occ)
@@ -862,7 +895,7 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
             smear_steps: int = 25, spin_guess: Optional[Tensor] = None,
             pseudo_diagonalization: Optional[float] = None, graph_cache: Optional[SCFGraphCache] = None,
             graph_key: tuple = (), orbitals: Optional[Tensor] = None,
-            occupations: Optional[Tensor] = None) -> SCFResult:
+            occupations: Optional[Tensor] = None, bond_order: Optional[BondOrder] = None) -> SCFResult:
     """Solve the SCF equations of a batch (no gradient tracking).
 
     Parameters
@@ -907,6 +940,8 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
         The converged orbitals ``(S, B, n, n)`` and occupations ``(S, B, n)`` of the previous geometry of a warm
         start (``guess`` its density): where :data:`WARM_ORBITALS` of the device allows, without smeared
         iterations and with pseudo-diagonalization on, the iterations rotate them from the first one.
+    bond_order : BondOrder, optional
+        The pairs of the bond-order term (:mod:`~.bond_order`), whose energy and Fock matrices enter the SCF.
 
     Returns
     -------
@@ -926,58 +961,65 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
         graphs = None
         if graph_cache is not None and H.is_cuda and smear_steps == 0:
             key = (graph_key, tuple(H.shape), H.dtype, unrestricted, diis_size, filled, tuple(blocks),
-                   tuple(tuple(Wc.shape) for _, _, _, Wc, _ in W2p))
+                   tuple(tuple(Wc.shape) for _, _, _, Wc, _ in W2p),
+                   None if bond_order is None else (tuple(bond_order.gather.shape), bond_order.masked))
             graphs = graph_cache.get(key, lambda: SCFGraphs(layout, H, W1p, W2p, n_occ, weight, unrestricted,
-                                                            diis_size, filled, blocks))
+                                                            diis_size, filled, blocks, bond_order))
         if graphs is None:
             return scf_solve(layout, H, W1p, W2p, n_alpha, n_beta, unrestricted, guess, max_iter, tol_density,
                              tol_energy, diis_size, smearing, smear_steps, spin_guess, pseudo_diagonalization,
-                             _per_device(PSEUDO_MIN_BASIS, H.device), orbitals, occupations)
-        graphs.load(H, W1p, W2p, P, orbitals, occupations, layout, n_occ)
+                             _per_device(PSEUDO_MIN_BASIS, H.device), orbitals, occupations, bond_order,
+                             STALL_PATIENCE, LEVEL_SHIFT)
+        graphs.load(H, W1p, W2p, P, orbitals, occupations, layout, n_occ, bond_order)
         return solve_scf(_GraphedLoop(graphs), layout, H, W1p, W2p, n_occ, weight, unrestricted, diis_size, filled,
                          blocks, max_iter, tol_density, tol_energy, smearing, smear_steps, rotate,
-                         orbitals is not None)
+                         orbitals is not None, STALL_PATIENCE, LEVEL_SHIFT)
 
 
 def scf_solve(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, n_alpha: Tensor, n_beta: Tensor,
               unrestricted: bool, guess: Tensor, max_iter: int, tol_density: float, tol_energy: float,
               diis_size: int, smearing: float, smear_steps: int, spin_guess: Optional[Tensor],
               pseudo_diagonalization: float, min_basis: int, orbitals: Optional[Tensor] = None,
-              occupations: Optional[Tensor] = None) -> SCFResult:
+              occupations: Optional[Tensor] = None, bond_order: Optional[BondOrder] = None,
+              patience: int = 40, shift: float = 1.0) -> SCFResult:
     """:func:`run_scf` on packed integrals without graphs (detached inputs); pseudo-diagonalization from
     ``min_basis`` basis functions on, rotating the given ``orbitals`` (with their ``occupations``) from the
-    first iteration where it is on and nothing is smeared."""
+    first iteration where it is on and nothing is smeared; ``patience`` and ``shift`` as in :func:`solve_scf`
+    (defaults :data:`STALL_PATIENCE`, :data:`LEVEL_SHIFT`)."""
     P, n_occ, weight, filled, blocks = scf_start(guess, n_alpha, n_beta, unrestricted, spin_guess)
     filled, blocks = _fixed_shapes(layout, H, filled, blocks)
     rotate = pseudo_diagonalization if H.shape[-1] >= min_basis else 0.0
     if smear_steps != 0 or rotate == 0.0:
         orbitals = occupations = None
-    loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks)
+    loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, False, bond_order)
     loop.start(P, orbitals, occupations)
     return solve_scf(loop, layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, max_iter,
                      tol_density, tol_energy, smearing, smear_steps, rotate,
-                     orbitals is not None and occupations is not None)
+                     orbitals is not None and occupations is not None, patience, shift)
 
 
 def scf_with_starts(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, n_alpha: Tensor,
                     n_beta: Tensor, unrestricted: bool, guess: Tensor, max_iter: int, tol_density: float,
                     tol_energy: float, starts: List[Tuple[float, int]], restart_gap: float,
-                    pseudo_diagonalization: float, min_basis: int, search: int = 0) -> SCFResult:
+                    pseudo_diagonalization: float, min_basis: int, search: int = 0,
+                    bond_order: Optional[BondOrder] = None) -> SCFResult:
     """The SCF from each start ``(smearing, smeared iterations)`` where the first may have settled in an
     excited aufbau state (:func:`needs_restart`), then from ``search`` perturbed starts (:func:`search_guess`),
     per structure the converged result of lowest energy (:func:`lowest`); the rule of :class:`~.nddo.NDDO`."""
     results = [scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, guess, max_iter, tol_density,
-                         tol_energy, 8, starts[0][0], starts[0][1], None, pseudo_diagonalization, min_basis)]
+                         tol_energy, 8, starts[0][0], starts[0][1], None, pseudo_diagonalization, min_basis,
+                         None, None, bond_order)]
     if len(starts) > 1 and needs_restart(results[0], unrestricted, restart_gap):
         for kt, steps in starts[1:]:
             results.append(scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, guess, max_iter,
                                      tol_density, tol_energy, 8, kt, steps, None, pseudo_diagonalization,
-                                     min_basis))
+                                     min_basis, None, None, bond_order))
     for i in range(search):
         start, spin = search_guess(guess, layout, n_alpha, n_beta, unrestricted, i)
         kt, steps = search_schedule(i)
         results.append(scf_solve(layout, H, W1, W2, n_alpha, n_beta, unrestricted, start, max_iter, tol_density,
-                                 tol_energy, 8, kt, steps, spin, pseudo_diagonalization, min_basis))
+                                 tol_energy, 8, kt, steps, spin, pseudo_diagonalization, min_basis, None, None,
+                                 bond_order))
     return lowest(results)
 
 
@@ -1016,11 +1058,13 @@ def scf_start(guess: Tensor, n_alpha: Tensor, n_beta: Tensor, unrestricted: bool
 
 
 def _iterate(loop: SCFLoop, max_iter: int, smear_steps: int, smearing: float, rotate: float, tol_density: float,
-             tol_energy: float, seeded: bool = False) -> Tuple[int, bool]:
-    """The SCF iterations on a started :class:`SCFLoop` (or the same replayed from graphs): the iteration count
-    and whether the last one rotated the orbitals. A loop ``seeded`` with orbitals rotates them from the first
-    iteration."""
+             tol_energy: float, seeded: bool = False, patience: int = 0) -> Tuple[int, bool, bool]:
+    """The SCF iterations on a started :class:`SCFLoop` (or the same replayed from graphs): the iteration count,
+    whether the last one rotated the orbitals, and whether the run stalled (no new smallest density change for
+    ``patience`` iterations after the smeared ones; 0 never). A loop ``seeded`` with orbitals rotates them from the
+    first iteration."""
     it, have_orbitals, change, de_max, rotated = 0, seeded, 0.0 if seeded else float("inf"), float("inf"), False
+    best, best_it, stalled = float("inf"), 0, False
     while it < max_iter:
         it += 1
         if it == smear_steps:
@@ -1044,25 +1088,47 @@ def _iterate(loop: SCFLoop, max_iter: int, smear_steps: int, smearing: float, ro
         # every structure is converged when the largest changes are below the thresholds
         if change < tol_density and de_max < tol_energy and it >= smear_steps:
             break
-    return it, rotated
+        if patience > 0 and it > smear_steps:
+            if change < best:
+                best, best_it = change, it
+            elif it - best_it >= patience:
+                stalled = True
+                break
+    return it, rotated, stalled
 
 
 def solve_scf(loop: SCFLoop, layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, n_occ: Tensor,
               weight: float, unrestricted: bool, diis_size: int, filled: int, blocks: List[Optional[int]],
               max_iter: int, tol_density: float, tol_energy: float, smearing: float, smear_steps: int,
-              rotate: float, seeded: bool = False) -> SCFResult:
+              rotate: float, seeded: bool = False, patience: int = 0, shift: float = 0.0) -> SCFResult:
     """The iterations of a started loop and the converged quantities: after rotations the eigenpairs from the
     occupied and virtual blocks, and a check of the density against the aufbau occupation of the converged Fock
-    matrix (a rotated solution with another occupation goes on with full diagonalizations)."""
-    it, rotated = _iterate(loop, max_iter, smear_steps, smearing, rotate, tol_density, tol_energy, seeded)
+    matrix (a rotated solution with another occupation goes on with full diagonalizations).
+
+    A run that stalls (no new smallest density change for ``patience`` iterations: DIIS wandering between nearby
+    solutions, or over an energy far from quadratic in the density) goes on from its last density with plain
+    iterations (no extrapolation) on the Fock matrices with the virtual orbitals raised by ``shift`` eV (level
+    shifting: the same solutions, smaller steps that lower the energy), full diagonalizations and the aufbau
+    check."""
+    it, rotated, stalled = _iterate(loop, max_iter, smear_steps, smearing, rotate, tol_density, tol_energy, seeded,
+                                    patience)
+    check = rotate
+    if stalled and shift > 0.0 and it < max_iter:
+        shifted = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, 1, filled, blocks, False,
+                          loop.bond_order)
+        shifted.shift = shift
+        shifted.start(loop.P.clone())
+        rest, rotated, _ = _iterate(shifted, max_iter - it, 0, smearing, 0.0, tol_density, tol_energy)
+        loop, it, check = shifted, it + rest, 1.0
     result, P_aufbau = _converged(loop, layout, H, W1, W2, n_occ, weight, unrestricted, filled, blocks, it, rotated,
-                                  smear_steps, max_iter, tol_density, tol_energy, rotate)
+                                  smear_steps, max_iter, tol_density, tol_energy, check)
     if P_aufbau is None:
         return result
     # a rotated solution with another occupation goes on with full diagonalizations
-    loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks)
+    loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, False,
+                   loop.bond_order)
     loop.start(P_aufbau)
-    rest, _ = _iterate(loop, max_iter - it, 0, smearing, 0.0, tol_density, tol_energy)
+    rest, _, _ = _iterate(loop, max_iter - it, 0, smearing, 0.0, tol_density, tol_energy)
     result, _ = _converged(loop, layout, H, W1, W2, n_occ, weight, unrestricted, filled, blocks, rest, False, 0,
                            max_iter - it, tol_density, tol_energy, 0.0)
     return SCFResult(result.densities, result.orbitals, result.energies, result.occupations, it + rest,
@@ -1080,8 +1146,7 @@ def _converged(loop: SCFLoop, layout: Layout, H: Tensor, W1: Dict[str, Tensor], 
         # not "& (it >= smear_steps)": TorchScript makes the flags integers with a Python bool
         converged = torch.zeros_like(converged)
     P = loop.P.clone()
-    F = _fock(layout, H, W1, W2, P, unrestricted)
-    e_el = _electronic_energy(H, F, P, unrestricted)
+    F, e_el = _fock_energy(layout, H, W1, W2, P, unrestricted, loop.bond_order)
     # after rotations the converged orbitals separate the occupied and virtual spaces of F (to the SCF
     # tolerance): the eigenpairs from the two smaller blocks, a full diagonalization otherwise
     pairs = _block_eigenpairs(F, loop.C, blocks) if rotated and it < max_iter else None
@@ -1269,6 +1334,23 @@ def _electronic_energy(H: Tensor, F: Tensor, P: Tensor, unrestricted: bool) -> T
     return 0.5 * (P[0] * (H + F[0])).sum((-1, -2))
 
 
+def _fock_energy(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs, P: Tensor, unrestricted: bool,
+                 bond_order: Optional[BondOrder]) -> Tuple[Tensor, Tensor]:
+    """The Fock matrices and electronic energies of densities ``P``, with the bond-order term where given (its
+    derivative in both spins' Fock matrices, its energy added to that of the quadratic Hamiltonian)."""
+    F = _fock(layout, H, W1, W2, P, unrestricted)
+    energy = _electronic_energy(H, F, P, unrestricted)
+    if bond_order is None:
+        return F, energy
+    if not torch.jit.is_scripting():
+        if not P.is_cuda and not P.requires_grad:
+            # the iterations on the CPU: the same formulas in NumPy (small arrays, no gradients)
+            F_h, E_h = fock_host(bond_order, total_density(P))
+            return (F if F_h is None else F + F_h.unsqueeze(0)), energy + E_h
+    F_w, E_w = bond_order_fock(bond_order, total_density(P))
+    return F + F_w.unsqueeze(0), energy + E_w
+
+
 def two_electron_fock(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, P: Tensor,
                       unrestricted: bool) -> Tensor:
     """The two-electron parts ``G(P)`` ``(S, B, n, n)`` of the Fock matrices of densities ``P`` (linear in ``P``)."""
@@ -1298,10 +1380,17 @@ class CPHFLoop:
     stages write into fixed buffers (the form of :class:`CPHFGraphs`)."""
 
     def __init__(self, layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, C: Tensor, eps: Tensor, occ: Tensor,
-                 gP: Tensor, unrestricted: bool, static: bool = False):
+                 gP: Tensor, unrestricted: bool, static: bool = False, bond_order: Optional[BondOrder] = None):
         self.layout, self.W1, self.W2 = layout, W1, W2
         self.C, self.eps, self.occ, self.gP = C, eps, occ, gP
         self.unrestricted, self.static = unrestricted, static
+        # the bond-order term's response at the converged density (pair blocks and factors, set by start)
+        self.bond_order = bond_order
+        n_bo = bond_order.coef.shape[0] if bond_order is not None else 0
+        k_bo = bond_order.k if bond_order is not None else 1
+        self.bo_P = C.new_zeros([n_bo, k_bo, k_bo])
+        self.bo_a1, self.bo_a2 = C.new_zeros([n_bo]), C.new_zeros([n_bo])
+        self.bo_host = None
         self.weight = 1.0 if unrestricted else 2.0
         self.ov = torch.zeros(C.shape, dtype=torch.bool, device=C.device)
         self.D = torch.ones_like(C)
@@ -1324,7 +1413,13 @@ class CPHFLoop:
         return torch.matmul(self.C, torch.matmul(Uov + Uov.transpose(-1, -2), self.C.transpose(-1, -2)))
 
     def _G(self, Z: Tensor) -> Tensor:
-        return two_electron_fock(self.layout, self.W1, self.W2, Z, self.unrestricted)
+        G = two_electron_fock(self.layout, self.W1, self.W2, Z, self.unrestricted)
+        bo = self.bond_order
+        if bo is None:
+            return G
+        if self.bo_host is not None:
+            return G + kernel_host(bo, *self.bo_host, Z.sum(0)).unsqueeze(0)
+        return G + kernel_at(bo, self.bo_P, self.bo_a1, self.bo_a2, Z.sum(0)).unsqueeze(0)
 
     def _A(self, u: Tensor) -> Tensor:
         # A u = (D / w) u + [G(z(u))]_ov with z(u) = from_mo(u)
@@ -1332,6 +1427,16 @@ class CPHFLoop:
                            torch.zeros_like(u))
 
     def start(self) -> None:
+        bo = self.bond_order
+        if bo is not None:
+            P = density(self.C, self.occ, self.C.shape[-1]).sum(0)
+            if not P.is_cuda and not torch.is_grad_enabled():
+                self.bo_host = linearized_host(bo, P)             # the iterations on the CPU, in NumPy
+            else:
+                Pab, a1, a2 = linearized(bo, P)
+                self.bo_P = self._put(self.bo_P, Pab)
+                self.bo_a1 = self._put(self.bo_a1, a1)
+                self.bo_a2 = self._put(self.bo_a2, a2)
         gP = 0.5 * (self.gP + self.gP.transpose(-1, -2))
         occ_mask = self.occ > 0
         denom = self.eps.unsqueeze(-1) - self.eps.unsqueeze(-2)              # (S,B,n,n) e_i - e_a
@@ -1382,16 +1487,17 @@ class CPHFGraphs:
     STAGES = ("start", "step")
 
     def __init__(self, layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, C: Tensor, eps: Tensor,
-                 occ: Tensor, gP: Tensor, unrestricted: bool):
+                 occ: Tensor, gP: Tensor, unrestricted: bool, bond_order: Optional[BondOrder] = None):
         self.W1 = {key: v.clone() for key, v in W1.items()}
         self.W2 = [(ka, kb, maps, Wc.clone(), Wx.clone()) for ka, kb, maps, Wc, Wx in W2]
         self.layout = static_layout(layout) if layout.fixed else None
         if self.layout is not None:
             self.W2 = [(ka, kb, mg, Wc, Wx) for (ka, kb, _, Wc, Wx), mg in zip(self.W2,
                                                                             self.layout.pair_group_maps())]
+        self.bond_order = cloned(bond_order) if bond_order is not None else None
         self.loop = CPHFLoop(self.layout if self.layout is not None else layout, self.W1, self.W2, C.clone(),
                              eps.clone(), occ.clone(), gP.clone(),
-                             unrestricted, static=True)
+                             unrestricted, static=True, bond_order=self.bond_order)
         # the state a step starts from (see step_pair)
         self.kept_u, self.kept_unstable = self.loop.u.clone(), self.loop.unstable.clone()
         self.kept_res = self.loop.res.clone()
@@ -1430,9 +1536,11 @@ class CPHFGraphs:
         return second < tol
 
     def load(self, W1: Dict[str, Tensor], W2: PackedPairs, C: Tensor, eps: Tensor, occ: Tensor,
-             gP: Tensor, layout: Optional[Layout] = None) -> CPHFLoop:
+             gP: Tensor, layout: Optional[Layout] = None, bond_order: Optional[BondOrder] = None) -> CPHFLoop:
         if self.layout is not None and layout is not None:
             load_layout(self.layout, layout)
+        if bond_order is not None and self.bond_order is not None:
+            load_bond_order(self.bond_order, bond_order)
         for key, v in self.W1.items():
             if key in W1:
                 v.copy_(W1[key])
@@ -1450,15 +1558,17 @@ class CPHFGraphs:
 
 
 def _cphf(layout: Layout, W1: Dict[str, Tensor], W2: PackedPairs, result: SCFResult, gP: Tensor,
-          unrestricted: bool, tol: float, graphs: Optional[CPHFGraphs] = None) -> CPHFLoop:
+          unrestricted: bool, tol: float, graphs: Optional[CPHFGraphs] = None,
+          bond_order: Optional[BondOrder] = None) -> CPHFLoop:
     """The coupled-perturbed equations of the converged ``result`` for the density gradient ``gP``, solved by
-    :class:`CPHFLoop` (replayed from ``graphs`` when given)."""
+    :class:`CPHFLoop` (replayed from ``graphs`` when given), with the response of the bond-order term where
+    given."""
     C, eps, occ = result.orbitals, result.energies, result.occupations
     if graphs is not None:
-        loop = graphs.load(W1, W2, C, eps, occ, gP, layout)
+        loop = graphs.load(W1, W2, C, eps, occ, gP, layout, bond_order)
         run = graphs.run
     else:
-        loop = CPHFLoop(layout, W1, W2, C, eps, occ, gP, unrestricted)
+        loop = CPHFLoop(layout, W1, W2, C, eps, occ, gP, unrestricted, False, bond_order)
 
         def run(stage: str) -> None:
             getattr(loop, stage)()
@@ -1488,20 +1598,23 @@ def _projectors(P: Tensor, valid: Tensor, unrestricted: bool) -> Tuple[Tensor, T
 
 
 def response_operator(layout: Layout, F: Tensor, P: Tensor, W1: Tensor, W2: Tensor, X: Tensor,
-                      unrestricted: bool) -> Tensor:
+                      unrestricted: bool, bond_order: Optional[BondOrder] = None) -> Tensor:
     """The linearized SCF equations of converged densities as a symmetric operator on ``X`` ``(S, B, n, n)``.
 
     With the projectors ``D``, ``Q`` of :func:`_projectors` and ``Y = Q X D`` (the occupied-to-virtual part),
     ``M X = Q (F Y - Y F + G(w (Y + Y^T))) D + X - Y``, ``w`` the occupation of an orbital and ``G`` the
-    two-electron part of the Fock matrix. The first-order density change of a Fock perturbation ``dF`` is
-    ``w (Y + Y^T)`` with ``M Y = -Q dF D``. Every input enters differentiably, so solutions of ``M`` can be
-    differentiated again (:class:`ResponseSolve`).
+    two-electron part of the Fock matrix (with the response of the bond-order term where given, on the total
+    density). The first-order density change of a Fock perturbation ``dF`` is ``w (Y + Y^T)`` with
+    ``M Y = -Q dF D``. Every input enters differentiably, so solutions of ``M`` can be differentiated again
+    (:class:`ResponseSolve`).
     """
     D, Q = _projectors(P, layout.valid, unrestricted)
     Y = torch.matmul(Q, torch.matmul(X, D))
     w = 1.0 if unrestricted else 2.0
-    G = two_electron_fock(layout, pack_one_center(W1), pack_pairs(layout, W2), w * (Y + Y.transpose(-1, -2)),
-                          unrestricted)
+    dP = w * (Y + Y.transpose(-1, -2))
+    G = two_electron_fock(layout, pack_one_center(W1), pack_pairs(layout, W2), dP, unrestricted)
+    if bond_order is not None:
+        G = G + kernel(bond_order, total_density(P), dP.sum(0)).unsqueeze(0)
     inner = torch.matmul(F, Y) - torch.matmul(Y, F) + G
     return torch.matmul(Q, torch.matmul(inner, D)) + X - Y
 
@@ -1514,42 +1627,67 @@ def _alias(t: Tensor, create_graph: bool) -> Tensor:
     return t.detach().requires_grad_(True)
 
 
+def _with_values(bond_order: Optional[BondOrder], values) -> Optional[BondOrder]:
+    return None if bond_order is None else with_values(bond_order, values[0], values[1], values[2])
+
+
+def _bond_order_grads(bond_order: Optional[BondOrder], values, need, P: Tensor, z: Tensor, create_graph: bool):
+    """The gradients of ``<z, F_W(P)>`` (the bond-order Fock matrices at fixed densities, summed over the spins of
+    ``z``) with respect to the values of the bond-order term that ``need`` them (the source of their response)."""
+    grads = [None, None, None]
+    if bond_order is None or not any(need):
+        return grads
+    with torch.enable_grad():
+        vs = [_alias(v, create_graph) if n else v.detach() for v, n in zip(values, need)]
+        F_w = bond_order_fock(with_values(bond_order, vs[0], vs[1], vs[2]), total_density(P))[0]
+        wrt = [v for v, n in zip(vs, need) if n]
+        out = iter(torch.autograd.grad((F_w * z.sum(0)).sum(), wrt, create_graph=create_graph, allow_unused=True))
+    return [next(out) if n else None for n in need]
+
+
 class ResponseSolve(torch.autograd.Function):
     """``X = M^-1 b`` for the operator ``M`` of :func:`response_operator`, differentiable to any order.
 
     The forward pass solves the occupied-virtual part by the conjugate gradients of :class:`CPHFLoop` (the
     rest of ``M`` is the identity). ``M`` is symmetric, so the backward pass is another solve,
-    ``lambda = M^-1 gX``, and the gradients of ``F``, ``P`` and the integrals are those of
-    ``-<lambda, M X>`` at fixed ``lambda`` and ``X``: made of differentiable operations, they give the
-    second and higher derivatives of the SCF density (implicit differentiation of the SCF equations).
+    ``lambda = M^-1 gX``, and the gradients of ``F``, ``P``, the integrals and the values of the bond-order term
+    are those of ``-<lambda, M X>`` at fixed ``lambda`` and ``X``: made of differentiable operations, they give
+    the second and higher derivatives of the SCF density (implicit differentiation of the SCF equations).
     """
 
     @staticmethod
-    def forward(ctx, b, F, P, W1, W2, result: SCFResult, layout: Layout, unrestricted: bool, tol: float):
+    def forward(ctx, b, F, P, W1, W2, result: SCFResult, layout: Layout, unrestricted: bool, tol: float,
+                bond_order: Optional[BondOrder] = None, coef=None, lower=None, width=None):
         D, Q = _projectors(P, layout.valid, unrestricted)
         inside = torch.matmul(Q, torch.matmul(b, D))
         w = 1.0 if unrestricted else 2.0
         # the CPHF loop solves A u = -[C^T sym(g) C]_ov with M = w A; [C^T sym(Q b D) C]_ia = (C^T b C)_ai / 2
         loop = _cphf(layout, pack_one_center(W1), pack_pairs(layout, W2), result, (-2.0 / w) * inside,
-                     unrestricted, tol)
+                     unrestricted, tol, None, bond_order)
         C = result.orbitals
         X = torch.matmul(C, torch.matmul(loop.u.transpose(-1, -2), C.transpose(-1, -2))) + (b - inside)
-        ctx.save_for_backward(F, P, W1, W2, X)
+        ctx.save_for_backward(F, P, W1, W2, X, coef, lower, width)
         ctx.result, ctx.layout, ctx.unrestricted, ctx.tol = result, layout, unrestricted, tol
+        ctx.bond_order = bond_order
         return X
 
     @staticmethod
     def backward(ctx, gX):
-        F, P, W1, W2, X = ctx.saved_tensors
-        lam = ResponseSolve.apply(gX, F, P, W1, W2, ctx.result, ctx.layout, ctx.unrestricted, ctx.tol)
-        need = ctx.needs_input_grad[1:5]
-        grads = [None, None, None, None]
+        F, P, W1, W2, X, coef, lower, width = ctx.saved_tensors
+        bo = ctx.bond_order
+        lam = ResponseSolve.apply(gX, F, P, W1, W2, ctx.result, ctx.layout, ctx.unrestricted, ctx.tol,
+                                  _with_values(bo, (coef, lower, width)), coef, lower, width)
+        need = list(ctx.needs_input_grad[1:5]) + (list(ctx.needs_input_grad[10:13]) if bo is not None
+                                                  else [False, False, False])
+        grads = [None] * 7
         if any(need):
             create = torch.is_grad_enabled()
+            inputs = (F, P, W1, W2, coef, lower, width)
             with torch.enable_grad():
-                xs = [_alias(t, create) if n else t.detach() for t, n in zip((F, P, W1, W2), need)]
+                xs = [_alias(t, create) if n else (t.detach() if t is not None else None)
+                      for t, n in zip(inputs, need)]
                 MX = response_operator(ctx.layout, xs[0], xs[1], xs[2], xs[3], X if create else X.detach(),
-                                       ctx.unrestricted)
+                                       ctx.unrestricted, _with_values(bo, xs[4:]))
                 wrt = [x for x, n in zip(xs, need) if n]
                 out = torch.autograd.grad(((lam if create else lam.detach()) * MX).sum(), wrt,
                                           create_graph=create, allow_unused=True)
@@ -1558,17 +1696,20 @@ class ResponseSolve(torch.autograd.Function):
                 if n:
                     g = next(it)
                     grads[i] = None if g is None else -g
-        return lam, grads[0], grads[1], grads[2], grads[3], None, None, None, None
+        return (lam, grads[0], grads[1], grads[2], grads[3], None, None, None, None, None, grads[4], grads[5],
+                grads[6])
 
 
 class SCFDensity(torch.autograd.Function):
-    """Converged densities as a function of ``H``, ``W1`` and ``W2``.
+    """Converged densities as a function of ``H``, ``W1`` and ``W2`` (and of the values of a bond-order term).
 
     The forward pass returns the densities of a converged :class:`SCFResult`
     (computed outside, passed through ``ctx``); the backward pass solves the
     coupled-perturbed SCF equations in the occupied-virtual space by
     preconditioned conjugate gradients and returns the gradients with respect
-    to the core Hamiltonian and the two-electron integrals. Under
+    to the core Hamiltonian, the two-electron integrals and the values
+    ``coef``, ``lower``, ``width`` of ``bond_order`` (:mod:`~.bond_order`, whose
+    Fock matrices and response enter the equations). Under
     ``create_graph`` the backward pass is formed of differentiable operations
     (:class:`ResponseSolve` on the Fock matrix of the returned densities), so
     the densities are differentiable to any order: Hessians of the energy, and
@@ -1577,10 +1718,12 @@ class SCFDensity(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, H, W1, W2, result: SCFResult, layout: Layout, unrestricted: bool,
-                tol: float, graph_cache: Optional[SCFGraphCache] = None, graph_key: tuple = ()):
+                tol: float, graph_cache: Optional[SCFGraphCache] = None, graph_key: tuple = (),
+                bond_order: Optional[BondOrder] = None, coef=None, lower=None, width=None):
         P = result.densities.clone()
-        ctx.save_for_backward(H, W1, W2, P)
+        ctx.save_for_backward(H, W1, W2, P, coef, lower, width)
         ctx.result, ctx.layout, ctx.unrestricted, ctx.tol = result, layout, unrestricted, tol
+        ctx.bond_order = bond_order
         ctx.graphs = None
         C = result.orbitals
         if graph_cache is not None and C.is_cuda:
@@ -1588,22 +1731,26 @@ class SCFDensity(torch.autograd.Function):
             # here on the calling thread (a capture in the backward pass could meet autograd's other threads)
             W1p, W2p = pack_one_center(W1.detach()), pack_pairs(layout, W2.detach())
             key = ("cphf", graph_key, tuple(C.shape), C.dtype, unrestricted,
-                   tuple(tuple(Wc.shape) for _, _, _, Wc, _ in W2p))
+                   tuple(tuple(Wc.shape) for _, _, _, Wc, _ in W2p),
+                   None if bond_order is None else (tuple(bond_order.gather.shape), bond_order.masked))
             ctx.graphs = graph_cache.get(key, lambda: CPHFGraphs(layout, W1p, W2p, C, result.energies,
                                                                  result.occupations, torch.zeros_like(C),
-                                                                 unrestricted))
+                                                                 unrestricted, bond_order))
         return P
 
     @staticmethod
     def backward(ctx, gP):
         if torch.is_grad_enabled():
             return SCFDensity._differentiable_backward(ctx, gP)
-        H, W1, W2, _ = ctx.saved_tensors
+        H, W1, W2, _, coef, lower, width = ctx.saved_tensors
         res, layout, uhf = ctx.result, ctx.layout, ctx.unrestricted
+        bo = ctx.bond_order
+        values = (coef, lower, width)
         with torch.no_grad():
             W1d, W2d = W1.detach(), W2.detach()
+            bo_d = _with_values(bo, [v.detach() for v in values] if bo is not None else values)
             loop = _cphf(layout, pack_one_center(W1d), pack_pairs(layout, W2d), res, gP.detach(), uhf, ctx.tol,
-                         ctx.graphs)
+                         ctx.graphs, bo_d)
             z = loop.from_mo(loop.u)          # dL/dF (AO), one per spin
         # dL/dH = sum over spins of z; dL/dW from <z, G_W(P)>
         gH = z.sum(0)
@@ -1612,19 +1759,24 @@ class SCFDensity(torch.autograd.Function):
             W2g = W2d.clone().requires_grad_(True)
             Gs = two_electron_fock(layout, pack_one_center(W1g), pack_pairs(layout, W2g), res.densities, uhf)
             gW1, gW2 = torch.autograd.grad((Gs * z).sum(), (W1g, W2g), allow_unused=True)
-        return gH, gW1, gW2, None, None, None, None, None, None
+        g = _bond_order_grads(bo, values, ctx.needs_input_grad[10:13], res.densities, z, False)
+        return gH, gW1, gW2, None, None, None, None, None, None, None, g[0], g[1], g[2]
 
     @staticmethod
     def _differentiable_backward(ctx, gP):
         """The backward pass under ``create_graph``: ``dL/dF = -sym(Z)`` with ``M Z = 2 w Q sym(gP) D``
         (:func:`response_operator` at the returned densities), in differentiable operations."""
-        H, W1, W2, P = ctx.saved_tensors
+        H, W1, W2, P, coef, lower, width = ctx.saved_tensors
         layout, uhf = ctx.layout, ctx.unrestricted
+        values = (coef, lower, width)
+        bo = _with_values(ctx.bond_order, values)
         F = H + two_electron_fock(layout, pack_one_center(W1), pack_pairs(layout, W2), P, uhf)
+        if bo is not None:
+            F = F + bond_order_fock(bo, total_density(P))[0].unsqueeze(0)
         D, Q = _projectors(P, layout.valid, uhf)
         w = 1.0 if uhf else 2.0
         rhs = (2.0 * w) * torch.matmul(Q, torch.matmul(0.5 * (gP + gP.transpose(-1, -2)), D))
-        Z = ResponseSolve.apply(rhs, F, P, W1, W2, ctx.result, layout, uhf, ctx.tol)
+        Z = ResponseSolve.apply(rhs, F, P, W1, W2, ctx.result, layout, uhf, ctx.tol, bo, coef, lower, width)
         z = -0.5 * (Z + Z.transpose(-1, -2))
         need = ctx.needs_input_grad[:3]
         gH = z.sum(0) if need[0] else None
@@ -1635,4 +1787,5 @@ class SCFDensity(torch.autograd.Function):
             wrt = [W for W, n in zip(Ws, need[1:]) if n]
             out = iter(torch.autograd.grad((Gs * z).sum(), wrt, create_graph=True, allow_unused=True))
             gW = [next(out) if n else None for n in need[1:]]
-        return gH, gW[0], gW[1], None, None, None, None, None, None
+        g = _bond_order_grads(ctx.bond_order, values, ctx.needs_input_grad[10:13], P, z, True)
+        return gH, gW[0], gW[1], None, None, None, None, None, None, None, g[0], g[1], g[2]

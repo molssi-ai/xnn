@@ -58,6 +58,7 @@ shells (``spin_multiplicity`` > 1, or an odd electron count).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -71,6 +72,10 @@ from ..common import elements as el
 from ..common.parameters import ELEMENT_PARAMETERS, GAUSSIAN_PARAMETERS, PAIR_PARAMETERS, ParameterSet, read_parameters
 from . import scf as scf_module
 from .angular import L_OF, MOLECULAR, dipole_factors, pair_type
+from .bond_order import BondOrder, with_values
+from .bond_order import from_tensors as bond_order_from_tensors
+from .bond_order import index as bond_order_index
+from .bond_order import pair_values as bond_order_pair_values
 from .core import (
     build_integrals,
     charges_and_dipole,
@@ -115,6 +120,21 @@ PADDED_CAPACITY = 512
 #: (at most a quarter of padding), 2 means 2, 3, 4 times a power of two (fewer buckets, at most half of padding).
 BUCKET_SPACING = 2
 _CORRECTION_CONSTANTS = {"YNE": YNE, "DISP": DISPERSION, "HBOND": HBOND}
+# the trainable values of the bond-order and resonance-overlap terms
+_TERM_GROUPS = ("BOND_ORDER", "BOND_ORDER_WINDOW", "BOND_ORDER_CUTOFF", "RESONANCE_OVERLAP")
+
+
+def _bond_order_args(bo: Optional[BondOrder]) -> list:
+    """The trailing arguments of :class:`~.scf.SCFDensity` for a bond-order term (or none)."""
+    return [bo, bo.coef, bo.lower, bo.width] if bo is not None else [None, None, None, None]
+
+
+def _element_pair(key) -> Tuple[int, int]:
+    """The atomic numbers of an element pair written ``"C-N"``."""
+    parts = str(key).split("-")
+    if len(parts) != 2:
+        raise ValueError(f"element pair {key!r}: write it as two symbols joined by '-', such as 'C-N'")
+    return el.atomic_number(parts[0]), el.atomic_number(parts[1])
 _N_GLOBALS = 61
 
 
@@ -265,14 +285,32 @@ class NDDO(InteratomicPotential):
         ``"YNE"`` (the acetylenic C-C correction of PM6, PM7 and PM6-ORG: its
         energy and the distances where its switch starts and ends), ``"DISP"``
         and ``"HBOND"`` (the scale and damping of the PM7 dispersion, the
-        scales and O...O energy of the PM7 hydrogen bonds), or ``"all"``.
+        scales and O...O energy of the PM7 hydrogen bonds), the values of the
+        terms below: ``"BOND_ORDER"`` (the energies), ``"BOND_ORDER_WINDOW"``
+        (the windows, as lower edge and logarithm of the width),
+        ``"BOND_ORDER_CUTOFF"`` (the cutoffs, as start and logarithm of the
+        width) and ``"RESONANCE_OVERLAP"``, or ``"all"``.
         Empty (default) freezes the published method.
     yne_switch : str, optional
         The switch of the acetylenic C-C term: ``"polynomial"`` (default,
         the published method) has continuous first and second derivatives;
         ``"smooth"`` has continuous derivatives of every order, so that
         Hessians change smoothly with the C-C distance (for fits to
-        curvatures).
+        curvatures); ``"off"`` removes the term.
+    bond_order_terms : dict, optional
+        An energy switched on by the bond order of atom pairs (see
+        :mod:`~.bond_order`): per element pair (``"C-C"``, ``"N-N"``, ...),
+        the energy in kcal/mol and the window of the Wiberg bond index where
+        it switches on, ``[c, W_lo, W_hi]``, or with a cutoff of its own,
+        ``[c, W_lo, W_hi, R_on, R_off]``. Default: none.
+    bond_order_cutoff : sequence of float, optional
+        The distances (Angstrom) where the bond-order terms start and finish
+        switching off, for the pairs without a cutoff of their own; default
+        ``(1.40, 1.65)``.
+    resonance_overlap : dict, optional
+        Factors ``kappa`` of the overlap in the resonance integrals of the
+        p orbitals, ``beta (1 + kappa S)``, per element pair: one value for
+        the pi overlaps, or ``[kappa_pi, kappa_sigma]``. Default: none.
     correction_constants : dict, optional
         Values of the constants of corrections by group (``"YNE"``,
         ``"DISP"``, ``"HBOND"``, as many values as the published ones), also
@@ -359,7 +397,10 @@ class NDDO(InteratomicPotential):
                  reuse_density: bool = True,
                  scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 6.5,
                  search_starts: int = 0, use_fast="auto", position_response: bool = False,
-                 yne_switch: str = "polynomial", correction_constants: Optional[Dict[str, Sequence[float]]] = None):
+                 yne_switch: str = "polynomial", correction_constants: Optional[Dict[str, Sequence[float]]] = None,
+                 bond_order_terms: Optional[Dict[str, Sequence[float]]] = None,
+                 bond_order_cutoff: Sequence[float] = (1.40, 1.65),
+                 resonance_overlap: Optional[Dict[str, Union[float, Sequence[float]]]] = None):
         super().__init__()
         pset = (parameters if isinstance(parameters, ParameterSet)
                 else read_parameters(parameters or self.default_parameters))
@@ -372,8 +413,8 @@ class NDDO(InteratomicPotential):
             raise ValueError("response must be 'auto', 'always' or 'never'")
         self.response = response
         self.position_response = bool(position_response)
-        if yne_switch not in ("polynomial", "smooth"):
-            raise ValueError("yne_switch must be 'polynomial' or 'smooth'")
+        if yne_switch not in ("polynomial", "smooth", "off"):
+            raise ValueError("yne_switch must be 'polynomial', 'smooth' or 'off'")
         self.yne_switch = yne_switch
         self.max_iter, self.tol_density, self.tol_energy = int(max_iter), float(tol_density), float(tol_energy)
         self.use_corrections = bool(corrections)
@@ -391,6 +432,8 @@ class NDDO(InteratomicPotential):
         self._scf_key = None
         self._scf_pos = None
         self._q_cache = {}
+        # the pairs of the bond-order term per batch composition (see _bond_order_pairs)
+        self._bo_pairs = _PlanCache()
 
         nz = el.MAX_Z + 1
         table = torch.zeros(len(_ELEMENT_NAMES), nz, dtype=torch.float64)
@@ -410,12 +453,20 @@ class NDDO(InteratomicPotential):
                 glob[n_] = v
         self.supported = tuple(z for z in pset.atomic_numbers if z < nz)
 
+        term_groups = self._set_terms(bond_order_terms, bond_order_cutoff, resonance_overlap)
         groups = set(trainable or ())
         if "all" in groups:
-            groups = set(_ELEMENT_NAMES) | set(PAIR_PARAMETERS) | {"PAR"} | set(self.correction_groups)
-        unknown = groups - set(_ELEMENT_NAMES) - set(PAIR_PARAMETERS) - {"PAR"} - set(self.correction_groups)
+            groups = (set(_ELEMENT_NAMES) | set(PAIR_PARAMETERS) | {"PAR"} | set(self.correction_groups)
+                      | set(term_groups))
+            if yne_switch == "off":
+                groups.discard("YNE")
+        unknown = (groups - set(_ELEMENT_NAMES) - set(PAIR_PARAMETERS) - {"PAR"} - set(self.correction_groups)
+                   - set(term_groups))
         if unknown:
-            raise ValueError(f"unknown trainable groups {sorted(unknown)}")
+            raise ValueError(f"unknown trainable groups {sorted(unknown)} (the groups of the bond-order and "
+                             "resonance terms need the terms)")
+        if yne_switch == "off" and "YNE" in groups:
+            raise ValueError("the YNE group cannot be trained with yne_switch='off'")
         self.trainable_groups = tuple(sorted(groups))
         self.register_buffer("element_table", table)
         self.register_buffer("pair_table", pairs)
@@ -429,11 +480,15 @@ class NDDO(InteratomicPotential):
             values = [float(v) for v in given.get(name, values)]
             if len(values) != len(_CORRECTION_CONSTANTS[name]):
                 raise ValueError(f"correction constants {name} take {len(_CORRECTION_CONSTANTS[name])} values")
+            if name == "YNE" and yne_switch == "off":
+                values[0] = 0.0
             self.register_buffer(f"constants_{name}", torch.tensor(values, dtype=torch.float64), persistent=False)
         self.params = nn.ParameterDict()
         for name in self.trainable_groups:
             if name in _CORRECTION_CONSTANTS:
                 self.params[name] = nn.Parameter(getattr(self, f"constants_{name}").clone())
+            elif name in _TERM_GROUPS:
+                self.params[name] = nn.Parameter(getattr(self, f"terms_{name}").clone())
             elif name in _ELEMENT_NAMES:
                 self.params[name] = nn.Parameter(table[_ELEMENT_NAMES.index(name)].clone())
             elif name in PAIR_PARAMETERS:
@@ -470,6 +525,125 @@ class NDDO(InteratomicPotential):
         :data:`~.corrections.YNE`), ``"DISP"`` (:data:`~.corrections.DISPERSION`) or ``"HBOND"``
         (:data:`~.corrections.HBOND`)."""
         return self.params[name] if name in self.params else getattr(self, f"constants_{name}")
+
+    def _set_terms(self, bond_order_terms, bond_order_cutoff, resonance_overlap) -> Tuple[str, ...]:
+        """Tables of the bond-order and resonance-overlap terms (non-persistent buffers: the values are options);
+        the groups they offer for training."""
+        nz = el.MAX_Z + 1
+        self.bond_order_terms = {str(k): [float(x) for x in v] for k, v in (bond_order_terms or {}).items()}
+        self.bond_order_cutoff = [float(x) for x in bond_order_cutoff]
+        self.resonance_overlap = {str(k): ([float(v)] if isinstance(v, (int, float)) else [float(x) for x in v])
+                                  for k, v in (resonance_overlap or {}).items()}
+        if len(self.bond_order_cutoff) != 2 or not self.bond_order_cutoff[1] > self.bond_order_cutoff[0]:
+            raise ValueError("bond_order_cutoff takes two distances, the second larger")
+        slots = torch.full((nz, nz), -1, dtype=torch.long)
+        energy, window, cut = [], [], []
+        sizes = {len(v) for v in self.bond_order_terms.values()}
+        if sizes - {3, 5} or len(sizes) > 1:
+            raise ValueError("bond_order_terms take [c, W_lo, W_hi] or [c, W_lo, W_hi, R_on, R_off] per element "
+                             "pair, the same form for every pair")
+        for i, (key, v) in enumerate(self.bond_order_terms.items()):
+            za, zb = _element_pair(key)
+            if slots[za, zb] >= 0:
+                raise ValueError(f"bond_order_terms: element pair {key} given twice")
+            slots[za, zb] = slots[zb, za] = i
+            if not v[2] > v[1]:
+                raise ValueError(f"bond_order_terms {key}: W_hi must be larger than W_lo")
+            energy.append(v[0])
+            window.append([v[1], math.log(v[2] - v[1])])
+            if len(v) == 5:
+                if not v[4] > v[3]:
+                    raise ValueError(f"bond_order_terms {key}: R_off must be larger than R_on")
+                cut.append([v[3], math.log(v[4] - v[3])])
+        if not cut:
+            r_on, r_off = self.bond_order_cutoff
+            cut = [[r_on, math.log(r_off - r_on)]]
+        self.register_buffer("bond_order_slots", slots, persistent=False)
+        self.register_buffer("terms_BOND_ORDER", torch.tensor(energy, dtype=torch.float64), persistent=False)
+        self.register_buffer("terms_BOND_ORDER_WINDOW", torch.tensor(window, dtype=torch.float64).reshape(-1, 2),
+                             persistent=False)
+        self.register_buffer("terms_BOND_ORDER_CUTOFF", torch.tensor(cut, dtype=torch.float64), persistent=False)
+        slots = torch.full((nz, nz), -1, dtype=torch.long)
+        width = max([len(v) for v in self.resonance_overlap.values()], default=1)
+        if width > 2:
+            raise ValueError("resonance_overlap takes kappa_pi or [kappa_pi, kappa_sigma] per element pair")
+        kappa = []
+        for i, (key, v) in enumerate(self.resonance_overlap.items()):
+            za, zb = _element_pair(key)
+            if slots[za, zb] >= 0:
+                raise ValueError(f"resonance_overlap: element pair {key} given twice")
+            slots[za, zb] = slots[zb, za] = i
+            kappa.append(v + [0.0] * (width - len(v)))
+        self.register_buffer("resonance_slots", slots, persistent=False)
+        self.register_buffer("terms_RESONANCE_OVERLAP", torch.tensor(kappa, dtype=torch.float64).reshape(-1, width),
+                             persistent=False)
+        groups = ()
+        if self.bond_order_terms:
+            groups += _TERM_GROUPS[:3]
+        if self.resonance_overlap:
+            groups += _TERM_GROUPS[3:]
+        return groups
+
+    def _bond_order_pairs(self, z: Tensor, pa: Tensor, pb: Tensor, layout: Layout, n_struct: int, pos: Tensor,
+                          padded: Optional[_Padded], key: tuple):
+        """The bond-order term of a batch at the detached positions (for the SCF; ``None`` without the term) and
+        the function giving it at other positions. Its pairs are those with an entry, or on a bucket's graphs
+        every pair of the bucket (the shapes are fixed; the others get zero energy); their index is kept per
+        batch composition ``key``."""
+        if not self.bond_order_terms:
+            return None, lambda positions: None
+        key = key + (str(pos.device),)
+        entry = self._bo_pairs.pop(key, None)
+        if entry is None:
+            if padded is None:
+                keep = (self.bond_order_slots[take0(z, pa), take0(z, pb)] >= 0).nonzero().squeeze(-1)
+                pa, pb = pa[keep], pb[keep]
+            entry = None
+            if pa.shape[0] > 0:
+                zero = pos.new_zeros(pa.shape[0], dtype=torch.float64)
+                entry = (pa, pb, take0(z, pa), take0(z, pb),
+                         bond_order_index(layout.atom_struct, layout.ao, pa, pb, n_struct, layout.n_basis, zero,
+                                          zero, zero))
+        self._bo_pairs[key] = entry                                # most recent last
+        while len(self._bo_pairs) > PADDED_CAPACITY:
+            self._bo_pairs.pop(next(iter(self._bo_pairs)))
+        if entry is None:
+            return None, lambda positions: None
+        pa, pb, za, zb, skeleton = entry
+
+        def values(positions: Tensor):
+            r = (take0(positions, pb) - take0(positions, pa)).norm(dim=-1)
+            coef, lower, width = self.bond_order_values(za, zb, r)
+            if padded is not None:
+                coef = coef * padded.pair_real
+            return coef, lower, width
+
+        here = with_values(skeleton, *values(pos))
+        scf_term = with_values(skeleton, here.coef.detach(), here.lower.detach(), here.width.detach())
+        return scf_term, lambda positions: here if positions is pos else with_values(skeleton, *values(positions))
+
+    def term_values(self, name: str) -> Tensor:
+        """The values of a group of the bond-order or resonance-overlap terms (the trainable copy if any):
+        ``"BOND_ORDER"`` ``(n,)`` the energies (kcal/mol) of the element pairs in the order given,
+        ``"BOND_ORDER_WINDOW"`` ``(n, 2)`` the window's lower edge and the logarithm of its width,
+        ``"BOND_ORDER_CUTOFF"`` ``(n, 2)`` or ``(1, 2)`` the start of the cutoff and the logarithm of its width
+        (Angstrom), ``"RESONANCE_OVERLAP"`` ``(n, 1)`` or ``(n, 2)`` the factors ``kappa``."""
+        return self.params[name] if name in self.params else getattr(self, f"terms_{name}")
+
+    def bond_order_values(self, za: Tensor, zb: Tensor, r: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """The values of :class:`~.bond_order.BondOrder` (eV, window edge and width) of pairs of atomic numbers
+        ``za``, ``zb`` at distances ``r`` (Angstrom); zero energy for pairs without an entry."""
+        return bond_order_pair_values(self.bond_order_slots, self.term_values("BOND_ORDER"),
+                                      self.term_values("BOND_ORDER_WINDOW"), self.term_values("BOND_ORDER_CUTOFF"),
+                                      za, zb, r)
+
+    def resonance_factors(self, za: Tensor, zb: Tensor) -> Tensor:
+        """The factors ``kappa`` ``(P, 1)`` or ``(P, 2)`` of :func:`~.core.resonance_overlap` of pairs of atomic
+        numbers ``za``, ``zb`` (zero for pairs without an entry)."""
+        slot = self.resonance_slots[za, zb]
+        values = self.term_values("RESONANCE_OVERLAP")
+        rows = values.index_select(0, slot.clamp(min=0))
+        return torch.where((slot >= 0)[:, None], rows, torch.zeros_like(rows))
 
     def parameter_set(self) -> ParameterSet:
         """The current parameters as a :class:`ParameterSet` (for MOPAC export)."""
@@ -730,7 +904,8 @@ class NDDO(InteratomicPotential):
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
         ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``,
-        ``position_response``, ``yne_switch``, ``correction_constants``.
+        ``position_response``, ``yne_switch``, ``correction_constants``, ``bond_order_terms``,
+        ``bond_order_cutoff``, ``resonance_overlap``.
         """
 
         from xnn.common.config.options import model_options
@@ -739,7 +914,7 @@ class NDDO(InteratomicPotential):
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
                 "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
                 "restart_gap", "search_starts", "use_fast", "position_response", "yne_switch",
-                "correction_constants")
+                "correction_constants", "bond_order_terms", "bond_order_cutoff", "resonance_overlap")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
     # the calculation
@@ -783,7 +958,13 @@ class NDDO(InteratomicPotential):
         occ_d = device_constant(("occ_d",), lambda: el.OCC_D, device)
         shells = device_constant(("shells", k), lambda: [0, 1, 1, 1, 2, 2, 2, 2, 2][:k], device)
 
-        def build(positions: Tensor, q: dict, index=None):
+        # the factors of the resonance-overlap term of every pair (an input of the integral build and its graphs)
+        kappa = (self.resonance_factors(take0(z_w, pa), take0(z_w, pb)) if self.resonance_overlap and k >= 4
+                 else None)
+        kap_in = [kappa] if kappa is not None else []
+        n_kap = len(kap_in)
+
+        def build(positions: Tensor, q: dict, index=None, kap=None):
             # the plan's tensors, or those of the given buffer (the input of a bucket's graphs); the integrals,
             # and the layout, atomic numbers and element indices they used
             if index is None:
@@ -795,13 +976,13 @@ class NDDO(InteratomicPotential):
             qt = {key: v for key, v in q.items() if isinstance(v, Tensor)}
             out = build_integrals(qt, self._pair_tables(q, lay, k, positions), constants(device, dtype), lay,
                                   positions, ea_, z_, n_orb_, k, lay.pair_a, lay.pair_b, has_, valid_, self.feather,
-                                  self.balance_integrals, occ_d, shells)
+                                  self.balance_integrals, occ_d, shells, kap)
             return out, lay, z_, ea_
 
-        def integrals(positions: Tensor, q: dict, index=None, given=None, core: bool = True):
+        def integrals(positions: Tensor, q: dict, index=None, given=None, core: bool = True, kap=None):
             # the two-center integrals, core Hamiltonian, one-center integrals and, with ``core``, the pairs'
             # core-core energies (from the trained core parameters ``given``; ghost pairs are cleared later)
-            (ints, H, W1, _, _), lay, z_, ea_ = build(positions, q, index)
+            (ints, H, W1, _, _), lay, z_, ea_ = build(positions, q, index, kap)
             outs = (ints["W"], ints["r"], ints["gab"], H, W1)
             if not core:
                 return outs
@@ -828,19 +1009,22 @@ class NDDO(InteratomicPotential):
             return _with_leaves(q, paths, [x.view(shape) for x, shape in
                                            zip(values[0].split([v.numel() for v in q_values]), shapes)])
 
-        def eval_fn(positions, *index):
-            return integrals(positions, q, index[0] if padded is not None else None)
+        def eval_fn(positions, *rest):
+            kap, index = rest[:n_kap], rest[n_kap:]
+            return integrals(positions, q, index[0] if padded is not None else None, kap=kap[0] if n_kap else None)
 
         def train_fn(positions, *rest):
-            values, given, index = rest[:n_q], rest[n_q:n_q + n_core], rest[n_q + n_core:]
+            values, given = rest[:n_q], rest[n_q:n_q + n_core]
+            kap, index = rest[n_q + n_core:n_q + n_core + n_kap], rest[n_q + n_core + n_kap:]
             return integrals(positions, unpacked(values), index[0] if padded is not None else None,
-                             dict(zip(core_names, given)))
+                             dict(zip(core_names, given)), kap=kap[0] if n_kap else None)
 
         def response_fn(positions, *rest):
-            values, index = rest[:n_q], rest[n_q:]
-            return integrals(positions, unpacked(values), index[0] if padded is not None else None, core=False)
+            values, kap, index = rest[:n_q], rest[n_q:n_q + n_kap], rest[n_q + n_kap:]
+            return integrals(positions, unpacked(values), index[0] if padded is not None else None, core=False,
+                             kap=kap[0] if n_kap else None)
 
-        trained = any(v.requires_grad for v in q_values + core_in)
+        trained = any(v.requires_grad for v in q_values + core_in + kap_in)
         # the density as a function of the positions: the integrals of the energy enter the SCF density (their
         # derivatives to any order, so built eagerly)
         exact = self.position_response and torch.is_grad_enabled()
@@ -849,14 +1033,14 @@ class NDDO(InteratomicPotential):
         if exact:
             graph = None
         else:
-            graph = (self._build_graph(holder, "train", train_fn, q, [pos_w, *q_in, *core_in, *ptens]) if trained
-                     else self._build_graph(holder, "eval", eval_fn, q, [pos_w, *ptens]))
+            graph = (self._build_graph(holder, "train", train_fn, q, [pos_w, *q_in, *core_in, *kap_in, *ptens])
+                     if trained else self._build_graph(holder, "eval", eval_fn, q, [pos_w, *kap_in, *ptens]))
         if graph is not None and trained:
-            W2, r_pair, gab, H, W1, e_core_pair = replay(graph, [pos_w, *q_in, *core_in, *ptens])
+            W2, r_pair, gab, H, W1, e_core_pair = replay(graph, [pos_w, *q_in, *core_in, *kap_in, *ptens])
         elif graph is not None:
-            W2, r_pair, gab, H, W1, e_core_pair = replay(graph, [pos_w, *ptens])
+            W2, r_pair, gab, H, W1, e_core_pair = replay(graph, [pos_w, *kap_in, *ptens])
         else:
-            W2, r_pair, gab, H, W1, e_core_pair = integrals(pos_w, q)
+            W2, r_pair, gab, H, W1, e_core_pair = integrals(pos_w, q, kap=kappa)
         if graph is not None and graph.wants_second:
             graph.capture_second()
         if padded is not None:
@@ -872,6 +1056,8 @@ class NDDO(InteratomicPotential):
                                   lambda: [[el.OCC_S[v], el.OCC_P[v] / 3.0, el.OCC_D[v] / 5.0] for v in uz],
                                   device, dtype)
         guess = initial_guess(occ_ref, ea, shells, has, batch_w, n_struct, n_e, layout, pa.shape[0], k)
+        bo_scf, bo_at = self._bond_order_pairs(z_w, pa, pb, layout, n_struct, pos_w, padded,
+                                               composition + (n_struct, holder.key if padded is not None else None))
 
         spins = torch.stack([n_alpha, n_beta]).tolist()
         key = composition + (tuple(spins[0]), tuple(spins[1]), uhf, holder.key if padded is not None else None)
@@ -887,12 +1073,12 @@ class NDDO(InteratomicPotential):
                              self.tol_density, self.tol_energy, smear_steps=0,
                              spin_guess=self.last_scf.densities if uhf else None,
                              graph_cache=self._graph_cache(), graph_key=graph_key, orbitals=self.last_scf.orbitals,
-                             occupations=self.last_scf.occupations)
+                             occupations=self.last_scf.occupations, bond_order=bo_scf)
         else:
             def start(kt, steps):
                 return run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter, self.tol_density,
                                self.tol_energy, smearing=kt, smear_steps=steps, graph_cache=self._graph_cache(),
-                               graph_key=graph_key)
+                               graph_key=graph_key, bond_order=bo_scf)
             results = [start(*self.scf_starts[0])]
             # the other runs where the first may have settled in an excited aufbau state
             if len(self.scf_starts) > 1 and needs_restart(results[0], uhf, self.restart_gap):
@@ -902,20 +1088,24 @@ class NDDO(InteratomicPotential):
                 kt, steps = search_schedule(i)
                 results.append(run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, kicked, self.max_iter,
                                        self.tol_density, self.tol_energy, smearing=kt, smear_steps=steps,
-                                       spin_guess=spin, graph_cache=self._graph_cache(), graph_key=graph_key))
+                                       spin_guess=spin, graph_cache=self._graph_cache(), graph_key=graph_key,
+                                       bond_order=bo_scf))
             result = lowest(results)
         self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
+        # the bond-order term at the positions (its energy, and the density's response where exact)
+        bo = bo_at(pos_w)
         if exact:
-            P = SCFDensity.apply(H, W1, W2, result, layout, uhf, 1e-10)
+            P = SCFDensity.apply(H, W1, W2, result, layout, uhf, 1e-10, None, (), *_bond_order_args(bo))
         elif self._use_response():
             pos_fixed = pos_w.detach()
-            response = (self._build_graph(holder, "response", response_fn, q, [pos_fixed, *q_in, *ptens])
+            response = (self._build_graph(holder, "response", response_fn, q, [pos_fixed, *q_in, *kap_in, *ptens])
                         if trained else None)
             if response is not None:
-                W_t, _, _, H_t, W1_t = replay(response, [pos_fixed, *q_in, *ptens])
+                W_t, _, _, H_t, W1_t = replay(response, [pos_fixed, *q_in, *kap_in, *ptens])
             else:
-                W_t, _, _, H_t, W1_t = integrals(pos_fixed, q, core=False)
-            P = SCFDensity.apply(H_t, W1_t, W_t, result, layout, uhf, 1e-10, self._graph_cache(), graph_key)
+                W_t, _, _, H_t, W1_t = integrals(pos_fixed, q, core=False, kap=kappa)
+            P = SCFDensity.apply(H_t, W1_t, W_t, result, layout, uhf, 1e-10, self._graph_cache(), graph_key,
+                                 *_bond_order_args(bo_at(pos_fixed)))
         else:
             P = result.densities
         n_pad = int(z_w.shape[0]) - int(z.shape[0])
@@ -936,8 +1126,13 @@ class NDDO(InteratomicPotential):
         pd_mask = device_constant(("pd_mask",), lambda: _hybrid_mask("pd"), device, dtype)
         dfac = device_constant(("dipole_factors",), dipole_factors, device, dtype)
 
+        bo_in = bo.tensors() if bo is not None else []
+        n_bo = len(bo_in)
+
         def outputs_fn(H_, W1_, W2_, P_, e_core_, eisol_, heat_, corr_, tore_, d_sp, d_pd, mass_, charge_, pos_,
-                       *index):
+                       *rest):
+            t, index = rest[:n_bo], rest[n_bo:]
+            bo_ = bond_order_from_tensors(list(t), n_struct, layout.n_basis, k, bo.masked) if n_bo else None
             if index:
                 tensors = scf_module.unpack_index(index[0], padded.spec)
                 lay, n_orb_ = scf_module.layout_from_tensors(n_struct, layout.n_basis, k, list(tensors[5:])), tensors[2]
@@ -945,13 +1140,13 @@ class NDDO(InteratomicPotential):
             else:
                 lay, n_orb_, pa_, pb_, batch_ = layout, n_orb, pa, pb, batch_w
             res = energy_outputs(lay, H_, W1_, W2_, P_, uhf, e_core_, pa_, pb_, batch_, n_struct, eisol_, heat_,
-                                 corr_)
+                                 corr_, bo_)
             charges, dipole = charges_and_dipole(lay, P_, uhf, tore_, k, dfac, sp_mask, pd_mask, d_sp, d_pd, n_orb_,
                                                  mass_, batch_, n_struct, charge_, pos_)
             return tuple(res[key] for key in _ENERGY_KEYS) + (charges, dipole)
 
         inputs = [H, W1, W2, P, e_core_pair, eisol, atom_heat, corr, tore, take0(q["dd"], ea),
-                  take0(q["ddp"][:, 5], ea), mass, charge, pos_w, *ptens]
+                  take0(q["ddp"][:, 5], ea), mass, charge, pos_w, *bo_in, *ptens]
         post = (self._build_graph(holder, "outputs_uhf" if uhf else "outputs", outputs_fn, q, inputs)
                 if graph is not None else None)
         values = replay(post, inputs) if post is not None else outputs_fn(*inputs)

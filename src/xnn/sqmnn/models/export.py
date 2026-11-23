@@ -15,6 +15,9 @@ from torch import Tensor, nn
 
 from ..common import elements as el
 from .angular import L_OF, MOLECULAR, dipole_factors, pair_type
+from .bond_order import BondOrder, with_values
+from .bond_order import index as bond_order_index
+from .bond_order import pair_values as bond_order_pair_values
 from .core import (
     build_integrals,
     charges_and_dipole,
@@ -45,6 +48,8 @@ class NDDOExport(nn.Module):
     correction_kind: int
     peptide_barrier: float
     smooth_yne: bool
+    bond_order: bool
+    resonance: bool
     unrestricted: bool
     max_iter: int
     tol_density: float
@@ -104,6 +109,16 @@ class NDDOExport(nn.Module):
         self.correction_kind = int(model.correction_kind)
         self.peptide_barrier = float(model.peptide_barrier)
         self.smooth_yne = model.yne_switch == "smooth"
+        # the bond-order and resonance-overlap terms (tables of the element pairs and their values)
+        self.bond_order = bool(model.bond_order_terms)
+        self.resonance = bool(model.resonance_overlap)
+        with torch.no_grad():
+            self.bo_slots = model.bond_order_slots.to(device)
+            self.bo_energy = model.term_values("BOND_ORDER").detach().to(device, dtype)
+            self.bo_window = model.term_values("BOND_ORDER_WINDOW").detach().to(device, dtype)
+            self.bo_cutoff = model.term_values("BOND_ORDER_CUTOFF").detach().to(device, dtype)
+            self.res_slots = model.resonance_slots.to(device)
+            self.res_values = model.term_values("RESONANCE_OVERLAP").detach().to(device, dtype)
         self.unrestricted = bool(model.unrestricted)
         self.max_iter, self.tol_density, self.tol_energy = int(model.max_iter), float(model.tol_density), \
             float(model.tol_energy)
@@ -142,8 +157,24 @@ class NDDOExport(nn.Module):
             raise ValueError("the parameter set has no parameters for an element of the structure")
         ea, n_orb, k, pa, pb, layout, has, valid = make_plan(z, batch, 1, self.lookup, self.n_orb_el, -1)
         shells = self.shells[:k]
+        kappa: Optional[Tensor] = None
+        if self.resonance and k >= 4:
+            slot = self.res_slots[z[pa], z[pb]]
+            rows = self.res_values.index_select(0, slot.clamp(min=0))
+            kappa = torch.where((slot >= 0).unsqueeze(1), rows, torch.zeros_like(rows))
         ints, H, W1, _, _ = build_integrals(self.qt, self.tables, self.c, layout, pos, ea, z, n_orb, k, pa, pb,
-                                            has, valid, self.feather, self.balance, self.occ_d, shells)
+                                            has, valid, self.feather, self.balance, self.occ_d, shells, kappa)
+        bo: Optional[BondOrder] = None
+        bo_scf: Optional[BondOrder] = None
+        if self.bond_order:
+            keep = (self.bo_slots[z[pa], z[pb]] >= 0).nonzero().squeeze(-1)
+            ia, ib = pa[keep], pb[keep]
+            coef, lower, width = bond_order_pair_values(self.bo_slots, self.bo_energy, self.bo_window,
+                                                        self.bo_cutoff, z[ia], z[ib],
+                                                        (pos[ib] - pos[ia]).norm(p=2, dim=-1))
+            made = bond_order_index(layout.atom_struct, layout.ao, ia, ib, 1, layout.n_basis, coef, lower, width)
+            bo = made
+            bo_scf = with_values(made, coef.detach(), lower.detach(), width.detach())
         W2, r_pair, gab = ints["W"], ints["r"], ints["gab"]
         tore = self.qt["tore"][ea]
         za, zb = z[pa], z[pb]
@@ -171,11 +202,12 @@ class NDDOExport(nn.Module):
                 C: Optional[Tensor] = self.last_C if warm_orbitals else None
                 occ: Optional[Tensor] = self.last_occ if warm_orbitals else None
                 result = scf_solve(layout, Hd, W1p, W2p, n_alpha, n_beta, uhf, start, self.max_iter,
-                                   self.tol_density, self.tol_energy, 8, 2.0, 0, spin, rotate, min_basis, C, occ)
+                                   self.tol_density, self.tol_energy, 8, 2.0, 0, spin, rotate, min_basis, C, occ,
+                                   bo_scf)
             else:
                 result = scf_with_starts(layout, Hd, W1p, W2p, n_alpha, n_beta, uhf, guess, self.max_iter,
                                          self.tol_density, self.tol_energy, self.starts, self.restart_gap,
-                                         rotate, min_basis, self.search)
+                                         rotate, min_basis, self.search, bo_scf)
             self.last_z, self.last_pos, self.last_P = z.clone(), pos.detach().clone(), result.densities.clone()
             self.last_C, self.last_occ = result.orbitals.clone(), result.occupations.clone()
         P = result.densities
@@ -197,7 +229,7 @@ class NDDOExport(nn.Module):
                                    torch.zeros(1, dtype=dtype, device=device))["node_energy"]
                 corr = e_d3 * 23.060547830619029 + corr
         out = energy_outputs(layout, H, W1, W2, P, uhf, e_core_pair, pa, pb, batch, 1, self.qt["eisol"][ea],
-                             self.atom_heat[z], corr)
+                             self.atom_heat[z], corr, bo)
         charges, _ = charges_and_dipole(layout, P, uhf, tore, k, self.dfac, self.sp_mask, self.pd_mask,
                                         self.qt["dd"][ea], self.qt["ddp"][ea, 5], n_orb, self.mass[z], batch, 1,
                                         charge, pos)
