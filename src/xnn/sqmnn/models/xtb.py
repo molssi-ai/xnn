@@ -30,23 +30,22 @@ separate Fermi levels for the alpha and beta electrons.
 from __future__ import annotations
 
 import copy
-import dataclasses
 import functools
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import torch
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
 from xnn.common.data import AtomicGraph
-from xnn.common.models import InteratomicPotential, register_model
+from xnn.common.models import register_model
 from xnn.common.models.d4 import charge_scaling_terms
 
 from ..common.xtb_published import XTBParameters, parse_parameters, published_parameters, write_parameters
 from ..common.xtb_tables import GFN0_SRB, GFN0_SRB_FACTOR, GFN2_AES_RADII, GFN2_RADII, STO_NG, n_gaussians
 from .gaussian import N_SPHERICAL, primitive_norm, self_overlap, shell_pair_integrals
+from .tightbinding import TightBinding, _all_pairs, _Orthogonalizer, _stacked
 
 #: Largest atomic number with parameters.
 MAX_Z = 86
@@ -121,7 +120,7 @@ class _Basis:
                               self.alpha.contiguous(), (self.weight * math.pi ** 0.75).contiguous())
 
 
-class GFN(InteratomicPotential):
+class GFN(TightBinding):
     """Base class of the GFN tight-binding methods; see the module docstring.
 
     Parameters
@@ -160,14 +159,9 @@ class GFN(InteratomicPotential):
     """
 
     method = ""
-    #: Second derivatives of the energy by plain autograd lack the response of the electronic density;
-    #: :meth:`energy_gradient` gives a gradient whose derivatives are exact (:func:`xnn.common.models.hessian`
-    #: takes it).
-    exact_second_derivatives = False
+    bohr, hartree, boltzmann = BOHR, AUTOEV, KB_AU
     #: Shell-resolved third-order term (GFN2) instead of the atomic one (GFN1).
     shell_third_order = False
-    #: Anisotropic electrostatics and exchange-correlation (GFN2).
-    multipoles = False
     #: Shell pairs with ``a b / (a + b) R^2`` above this for their most diffuse primitives are skipped.
     integral_screening = 25.0
     #: Elements of the largest temporary of one block of the integral evaluation.
@@ -186,16 +180,8 @@ class GFN(InteratomicPotential):
     #: squares of its structures' atomic-orbital counts is at most this (one structure: its orbital
     #: count). Below it the evaluation is many short operations, which the host runs faster.
     host_basis = 200
-    #: A cycle longer than this is run again with half the damping (see :meth:`_safeguarded`).
-    long_cycle = 100
-    #: Electronic temperature (K) of the warm start of a cycle that did not converge.
-    warm_temperature = 3000.0
     #: Root-mean-square change of the charges and moments that ends the cycle at ``accuracy = 1``.
     charge_convergence = 2e-5
-    #: Relative residual that ends the linear solve of the density response in training.
-    response_tolerance = 1e-10
-    #: Orbitals with occupations below this are left out of the density matrix.
-    occupation_neglect = 1e-20
 
     def __init__(self, parameters: Union[str, XTBParameters, None] = None, electronic_temperature: float = 300.0,
                  max_iter: int = 500, accuracy: float = 1.0, mixing: float = 0.4, history: int = 8, use_fast="auto",
@@ -327,6 +313,15 @@ class GFN(InteratomicPotential):
         self.use_fast = resolve_use_fast(use_fast)
         return self
 
+    def _make_basis(self, z: List[int], batch: List[int], n_struct: int, dtype, device) -> _Basis:
+        return _Basis(self, z, batch, n_struct, dtype, device)
+
+    def _scc_threshold(self) -> float:
+        return self.charge_convergence * self.accuracy
+
+    def _integrals_trained(self, basis: _Basis) -> bool:
+        return bool(basis.alpha.requires_grad)
+
     def _fused_integrals(self, pos: Tensor) -> bool:
         """Whether the shell-pair integrals take the kernels (the fast path where they run)."""
         if self.use_fast is False:
@@ -432,15 +427,7 @@ class GFN(InteratomicPotential):
             coef = coef.index_copy(0, at, torch.stack([pad(c, (0, basis.kmax - c.shape[0])) for _, c, _ in new]))
         return alpha, coef
 
-    def reference_occupations(self, z: int) -> List[float]:
-        """Electrons per shell of the neutral reference atom."""
-        raise NotImplementedError
-
     # method-specific pieces (implemented by GFN1 and GFN2)
-
-    def coordination_numbers(self, z: Tensor, pos: Tensor, batch: Tensor) -> Tensor:
-        """Coordination numbers of the atoms (pairs within each structure)."""
-        raise NotImplementedError
 
     def shell_levels(self, z: List[int], basis: _Basis, cn: Tensor) -> Tensor:
         raise NotImplementedError
@@ -448,176 +435,6 @@ class GFN(InteratomicPotential):
     def shell_pair_factor(self, basis: _Basis, pos: Tensor) -> Tensor:
         """``K X Y Pi`` of the Hamiltonian for every pair of shells, shape ``(n_shell, n_shell)``."""
         raise NotImplementedError
-
-    def classical_energy(self, z: Tensor, pos: Tensor, batch: Tensor, n_struct: int) -> Dict[str, Tensor]:
-        """Repulsion and the charge-independent terms, per structure (hartree)."""
-        raise NotImplementedError
-
-    def _terms(self, q_shell: Tensor, mu: Tensor, theta: Tensor, ctx: dict) -> Dict[str, Tensor]:
-        """Charge- and moment-dependent energies per structure (hartree), by name: those of
-        ``scc_terms`` add up to the energy, those of ``reported_terms`` are returned by the model."""
-        raise NotImplementedError
-
-    def second_order_energy(self, q_shell: Tensor, mu: Tensor, theta: Tensor, ctx: dict,
-                            per_structure: bool = False) -> Tensor:
-        """Charge- and moment-dependent energy (hartree), summed over the batch or per structure."""
-        terms = self._terms(q_shell, mu, theta, ctx)
-        e = sum(terms[k] for k in self.scc_terms)
-        return e if per_structure else e.sum()
-
-    # the calculation
-
-    def energy_gradient(self, data: AtomicGraph, create_graph: bool = False) -> Tuple[Tensor, Tensor]:
-        """The positions and the gradient of the energy with its graph, whose derivatives are exact.
-
-        The free energy is stationary in the self-consistent density, so its gradient is the derivative
-        at a fixed density (with the overlap term of the energy-weighted density). The energy is formed
-        with two aliases of the positions, one for the explicit dependences and one for the density
-        (a function of the positions through the self-consistent equations, see
-        :meth:`_responsive_density`); the gradient is taken in the first. Differentiated once more
-        through both, it gives the exact Hessian.
-
-        Parameters
-        ----------
-        data : AtomicGraph
-            The structures.
-        create_graph : bool, optional
-            The Hessian will be differentiated once more (parameter gradients of curvatures): the
-            evaluation takes the reference's functions, whose derivatives go to any order (the fast
-            path's kernels stop at the second); default ``False``.
-
-        Returns
-        -------
-        tuple of Tensor
-            The positions (a tensor requiring gradients; ``data.pos`` itself when it does) and the
-            gradient ``(N, 3)`` in eV / Angstrom, differentiable in them.
-        """
-        pos = data.pos if data.pos.requires_grad else data.pos.detach().requires_grad_(True)
-        explicit, density = pos.view_as(pos), pos.view_as(pos)
-        self.__dict__["_density_positions"] = density
-        use_fast = self.use_fast
-        if create_graph:
-            self.use_fast = False
-            self.__dict__["_second_order_density"] = True
-        try:
-            with torch.enable_grad():
-                energy = self(dataclasses.replace(data, pos=explicit))["energy"]
-                (grad,) = torch.autograd.grad(energy.sum(), explicit, create_graph=True)
-        finally:
-            self.__dict__.pop("_density_positions", None)
-            self.__dict__.pop("_second_order_density", None)
-            self.use_fast = use_fast
-        return pos, grad
-
-    def forward(self, data: AtomicGraph) -> Dict[str, Tensor]:
-        """Total energies (eV), charges and moments of a batch of molecules."""
-        # the density at positions of its own (an alias of the positions, see energy_gradient)
-        density_pos = self.__dict__.get("_density_positions") if torch.is_grad_enabled() else None
-        if density_pos is None and self._on_host(data):
-            twin = self._host_model()
-            out = twin(data.to("cpu"))
-            self.last_scf = twin.last_scf
-            return {k: (v.to(data.pos.device) if isinstance(v, Tensor) else v) for k, v in out.items()}
-        dtype = torch.float64
-        device = data.pos.device
-        pos = data.pos.to(dtype) / BOHR
-        z = data.atomic_numbers.long()
-        zl = z.tolist()
-        missing = sorted(set(zl) - set(self.supported))
-        if missing:
-            raise ValueError(f"{type(self).__name__} has no parameters for Z = {missing}")
-        batch = data.batch
-        n_struct = data.num_graphs
-        bl = batch.tolist()
-        basis = _Basis(self, zl, bl, n_struct, dtype, device)
-
-        charge = (data.total_charge.to(dtype) if data.total_charge is not None
-                  else torch.zeros(n_struct, dtype=dtype, device=device))
-        self._begin(z, pos, batch, n_struct, charge)
-
-        # integrals and Hamiltonian (differentiable in the positions)
-        S, DA, QA = self._integrals(basis, pos, n_struct)
-        cn = self.coordination_numbers(z, pos, batch)
-        H0 = self._hamiltonian(zl, basis, pos, S, cn, n_struct)
-        ctx = self.scc_context(z, pos, basis, cn, batch, n_struct)
-
-        n0 = torch.tensor([o for za in zl for o in self.reference_occupations(za)], dtype=dtype, device=device)
-        shell_struct = torch.tensor(basis.shell_struct, dtype=torch.long, device=device)
-        n_el = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, shell_struct, n0) - charge
-        n_el_i = [int(round(float(x))) for x in n_el]
-        mult = getattr(data, "spin_multiplicity", None)
-        uhf = []
-        for b in range(n_struct):
-            m = int(mult[b]) if mult is not None else 0
-            uhf.append(m - 1 if m > 0 else n_el_i[b] % 2)
-        n_alpha = torch.tensor([(n + u) / 2 for n, u in zip(n_el_i, uhf)], dtype=dtype, device=device)
-        n_beta = torch.tensor([(n - u) / 2 for n, u in zip(n_el_i, uhf)], dtype=dtype, device=device)
-
-        with torch.no_grad():
-            start = self._initial_charges(z, pos.detach(), batch, n_struct, charge, basis, n0)
-            inputs = [t.detach() for t in (S, DA, QA, H0)]
-            scc_ctx = {k: (v.detach() if isinstance(v, Tensor) else v) for k, v in ctx.items()}
-            res = self._scc(basis, *inputs, scc_ctx, n0, n_alpha, n_beta, n_struct, start)
-            if start is not None and not bool(res["converged"]):
-                # the cycle did not converge from the model charges: start from neutral atoms
-                retry = self._scc(basis, *inputs, scc_ctx, n0, n_alpha, n_beta, n_struct, None)
-                if bool(retry["converged"]):
-                    res = retry
-            res = self._safeguarded(res, basis, inputs, scc_ctx, n0, n_alpha, n_beta, n_struct, start)
-        self.last_scf = res
-        P, W, ts = res["P"], res["W"], res["ts"]
-        fixed = S.detach()
-        if density_pos is not None:
-            # the density as a function of the positions (and of trained parameters)
-            pos_s = density_pos.to(dtype) / BOHR
-            still = self._integrals(basis, pos_s, n_struct)
-            fixed = still[0]
-            P, W, ts = self._responsive_density(z, zl, pos_s, batch, basis, *still, n0, n_alpha, n_beta, n_struct,
-                                                res["x"])
-        elif self.trainable and self.training and torch.is_grad_enabled():
-            # training: the density follows the parameters through the self-consistent solution
-            still = (fixed, DA.detach(), QA.detach())
-            if basis.alpha.requires_grad:
-                # trained exponents: the integrals at fixed positions, as functions of the exponents
-                still = self._integrals(basis, pos.detach(), n_struct)
-                fixed = still[0]
-            P, W, ts = self._responsive_density(z, zl, pos.detach(), batch, basis, *still, n0, n_alpha, n_beta,
-                                                n_struct, res["x"])
-        q_shell, mu, theta = self._moments(basis, P, S, DA, QA, n0)
-        e_h0 = (P * H0).sum((-1, -2))
-        terms = self._terms(q_shell, mu, theta, ctx)
-        e_scc = sum(terms[k] for k in self.scc_terms)
-        cls = self.classical_energy(z, pos, batch, n_struct)
-        # energy-weighted density: makes the gradient include the overlap derivative (a zero that
-        # depends on the positions only through the overlap)
-        e_total = e_h0 + e_scc + cls["total"] - ts - (W * (S - fixed)).sum((-1, -2))
-        energy = e_total * AUTOEV
-        n_atoms = z.shape[0]
-        counts = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, batch, torch.ones_like(pos[:, 0]))
-        node_energy = (energy / counts)[batch]
-        q_atom = torch.zeros(n_atoms, dtype=dtype, device=device).index_add(0, basis.shell_atom, q_shell)
-        out = {
-            "energy": energy,
-            "node_energy": node_energy,
-            "charges": q_atom.detach(),
-            "atomic_dipoles": mu.detach(),
-            "atomic_quadrupoles": theta.detach(),
-            "electronic_energy": ((e_h0 + e_scc - ts) * AUTOEV).detach(),
-            "repulsion_energy": (cls["repulsion"] * AUTOEV).detach(),
-            "scf_converged": res["converged"],
-        }
-        for k, v in cls.items():
-            if k not in ("total", "repulsion"):
-                out[f"{k}_energy"] = (v * AUTOEV).detach()
-        for k in self.reported_terms:
-            out[f"{k}_energy"] = (terms[k] * AUTOEV).detach()
-        return out
-
-    def scc_context(self, z, pos, basis, cn, batch, n_struct) -> dict:
-        return {}
-
-    def _begin(self, z: Tensor, pos: Tensor, batch: Tensor, n_struct: int, charge: Tensor) -> None:
-        """What a method prepares from the structures and their total charges before the Hamiltonian."""
 
     def _integrals(self, basis: _Basis, pos: Tensor, n_struct: int) -> Tuple[Tensor, Tensor, Tensor]:
         """Dense overlap ``S``, dipole ``DA`` and second-moment ``QA`` matrices per structure.
@@ -773,174 +590,6 @@ class GFN(InteratomicPotential):
         ratio = torch.sqrt(r / (rc[:, None] + rc[None, :]))
         return (1.0 + kpoly[:, None] * ratio) * (1.0 + kpoly[None, :] * ratio)
 
-    def _moments(self, basis: _Basis, P: Tensor, S: Tensor, DA: Tensor, QA: Tensor, n0: Tensor,
-                 stack: Optional[Tensor] = None):
-        """Mulliken shell charges, atomic dipoles and second moments (atomic units); with the integral
-        matrices as ``stack[b, nu, c, mu]``, one product per column gives all of them."""
-        n_shell = len(basis.shell_l)
-        n_atoms = int(basis.ao_atom.max()) + 1 if basis.ao_atom.numel() else 0
-        b, i = basis.ao_struct, basis.ao_index
-        nb = P.shape[-1]
-        flat = b * nb + i
-        if stack is not None:
-            sums = torch.matmul(stack, P.transpose(1, 2).unsqueeze(-1)).squeeze(-1)      # (B, nb, n_ops)
-            sums = sums.reshape(-1, sums.shape[-1]).index_select(0, flat)
-            q_shell = n0 - torch.zeros(n_shell, dtype=P.dtype, device=P.device).index_add(0, basis.ao_shell, sums[:, 0])
-            mu = torch.zeros(n_atoms, 3, dtype=P.dtype, device=P.device)
-            theta = torch.zeros(n_atoms, 6, dtype=P.dtype, device=P.device)
-            if self.multipoles:
-                mu = mu.index_add(0, basis.ao_atom, -sums[:, 1:4])
-                theta = theta.index_add(0, basis.ao_atom, -sums[:, 4:10])
-            return q_shell, mu, theta
-        PS = (P * S).sum(-1)                                         # (B, nb): sum_nu P_mu,nu S_nu,mu
-        pop_ao = PS.reshape(-1).index_select(0, flat)
-        pop_shell = torch.zeros(n_shell, dtype=P.dtype, device=P.device).index_add(0, basis.ao_shell, pop_ao)
-        q_shell = n0 - pop_shell
-        if not self.multipoles:
-            return (q_shell, torch.zeros(n_atoms, 3, dtype=P.dtype, device=P.device),
-                    torch.zeros(n_atoms, 6, dtype=P.dtype, device=P.device))
-        # dipole: mu_A = - sum_{k in A} sum_l P_lk DA[l, k]
-        pd = (P[:, None] * DA).sum(-2)                               # (B, 3, nb): column sums over l
-        pq = (P[:, None] * QA).sum(-2)                               # (B, 6, nb)
-        pd = pd.transpose(1, 2).reshape(-1, 3).index_select(0, flat)
-        pq = pq.transpose(1, 2).reshape(-1, 6).index_select(0, flat)
-        mu = -torch.zeros(n_atoms, 3, dtype=P.dtype, device=P.device).index_add(0, basis.ao_atom, pd)
-        theta = -torch.zeros(n_atoms, 6, dtype=P.dtype, device=P.device).index_add(0, basis.ao_atom, pq)
-        return q_shell, mu, theta
-
-    def _ao_potentials(self, basis: _Basis, v_shell: Tensor, v_mu: Tensor, v_theta: Tensor, n_struct: int) -> Tensor:
-        """The potentials of the shell charges and, with multipoles, of the atomic dipoles and second
-        moments on the atomic orbitals, ``(B, n_ops, nb)``. The Fock matrix is
-        ``H0 - (Z + Z^T) / 2`` with ``Z[mu, nu] = sum_c M_c[mu, nu] V[c, nu]`` over the overlap, dipole
-        and second-moment matrices ``M_c``."""
-        vals = v_shell[basis.ao_shell][:, None]
-        if self.multipoles:
-            vals = torch.cat([vals, v_mu[basis.ao_atom], v_theta[basis.ao_atom]], 1)
-        V = vals.new_zeros(n_struct, vals.shape[1], basis.nb)
-        V[basis.ao_struct, :, basis.ao_index] = vals
-        return V
-
-    def potentials(self, q_shell: Tensor, mu: Tensor, theta: Tensor, ctx: dict) -> Tuple[Tensor, Tensor, Tensor]:
-        """Derivatives of the charge-dependent energy with respect to the shell charges, atomic
-        dipoles and second moments (by automatic differentiation; the methods give closed forms)."""
-        inputs = [t.detach().clone().requires_grad_(True) for t in (q_shell, mu, theta)]
-        with torch.enable_grad():
-            e = self.second_order_energy(*inputs, ctx)
-            grads = torch.autograd.grad(e, inputs, allow_unused=True)
-        return tuple(g if g is not None else torch.zeros_like(t) for g, t in zip(grads, inputs))
-
-    def _fock(self, q_shell: Tensor, mu: Tensor, theta: Tensor, basis: _Basis, ctx: dict, ortho: "_Orthogonalizer",
-              left: Tensor, h0: Tensor) -> Tensor:
-        """The Fock matrix in the orthogonal basis from the charges and moments: one product (or
-        triangular solve) with the transformed integral matrices ``left`` (in the layout of
-        :func:`_stacked`) and ``h0``."""
-        V = self._ao_potentials(basis, *self.potentials(q_shell, mu, theta, ctx), left.shape[0])
-        # Z^T[nu, mu] = sum_c left_c[mu, nu] V[c, nu]: one product per column over its operators
-        Zt = torch.matmul(left, V.transpose(1, 2).unsqueeze(-1)).squeeze(-1)
-        K = ortho.left(Zt)
-        return h0 - 0.5 * (K + K.transpose(-1, -2))
-
-    def _scc_step(self, x, basis, S, DA, QA, ctx, n0, n_alpha, n_beta, ortho, left, h0, kt, n_shell, n_atoms,
-                  stack: Optional[Tensor] = None):
-        """One map of the cycle: charges and moments -> Fock matrices -> occupations -> new charges and moments."""
-        dtype, device = S.dtype, S.device
-        q_shell = x[:n_shell]
-        if self.multipoles:
-            mu = x[n_shell:n_shell + 3 * n_atoms].view(n_atoms, 3)
-            theta = x[n_shell + 3 * n_atoms:].view(n_atoms, 6)
-        else:
-            mu = torch.zeros(n_atoms, 3, dtype=dtype, device=device)
-            theta = torch.zeros(n_atoms, 6, dtype=dtype, device=device)
-        eps, Co = torch.linalg.eigh(self._fock(q_shell, mu, theta, basis, ctx, ortho, left, h0))
-        occ, ts = _fermi(eps, n_alpha, n_beta, kt, basis.n_ao)
-        # the levels are ascending: orbitals beyond the last occupied one add nothing to the density
-        n_occ = max(1, int((occ > self.occupation_neglect).sum(-1).max()))
-        eps, occ = eps[:, :n_occ], occ[:, :n_occ]
-        C = ortho.back(Co[:, :, :n_occ])
-        P = (C * occ[:, None, :]) @ C.transpose(-1, -2)
-        qn, mun, thn = self._moments(basis, P, S, DA, QA, n0, stack)
-        xn = torch.cat([qn, mun.reshape(-1), thn.reshape(-1)]) if self.multipoles else qn
-        return {"P": P, "C": C, "eps": eps, "occ": occ, "ts": ts}, xn
-
-    def _responsive_density(self, z: Tensor, zl: List[int], pos: Tensor, batch: Tensor, basis: _Basis, S: Tensor,
-                            DA: Tensor, QA: Tensor, n0: Tensor, n_alpha: Tensor, n_beta: Tensor, n_struct: int,
-                            x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        """The converged density, energy-weighted density and ``T S_el`` as differentiable functions
-        of the trained parameters (at fixed positions).
-
-        With the map ``g`` of one iteration, the converged charges and moments obey ``x = g(x, p)``, so
-        a gradient ``v`` in ``x`` reaches the parameters ``p`` as ``y dg/dp`` with
-        ``(1 - (dg/dx)^T) y = v``; this linear system is solved by Anderson-mixed fixed-point steps,
-        each one backward pass through an iteration (whose density uses first-order perturbation
-        theory at the Fermi occupations, :class:`_SpectralDensity`).
-        """
-        cn = self.coordination_numbers(z, pos, batch)
-        H0 = self._hamiltonian(zl, basis, pos, S, cn, n_struct)
-        ctx = self.scc_context(z, pos, basis, cn, batch, n_struct)
-        ortho = _Orthogonalizer(S)
-        if ortho.L is None:
-            raise RuntimeError("training needs a positive definite overlap matrix")
-        left = _stacked(ortho.left(torch.cat([S[:, None], DA, QA], 1) if self.multipoles else S[:, None]))
-        h0 = ortho.right(ortho.left(H0))
-        n_shell, n_atoms = n0.shape[0], int(basis.ao_atom.max()) + 1
-        kt = KB_AU * self.electronic_temperature
-
-        def fock(xx: Tensor, c: dict) -> Tensor:
-            if self.multipoles:
-                mu = xx[n_shell:n_shell + 3 * n_atoms].view(n_atoms, 3)
-                theta = xx[n_shell + 3 * n_atoms:].view(n_atoms, 6)
-            else:
-                mu, theta = xx.new_zeros(n_atoms, 3), xx.new_zeros(n_atoms, 6)
-            return self._fock(xx[:n_shell], mu, theta, basis, c, ortho, left, h0)
-
-        with torch.no_grad():
-            # on a copy of the context: matrices it caches here would be constants for the density below
-            eps, U = torch.linalg.eigh(fock(x, dict(ctx)))
-            f, level = _fermi_channels(eps, n_alpha, n_beta, kt, basis.n_ao)
-
-        def density(xx: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-            Po, Wo, ts = _SpectralDensity.apply(fock(xx, ctx), eps, U, f, level, kt)
-            # back to the atomic orbitals: L^-T M L^-1 of the symmetric matrices
-            P = ortho.back(ortho.back(Po).transpose(-1, -2)).transpose(-1, -2)
-            W = ortho.back(ortho.back(Wo).transpose(-1, -2)).transpose(-1, -2)
-            q, m, th = self._moments(basis, P, S, DA, QA, n0)
-            return P, W, ts, (torch.cat([q, m.reshape(-1), th.reshape(-1)]) if self.multipoles else q)
-
-        x_in = x.detach().clone().requires_grad_(True)
-        x_out = density(x_in)[3]
-
-        if self.__dict__.get("_second_order_density", False):
-            # derivatives to second order (parameter gradients of Hessians): with M = (1 - dg/dx)^-1 at the
-            # solution, x1 = x with the adjoint M^T (exact first derivatives, linear in the incoming gradient)
-            # and the step x2 = x1 + M (g(x1) - x1), whose second derivatives are those of the solution (the
-            # residual and its first derivative vanish there, so M enters as a constant)
-            eye = torch.eye(x_out.numel(), dtype=x_out.dtype, device=x_out.device)
-            rows = [torch.autograd.grad(x_out, x_in, e, retain_graph=True, allow_unused=True)[0] for e in eye]
-            J = torch.stack([torch.zeros_like(x_out) if r is None else r for r in rows])
-            M = torch.linalg.inv(eye - J)
-            x1 = x_out.clone()
-            x1.register_hook(lambda v: M.transpose(0, 1) @ v)
-            x2 = x1 + M @ (density(x1)[3] - x1)
-            return density(x2)[:3]
-
-        def adjoint(v: Tensor) -> Tensor:
-            scale = float(v.detach().abs().max())
-            if scale == 0.0:
-                return v
-            y, ys, rs = v, [], []
-            for _ in range(self.max_iter):
-                back = torch.autograd.grad(x_out, x_in, y, retain_graph=True, allow_unused=True)[0]
-                r = v - y if back is None else v + back - y
-                if float(r.abs().max()) <= self.response_tolerance * scale:
-                    break
-                ys, rs = (ys + [y])[-self.history:], (rs + [r])[-self.history:]
-                y = _anderson(ys, rs, 1.0)
-            return y
-
-        x_sc = x_out.clone()
-        x_sc.register_hook(adjoint)
-        return density(x_sc)[:3]
-
     def _initial_charges(self, z: Tensor, pos: Tensor, batch: Tensor, n_struct: int, charge: Tensor,
                          basis: _Basis, n0: Tensor) -> Optional[Tensor]:
         """Shell charges that start the cycle: with ``guess="eeq"`` the charges of the
@@ -962,127 +611,6 @@ class GFN(InteratomicPotential):
         sa = basis.shell_atom
         total = torch.zeros_like(q).index_add(0, sa, n0)
         return q[sa] * n0 / total[sa]
-
-    def _safeguarded(self, res: dict, basis: _Basis, inputs: list, ctx: dict, n0: Tensor, n_alpha: Tensor,
-                     n_beta: Tensor, n_struct: int, start: Optional[Tensor]) -> dict:
-        """The result of the cycle after two safeguards. A cycle that did not converge is run again
-        from the charges that converge at a higher electronic temperature (``warm_temperature``). A
-        cycle longer than ``long_cycle`` iterations may have several solutions: it is run again with
-        half the damping, and each structure keeps the solution of lower electronic free energy."""
-        def run(**options) -> dict:
-            return self._scc(basis, *inputs, ctx, n0, n_alpha, n_beta, n_struct, **options)
-
-        n_shell = n0.shape[0]
-        if not bool(res["converged"]):
-            hot = max(self.warm_temperature, 10.0 * self.electronic_temperature)
-            warm = run(start=start, temperature=hot)
-            alt = run(start=warm["x"][:n_shell])
-            alt["iterations"] += res["iterations"] + warm["iterations"]
-            return alt if bool(alt["converged"]) else res
-        if res["iterations"] <= self.long_cycle:
-            return res
-        alt = run(start=start, mixing=0.5 * self.mixing)
-        if not bool(alt["converged"]):
-            return res
-        n_atoms = int(basis.ao_atom.max()) + 1
-        atom_struct = torch.zeros(n_atoms, dtype=torch.long, device=n0.device)
-        atom_struct[basis.shell_atom] = basis.shell_struct_t
-        owner = basis.shell_struct_t
-        if self.multipoles:
-            owner = torch.cat([owner, atom_struct.repeat_interleave(3), atom_struct.repeat_interleave(6)])
-
-        def free_energy(r: dict) -> Tensor:
-            x = r["x"]
-            mu = x[n_shell:n_shell + 3 * n_atoms].view(n_atoms, 3) if self.multipoles else x.new_zeros(n_atoms, 3)
-            theta = x[n_shell + 3 * n_atoms:].view(n_atoms, 6) if self.multipoles else x.new_zeros(n_atoms, 6)
-            terms = self._terms(x[:n_shell], mu, theta, ctx)
-            return (r["P"] * inputs[3]).sum((-1, -2)) + sum(terms[k] for k in self.scc_terms) - r["ts"]
-
-        take = free_energy(alt) < free_energy(res) - 1e-9
-        out = dict(res)
-        out["iterations"] = res["iterations"] + alt["iterations"]
-        if not bool(take.any()):
-            return out
-        width = max(res["occ"].shape[-1], alt["occ"].shape[-1])
-        for key in ("P", "W", "ts", "C", "eps", "occ"):
-            a, b = res[key], alt[key]
-            if key in ("C", "eps", "occ"):
-                a = torch.nn.functional.pad(a, (0, width - a.shape[-1]))
-                b = torch.nn.functional.pad(b, (0, width - b.shape[-1]))
-            out[key] = torch.where(take.view(-1, *([1] * (a.dim() - 1))), b, a)
-        out["x"] = torch.where(take[owner], alt["x"], res["x"])
-        return out
-
-    def _scc(self, basis: _Basis, S, DA, QA, H0, ctx, n0, n_alpha, n_beta, n_struct,
-             start: Optional[Tensor] = None, mixing: Optional[float] = None,
-             temperature: Optional[float] = None) -> Dict[str, Tensor]:
-        """Self-consistent charges by Anderson mixing of the shell charges and atomic moments; the mixing
-        restarts from the best iterate with half the damping when the residual grows or stalls.
-        ``mixing`` and ``temperature`` replace the model's damping and electronic temperature."""
-        dtype, device = S.dtype, S.device
-        n_shell = n0.shape[0]
-        n_atoms = int(basis.ao_atom.max()) + 1
-        # the integral matrices and H0 with the orthogonalizing transformation applied
-        ortho = _Orthogonalizer(S)
-        M = torch.cat([S[:, None], DA, QA], 1) if self.multipoles else S[:, None]
-        stack = M.permute(0, 3, 1, 2).contiguous()
-        left = _stacked(ortho.left(M))
-        del M
-        h0 = ortho.right(ortho.left(H0))
-        kt = KB_AU * (self.electronic_temperature if temperature is None else temperature)
-        x = torch.zeros(n_shell + 9 * n_atoms * int(self.multipoles), dtype=dtype, device=device)
-        if start is not None:
-            x[:n_shell] = start
-        # the structure of every mixed quantity, for the convergence test per structure
-        atom_struct = torch.zeros(n_atoms, dtype=torch.long, device=device)
-        atom_struct[basis.shell_atom] = basis.shell_struct_t
-        owner = basis.shell_struct_t
-        if self.multipoles:
-            owner = torch.cat([owner, atom_struct.repeat_interleave(3), atom_struct.repeat_interleave(6)])
-        count = torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, owner, torch.ones_like(x))
-        threshold = self.charge_convergence * self.accuracy
-        xs, rs = [], []
-        converged = False
-        result = None
-        iterations = 0
-        beta = self.mixing if mixing is None else mixing
-        best_err, best_x, worse = float("inf"), x.clone(), 0
-        checkpoint = float("inf")
-        for _ in range(self.max_iter):
-            iterations += 1
-            result, xn = self._scc_step(x, basis, S, DA, QA, ctx, n0, n_alpha, n_beta, ortho, left, h0, kt, n_shell,
-                                        n_atoms, stack)
-            r = xn - x
-            err = float(r.abs().max())
-            rms = torch.sqrt(torch.zeros_like(count).index_add(0, owner, r * r) / count)
-            if float(rms.max()) < threshold:
-                converged = True
-                break
-            if err < best_err:
-                best_err, best_x, worse = err, x.clone(), 0
-            else:
-                worse += 1
-            stalled = iterations % 40 == 0 and best_err > 1e-2 * checkpoint
-            if iterations % 40 == 0:
-                checkpoint = best_err
-            if (worse >= 8 and err > 2.0 * best_err) or stalled:
-                # restart from the best iterate with a smaller damping
-                beta, worse = 0.5 * beta, 0
-                xs, rs = [], []
-                x = best_x.clone()
-                continue
-            xs.append(x.clone())
-            rs.append(r.clone())
-            if len(xs) > self.history:
-                xs.pop(0)
-                rs.pop(0)
-            x = _anderson(xs, rs, beta)
-        W = (result["C"] * (result["occ"] * result["eps"])[:, None, :]) @ result["C"].transpose(-1, -2)
-        result["W"] = W
-        result["x"] = x
-        result["converged"] = torch.tensor(converged, device=device)
-        result["iterations"] = iterations
-        return result
 
 
 class _FusedIntegrals(torch.autograd.Function):
@@ -1159,39 +687,6 @@ class _IntegralCurvature(torch.autograd.Function):
         return h, None, None, None, None, None, None, None, None
 
 
-class _Orthogonalizer:
-    """The transformation ``T`` that turns ``F C = S C eps`` into a standard eigenproblem of
-    ``T F T^T``: the inverse of the Cholesky factor of the overlap, ``S = L L^T``, or, where the
-    factorization fails (a numerically singular overlap), ``T^T = U s^-1/2`` from the eigenvectors
-    and eigenvalues of ``S``."""
-
-    def __init__(self, S: Tensor):
-        L, info = torch.linalg.cholesky_ex(S)
-        self.L: Optional[Tensor] = None if bool(info.any()) else L
-        self.X: Optional[Tensor] = None
-        if self.L is None:
-            es, us = torch.linalg.eigh(S)
-            self.X = us * es.clamp_min(1e-14).rsqrt()[:, None, :]
-
-    def left(self, M: Tensor) -> Tensor:
-        """``T M`` for ``M`` of shape ``(B, nb, nb)`` or ``(B, k, nb, nb)``."""
-        if self.L is None:
-            Xt = self.X.transpose(-1, -2)
-            return (Xt if M.dim() == 3 else Xt[:, None]) @ M
-        return torch.linalg.solve_triangular(self.L if M.dim() == 3 else self.L[:, None], M, upper=False)
-
-    def right(self, M: Tensor) -> Tensor:
-        """``M T^T``."""
-        if self.L is None:
-            return M @ self.X
-        return torch.linalg.solve_triangular(self.L.transpose(-1, -2), M, upper=True, left=False)
-
-    def back(self, C: Tensor) -> Tensor:
-        """Eigenvectors of the standard problem to those of the generalized one, ``T^T C``."""
-        if self.L is None:
-            return self.X @ C
-        return torch.linalg.solve_triangular(self.L.transpose(-1, -2), C, upper=True)
-
 
 class _Globals:
     """The global parameters by name, as elements of their trained table."""
@@ -1214,11 +709,6 @@ def _vector(values, dtype, device) -> Tensor:
     return torch.tensor(values, dtype=dtype, device=device)
 
 
-def _stacked(M: Tensor) -> Tensor:
-    """Integral matrices ``(B, n_ops, mu, nu)`` as ``(B, nu, mu, n_ops)``: the operators of an element
-    side by side, the elements of a column in a row."""
-    return M.permute(0, 3, 2, 1).contiguous()
-
 
 @functools.lru_cache(maxsize=None)
 def _origin_shift(dtype: torch.dtype, device: torch.device) -> Tuple[Tensor, Tensor]:
@@ -1237,273 +727,6 @@ def _origin_shift(dtype: torch.dtype, device: torch.device) -> Tuple[Tensor, Ten
         second[c, 4 + c, 0] = 1.0
     return first.view(3, 100), second.view(6, 100)
 
-
-def _anderson(xs: List[Tensor], rs: List[Tensor], beta: float) -> Tensor:
-    """Anderson (Pulay) mixing of the iterates ``xs`` with residuals ``rs``."""
-    m = len(xs)
-    if m == 1:
-        return xs[0] + beta * rs[0]
-    R = torch.stack(rs)
-    A = R @ R.T
-    A = A + torch.eye(m, dtype=A.dtype, device=A.device) * 1e-14 * A.diagonal().max()
-    ones = torch.ones(m, dtype=A.dtype, device=A.device)
-    try:
-        w = torch.linalg.solve(A, ones)
-    except RuntimeError:
-        return xs[-1] + beta * rs[-1]
-    c = w / w.sum()
-    X = torch.stack(xs)
-    return (c[:, None] * (X + beta * R)).sum(0)
-
-
-def _fermi(eps: Tensor, n_alpha: Tensor, n_beta: Tensor, kt: float, n_ao: List[int]) -> Tuple[Tensor, Tensor]:
-    """Spin-summed Fermi occupations and ``T S_el`` (hartree) per structure."""
-    f, _ = _fermi_channels(eps, n_alpha, n_beta, kt, n_ao)
-    return f.sum(1), _electronic_entropy(f, kt)
-
-
-def _electronic_entropy(f: Tensor, kt: float) -> Tensor:
-    """``T S_el`` (hartree) per structure of the channel occupations ``(B, 2, nb)``."""
-    return -kt * (torch.special.xlogy(f, f) + torch.special.xlogy(1.0 - f, 1.0 - f)).sum((-1, -2))
-
-
-def _fermi_channels(eps: Tensor, n_alpha: Tensor, n_beta: Tensor, kt: float, n_ao: List[int]) -> Tuple[Tensor, Tensor]:
-    """Fermi occupations ``(B, 2, nb)`` and levels ``(B, 2)`` of the two spin channels of all
-    structures at once; the Fermi levels by Newton steps on the host, bisecting where a step
-    leaves the bracket."""
-    nb = eps.shape[-1]
-    e_host = eps.detach().cpu().numpy()
-    n_valid = np.asarray(n_ao)
-    valid = np.arange(nb)[None, :] < n_valid[:, None]
-    nel = np.stack([n_alpha.detach().cpu().numpy(), n_beta.detach().cpu().numpy()], 1)       # (B, 2)
-    if kt <= 0:
-        f = ((np.arange(nb)[None, None, :] < nel[:, :, None]) & valid[:, None, :]).astype(np.float64)
-        return (torch.as_tensor(f, dtype=eps.dtype, device=eps.device),
-                torch.zeros(eps.shape[0], 2, dtype=eps.dtype, device=eps.device))
-    e = np.where(valid, e_host, np.inf)[:, None, :]
-    lo = np.repeat((np.where(valid, e_host, np.inf).min(-1) - 1.0)[:, None], 2, 1)
-    hi = np.repeat((np.where(valid, e_host, -np.inf).max(-1) + 1.0)[:, None], 2, 1)
-    # start between the highest occupied and the lowest empty level (the levels are ascending)
-    top = np.clip(np.ceil(nel).astype(np.int64), 1, n_valid[:, None])
-    rows = np.arange(e_host.shape[0])[:, None]
-    below = e_host[rows, top - 1]
-    above = e_host[rows, np.minimum(top, n_valid[:, None] - 1)]
-    mid = 0.5 * (below + above)
-    target = 4.0 * np.finfo(np.float64).eps * np.maximum(nel, 1.0)
-    for _ in range(200):
-        f = 0.5 * (1.0 - np.tanh(0.5 * (e - mid[:, :, None]) / kt))
-        res = f.sum(-1) - nel
-        done = (np.abs(res) <= target) | (nel <= 0)
-        if done.all():
-            break
-        over = res > 0
-        hi = np.where(over, mid, hi)
-        lo = np.where(over, lo, mid)
-        slope = (f * (1.0 - f)).sum(-1) / kt
-        step = mid - res / np.maximum(slope, 1e-300)
-        inside = (step > lo) & (step < hi)
-        new = np.where(inside, step, 0.5 * (lo + hi))
-        if (done | (new == mid)).all():
-            break
-        mid = np.where(done, mid, new)
-    mu = torch.as_tensor(mid, dtype=eps.dtype, device=eps.device)
-    has = torch.as_tensor(nel > 0, device=eps.device).to(eps.dtype)
-    ee = torch.where(torch.as_tensor(valid, device=eps.device), eps, torch.full_like(eps, float("inf")))[:, None, :]
-    return torch.sigmoid(-(ee - mu[:, :, None]) / kt) * has[:, :, None], mu
-
-
-#: Levels closer than this (hartree) take the derivative limits of the divided differences.
-_NEAR = 1e-8
-
-
-def _divided1(lam: Tensor, v: Tensor, dv: Tensor) -> Tensor:
-    """First divided differences ``[v_i, v_j]`` ``(B, n, n)`` of a function with values ``v`` and derivatives
-    ``dv`` at the levels ``lam`` ``(B, n)`` (the mean derivative for close levels)."""
-    d = lam[:, :, None] - lam[:, None, :]
-    near = d.abs() < _NEAR
-    return torch.where(near, 0.5 * (dv[:, :, None] + dv[:, None, :]),
-                       (v[:, :, None] - v[:, None, :]) / torch.where(near, torch.ones_like(d), d))
-
-
-def _divided2(lam: Tensor, v: Tensor, dv: Tensor, d2v: Tensor) -> Tensor:
-    """Second divided differences ``[v_i, v_k, v_j]`` ``(B, n, n, n)`` (indices ``i, k, j``), with the limits of
-    two and three close levels."""
-    d1 = _divided1(lam, v, dv)
-    dij = lam[:, :, None, None] - lam[:, None, None, :]
-    dik = lam[:, :, None, None] - lam[:, None, :, None]
-    far_ij, far_ik = dij.abs() >= _NEAR, dik.abs() >= _NEAR
-    general = (d1[:, :, :, None] - d1[:, None, :, :]) / torch.where(far_ij, dij, torch.ones_like(dij))
-    pair = (dv[:, :, None, None] - d1[:, :, :, None]) / torch.where(far_ik, dik, torch.ones_like(dik))
-    triple = (d2v[:, :, None, None] + d2v[:, None, :, None] + d2v[:, None, None, :]) / 6.0
-    return torch.where(far_ij, general, torch.where(far_ik, pair, triple))
-
-
-def _fermi_derivatives(fs: Tensor, kt: float) -> Tuple[Tensor, Tensor]:
-    """The first and second derivatives of Fermi occupations ``fs`` in their level, at a fixed Fermi level."""
-    if kt <= 0:
-        return torch.zeros_like(fs), torch.zeros_like(fs)
-    d1 = -fs * (1.0 - fs) / kt
-    return d1, -d1 * (1.0 - 2.0 * fs) / kt
-
-
-def _sym(M: Tensor) -> Tensor:
-    return 0.5 * (M + M.transpose(-1, -2))
-
-
-def _spectral_gradient(eps: Tensor, U: Tensor, f: Tensor, level: Tensor, kt: float, gP: Optional[Tensor],
-                       gW: Optional[Tensor], gts: Optional[Tensor]) -> Tensor:
-    """The gradient in ``F`` of ``<gP, P> + <gW, W> + gts T S_el`` (see :class:`_SpectralDensity`)."""
-    Ut = U.transpose(-1, -2)
-    A = None if gP is None else Ut @ _sym(gP) @ U
-    B = None if gW is None else Ut @ _sym(gW) @ U
-    gap = eps[:, :, None] - eps[:, None, :]
-    near = gap.abs() < _NEAR
-    gap = torch.where(near, torch.ones_like(gap), gap)
-
-    def quotient(a: Tensor, slope: Tensor) -> Tensor:
-        equal = 0.5 * (slope[:, :, None] + slope[:, None, :])
-        return torch.where(near, equal, (a[:, :, None] - a[:, None, :]) / gap)
-
-    M = torch.zeros_like(gap)
-    diagonal = torch.zeros_like(eps)
-    for s in range(2):
-        fs = f[:, s]
-        slope = -fs * (1.0 - fs) / kt if kt > 0 else torch.zeros_like(fs)      # df / d eps at a fixed level
-        total = slope.sum(-1, keepdim=True)
-        share = torch.where(total != 0, slope / torch.where(total != 0, total, torch.ones_like(total)),
-                            torch.zeros_like(slope))
-        moved = torch.zeros_like(total[:, 0])                                   # gradient in the Fermi level
-        if A is not None:
-            M = M + quotient(fs, slope) * A
-            moved = moved - (A.diagonal(dim1=-2, dim2=-1) * slope).sum(-1)
-        if B is not None:
-            M = M + quotient(fs * eps, fs + eps * slope) * B
-            moved = moved - (B.diagonal(dim1=-2, dim2=-1) * eps * slope).sum(-1)
-        if gts is not None:
-            entropy = (eps - level[:, s, None]) * slope
-            diagonal = diagonal + gts[:, None] * entropy
-            moved = moved - gts * entropy.sum(-1)
-        diagonal = diagonal + moved[:, None] * share
-    return _sym(U @ (M + torch.diag_embed(diagonal)) @ Ut)
-
-
-def _spectral_second(eps: Tensor, U: Tensor, f: Tensor, level: Tensor, kt: float, gP: Optional[Tensor],
-                     gW: Optional[Tensor], gts: Optional[Tensor], gG: Tensor):
-    """The derivatives of ``<gG, G>``, ``G`` the gradient of :func:`_spectral_gradient`: in ``F`` (the second
-    derivative of ``L = <gP, P> + <gW, W> + gts T S_el`` along ``gG``) and in ``gP``, ``gW``, ``gts`` (the
-    first-order changes of ``P``, ``W`` and ``T S_el`` along ``gG``).
-
-    Each spin channel contributes ``L_s(F, mu_s(F))`` with the matrix functions ``a = f(e - mu)``,
-    ``b = e f(e - mu)``, the trace of ``t = -kT H(f(e - mu))`` and the Fermi level fixed by
-    ``tr f(F - mu) = N``. In the eigenbasis the second derivatives take the second divided differences of
-    ``a`` and ``b``, the first of ``t'``, ``df / dmu`` and ``f'``, and the first and second derivatives of
-    ``mu``.
-    """
-    Ut = U.transpose(-1, -2)
-    zero = torch.zeros_like(U)
-    A = zero if gP is None else Ut @ _sym(gP) @ U
-    B = zero if gW is None else Ut @ _sym(gW) @ U
-    g = torch.zeros_like(eps[:, 0]) if gts is None else gts.to(eps.dtype)
-    E = Ut @ _sym(gG) @ U
-    Ad, Bd, Ed = (M.diagonal(dim1=-2, dim2=-1) for M in (A, B, E))
-    G = torch.zeros_like(U)
-    dP, dW = torch.zeros_like(U), torch.zeros_like(U)
-    dT = torch.zeros_like(eps[:, 0])
-    for s in range(2):
-        fs = f[:, s]
-        f1, f2 = _fermi_derivatives(fs, kt)
-        x = eps - level[:, s, None]
-        tp, tpp = x * f1, f1 + x * f2                                           # t' and t''
-        S1 = f1.sum(-1)
-        ok = S1 != 0
-        inv = torch.where(ok, 1.0 / torch.where(ok, S1, torch.ones_like(S1)), torch.zeros_like(S1))
-        share = f1 * inv[:, None]
-        dmu = (f1 * Ed).sum(-1) * inv                                           # d mu along gG
-        # the first-order changes: the gradients in gP, gW and gts
-        a1 = _divided1(eps, fs, f1)
-        b1 = _divided1(eps, eps * fs, fs + eps * f1)
-        dP = dP + a1 * E - torch.diag_embed(f1 * dmu[:, None])
-        dW = dW + b1 * E - torch.diag_embed(eps * f1 * dmu[:, None])
-        dT = dT + (tp * (Ed - dmu[:, None])).sum(-1)
-        # the second derivative at the fixed Fermi level
-        a2 = _divided2(eps, fs, f1, f2)
-        b2 = _divided2(eps, eps * fs, fs + eps * f1, 2.0 * f1 + eps * f2)
-        X = torch.einsum("bikj,bik,bij->bkj", a2, E, A) + torch.einsum("bikj,bik,bij->bkj", b2, E, B)
-        G = G + X + X.transpose(-1, -2) + g[:, None, None] * _divided1(eps, tp, tpp) * E
-        # the terms of the moving Fermi level
-        K = (_divided1(eps, -f1, -f2) * A + _divided1(eps, -eps * f1, -(f1 + eps * f2)) * B
-             - torch.diag_embed(g[:, None] * tpp))
-        kE = (K * E).sum((-1, -2))
-        L_mu = -(f1 * Ad + eps * f1 * Bd + g[:, None] * tp).sum(-1)
-        L_mumu = (f2 * Ad + eps * f2 * Bd + g[:, None] * tpp).sum(-1)
-        c_fmu = -(f2 * Ed).sum(-1)
-        c_mumu = f2.sum(-1)
-        d2mu = (_divided1(eps, f1, f2) * E + torch.diag_embed((c_fmu + c_mumu * dmu)[:, None] * share
-                                                               - dmu[:, None] * f2)) * inv[:, None, None]
-        moving = (dmu[:, None, None] * K + torch.diag_embed((kE + L_mumu * dmu)[:, None] * share)
-                  + L_mu[:, None, None] * d2mu)
-        G = G + torch.where(ok[:, None, None], moving, torch.zeros_like(moving))
-    rot = lambda M: U @ M @ Ut                                                  # noqa: E731
-    return _sym(rot(G)), rot(_sym(dP)), rot(_sym(dW)), dT
-
-
-class _SpectralDensity(torch.autograd.Function):
-    """Density ``U f U^T``, energy-weighted density ``U (f eps) U^T`` and ``T S_el`` of a symmetric
-    matrix ``F`` with eigenvalues ``eps``, eigenvectors ``U`` and Fermi occupations ``f`` (two spin
-    channels, each with its own level).
-
-    The backward pass is first-order perturbation theory: a spectral function ``a(eps)`` responds to
-    ``dF`` with ``U [D * (U^T dF U)] U^T``, ``D_ij = (a_i - a_j) / (eps_i - eps_j)`` (its derivative
-    for equal levels), and the Fermi level moves with the levels so that the electron number stays,
-    ``d mu = sum_k f'_k d eps_k / sum_k f'_k``. Under ``create_graph`` it is :class:`_SpectralResponse`,
-    differentiable once more.
-    """
-
-    @staticmethod
-    def forward(ctx, F, eps, U, f, level, kt):
-        ctx.set_materialize_grads(False)
-        ctx.save_for_backward(F, eps, U, f, level)
-        ctx.kt = kt
-        occ = f.sum(1)
-        Ut = U.transpose(-1, -2)
-        return (U * occ[:, None, :]) @ Ut, (U * (occ * eps)[:, None, :]) @ Ut, _electronic_entropy(f, kt)
-
-    @staticmethod
-    def backward(ctx, gP, gW, gts):
-        F, eps, U, f, level = ctx.saved_tensors
-        if torch.is_grad_enabled():
-            g = _SpectralResponse.apply(F, gP, gW, gts, eps, U, f, level, ctx.kt)
-        else:
-            g = _spectral_gradient(eps, U, f, level, ctx.kt, gP, gW, gts)
-        return g, None, None, None, None, None
-
-
-class _SpectralResponse(torch.autograd.Function):
-    """The gradient of :class:`_SpectralDensity` as a function of ``F`` and the incoming gradients, whose
-    backward pass is second-order perturbation theory (:func:`_spectral_second`)."""
-
-    @staticmethod
-    def forward(ctx, F, gP, gW, gts, eps, U, f, level, kt):
-        ctx.save_for_backward(eps, U, f, level, gP, gW, gts)
-        ctx.kt = kt
-        return _spectral_gradient(eps, U, f, level, kt, gP, gW, gts)
-
-    @staticmethod
-    @once_differentiable
-    def backward(ctx, gG):
-        eps, U, f, level, gP, gW, gts = ctx.saved_tensors
-        dF, dP, dW, dT = _spectral_second(eps, U, f, level, ctx.kt, gP, gW, gts, gG)
-        need = ctx.needs_input_grad
-        return (dF if need[0] else None, dP if need[1] else None, dW if need[2] else None,
-                dT if need[3] else None, None, None, None, None, None)
-
-
-def _all_pairs(batch: Tensor) -> Tuple[Tensor, Tensor]:
-    """Atom pairs ``i < j`` within each structure."""
-    n = batch.shape[0]
-    i, j = torch.triu_indices(n, n, 1, device=batch.device)
-    keep = batch[i] == batch[j]
-    return i[keep], j[keep]
 
 
 @register_model("gfn2_xtb")
