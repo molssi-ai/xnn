@@ -519,6 +519,7 @@ geometry optimization, the S22 interaction energies and a parameter refit.
    Noncovalent interactions: PM7 (S22, S66) and PM6-ORG <nb/examples/sqmnn/nddo/pm7_pm6org_noncovalent>
    Refitting NDDO parameters: hydrogen bonds, MOPAC export and force training <nb/examples/sqmnn/nddo/sqmnn_parameter_refit>
    GFN1-xTB and GFN2-xTB: charges, a geometry optimization, the S22 interaction energies and a parameter refit <nb/examples/sqmnn/xtb/gfn_xtb_noncovalent>
+   DFTB1, DFTB2 and DFTB3: energies, a geometry optimization, the S22 interaction energies, open shells, LC-DFTB and a parameter refit <nb/examples/sqmnn/dftb/dftb_examples>
 
 GDML and sGDML (krnn)
 =====================
@@ -589,6 +590,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    HIPPO: verifying the `xnn` implementation against Tinker, LAMMPS and the 2021 paper <nb/fidelity_checks/ffnn/hippo/hippo_verification>
    PM3, PM6, PM6-ORG and PM7 against the MOPAC program <nb/fidelity_checks/sqmnn/nddo/sqmnn_verification>
    GFN0-xTB, GFN1-xTB and GFN2-xTB against the xtb program <nb/fidelity_checks/sqmnn/xtb/xtb_verification>
+   DFTB1, DFTB2 and DFTB3 against the DFTB+ program <nb/fidelity_checks/sqmnn/dftb/dftb_verification>
    GDML and sGDML against the sGDML package: equations, transplanted models, refits and speed <nb/fidelity_checks/krnn/sgdml/sgdml_verification>
 
 Parity checks

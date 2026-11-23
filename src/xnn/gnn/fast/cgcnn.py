@@ -32,13 +32,15 @@ from xnn.common.models.fast import AutoPolicy, compile_differentiable
 from xnn.common.models.ops import exact_softplus
 
 #: Edge counts above which ``use_fast="auto"`` takes the stage in evaluation mode (never on a CPU, where
-#: it runs as written). A GPU without an entry takes the A100's values.
+#: it runs as written). The stage wins at every size on the A100, H200, L40S, A30, V100 and T4.
 AUTO_POLICY = AutoPolicy(min_edges={"A100": 0}, min_edges_float64={"A100": 0}, default_min_edges=0,
                          default_min_edges_float64=0)
 
-#: The same for training mode (a step with a property loss).
-AUTO_POLICY_TRAINING = AutoPolicy(min_edges={"A100": 16_384}, min_edges_float64={"A100": 16_384},
-                                  default_min_edges=16_384, default_min_edges_float64=16_384)
+#: The same for training mode (a step with a property loss). A GPU without an entry takes 16 384.
+AUTO_POLICY_TRAINING = AutoPolicy(
+    min_edges={"A100": 16_384, "H200": 65_536, "L40S": 32_768, "A30": 16_384, "V100": 16_384, "T4": 16_384},
+    min_edges_float64={"A100": 16_384, "H200": 65_536, "L40S": 2_048, "A30": 16_384, "V100": 16_384, "T4": 2_048},
+    default_min_edges=16_384, default_min_edges_float64=16_384)
 
 
 def _normalize(h: Tensor, weight: Tensor, bias: Tensor, eps: float):

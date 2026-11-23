@@ -289,6 +289,27 @@ and is at least as fast, for evaluation and for a training step.
      - |O|
      - |Y|
      - |Y|
+   * - DFTB1
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+   * - DFTB2 (SCC-DFTB)
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+   * - DFTB3
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
    * - GDML / sGDML
      - |Y|
      - |N|
@@ -507,6 +528,13 @@ Notes on individual models:
   parameters, Slater exponents and global parameters can be trained with exact
   gradients of energy and force losses. The TorchScript export evaluates one
   molecule and matches the reference to round-off (see :ref:`howto-lammps`).
+- **DFTB1, DFTB2 and DFTB3.** They match DFTB+ 26.1 to round-off, and the
+  reference is faster than it on the same cores. The
+  TorchScript export evaluates molecules and cells with every option,
+  k-points included. On a GPU, the fast path builds the overlap and
+  Hamiltonian matrices on fused kernels, with their first and second
+  derivatives, and evaluates small batches on the host. Training steps with a
+  force loss and Hessians run through the kernels; k-points use the reference.
 - **AMOEBA and HIPPO.** Both match Tinker 8 to round-off. On CPUs, their
   kernels run as C++ loops (see :ref:`howto-fast-paths-cpu`) and are faster
   than Tinker 8. On GPUs, both run on fused kernels. Both deploy as inputs for

@@ -447,7 +447,7 @@ def test_smeared_density_second_order_response(split, n_alpha, n_beta, kt):
     """The first and second derivatives of the smeared density, energy-weighted density and entropy (with the
     Fermi levels of two spin channels) equal central differences, also at levels degenerate across a Fermi
     level, and of integer occupations at zero temperature."""
-    from xnn.sqmnn.models import xtb
+    from xnn.sqmnn.models import tightbinding
     n = 7
     rng = np.random.default_rng(2)
     Q, _ = np.linalg.qr(rng.normal(size=(n, n)))
@@ -461,25 +461,25 @@ def test_smeared_density_second_order_response(split, n_alpha, n_beta, kt):
 
     def parts(F):
         eps, U = torch.linalg.eigh(F)
-        f, level = xtb._fermi_channels(eps, na, nb, kt, [n])
+        f, level = tightbinding._fermi_channels(eps, na, nb, kt, [n])
         return eps, U, f, level
 
     def scalar(F):
-        P, W, ts = xtb._SpectralDensity.apply(F, *parts(F), kt)
+        P, W, ts = tightbinding._SpectralDensity.apply(F, *parts(F), kt)
         return float((gP * P).sum() + (gW * W).sum() + (gts * ts).sum())
 
     def first(F):
-        return xtb._spectral_gradient(*parts(F), kt, gP, gW, gts)
+        return tightbinding._spectral_gradient(*parts(F), kt, gP, gW, gts)
 
     h = 1e-6
     fd1 = (scalar(F0 + h * E1) - scalar(F0 - h * E1)) / (2 * h)
     assert float((first(F0) * E1).sum()) == pytest.approx(fd1, rel=1e-7)
-    dF, dP, dW, dT = xtb._spectral_second(*parts(F0), kt, gP, gW, gts, E2)
+    dF, dP, dW, dT = tightbinding._spectral_second(*parts(F0), kt, gP, gW, gts, E2)
     fd2 = float(((first(F0 + h * E1) - first(F0 - h * E1)) / (2 * h) * E2).sum())
     assert float((dF * E1).sum()) == pytest.approx(fd2, rel=1e-6)
     # the changes along E2: the gradients in gP, gW and gts
-    plus = xtb._SpectralDensity.apply(F0 + h * E2, *parts(F0 + h * E2), kt)
-    minus = xtb._SpectralDensity.apply(F0 - h * E2, *parts(F0 - h * E2), kt)
+    plus = tightbinding._SpectralDensity.apply(F0 + h * E2, *parts(F0 + h * E2), kt)
+    minus = tightbinding._SpectralDensity.apply(F0 - h * E2, *parts(F0 - h * E2), kt)
     jvp = [(a - b) / (2 * h) for a, b in zip(plus, minus)]
     assert torch.allclose(dP, jvp[0], rtol=0.0, atol=1e-6) and torch.allclose(dW, jvp[1], rtol=0.0, atol=1e-6)
     assert float(dT) == pytest.approx(float(jvp[2]), rel=1e-6, abs=1e-9)

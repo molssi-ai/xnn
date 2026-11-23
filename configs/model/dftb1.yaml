@@ -1,0 +1,24 @@
+name: dftb1
+cutoff: 0.1                   # neighbor-list radius of the data pipeline; the model forms all atom pairs itself
+parameters: mio-1-1           # Slater-Koster set: mio-1-1, 3ob-3-1, ob2-1-1, pbc-0-3 or matsci-0-3 (downloaded on first use) or a folder of .skf files
+max_angular_momentum: null    # highest shell per element, e.g. {C: p, S: d}; null takes the values the set recommends
+scc: false                    # self-consistent charges; true turns the model into DFTB2
+shell_resolved: false         # no effect: the method has no self-consistent cycle
+third_order: null             # no effect: the third-order terms need self-consistent charges
+hubbard_derivatives: null     # no effect: the third-order terms need self-consistent charges
+damping_exponent: null        # no effect: the method has no self-consistent cycle
+electronic_temperature: 0.0   # Fermi smearing temperature of the occupations (K); 0 fills the lowest orbitals
+scc_tolerance: 1.0e-5         # no effect: the method has no self-consistent cycle
+max_iter: 100                 # no effect: the method has no self-consistent cycle
+mixing: 0.4                   # no effect: the method has no self-consistent cycle
+history: 8                    # no effect: the method has no self-consistent cycle
+dispersion: null              # D3 or D4 dispersion, e.g. {model: d3, damping: bj, s8: 3.209, a1: 0.746, a2: 4.191}; hh_repulsion: true adds the D3H5 H-H term; null for none
+h5: null                      # no effect: the method has no self-consistent cycle
+spin_constants: null          # no effect: spin polarization needs self-consistent charges
+trainable: false              # parameters to train: tables, repulsive, onsite, hubbard (or true for all); write_set saves them as .skf files
+range_separation: null        # no effect: the method has no self-consistent cycle
+exchange_cutoff: null         # no effect: the method has no self-consistent cycle
+kpoints: null                 # periodic cells: Monkhorst-Pack grid [n1, n2, n3] or {grid: [...], shift: [...]}; null samples the Gamma point
+onsite_correction: null       # no effect: the method has no self-consistent cycle
+orbital_potential: null       # no effect: the method has no self-consistent cycle
+use_fast: auto                # fast path: small batches on a GPU run on the host (auto or true); false keeps them on the GPU
