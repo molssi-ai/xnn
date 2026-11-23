@@ -29,6 +29,9 @@ THIOFORMALDEHYDE = (["C", "S", "H", "H"], np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 
 METHANE = (["C", "H", "H", "H", "H"], np.array([[0.0, 0.0, 0.0], [0.63, 0.63, 0.63], [-0.63, -0.6, 0.66],
                                                 [-0.62, 0.64, -0.63], [0.64, -0.63, -0.61]]))
 HS = (["S", "H"], np.array([[0.0, 0.0, 0.0], [0.1, 0.2, 1.33]]))
+# a closed shell of S and H: the S-H radical shares its electron between degenerate levels at the smallest
+# smearing, which bounds how far its charges converge
+H2S = (["S", "H", "H"], np.array([[0.0, 0.0, 0.0], [0.0, 0.96, 0.93], [0.0, -0.96, 0.93]]))
 
 
 @pytest.fixture(autouse=True)
@@ -422,7 +425,7 @@ def test_h5_correction(skset):
     custom = _model(DFTB2, skset, h5={"scaling": {"S": -1.0, "C": 0.1}, "r_scaling": 0.7})
     assert custom.h5["scaling"] == {7: 0.18, 8: 0.06, 6: 0.1} and custom.h5["r_scaling"] == 0.7
     third = _model(DFTB3, skset, h5=True, damping_exponent=None)
-    assert third.damping_exponent is None and bool(third(g)["scf_converged"])
+    assert third.damping_exponent is None and bool(third(collate([_graph(*H2S)]))["scf_converged"])
     with pytest.raises(ValueError):
         _model(DFTB2, skset, h5=True, damping_exponent=4.0)
     with pytest.raises(ValueError):
@@ -1223,7 +1226,7 @@ def test_two_center_kernel_second_derivatives(skset):
     matrices equal those of the reference; Hessians and force-loss gradients of trained parameters agree."""
     if os.environ.get("TRITON_INTERPRET") != "1":
         pytest.skip("runs where Triton's interpreter is on (no CUDA device)")
-    g = collate([_graph(*THIOFORMALDEHYDE), _graph(*HS)])
+    g = collate([_graph(*THIOFORMALDEHYDE), _graph(*H2S)])
     gen = torch.Generator().manual_seed(3)
     results = []
     for fused in (False, True):
