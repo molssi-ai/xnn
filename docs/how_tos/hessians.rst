@@ -81,6 +81,25 @@ its length. For fits to curvatures, a smooth and wider switch helps.
 - To check a Hessian by finite differences where a bond is inside the switch,
   use small steps of about 1e-4 Angstrom.
 
+Bond-order and resonance terms
+==============================
+The acetylenic term switches on with the bond length, which barely differs
+between triple bonds and some double bonds. A switch on the bond order of the
+SCF density separates them clearly and keeps Hessians smooth.
+
+.. code-block:: python
+
+   model = PM7(yne_switch="off",
+               bond_order_terms={"C-C": [11.09, 2.20, 2.65]},
+               trainable=["BOND_ORDER"])
+
+- Each entry is an energy in kcal/mol and the range of bond orders over which
+  it switches on.
+- ``yne_switch="off"`` removes the acetylenic term that this one replaces.
+- Forces, Hessians and parameter gradients stay exact.
+- ``resonance_overlap`` is a second option: it rescales the resonance
+  integrals of p orbitals per element pair.
+
 Tight-binding methods
 =====================
 GFN0-xTB, GFN1-xTB and GFN2-xTB also give exact Hessians and exact parameter

@@ -1301,7 +1301,10 @@ the license that applies to them.
   parameter file.
 - ``correction_constants`` sets the values of these constants, and
   ``yne_switch="smooth"`` gives the acetylenic term a switch with smooth
-  Hessians.
+  Hessians, and ``yne_switch="off"`` removes it.
+- ``bond_order_terms`` adds an energy that switches on with the bond order of
+  chosen element pairs, and ``resonance_overlap`` rescales the p resonance
+  integrals. Both can be trained, see :ref:`howto-hessians`.
 - Hessians and their parameter gradients are exact, see
   :ref:`howto-hessians`.
 

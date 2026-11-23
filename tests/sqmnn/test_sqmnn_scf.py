@@ -245,7 +245,7 @@ def test_rotated_end_state_of_another_occupation_restarts(monkeypatch):
     loop.start(P, C, occ)
     # the first iterations end where they start, on the rotated excited determinant
     iterate = scf._iterate
-    monkeypatch.setattr(scf, "_iterate", lambda lp, *a, **k: (3, True) if lp is loop else iterate(lp, *a, **k))
+    monkeypatch.setattr(scf, "_iterate", lambda lp, *a, **k: (3, True, False) if lp is loop else iterate(lp, *a, **k))
     separated = []
     block_pairs = scf._block_eigenpairs
     monkeypatch.setattr(scf, "_block_eigenpairs",

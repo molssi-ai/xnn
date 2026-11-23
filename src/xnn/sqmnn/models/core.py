@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import Tensor
 
+from .bond_order import BondOrder, pair_energies, total_density
 from .integrals import take0, take1
 from .scf import Layout, electronic_energy, fock_matrices
 from .twocenter import pair_kernel
@@ -156,9 +157,11 @@ def pm7_balance(ints: Dict[str, Tensor], za: Tensor, zb: Tensor, n_orb_a: Tensor
 def build_integrals(qt: Dict[str, Tensor], tables: Dict[str, Dict[str, Tensor]], c: Dict[str, Tensor],
                     layout: Layout, positions: Tensor, ea: Tensor, z: Tensor, n_orb: Tensor, k: int, pa: Tensor,
                     pb: Tensor, has: Tensor, valid: Tensor, use_feather: bool, balance: bool, occ_d: Tensor,
-                    shells: Tensor) -> Tuple[Dict[str, Tensor], Tensor, Tensor, Tensor, Tensor]:
+                    shells: Tensor, kappa: Optional[Tensor] = None
+                    ) -> Tuple[Dict[str, Tensor], Tensor, Tensor, Tensor, Tensor]:
     """The molecular-frame pair integrals, the core Hamiltonian ``(B, n, n)``, the one-center integrals
-    ``(N, k, k, k, k)`` and the atom and pair blocks of the core Hamiltonian, from the positions."""
+    ``(N, k, k, k, k)`` and the atom and pair blocks of the core Hamiltonian, from the positions; ``kappa``
+    ``(P, 1)`` or ``(P, 2)``: the factors of :func:`resonance_overlap` of every pair."""
     dtype, device = positions.dtype, positions.device
     # gathers whose backward adds without synchronizing (capturable in a CUDA graph)
     vec = positions.gather(0, pb[:, None].expand(-1, 3)) - positions.gather(0, pa[:, None].expand(-1, 3))
@@ -207,6 +210,10 @@ def build_integrals(qt: Dict[str, Tensor], tables: Dict[str, Dict[str, Tensor]],
     atom_blocks = torch.diag_embed(u)
     atom_blocks = atom_blocks.index_add(0, pa, ints["VA"]).index_add(0, pb, ints["VB"])
     pair_blocks = ints["S"] * 0.5 * (take0(beta, pa)[:, :, None] + take0(beta, pb)[:, None, :])
+    if kappa is not None and k >= 4:
+        e = vec / vec.norm(p=2, dim=-1, keepdim=True)
+        d_pp = resonance_overlap(ints["S"][:, 1:4, 1:4], take0(beta, pa)[:, 1], take0(beta, pb)[:, 1], e, kappa)
+        pair_blocks = pair_blocks + torch.nn.functional.pad(d_pp, [1, k - 4, 1, k - 4])
     H = layout.scatter(atom_blocks, pair_blocks)
     diag_pad = torch.where(valid, torch.zeros((), dtype=dtype, device=device),
                            torch.full((), 1.0e4, dtype=dtype, device=device))           # PAD_ENERGY
@@ -215,6 +222,23 @@ def build_integrals(qt: Dict[str, Tensor], tables: Dict[str, Dict[str, Tensor]],
     W1 = (W1 * mask[:, :, None, None, None] * mask[:, None, :, None, None]
           * mask[:, None, None, :, None] * mask[:, None, None, None, :])
     return ints, H, W1, atom_blocks, pair_blocks
+
+
+def resonance_overlap(S_pp: Tensor, beta_a: Tensor, beta_b: Tensor, e: Tensor, kappa: Tensor) -> Tensor:
+    """The change of the p-p resonance blocks ``(P, 3, 3)`` when the resonance integrals carry the factor
+    ``1 + kappa S``: ``(beta_A + beta_B) / 2 kappa_pi S_pi^2 (1 - e e^T)``, ``S_pi`` the pi overlap
+    ``tr((1 - e e^T) S_pp) / 2`` of the p-p overlaps ``S_pp`` (molecular frame, ``e`` the unit vector from A to
+    B), plus ``(beta_A + beta_B) / 2 kappa_sigma S_sigma^2 e e^T`` with ``S_sigma = tr(e e^T S_pp)`` where
+    ``kappa`` ``(P, 2)`` has the second column."""
+    par = e[:, :, None] * e[:, None, :]
+    perp = torch.eye(3, dtype=e.dtype, device=e.device) - par
+    beta = 0.5 * (beta_a + beta_b)
+    s_pi = 0.5 * (perp * S_pp).sum((-1, -2))
+    d = (beta * kappa[:, 0] * s_pi * s_pi)[:, None, None] * perp
+    if kappa.shape[1] > 1:
+        s_sigma = (par * S_pp).sum((-1, -2))
+        d = d + (beta * kappa[:, 1] * s_sigma * s_sigma)[:, None, None] * par
+    return d
 
 
 def _pair_is(za: Tensor, zb: Tensor, a: int, b: int) -> Tensor:
@@ -382,10 +406,11 @@ def initial_guess(occ_ref: Tensor, ea: Tensor, shells: Tensor, has: Tensor, batc
 
 def energy_outputs(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, P: Tensor, uhf: bool, e_core_pair: Tensor,
                    pa: Tensor, pb: Tensor, batch: Tensor, n_struct: int, eisol: Tensor, atom_heat: Tensor,
-                   corr: Tensor) -> Dict[str, Tensor]:
+                   corr: Tensor, bond_order: Optional[BondOrder] = None) -> Dict[str, Tensor]:
     """Heats of formation and energies from the converged densities ``P`` (differentiable in the integrals):
     the electronic energy partitioned over the atoms, the core-core terms, the isolated-atom energies
-    ``eisol`` (eV), the atomic heats of formation ``atom_heat`` and the corrections ``corr`` (kcal/mol)."""
+    ``eisol`` (eV), the atomic heats of formation ``atom_heat`` and the corrections ``corr`` (kcal/mol); the
+    energy of a bond-order term (:mod:`~.bond_order`) is electronic, split equally over each pair's atoms."""
     dtype, device = H.dtype, H.device
     F = fock_matrices(layout, H, W1, W2, P, uhf)
     e_el = electronic_energy(H, F, P, uhf)
@@ -399,6 +424,11 @@ def energy_outputs(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, P: Tensor,
         e_pair = layout.gather_pair(e_mat).sum((-1, -2))
         e_atom = e_atom.index_add(0, pa, e_pair).index_add(0, pb, e_pair)
         e_atom = e_atom.index_add(0, pa, 0.5 * e_core_pair).index_add(0, pb, 0.5 * e_core_pair)
+    if bond_order is not None:
+        e_w = pair_energies(bond_order, total_density(P))
+        e_atom = (e_atom.index_add(0, bond_order.atom_a, 0.5 * e_w)
+                  .index_add(0, bond_order.atom_b, 0.5 * e_w))
+        e_el = e_el + torch.zeros(n_struct, dtype=dtype, device=device).index_add(0, bond_order.struct, e_w)
     ev_to_kcal = 23.06054783061903                                        # EV_TO_KCAL
     node_kcal = (e_atom - eisol) * ev_to_kcal + atom_heat + corr
     node_energy = node_kcal / ev_to_kcal

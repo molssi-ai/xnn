@@ -11,3 +11,6 @@ tol_density: 1.0e-9       # SCF convergence: largest density change
 tol_energy: 1.0e-10       # SCF convergence: energy change (eV)
 restart_gap: 6.5          # the extra SCF starts of a cold start run when the first run did not converge or its HOMO-LUMO gap is below this (eV)
 search_starts: 0          # further SCF runs of a cold start from perturbed initial densities; the lowest solution is kept (about 6 find hard ground states at 4-6 times the cost)
+bond_order_terms: {}      # energy switched on by the Wiberg bond index of atom pairs, per element pair: [energy in kcal/mol, W_lo, W_hi] or [energy, W_lo, W_hi, R_on, R_off], e.g. {C-C: [11.09, 2.20, 2.65]}
+bond_order_cutoff: [1.40, 1.65]  # distances (Angstrom) where the bond-order terms start and finish switching off
+resonance_overlap: {}     # factors kappa of the p resonance integrals beta (1 + kappa S) per element pair: kappa_pi or [kappa_pi, kappa_sigma], e.g. {C-C: -0.10}

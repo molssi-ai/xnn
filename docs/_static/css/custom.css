@@ -242,11 +242,6 @@ div.bd-article-container > article {
 		--xnn-content-width: clamp(45rem, 96vw, 120rem);
 	}
 
-	.bd-sidebar-secondary {
-		flex: 0 0 var(--xnn-toc-width);
-		max-width: var(--xnn-toc-width);
-	}
-
 	/* On a short window the theme scrolls the sidebar to reveal the current
 	   page, carrying the Collapse button off the top. The button itself
 	   cannot be pinned (the theme sets position: relative on it with a
@@ -386,8 +381,8 @@ button.toggle-button {
    --------------------------------------------------------------------------
    pydata-sphinx-theme collapses the primary sidebar only, so the button, the
    behaviour (_static/toc-collapse.js) and the collapsed state below are ours.
-   The widths are expressed in the same properties the wide-screen block uses,
-   so collapsing hands the reclaimed space to the article.
+   The expanded and collapsed widths use the same properties, so collapsing
+   hands the reclaimed space to the article.
    -------------------------------------------------------------------------- */
 
 #xnn-collapse-toc-button {
@@ -413,6 +408,8 @@ button.toggle-button {
    and flips when collapsed. */
 #xnn-collapse-toc-button .pst-icon {
 	flex: 0 0 auto;
+	width: 1.3em;
+	height: 1.3em;
 	transition: transform 0.3s ease;
 }
 
@@ -433,8 +430,18 @@ button.toggle-button {
 	display: none;
 }
 
-@media (min-width: 960px) {
-	.bd-sidebar-secondary {
+/* Below 1200px the theme shows the table of contents in a drawer opened from
+   the header, and moves the sidebar's contents and classes into it. Collapsing
+   means nothing there, so the button is hidden, and every rule below names the
+   sidebar by id so a collapsed state never squeezes the drawer. */
+#pst-secondary-sidebar-modal #xnn-collapse-toc-button {
+	display: none;
+}
+
+@media (min-width: 1200px) {
+	#pst-secondary-sidebar {
+		flex: 0 0 var(--xnn-toc-width);
+		max-width: var(--xnn-toc-width);
 		transition: flex-basis 0.4s ease, max-width 0.4s ease;
 	}
 
@@ -445,7 +452,7 @@ button.toggle-button {
 	   plus the 1rem padding-left and border-left it puts on every
 	   .sidebar-secondary-item, together exceed the collapsed width, which
 	   laid the button out past the edge where overflow clipped it. */
-	.bd-sidebar-secondary.xnn-toc-squeeze {
+	#pst-secondary-sidebar.xnn-toc-squeeze {
 		width: var(--xnn-toc-collapsed);
 		flex-basis: var(--xnn-toc-collapsed);
 		max-width: var(--xnn-toc-collapsed);
@@ -456,20 +463,20 @@ button.toggle-button {
 
 	/* The theme gives every entry the same class, and our button is first in
 	   secondary_sidebar_items -- so hide the rest by position. */
-	.xnn-toc-squeeze .sidebar-secondary-item:not(:first-child) {
+	#pst-secondary-sidebar.xnn-toc-squeeze .sidebar-secondary-item:not(:first-child) {
 		display: none;
 	}
 
 	/* Strip the item chrome from the button's own wrapper and centre it in
 	   what is left. */
-	.xnn-toc-squeeze .sidebar-secondary-item:first-child {
+	#pst-secondary-sidebar.xnn-toc-squeeze .sidebar-secondary-item:first-child {
 		display: flex;
 		justify-content: center;
 		border-left: 0;
 		padding: 0.25rem;
 	}
 
-	.xnn-toc-squeeze #xnn-collapse-toc-button {
+	#pst-secondary-sidebar.xnn-toc-squeeze #xnn-collapse-toc-button {
 		width: auto;
 		gap: 0;
 		padding: 0.35rem;
@@ -477,7 +484,7 @@ button.toggle-button {
 	}
 
 	/* Hand the reclaimed width to the article, as the primary sidebar does. */
-	.bd-main:has(.bd-sidebar-secondary.xnn-toc-squeeze) {
+	.bd-main:has(#pst-secondary-sidebar.xnn-toc-squeeze) {
 		--xnn-content-width: clamp(45rem, 92vw, 116rem);
 	}
 }
