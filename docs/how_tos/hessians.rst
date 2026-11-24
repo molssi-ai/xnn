@@ -81,6 +81,21 @@ its length. For fits to curvatures, a smooth and wider switch helps.
 - To check a Hessian by finite differences where a bond is inside the switch,
   use small steps of about 1e-4 Angstrom.
 
+The PM7 hydrogen-bond term
+==========================
+PM7's hydrogen-bond term jumps where its search ends at 7 Angstrom and where it
+switches between choices of reference atoms. Its short O...O term also has a
+hump in its curvature. So, frequencies of strong O-H...O bonds can jump.
+
+.. code-block:: python
+
+   model = PM7(hbond_switch="smooth", trainable=["HBOND", "USS", "BETAS"])
+
+- ``hbond_switch="smooth"`` replaces each jump with a narrow switch. Energies,
+  forces and Hessians are then continuous.
+- Away from the switches the energy is PM7's.
+- The energy fades out between 7 and 8 Angstrom.
+
 Bond-order and resonance terms
 ==============================
 The acetylenic term switches on with the bond length, which barely differs
