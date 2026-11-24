@@ -48,6 +48,7 @@ class NDDOExport(nn.Module):
     correction_kind: int
     peptide_barrier: float
     smooth_yne: bool
+    smooth_hbond: bool
     bond_order: bool
     resonance: bool
     unrestricted: bool
@@ -109,6 +110,7 @@ class NDDOExport(nn.Module):
         self.correction_kind = int(model.correction_kind)
         self.peptide_barrier = float(model.peptide_barrier)
         self.smooth_yne = model.yne_switch == "smooth"
+        self.smooth_hbond = model.hbond_switch == "smooth"
         # the bond-order and resonance-overlap terms (tables of the element pairs and their values)
         self.bond_order = bool(model.bond_order_terms)
         self.resonance = bool(model.resonance_overlap)
@@ -215,7 +217,7 @@ class NDDOExport(nn.Module):
         if self.use_corrections:
             corr = batch_corrections(self.correction_kind, torch.jit.annotate(List[int], z.tolist()), pos, batch,
                                      1, self.correction_data, self.peptide_barrier, self.yne, self.disp,
-                                     self.hbond, self.smooth_yne)
+                                     self.hbond, self.smooth_yne, self.smooth_hbond)
             d3 = self.d3
             if d3 is not None:
                 same = batch.unsqueeze(0) == batch.unsqueeze(1)

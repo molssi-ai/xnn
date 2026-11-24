@@ -297,6 +297,12 @@ class NDDO(InteratomicPotential):
         ``"smooth"`` has continuous derivatives of every order, so that
         Hessians change smoothly with the C-C distance (for fits to
         curvatures); ``"off"`` removes the term.
+    hbond_switch : str, optional
+        The form of the PM7 hydrogen-bond term: ``"sharp"`` (default, the
+        published method) has jumps where the search or a choice of
+        reference atoms changes; ``"smooth"`` replaces each of them by a
+        switch with continuous second derivatives and keeps every value
+        outside the switches (see :func:`~.corrections.pm7_hbond`).
     bond_order_terms : dict, optional
         An energy switched on by the bond order of atom pairs (see
         :mod:`~.bond_order`): per element pair (``"C-C"``, ``"N-N"``, ...),
@@ -397,7 +403,8 @@ class NDDO(InteratomicPotential):
                  reuse_density: bool = True,
                  scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 6.5,
                  search_starts: int = 0, use_fast="auto", position_response: bool = False,
-                 yne_switch: str = "polynomial", correction_constants: Optional[Dict[str, Sequence[float]]] = None,
+                 yne_switch: str = "polynomial", hbond_switch: str = "sharp",
+                 correction_constants: Optional[Dict[str, Sequence[float]]] = None,
                  bond_order_terms: Optional[Dict[str, Sequence[float]]] = None,
                  bond_order_cutoff: Sequence[float] = (1.40, 1.65),
                  resonance_overlap: Optional[Dict[str, Union[float, Sequence[float]]]] = None):
@@ -416,6 +423,9 @@ class NDDO(InteratomicPotential):
         if yne_switch not in ("polynomial", "smooth", "off"):
             raise ValueError("yne_switch must be 'polynomial', 'smooth' or 'off'")
         self.yne_switch = yne_switch
+        if hbond_switch not in ("sharp", "smooth"):
+            raise ValueError("hbond_switch must be 'sharp' or 'smooth'")
+        self.hbond_switch = hbond_switch
         self.max_iter, self.tol_density, self.tol_energy = int(max_iter), float(tol_density), float(tol_energy)
         self.use_corrections = bool(corrections)
         self.last_scf = None
@@ -904,7 +914,7 @@ class NDDO(InteratomicPotential):
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
         ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``,
-        ``position_response``, ``yne_switch``, ``correction_constants``, ``bond_order_terms``,
+        ``position_response``, ``yne_switch``, ``hbond_switch``, ``correction_constants``, ``bond_order_terms``,
         ``bond_order_cutoff``, ``resonance_overlap``.
         """
 
@@ -913,7 +923,7 @@ class NDDO(InteratomicPotential):
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
                 "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
-                "restart_gap", "search_starts", "use_fast", "position_response", "yne_switch",
+                "restart_gap", "search_starts", "use_fast", "position_response", "yne_switch", "hbond_switch",
                 "correction_constants", "bond_order_terms", "bond_order_cutoff", "resonance_overlap")
         return cls(**{k: extra[k] for k in keys if k in extra})
 
