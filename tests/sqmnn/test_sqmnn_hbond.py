@@ -5,6 +5,8 @@ PM7's where no comparison is inside its switch; the O...O switch, the taper and 
 their defined values; energy, slope and curvature are continuous across every switch where PM7 jumps; gradients
 and Hessians equal central differences inside the switches; the energy does not depend on the numbering of the
 atoms; the host, PyTorch and TorchScript forms agree; and the model option reaches the energy and the export.
+The smooth torsions leave the energy unchanged outside their windows and at planar and linear hydrogen bonds,
+remove the kinks there and keep exact derivatives.
 """
 import math
 
@@ -72,16 +74,17 @@ def _formaldehyde_acceptor(theta):
     return [6, 8, 1, 1, 8, 1, 1], x
 
 
-def _energy(z, x, smooth=True, constants=None):
+def _energy(z, x, smooth=True, constants=None, torsion=False):
     c = None if constants is None else torch.tensor(constants)
-    return float(cr.pm7_hbond(list(z), torch.as_tensor(np.asarray(x, dtype=np.float64)), TABLES, c, smooth).sum())
+    return float(cr.pm7_hbond(list(z), torch.as_tensor(np.asarray(x, dtype=np.float64)), TABLES, c, smooth,
+                              torsion).sum())
 
 
-def _derivatives(z, x, v, smooth=True):
+def _derivatives(z, x, v, smooth=True, torsion=False):
     """Energy, slope and curvature along the direction ``v`` (the PyTorch form for the curvature)."""
     p = torch.tensor(np.asarray(x, dtype=np.float64), requires_grad=True)
     vt = torch.as_tensor(v)
-    e = cr.pm7_hbond(list(z), p, TABLES, None, smooth).sum()
+    e = cr.pm7_hbond(list(z), p, TABLES, None, smooth, torsion).sum()
     if not e.requires_grad:
         return float(e), 0.0, 0.0
     g, = torch.autograd.grad(e, p, create_graph=True)
@@ -92,10 +95,11 @@ def _derivatives(z, x, v, smooth=True):
     return float(e), float(slope), 0.0 if curv is None else float((curv * vt).sum().detach())
 
 
-def _jumps(path, s0, smooth=True, eps=1e-7):
+def _jumps(path, s0, smooth=True, eps=1e-7, torsion=False):
     """The changes of energy, slope and curvature across ``s0`` of ``path(s) -> (z, x, dx/ds)``: the values
     ``eps`` to either side, carried to ``s0`` by their Taylor series."""
-    (e_l, s_l, c_l), (e_r, s_r, c_r) = [_derivatives(*path(s), smooth=smooth) for s in (s0 - eps, s0 + eps)]
+    (e_l, s_l, c_l), (e_r, s_r, c_r) = [_derivatives(*path(s), smooth=smooth, torsion=torsion)
+                                        for s in (s0 - eps, s0 + eps)]
     return [abs((e_r - eps * s_r + 0.5 * eps * eps * c_r) - (e_l + eps * s_l + 0.5 * eps * eps * c_l)),
             abs((s_r - eps * c_r) - (s_l + eps * c_l)), abs(c_r - c_l)]
 
@@ -288,9 +292,10 @@ def test_smooth_forms_agree(monkeypatch):
     def terms(fn):
         out = []
         for z, x in systems:
-            p = torch.tensor(x, requires_grad=True)
-            e = fn(2, z, p, TABLES, 3.1595, None, None, None, False, True)
-            out.append((e.detach(), torch.autograd.grad(e.sum(), p)[0]))
+            for torsion in (False, True):
+                p = torch.tensor(x, requires_grad=True)
+                e = fn(2, z, p, TABLES, 3.1595, None, None, None, False, True, torsion)
+                out.append((e.detach(), torch.autograd.grad(e.sum(), p)[0]))
         return out
     host = terms(cr.structure_corrections)
     scripted = terms(torch.jit.script(cr.structure_corrections))
@@ -352,3 +357,103 @@ def test_hbond_switch_option():
     assert torch.allclose(node_energy, built(_graph(x, z, mult=2.0))["node_energy"].detach(), rtol=0.0, atol=1e-10)
     with pytest.raises(ValueError, match="hbond_switch"):
         PM7(hbond_switch="soft")
+
+
+def _planar_water(s):
+    """An acceptor water in the xy plane with the donor water in that plane at s = 0, moved along z by s."""
+    z = [8, 1, 1, 8, 1, 1]
+    x = np.array([[0.0, 0, 0], [0.59, 0.76, 0], [0.59, -0.76, 0], [-2.9, 0.25, 0], [-1.95, 0.2, 0],
+                  [-3.2, 1.15, 0]])
+    return _move(z, x, [3, 4, 5], [0, 0, 1], s)
+
+
+def _planar_amine(s):
+    """A planar three-coordinate nitrogen donating to water, its hydrogen moved out of the plane by s."""
+    z = [7, 6, 6, 1, 8, 1, 1]
+    x = np.array([[0.0, 0, 0], [-0.73, 1.25, 0], [-0.73, -1.25, 0], [1.01, 0, 0], [2.95, 0.05, 0.1],
+                  [3.3, 0.85, 0.45], [3.3, -0.7, 0.55]])
+    return _move(z, x, [3], [0, 0, 1], s)
+
+
+def _linear_nitrile(s):
+    """A water donating along the C-N axis of a bent HCN at s = 0, moved across the axis by s."""
+    z = [8, 1, 1, 7, 6, 1]
+    x = np.array([[-0.96, 0, 0], [0.0, 0, 0], [-1.2, 0.93, 0.1], [2.0, 0, 0], [3.16, 0, 0], [4.21, 0.15, 0.05]])
+    return _move(z, x, [0, 1, 2], [0, 1, 0], s)
+
+
+TORSION_PATHS = [_planar_water, _planar_amine, _linear_nitrile]
+
+
+def test_smooth_torsion_unchanged_outside_its_windows():
+    """The smooth torsions give the smooth form's energy away from planar and linear hydrogen bonds, and at the
+    planar or linear points themselves; inside their windows they change it."""
+    for z, x in (_water_dimer(2.9, tilt=0.3), _water_dimer(3.3, tilt=0.4), _tied_amine(0.2),
+                 _formaldehyde_acceptor(120.0)):
+        assert _energy(z, x, torsion=True) == pytest.approx(_energy(z, x), abs=1e-12)
+    for path in TORSION_PATHS:
+        z, x, _ = path(0.0)
+        assert _energy(z, x, torsion=True) == pytest.approx(_energy(z, x), abs=1e-12)
+        z, x, _ = path(0.05)
+        assert abs(_energy(z, x, torsion=True) - _energy(z, x)) > 1e-4
+        z, x, _ = path(0.2)
+        assert _energy(z, x, torsion=True) == pytest.approx(_energy(z, x), abs=1e-12)
+
+
+@pytest.mark.parametrize("path", TORSION_PATHS)
+def test_smooth_torsion_removes_the_kinks(path):
+    """Through a planar water acceptor, a planar nitrogen donor and a nitrile axis the smooth form's slope jumps;
+    with smooth torsions energy, slope and curvature are continuous, and the gradient and Hessian equal central
+    differences at the planar or linear point and inside the window (on an axis the Hessian is checked off it:
+    the lever weight is twice differentiable there, so differences of the gradient converge slowly)."""
+    assert _jumps(path, 0.0)[1] > 0.1
+    de, ds, dc = _jumps(path, 0.0, torsion=True)
+    assert de < 1e-8 and ds < 1e-5 and dc < 1.0
+    for s0 in (0.0, 0.03):
+        z, x, _ = path(s0)
+        p = torch.tensor(x, requires_grad=True)
+        e = cr.pm7_hbond(z, p, TABLES, None, True, True).sum()
+        g, = torch.autograd.grad(e, p, create_graph=True)
+        v = torch.as_tensor(np.random.default_rng(1).normal(size=x.shape))
+        hv, = torch.autograd.grad((g * v).sum(), p)
+        h = 2e-6
+        fd = np.zeros_like(x)
+        for i in range(len(z)):
+            for k in range(3):
+                xp, xm = x.copy(), x.copy()
+                xp[i, k] += h
+                xm[i, k] -= h
+                fd[i, k] = (_energy(z, xp, torsion=True) - _energy(z, xm, torsion=True)) / (2.0 * h)
+        assert np.allclose(g.detach().numpy(), fd, rtol=0.0, atol=1e-6)
+        if s0 == 0.0 and path is _linear_nitrile:
+            continue
+
+        def grad(y, z=z):
+            q = torch.tensor(y, requires_grad=True)
+            return torch.autograd.grad(cr.pm7_hbond(z, q, TABLES, None, True, True).sum(), q)[0].numpy()
+        fd_hv = (grad(x + h * v.numpy()) - grad(x - h * v.numpy())) / (2.0 * h)
+        assert np.allclose(hv.numpy(), fd_hv, rtol=0.0, atol=1e-4)
+
+
+def test_hbond_torsion_option():
+    """``hbond_torsion`` changes the heat of formation by the difference of the two forms, builds from a config,
+    reaches the exported core and rejects unknown values."""
+    from xnn.common.config import from_dict
+    from xnn.common.models import build_model
+
+    z, x, _ = _planar_amine(0.05)
+    smooth = PM7(reuse_density=False, hbond_switch="smooth")(_graph(x, z))["heat_of_formation"]
+    both = PM7(reuse_density=False, hbond_switch="smooth", hbond_torsion="smooth")(_graph(x, z))["heat_of_formation"]
+    assert float(both - smooth) == pytest.approx(_energy(z, x, torsion=True) - _energy(z, x), abs=1e-8)
+    built = build_model(from_dict({"model": {"name": "pm7", "hbond_switch": "smooth",
+                                             "hbond_torsion": "smooth"}}).model)
+    assert built.hbond_torsion == "smooth"
+    core = built.export_core()
+    edges, vec = torch.zeros((2, 0), dtype=torch.long), torch.zeros((0, 3))
+    _, node_energy, _ = core.node_features_energy_charges(torch.tensor(z), edges, vec, torch.tensor(x),
+                                                          torch.zeros((3, 3)), torch.zeros(3, dtype=torch.bool),
+                                                          0.0, 1.0)
+    built.reuse_density = False
+    assert torch.allclose(node_energy, built(_graph(x, z))["node_energy"].detach(), rtol=0.0, atol=1e-10)
+    with pytest.raises(ValueError, match="hbond_torsion"):
+        PM7(hbond_torsion="soft")
