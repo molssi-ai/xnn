@@ -83,6 +83,12 @@ Agreement with the upstream codes under identical weights:
   implementation of the paper's equations and against ``schnetpack`` with
   transplanted weights, with the ``schnetpack`` defaults, the paper's options
   and shared weights.
+- **NewtonNet** (`Haghighatlari et al., Digital Discovery 1, 333 (2022)
+  <https://doi.org/10.1039/D2DD00008C>`_; reference implementation in
+  `THGLab/NewtonNet <https://github.com/THGLab/NewtonNet>`_): energies, forces
+  and stress agree with the authors' current code to float64 and float32
+  round-off. The paper's model, with its latent forces, agrees with the
+  authors' release v1.0.0 in the same way.
 - **ET and TensorNet** (`torchmd/torchmd-net
   <https://github.com/torchmd/torchmd-net>`_): built from the papers. Energies
   and forces agree to about 1e-14 in float64 and to float32 round-off, for

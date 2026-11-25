@@ -147,7 +147,7 @@ Models at a glance
      - Models
    * - Graph neural networks (``gnn``)
      - MACE, NequIP, Allegro, CACE, AIMNet2, SchNet, DimeNet, DimeNet++, GemNet, PaiNN,
-       TensorNet, QET, MEGNet (single- and multi-fidelity) and CGCNN (property models)
+       NewtonNet, TensorNet, QET, MEGNet (single- and multi-fidelity) and CGCNN (property models)
    * - Dense neural networks (``dnn``)
      - ANI (ANI-1, ANI-1x, ANI-1ccx, ANI-2x), PhysNet, HDNNP (generations 1 to 4), QRNN
    * - Convolutional neural networks (``cnn``)
@@ -169,7 +169,7 @@ Each model matches its reference code or paper to round-off (:ref:`fidelity`);
 the MACE and AIMNet2 foundation models load through the hub. Every potential trains,
 evaluates and runs under ASE deployment interface. MEGNet and CGCNN predict a property per
 structure instead of an energy surface. SchNet, DimeNet, GemNet,
-PaiNN, TensorNet, QET, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
+PaiNN, NewtonNet, TensorNet, QET, ET, Equiformer, EquiformerV2, SpookyNet, BAMBOO, NequIP, MACE,
 Allegro, CACE, AIMNet2, ANI, PhysNet, HDNNP, QRNN and PM3 / PM6 / PM6-ORG / PM7 also
 export to TorchScript for
 LAMMPS. OPLS, AMBER, CHARMM, DREIDING, classical ReaxFF, AMOEBA and HIPPO

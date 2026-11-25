@@ -156,6 +156,21 @@ spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
    Propagation of directional information: the substituted ferrocene rotation <nb/examples/gnn/painn/painn_ferrocene>
    Infrared and Raman spectra of ethanol from classical and ring-polymer dynamics <nb/examples/gnn/painn/painn_spectra>
 
+NewtonNet (gnn)
+===============
+
+The Newtonian message passing paper
+(`Haghighatlari et al., Digital Discovery 1, 333 (2022)
+<https://doi.org/10.1039/D2DD00008C>`_): Newton's third law for the latent
+forces, equivariance and smoothness checked with untrained models, and the MD17
+experiments of Tables 1 and 5.
+
+.. example-toctree::
+   :caption: NewtonNet (gnn)
+
+   NewtonNet from the paper: latent forces, equivariance and smoothness <nb/examples/gnn/newtonnet/newtonnet_paper_checks>
+   NewtonNet on MD17: energies and forces from 950 structures, and the latent-force loss <nb/examples/gnn/newtonnet/newtonnet_md17>
+
 TensorNet (gnn)
 ===============
 
@@ -561,6 +576,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
    PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
+   NewtonNet, block by block: the authors' code, the paper's equations, speed and memory <nb/fidelity_checks/gnn/newtonnet/newtonnet_verification>
    QET against MatGL: the published MatPES potential, charged cells and an applied potential <nb/fidelity_checks/gnn/qet/qet_verification>
    CGCNN against the authors' code: the crystal graph, one convolution, training mode and the eight published models <nb/fidelity_checks/gnn/cgcnn/cgcnn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
@@ -614,6 +630,7 @@ gradients and timings.
    GFN0-xTB, GFN1-xTB and GFN2-xTB fast path: parity with the reference <nb/parity_checks/sqmnn/xtb/gfn_xtb_parity>
    SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
    PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>
+   NewtonNet fast path: parity with the reference <nb/parity_checks/gnn/newtonnet/newtonnet_parity>
    DimeNet and DimeNet++ fast path: parity with the reference <nb/parity_checks/gnn/dimenet/dimenet_parity>
    GemNet fast path: parity with the reference <nb/parity_checks/gnn/gemnet/gemnet_parity>
    TensorNet fast path: parity with the reference <nb/parity_checks/gnn/tensornet/tensornet_parity>
