@@ -162,6 +162,17 @@ Currently, the following datasets are available:
   - Available arguments: ``molecule``, ``fold`` (1 to 5), ``split``, ``units``
     (``eV`` or ``kcal/mol``), ``n_train`` / ``n_test``.
 
+- ``md17_ccsd``: five MD17 molecules at the coupled-cluster level (aspirin, benzene,
+  ethanol, malonaldehyde, toluene) with the authors' fixed train and test splits.
+
+  - Available arguments: ``molecule``, ``split``, ``units``, ``n_train`` / ``n_test``.
+
+- ``h2_combustion``: energies and forces of the hydrogen combustion reaction
+  channels (IRC, molecular dynamics and normal modes), one split per channel.
+  The 16 channels that NewtonNet trains on load by default.
+
+  - Available arguments: ``reactions``, ``sources`` (``irc``, ``aimd``, ``nm``), ``units``.
+
 - ``qm7``: the 7165 QM7 molecules with PBE0 atomization energies and the
   stratified five-fold split (needs the scipy installed).
 

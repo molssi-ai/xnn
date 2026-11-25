@@ -171,17 +171,18 @@ Agreement with the upstream codes under identical weights:
   recompute every term from the papers.
 - **OPLS / L-OPLS** (`Jorgensen et al., J. Am. Chem. Soc. 118, 11225 (1996)
   <https://doi.org/10.1021/ja9621760>`_): OpenMM to about 1e-7 kJ/mol, and
-  Table 1 of the paper to 0.01 kcal/mol with the ``"oplsaa-1996"`` library.
+  the paper's conformational energies to 0.01 kcal/mol with the ``"oplsaa-1996"``
+  library.
 - **DREIDING** (`Mayo et al., J. Phys. Chem. 94, 8897 (1990)
   <https://doi.org/10.1021/j100389a010>`_): the LAMMPS DREIDING styles to about
-  1e-10 kcal/mol. The parameter tables match the paper entry by entry, and its
-  Table XI barriers to about 0.01 kcal/mol.
+  1e-10 kcal/mol. The parameters match the paper entry by entry, and its
+  rotational barriers to about 0.01 kcal/mol.
 - **AMBER ff94** (`Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
   <https://doi.org/10.1021/ja00124a002>`_): LAMMPS to about 1e-8 kcal/mol on
   capped peptides, water and ions. The atom types, RESP charges and impropers
   match ``tleap``, and the energy components match ``sander`` on peptides and
-  nucleic acids. Table 14 and the residue charges of the paper match entry by
-  entry. Float32 stays within 1e-6 relative of float64.
+  nucleic acids. The parameters and the residue charges of the paper match entry
+  by entry. Float32 stays within 1e-6 relative of float64.
 - **CHARMM22** (`MacKerell et al., J. Phys. Chem. B 102, 3586 (1998)
   <https://doi.org/10.1021/jp973084f>`_): LAMMPS to about 1e-9 kcal/mol on
   capped peptides, water and ions. The atom types, charges and impropers match
@@ -215,7 +216,7 @@ Agreement with the upstream codes under identical weights:
   Model. 29, 284 (2023) <https://doi.org/10.1007/s00894-023-05695-1>`_): MOPAC
   23.2.5 to about 1e-6 kcal/mol in heats of formation and 1e-7 in charges,
   open shells and transition metals included. The PM6 and PM7 S22 interaction
-  energies of the PM7 paper (Table 5) are reproduced. MOPAC's PM6-ORG gradient
+  energies of the PM7 paper are reproduced. MOPAC's PM6-ORG gradient
   is not the derivative of its energy, while xnn's is.
 
 In xnn, fidelity means that published results can be reproduced, that weights

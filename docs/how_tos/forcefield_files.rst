@@ -59,10 +59,10 @@ Lennard-Jones values) and ``nonbond_pair(12-6)`` (NBFIX overrides) sections,
 and its ``#fragments`` also carry each residue's ``impropers`` by atom name,
 with ``-`` / ``+`` prefixes for the atoms of the neighbouring residues.
 
-``amoeba-water-2003`` (``amoeba_water_2003.frc``, Table 1 of
+``amoeba-water-2003`` (``amoeba_water_2003.frc``, the water model of
 `Ren and Ponder, J. Phys. Chem. B 107, 5933 (2003)
 <https://doi.org/10.1021/jp027815+>`_), ``hippo-water-2021``
-(``hippo_water_2021.frc``, Table S1 of
+(``hippo_water_2021.frc``, the water model of
 `Rackers et al., J. Chem. Theory Comput. 17, 7056 (2021)
 <https://doi.org/10.1021/acs.jctc.1c00628>`_) and ``amoebapro13``
 (``amoebapro13.frc``, the protein set of
