@@ -88,6 +88,15 @@ class AtomicGraph:
         (Angstrom^3). Present during training of PaiNN's polarizability head.
     dipole_mask, polarizability_mask : Tensor, optional
         The same as ``forces_mask`` for ``dipole`` / ``polarizability``.
+    dipole_magnitude : Tensor, optional
+        Target magnitude of the dipole moment per structure, of shape ``(B,)``
+        (e Angstrom), for data that has no direction (experimental dipoles).
+    ionization_potential : Tensor, optional
+        Target ionization potential per structure, of shape ``(B,)`` (eV),
+        for models with an ``ionization_potential`` output.
+    dipole_magnitude_mask, ionization_potential_mask : Tensor, optional
+        The same as ``forces_mask`` for ``dipole_magnitude`` /
+        ``ionization_potential``.
     charges : Tensor, optional
         Target partial charge of every atom, of shape ``(N,)`` (e). Present
         during training of the charge networks of the 3G and 4G HDNNPs.
@@ -179,6 +188,12 @@ class AtomicGraph:
         Target polarizability tensor ``(B, 3, 3)``.
     dipole_mask, polarizability_mask : Tensor or None
         Bool ``(B,)``: the structures that carry dipole / polarizability labels.
+    dipole_magnitude : Tensor or None
+        Target dipole magnitude ``(B,)``.
+    ionization_potential : Tensor or None
+        Target ionization potential ``(B,)``.
+    dipole_magnitude_mask, ionization_potential_mask : Tensor or None
+        Bool ``(B,)``: the structures that carry these labels.
     charges : Tensor or None
         Target partial charges ``(N,)``.
     charges_mask : Tensor or None
@@ -232,6 +247,11 @@ class AtomicGraph:
     polarizability: Optional[Tensor] = None    # (B, 3, 3)
     dipole_mask: Optional[Tensor] = None           # (B,) bool
     polarizability_mask: Optional[Tensor] = None   # (B,) bool
+    # scalar labels of molecules: the dipole magnitude (e A) and the ionization potential (eV)
+    dipole_magnitude: Optional[Tensor] = None          # (B,)
+    ionization_potential: Optional[Tensor] = None      # (B,)
+    dipole_magnitude_mask: Optional[Tensor] = None     # (B,) bool
+    ionization_potential_mask: Optional[Tensor] = None  # (B,) bool
     # reference partial charges of the atoms (e), with the same mask convention
     charges: Optional[Tensor] = None           # (N,)
     charges_mask: Optional[Tensor] = None      # (B,) bool
@@ -347,6 +367,10 @@ class AtomicGraph:
             polarizability=rows(self.polarizability, keep),
             dipole_mask=rows(self.dipole_mask, keep),
             polarizability_mask=rows(self.polarizability_mask, keep),
+            dipole_magnitude=rows(self.dipole_magnitude, keep),
+            ionization_potential=rows(self.ionization_potential, keep),
+            dipole_magnitude_mask=rows(self.dipole_magnitude_mask, keep),
+            ionization_potential_mask=rows(self.ionization_potential_mask, keep),
             charges=rows(self.charges, node_keep),
             charges_mask=rows(self.charges_mask, keep),
             fragment_charges=rows(self.fragment_charges, node_keep),

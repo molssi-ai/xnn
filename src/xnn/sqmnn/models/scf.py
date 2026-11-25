@@ -1248,6 +1248,19 @@ def frontier_gap(result: SCFResult) -> Tensor:
     return (lumo - homo).amin(0)
 
 
+def homo_orbitals(result: SCFResult) -> Tuple[Tensor, Tensor]:
+    """The highest occupied orbital ``(B, n)`` of each structure and its spin ``(B,)``: of an unrestricted
+    result the higher of the two spins' highest occupied orbitals (a structure without electrons gets zeros)."""
+    occupied = result.occupations > 0.0
+    eps = torch.where(occupied, result.energies, torch.full_like(result.energies, -1.0e30))
+    e_top, i_top = eps.max(-1)                                            # (S, B)
+    spin = e_top.argmax(0)
+    b = torch.arange(spin.shape[0], device=spin.device)
+    vec = result.orbitals[spin, b, :, i_top[spin, b]]
+    has = occupied.any(-1).any(0)
+    return torch.where(has[:, None], vec, torch.zeros_like(vec)), spin
+
+
 def search_schedule(index: int) -> Tuple[float, int]:
     """Fermi temperature (eV) and annealing iterations of search start ``index`` (:func:`search_guess`): the
     occupation kicks anneal, the density kicks run plain."""

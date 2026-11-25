@@ -185,7 +185,7 @@ TRIAL_STEPS = 3
 
 #: Properties scored by the error metrics (``trainer.metrics``).
 _METRIC_TARGETS = ["energy", "forces", "stress", "dipole", "polarizability", "charges", "properties",
-                   "les_dipole", "les_charges"]
+                   "les_dipole", "les_charges", "dipole_magnitude", "ionization_potential"]
 
 
 class _Sums:
@@ -935,10 +935,13 @@ class Trainer:
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
             dipole_weight=o.dipole_weight,
             polarizability_weight=o.polarizability_weight,
+            dipole_magnitude_weight=o.dipole_magnitude_weight,
+            ionization_weight=o.ionization_weight,
             charge_weight=o.charge_weight,
             les_dipole_weight=o.les_dipole_weight,
             les_charge_weight=o.les_charge_weight,
             property_weight=o.property_weight,
+            latent_force_weight=o.latent_force_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,
@@ -1070,10 +1073,13 @@ class Trainer:
             pred, data, o.energy_weight, o.force_weight, o.stress_weight,
             dipole_weight=o.dipole_weight,
             polarizability_weight=o.polarizability_weight,
+            dipole_magnitude_weight=o.dipole_magnitude_weight,
+            ionization_weight=o.ionization_weight,
             charge_weight=o.charge_weight,
             les_dipole_weight=o.les_dipole_weight,
             les_charge_weight=o.les_charge_weight,
             property_weight=o.property_weight,
+            latent_force_weight=o.latent_force_weight,
             huber_delta=o.huber_delta,
             huber_delta_energy=o.huber_delta_energy,
             huber_delta_forces=o.huber_delta_forces,

@@ -246,6 +246,17 @@ def prediction_pairs(out: dict, data: AtomicGraph, targets: list[str],
         if mask is not None:
             p_pred, p_ref = p_pred[mask], p_ref[mask]
         pairs["properties"] = (p_pred.reshape(-1), p_ref.reshape(-1).to(p_pred.dtype))
+    # scalar labels of molecules: the dipole's length and the ionization potential
+    for key, source in (("dipole_magnitude", "dipole"), ("ionization_potential", "ionization_potential")):
+        ref = getattr(data, key, None)
+        if key in targets and ref is not None and source in out:
+            v = out[source].detach()
+            v = v.norm(dim=-1) if key == "dipole_magnitude" else v
+            mask = _scored(data, getattr(data, key + "_mask", None))
+            v_ref = ref.detach().to(v.dtype)
+            if mask is not None:
+                v, v_ref = v[mask], v_ref[mask]
+            pairs[key] = (v.reshape(-1), v_ref.reshape(-1))
     return pairs
 
 
@@ -291,7 +302,9 @@ def collect_predictions(model, loader, device, targets: list[str],
         Which quantities to collect; a subset of ``"energy"``, ``"forces"``,
         ``"stress"``, ``"dipole"``, ``"polarizability"``, ``"charges"``
         (per-atom partial charges), ``"les_dipole"`` and ``"les_charges"``
-        (the LES outputs, scored against the dipole and charge labels). A target is
+        (the LES outputs, scored against the dipole and charge labels),
+        ``"dipole_magnitude"`` (the length of the ``"dipole"`` output) and
+        ``"ionization_potential"``. A target is
         skipped for a batch that lacks the reference value or the
         corresponding prediction.
     atomic_energies : torch.Tensor or None, optional

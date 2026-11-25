@@ -24,8 +24,10 @@ the quantity semiempirical methods are parameterized for: it is the total
 energy minus the energies of the isolated atoms in their reference
 configurations, plus the experimental heats of formation of the gaseous atoms.
 Forces are its negative gradient. The heat of formation in kcal/mol, the
-total and electronic energies, the core-core energy, the atomic charges and the
-dipole moment are returned as well.
+total and electronic energies, the core-core energy, the atomic charges, the
+dipole moment, the energy of the highest occupied orbital (``homo_energy``, eV)
+and Koopmans' ionization potential (``ionization_potential``, its negative)
+are returned as well.
 
 Original and trainable
 ----------------------
@@ -85,7 +87,7 @@ from .core import (
     make_plan,
     table_key,
 )
-from .corrections import DISPERSION, HBOND, YNE
+from .corrections import DISPERSION, HBOND, HH_SHORT, YNE
 from .derived import element_quantities
 from .graphed import GraphedFunction, replay, synchronizes
 from .integrals import constants, device_constant, take0
@@ -95,6 +97,7 @@ from .scf import (
     SCFDensity,
     SCFGraphCache,
     _per_device,
+    homo_orbitals,
     lowest,
     needs_restart,
     run_scf,
@@ -119,7 +122,7 @@ PADDED_CAPACITY = 512
 #: Bucket sizes per doubling of a size above 4 (a power of two): 4 means sizes 4, 5, 6, 7, 8 times a power of two
 #: (at most a quarter of padding), 2 means 2, 3, 4 times a power of two (fewer buckets, at most half of padding).
 BUCKET_SPACING = 2
-_CORRECTION_CONSTANTS = {"YNE": YNE, "DISP": DISPERSION, "HBOND": HBOND}
+_CORRECTION_CONSTANTS = {"YNE": YNE, "DISP": DISPERSION, "HBOND": HBOND, "HH_SHORT": HH_SHORT}
 # the trainable values of the bond-order and resonance-overlap terms
 _TERM_GROUPS = ("BOND_ORDER", "BOND_ORDER_WINDOW", "BOND_ORDER_CUTOFF", "RESONANCE_OVERLAP")
 
@@ -285,7 +288,9 @@ class NDDO(InteratomicPotential):
         ``"YNE"`` (the acetylenic C-C correction of PM6, PM7 and PM6-ORG: its
         energy and the distances where its switch starts and ends), ``"DISP"``
         and ``"HBOND"`` (the scale and damping of the PM7 dispersion, the
-        scales and O...O energy of the PM7 hydrogen bonds), the values of the
+        scales and O...O energy of the PM7 hydrogen bonds), ``"HH_SHORT"``
+        (the height, width factor and centre of the short-range H-H term,
+        which training switches on), the values of the
         terms below: ``"BOND_ORDER"`` (the energies), ``"BOND_ORDER_WINDOW"``
         (the windows, as lower edge and logarithm of the width),
         ``"BOND_ORDER_CUTOFF"`` (the cutoffs, as start and logarithm of the
@@ -328,7 +333,12 @@ class NDDO(InteratomicPotential):
         ``"DISP"``, ``"HBOND"``, as many values as the published ones), also
         the start of a trainable group; ``{"YNE": [12.0, 1.21, 1.45]}``, for
         example, widens the switch of the acetylenic term. Default: the
-        published values.
+        published values. ``"HH_SHORT"`` adds the short-range H-H term
+        ``A exp(-b (R - R_c)^2) S(R)`` (``[A, b, R_c]`` in kcal/mol,
+        1/Angstrom^2 and Angstrom; ``S`` falls from 1 at 1.1 to 0 at 1.4
+        Angstrom), which no published method has; its defaults
+        (:data:`~.corrections.HH_SHORT`) give H2 its experimental bond length,
+        heat of formation and frequency with the PM7 parameters.
     unrestricted : bool, optional
         Force spin-unrestricted SCF even for closed shells (default: only
         open shells are unrestricted).
@@ -474,11 +484,15 @@ class NDDO(InteratomicPotential):
 
         term_groups = self._set_terms(bond_order_terms, bond_order_cutoff, resonance_overlap)
         groups = set(trainable or ())
+        # the short-range H-H term is no part of a published method: on when its constants are given or trained
+        self.hh_short = "HH_SHORT" in (correction_constants or {}) or "HH_SHORT" in groups
         if "all" in groups:
             groups = (set(_ELEMENT_NAMES) | set(PAIR_PARAMETERS) | {"PAR"} | set(self.correction_groups)
                       | set(term_groups))
             if yne_switch == "off":
                 groups.discard("YNE")
+            if not self.hh_short:
+                groups.discard("HH_SHORT")
         unknown = (groups - set(_ELEMENT_NAMES) - set(PAIR_PARAMETERS) - {"PAR"} - set(self.correction_groups)
                    - set(term_groups))
         if unknown:
@@ -541,8 +555,8 @@ class NDDO(InteratomicPotential):
 
     def correction_constants(self, name: str) -> Tensor:
         """The constants of a correction, the trainable copy if any: ``"YNE"`` (see
-        :data:`~.corrections.YNE`), ``"DISP"`` (:data:`~.corrections.DISPERSION`) or ``"HBOND"``
-        (:data:`~.corrections.HBOND`)."""
+        :data:`~.corrections.YNE`), ``"DISP"`` (:data:`~.corrections.DISPERSION`), ``"HBOND"``
+        (:data:`~.corrections.HBOND`) or ``"HH_SHORT"`` (:data:`~.corrections.HH_SHORT`)."""
         return self.params[name] if name in self.params else getattr(self, f"constants_{name}")
 
     def _set_terms(self, bond_order_terms, bond_order_cutoff, resonance_overlap) -> Tuple[str, ...]:
@@ -1150,7 +1164,7 @@ class NDDO(InteratomicPotential):
         n_bo = len(bo_in)
 
         def outputs_fn(H_, W1_, W2_, P_, e_core_, eisol_, heat_, corr_, tore_, d_sp, d_pd, mass_, charge_, pos_,
-                       *rest):
+                       homo_v, homo_s, *rest):
             t, index = rest[:n_bo], rest[n_bo:]
             bo_ = bond_order_from_tensors(list(t), n_struct, layout.n_basis, k, bo.masked) if n_bo else None
             if index:
@@ -1160,19 +1174,23 @@ class NDDO(InteratomicPotential):
             else:
                 lay, n_orb_, pa_, pb_, batch_ = layout, n_orb, pa, pb, batch_w
             res = energy_outputs(lay, H_, W1_, W2_, P_, uhf, e_core_, pa_, pb_, batch_, n_struct, eisol_, heat_,
-                                 corr_, bo_)
+                                 corr_, bo_, homo_v, homo_s)
             charges, dipole = charges_and_dipole(lay, P_, uhf, tore_, k, dfac, sp_mask, pd_mask, d_sp, d_pd, n_orb_,
                                                  mass_, batch_, n_struct, charge_, pos_)
-            return tuple(res[key] for key in _ENERGY_KEYS) + (charges, dipole)
+            return tuple(res[key] for key in _ENERGY_KEYS) + (charges, dipole, res["homo_energy"])
 
+        # the highest occupied orbital of each structure (its energy, differentiable through the density)
+        homo_vec, homo_spin = homo_orbitals(result)
         inputs = [H, W1, W2, P, e_core_pair, eisol, atom_heat, corr, tore, take0(q["dd"], ea),
-                  take0(q["ddp"][:, 5], ea), mass, charge, pos_w, *bo_in, *ptens]
+                  take0(q["ddp"][:, 5], ea), mass, charge, pos_w, homo_vec, homo_spin, *bo_in, *ptens]
         post = (self._build_graph(holder, "outputs_uhf" if uhf else "outputs", outputs_fn, q, inputs)
                 if graph is not None else None)
         values = replay(post, inputs) if post is not None else outputs_fn(*inputs)
         if post is not None and post.wants_second:
             post.capture_second()
-        out = dict(zip(_ENERGY_KEYS + ("charges", "dipole"), values))
+        out = dict(zip(_ENERGY_KEYS + ("charges", "dipole", "homo_energy"), values))
+        # Koopmans' ionization potential
+        out["ionization_potential"] = -out["homo_energy"]
         if padded is not None:
             n_real = padded.n_real
             out["node_energy"], out["charges"] = out["node_energy"][:n_real], out["charges"][:n_real]

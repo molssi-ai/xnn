@@ -48,7 +48,9 @@ class _PM6Family(NDDO):
 
 
 def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
-    constants = [model.correction_constants(name) for name in ("YNE", "DISP", "HBOND")]
+    names = ("YNE", "DISP", "HBOND") + (("HH_SHORT",) if model.hh_short else ())
+    constants = [model.correction_constants(name) for name in names]
+    flags = (model.yne_switch == "smooth", model.hbond_switch == "smooth", model.hbond_torsion == "smooth")
     if pos.is_cuda and model._graph_cache() is not None:
         # on the fast path of a GPU the terms (small, with host searches per molecule) run on the host: the
         # positions and constants go there in one copy, the per-atom result comes back in one (with derivatives)
@@ -57,13 +59,11 @@ def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
         ids = torch.stack([data.atomic_numbers.long(), data.batch.long()]).cpu()
         out = batch_corrections(model.correction_kind, ids[0].tolist(), parts[0].view(pos.shape), ids[1],
                                 data.num_graphs, correction_tables(torch.device("cpu")), model.peptide_barrier,
-                                *parts[1:], model.yne_switch == "smooth", model.hbond_switch == "smooth",
-                                model.hbond_torsion == "smooth")
+                                *parts[1:4], *flags, parts[4] if model.hh_short else None)
         return out.to(pos.device)
     return batch_corrections(model.correction_kind, data.atomic_numbers.tolist(), pos, data.batch, data.num_graphs,
-                             correction_tables(pos.device), model.peptide_barrier, *constants,
-                             model.yne_switch == "smooth", model.hbond_switch == "smooth",
-                             model.hbond_torsion == "smooth")
+                             correction_tables(pos.device), model.peptide_barrier, *constants[:3], *flags,
+                             constants[3] if model.hh_short else None)
 
 
 @register_model("pm3")
@@ -73,6 +73,7 @@ class PM3(NDDO):
     default_parameters = "pm3"
     method = "PM3"
     correction_kind = 0
+    correction_groups = ("HH_SHORT",)
     core_form = 1
     peptide_barrier = 7.1853
 
@@ -90,7 +91,7 @@ class PM6(_PM6Family):
     default_parameters = "pm6"
     method = "PM6"
     correction_kind = 1
-    correction_groups = ("YNE",)
+    correction_groups = ("YNE", "HH_SHORT")
 
     def corrections(self, data, pos):
         return _corrections(self, data, pos)
@@ -108,7 +109,7 @@ class PM7(_PM6Family):
     default_parameters = "pm7"
     method = "PM7"
     correction_kind = 2
-    correction_groups = ("YNE", "DISP", "HBOND")
+    correction_groups = ("YNE", "DISP", "HBOND", "HH_SHORT")
     average_missing_pairs = True
     feather = True
 
@@ -130,7 +131,7 @@ class PM6ORG(_PM6Family):
     default_parameters = "pm6_org"
     method = "PM6-ORG"
     correction_kind = 3
-    correction_groups = ("YNE",)
+    correction_groups = ("YNE", "HH_SHORT")
     feather = True
 
     def __init__(self, *args, **kwargs):

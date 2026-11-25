@@ -419,6 +419,38 @@ DISPERSION = (2.286419, 15.450118, 1.226593)
 #: The PM7 hydrogen-bond constants: the scales of N and O ends (kcal/mol Angstrom^2 / Hartree) and the energy of
 #: the short-range O...O term (kcal/mol).
 HBOND = (-0.171271 * 0.529177210903 ** 2, -0.098822 * 0.529177210903 ** 2, 2.5)
+#: The short-range H-H correction (not part of a published method): its height (kcal/mol), width factor
+#: (1/Angstrom^2) and centre (Angstrom); these values give H2 its experimental bond length, heat of formation and
+#: harmonic frequency with the PM7 parameters.
+HH_SHORT = (32.28, 10.29, 0.780)
+
+
+def hh_short_correction(z: List[int], pos: Tensor, constants: Tensor) -> Tensor:
+    """``A exp(-b (R - R_c)^2) S(R)`` of every H-H pair (``constants`` ``A, b, R_c``, see :data:`HH_SHORT`),
+    ``S`` the quintic switch from 1 below 1.1 to 0 above 1.4 Angstrom, so that no nonbonded H...H contact feels
+    it; per atom, half to each hydrogen (kcal/mol), differentiable in the positions and the constants."""
+    out = pos.new_zeros(len(z))
+    hyd: List[int] = []
+    for i in range(len(z)):
+        if z[i] == 1:
+            hyd.append(i)
+    if len(hyd) < 2:
+        return out
+    h = torch.tensor(hyd, dtype=torch.long, device=pos.device)
+    iu = torch.triu_indices(len(hyd), len(hyd), 1, device=pos.device)
+    a, b = h[iu[0]], h[iu[1]]
+    d = pos.detach()[a] - pos.detach()[b]
+    near = (d * d).sum(-1) < 1.96
+    a, b = a[near], b[near]
+    if a.shape[0] == 0:
+        return out
+    v = pos[a] - pos[b]
+    r = torch.sqrt((v * v).sum(-1))
+    c = constants.to(pos.dtype)
+    t = ((r - 1.1) / 0.3).clamp(0.0, 1.0)
+    switch = 1.0 - t * t * t * (10.0 + t * (6.0 * t - 15.0))
+    e = c[0] * torch.exp(-c[1] * (r - c[2]) * (r - c[2])) * switch
+    return out.index_add(0, a, 0.5 * e).index_add(0, b, 0.5 * e)
 
 
 def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optional[Tensor] = None,
@@ -1601,12 +1633,24 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
                           peptide_barrier: float, yne: Optional[Tensor] = None,
                           dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
                           smooth_yne: bool = False, smooth_hbond: bool = False,
-                          smooth_torsion: bool = False) -> Tensor:
+                          smooth_torsion: bool = False, hh_short: Optional[Tensor] = None) -> Tensor:
     """The corrections of one molecule per atom (kcal/mol) of a method (``kind``: 0 PM3, 1 PM6, 2 PM7,
     3 PM6-ORG without its D3 term); ``yne``, ``dispersion`` and ``hbond`` the constants of
     :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's);
     ``smooth_yne`` the smooth switch of :func:`yne_correction`, ``smooth_hbond`` and ``smooth_torsion`` the
-    smooth forms of :func:`pm7_hbond`."""
+    smooth forms of :func:`pm7_hbond`; ``hh_short`` the constants of :func:`hh_short_correction`, which is added
+    when they are given."""
+    out = _method_corrections(kind, z, p, tables, peptide_barrier, yne, dispersion, hbond, smooth_yne, smooth_hbond,
+                              smooth_torsion)
+    if hh_short is not None:
+        out = out + hh_short_correction(z, p, hh_short)
+    return out
+
+
+def _method_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor], peptide_barrier: float,
+                        yne: Optional[Tensor], dispersion: Optional[Tensor], hbond: Optional[Tensor],
+                        smooth_yne: bool, smooth_hbond: bool, smooth_torsion: bool) -> Tensor:
+    """The corrections of the published method ``kind`` (see :func:`structure_corrections`)."""
     if kind == 0:
         return peptide_torsion(z, p, peptide_barrier)
     bonds = bond_topology(z, p, tables)
@@ -1627,7 +1671,7 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
                       tables: Dict[str, Tensor], peptide_barrier: float, yne: Optional[Tensor] = None,
                       dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
                       smooth_yne: bool = False, smooth_hbond: bool = False,
-                      smooth_torsion: bool = False) -> Tensor:
+                      smooth_torsion: bool = False, hh_short: Optional[Tensor] = None) -> Tensor:
     """:func:`structure_corrections` of every structure of a batch, per atom."""
     out = pos.new_zeros(pos.shape[0])
     for b in range(n_struct):
@@ -1640,5 +1684,5 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
             zb.append(z_all[i])
         out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier, yne,
                                                                 dispersion, hbond, smooth_yne, smooth_hbond,
-                                                                smooth_torsion))
+                                                                smooth_torsion, hh_short))
     return out

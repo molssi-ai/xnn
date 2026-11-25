@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 
 from .bond_order import BondOrder, pair_energies, total_density
+from .bond_order import fock as bond_order_fock
 from .integrals import take0, take1
 from .scf import Layout, electronic_energy, fock_matrices
 from .twocenter import pair_kernel
@@ -406,11 +407,15 @@ def initial_guess(occ_ref: Tensor, ea: Tensor, shells: Tensor, has: Tensor, batc
 
 def energy_outputs(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, P: Tensor, uhf: bool, e_core_pair: Tensor,
                    pa: Tensor, pb: Tensor, batch: Tensor, n_struct: int, eisol: Tensor, atom_heat: Tensor,
-                   corr: Tensor, bond_order: Optional[BondOrder] = None) -> Dict[str, Tensor]:
+                   corr: Tensor, bond_order: Optional[BondOrder] = None, homo_vec: Optional[Tensor] = None,
+                   homo_spin: Optional[Tensor] = None) -> Dict[str, Tensor]:
     """Heats of formation and energies from the converged densities ``P`` (differentiable in the integrals):
     the electronic energy partitioned over the atoms, the core-core terms, the isolated-atom energies
     ``eisol`` (eV), the atomic heats of formation ``atom_heat`` and the corrections ``corr`` (kcal/mol); the
-    energy of a bond-order term (:mod:`~.bond_order`) is electronic, split equally over each pair's atoms."""
+    energy of a bond-order term (:mod:`~.bond_order`) is electronic, split equally over each pair's atoms.
+    With the highest occupied orbitals ``homo_vec`` ``(B, n)`` and their spins ``homo_spin`` (see
+    :func:`~.scf.homo_orbitals`), also their energies ``homo_energy`` (eV), ``c F c`` of the Fock matrix of
+    their spin: the orbital energy, differentiable through ``P`` and the integrals (the orbital is stationary)."""
     dtype, device = H.dtype, H.device
     F = fock_matrices(layout, H, W1, W2, P, uhf)
     e_el = electronic_energy(H, F, P, uhf)
@@ -444,6 +449,11 @@ def energy_outputs(layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, P: Tensor,
         "electronic_energy": e_el,
         "core_core_energy": e_core,
     }
+    if homo_vec is not None and homo_spin is not None:
+        if bond_order is not None:
+            F = F + bond_order_fock(bond_order, total_density(P))[0].unsqueeze(0)
+        Fs = F[homo_spin, torch.arange(n_struct, device=device)]
+        out["homo_energy"] = torch.matmul(torch.matmul(homo_vec.unsqueeze(1), Fs), homo_vec.unsqueeze(2)).reshape(-1)
     return out
 
 

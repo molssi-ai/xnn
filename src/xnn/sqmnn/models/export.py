@@ -50,6 +50,7 @@ class NDDOExport(nn.Module):
     smooth_yne: bool
     smooth_hbond: bool
     smooth_torsion: bool
+    hh_short: Optional[Tensor]
     bond_order: bool
     resonance: bool
     unrestricted: bool
@@ -90,6 +91,8 @@ class NDDOExport(nn.Module):
         self.yne = model.correction_constants("YNE").detach().to(device, dtype)
         self.disp = model.correction_constants("DISP").detach().to(device, dtype)
         self.hbond = model.correction_constants("HBOND").detach().to(device, dtype)
+        self.hh_short = (model.correction_constants("HH_SHORT").detach().to(device, dtype) if model.hh_short
+                         else None)
         self.occ_d = torch.tensor(el.OCC_D, device=device)
         self.shells = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2], device=device)
         self.occ_ref = torch.tensor([[el.OCC_S[v], el.OCC_P[v] / 3.0, el.OCC_D[v] / 5.0] for v in uz], dtype=dtype,
@@ -219,7 +222,8 @@ class NDDOExport(nn.Module):
         if self.use_corrections:
             corr = batch_corrections(self.correction_kind, torch.jit.annotate(List[int], z.tolist()), pos, batch,
                                      1, self.correction_data, self.peptide_barrier, self.yne, self.disp,
-                                     self.hbond, self.smooth_yne, self.smooth_hbond, self.smooth_torsion)
+                                     self.hbond, self.smooth_yne, self.smooth_hbond, self.smooth_torsion,
+                                     self.hh_short)
             d3 = self.d3
             if d3 is not None:
                 same = batch.unsqueeze(0) == batch.unsqueeze(1)
