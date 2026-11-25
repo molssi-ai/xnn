@@ -341,7 +341,7 @@ def make_activation(activation) -> nn.Module:
     Parameters
     ----------
     activation : str or torch.nn.Module
-        One of ``"silu"``, ``"celu"`` (ANI, alpha=0.1), ``"gaussian"``
+        One of ``"silu"`` (also ``"swish"``), ``"celu"`` (ANI, alpha=0.1), ``"gaussian"``
         (original ANI-1), ``"tanh"``, ``"relu"``, ``"sigmoid"``, ``"ssp"``
         (the exact shifted softplus of SchNet / PhysNet), ``"softplus"``
         (:class:`Softplus`), ``"scaled_tanh"`` (:class:`ScaledTanh`),
@@ -363,6 +363,7 @@ def make_activation(activation) -> nn.Module:
         return activation
     factories = {
         "silu": SiLU,
+        "swish": SiLU,
         "gelu": GELU,
         "celu": lambda: nn.CELU(alpha=0.1),   # ANI / torchani convention
         "gaussian": GaussianActivation,

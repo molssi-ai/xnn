@@ -154,6 +154,12 @@ _KEY_TRANSLATIONS: dict[str, dict[str, str]] = {
         "n_radial_basis": "n_rbf",
         "atomref": "atomic_energies",
     },
+    # the NewtonNet reference code's spellings (current and paper-era); key names only
+    "newtonnet": {
+        "n_basis": "n_rbf",
+        "resolution": "n_rbf",
+        "cutoff_network": "cutoff_function",
+    },
     # the reference 3D steerable CNN (mariogeiger/se3cnn) block arguments;
     # the xnn models are built from the paper, these are key names only
     "se3cnn": {
