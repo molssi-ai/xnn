@@ -1068,10 +1068,105 @@ def _hb_weights(ops: TorchOps, pos: Tensor, fa: Tensor, fv: Tensor) -> Tensor:
     return out
 
 
+def _hb_soft_abs(ops: TorchOps, y: Tensor, d: float) -> Tensor:
+    """``|y|`` with a C2 rounding below ``d``: ``d P(y^2 / d^2)``, ``P(q) = 15/8 q - 5/4 q^2 + 3/8 q^3``, an even
+    polynomial (0 at 0, curvature 3.75 / d) that meets ``|y|`` with two derivatives at ``|y| = d``."""
+    q = y * y / (d * d)
+    return ops.where(ops.value(q) < 1.0, d * q * (15.0 / 8.0 - q * (5.0 / 4.0 - q * (3.0 / 8.0))), ops.abs(y))
+
+
+def _hb_soft_norm(ops: TorchOps, v: Tensor, d: float) -> Tensor:
+    """The length of the vectors ``v`` with the rounding of :func:`_hb_soft_abs` (smooth at ``v = 0``)."""
+    vv = ops.sum(v * v)
+    q = vv / (d * d)
+    return ops.where(ops.value(q) < 1.0, d * q * (15.0 / 8.0 - q * (5.0 / 4.0 - q * (3.0 / 8.0))),
+                     ops.sqrt(ops.clamp(vv, d * d)))
+
+
+def _hb_torsion(ops: TorchOps, pos: Tensor, i: Tensor, j: Tensor, k: Tensor,
+                l: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Dihedrals ``i-j-k-l`` in ``(-pi, pi]`` (no rounding to 0 near 0), whether they are degenerate (a projection
+    of ``i`` or ``l`` perpendicular to the ``j-k`` axis shorter than 1e-6 Angstrom), the lever weights
+    ``S(rho_i / 0.1) S(rho_l / 0.1)`` of the two projections' lengths (Angstrom), and the projection of ``l``."""
+    pj, pk = ops.take(pos, j), ops.take(pos, k)
+    b0, b1, b2 = ops.take(pos, i) - pj, pk - pj, ops.take(pos, l) - pk
+    axis = b1 / ops.norm(b1)[..., None]
+    v = b0 - ops.sum(b0 * axis)[..., None] * axis
+    w = b2 - ops.sum(b2 * axis)[..., None] * axis
+    vv, ww = ops.sum(v * v), ops.sum(w * w)
+    flat = (ops.value(vv) < 1e-12) | (ops.value(ww) < 1e-12)
+    x = ops.sum(v * w)
+    y = ops.sum(ops.cross(axis, v) * w)
+    phi = ops.atan2(ops.where(flat, 0.0, y), ops.where(flat, 1.0, x))
+    lam = _hb_step(ops, ops.sqrt(ops.clamp(vv, 1e-300)) / 0.1) * _hb_step(ops, ops.sqrt(ops.clamp(ww, 1e-300)) / 0.1)
+    return phi, flat, lam, w
+
+
+def _hb_torsion_factors(ops: TorchOps, s: Tensor, tp: Tensor, abs_sin_s: Tensor,
+                        wp: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """The torsion factors of the ends at the reflected torsions ``tp``: the soft maximum of the two lone-pair
+    alternatives (ends without the tcs flag) and its soft magnitude (their acceptors), and for tcs ends the
+    blend by ``wp`` of the alternatives (donors) and of their soft magnitudes (acceptors)."""
+    minus, plus = ops.cos(ops.wrap(s - tp)), ops.cos(ops.wrap(-s - tp))
+    other = 0.5 * (minus + plus) + abs_sin_s * _hb_soft_abs(ops, ops.sin(tp), 0.1)
+    donor = wp * plus + (1.0 - wp) * minus
+    acceptor = wp * _hb_soft_abs(ops, plus, 0.1) + (1.0 - wp) * _hb_soft_abs(ops, minus, 0.1)
+    return other, _hb_soft_abs(ops, other, 0.1), donor, acceptor
+
+
+def _hb_smooth_torsion(ops: TorchOps, pos: Tensor, center: Tensor, r1: Tensor, r2: Tensor, r3: Tensor, Hc: Tensor,
+                       flags: Tensor, shifts: Tensor, last: Tensor) -> Tuple[Tensor, Tensor]:
+    """The lone-pair factors ``c2`` and torsion factors ``tcos`` ``(R, 2)`` of the ends with smooth torsions (see
+    :func:`pm7_hbond`): every absolute value and sign test of PM7's form rounded within 0.1 (rad or sine), no
+    rounding of dihedrals to 0, the dihedral-dependent values blended toward their values for a degenerate
+    dihedral as an outer atom approaches the axis (within 0.1 Angstrom), and the sine of the angle at the end from
+    the rounded distance of the hydrogen from the axis."""
+    pi = 3.141592653589793
+    deg = pi / 180.0
+    tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
+    shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
+    tau, flat1, lam1, _ = _hb_torsion(ops, pos, r2, r1, center, r3)
+    t, flat2, lam2, rho_h = _hb_torsion(ops, pos, r2, r1, center, Hc)
+    # the magnitude of tc (rounded at 0 and pi) and the weight of PM7's "plus" alternative for tcs ends
+    tc = ops.reflect(tau)
+    abs_tc = ops.where(ops.vabs(ops.value(tc)) <= 0.5 * pi, _hb_soft_abs(ops, tc, 0.1),
+                       pi - _hb_soft_abs(ops, tau, 0.1))
+    abs_tc = ops.where(flat1, pi, lam1 * abs_tc + (1.0 - lam1) * pi)
+    wp = _hb_step(ops, (ops.sin(tc) + 0.1) / 0.2)
+    wp = ops.where(flat1, 1.0, lam1 * wp + (1.0 - lam1))
+    tcd = abs_tc / deg
+    s = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
+    shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
+    shift2 = ops.where(tcs, shift, shift2)
+    # c2: the larger of the two lone-pair cosines, as their mean and half their difference
+    cos_a = ops.cos_angle(pos, r1, center, Hc)
+    sin_a = _hb_soft_norm(ops, rho_h, 0.1) / ops.norm(ops.take(pos, Hc) - ops.take(pos, center))
+    mid, half = 0.5 * (shift + shift2), 0.5 * (shift - shift2)
+    c2 = 0.5 * ((ops.cos(shift) + ops.cos(shift2)) * cos_a + (ops.sin(shift) + ops.sin(shift2)) * sin_a) \
+        + ops.abs(ops.sin(half)) * _hb_soft_abs(ops, sin_a * ops.cos(mid) - cos_a * ops.sin(mid), 0.1)
+    # the torsion factors at the torsion and at a degenerate one (t = 0), blended by the lever weight
+    flip = ~tcs2 | (ops.vabs(ops.value(t)) / deg > 90.0)
+    tp = ops.where(flip, ops.reflect(t), t)
+    tp0 = 0.0 * tp + ops.vwhere(tcs2, 0.0 * tshift, 0.0 * tshift + pi)
+    abs_sin_s = ops.abs(ops.sin(s))
+    at_t = _hb_torsion_factors(ops, s, tp, abs_sin_s, wp)
+    at_0 = _hb_torsion_factors(ops, s, tp0, abs_sin_s, wp)
+    other = ops.where(flat2, at_0[0], lam2 * at_t[0] + (1.0 - lam2) * at_0[0])
+    other_acc = ops.where(flat2, at_0[1], lam2 * at_t[1] + (1.0 - lam2) * at_0[1])
+    donor = ops.where(flat2, at_0[2], lam2 * at_t[2] + (1.0 - lam2) * at_0[2])
+    acceptor = ops.where(flat2, at_0[3], lam2 * at_t[3] + (1.0 - lam2) * at_0[3])
+    tcos = ops.where(tcs, ops.where(last, acceptor, donor), ops.where(last, other_acc, other))
+    tcos = ops.where(zero_t, 0.0, tcos)
+    tcos = ops.where(one_t, 1.0, tcos)
+    return c2, tcos
+
+
 def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
-                     constants: Optional[List[float]] = None, smooth: bool = False) -> Optional[Tensor]:
+                     constants: Optional[List[float]] = None, smooth: bool = False,
+                     torsion: bool = False) -> Optional[Tensor]:
     """The PM7 hydrogen-bond energies per atom (a term of :func:`~.tape.host_term`; ``None`` without bonds),
-    with the ``constants`` of :data:`HBOND` when given; ``smooth`` the form of :func:`pm7_hbond`."""
+    with the ``constants`` of :data:`HBOND` when given; ``smooth`` and ``torsion`` the forms of
+    :func:`pm7_hbond`."""
     deg = math.pi / 180.0
     x = ops.host(pos)
     t = _pm7_hbond_tables(z, x, tables, smooth) if torch.jit.is_scripting() \
@@ -1102,32 +1197,36 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     cos_hb = -ops.cos_angle(pos, A, H, B)
     keep = ops.value(cos_hb) > 0.0
     center, r1, r2, r3 = atoms[..., 0], atoms[..., 1], atoms[..., 2], atoms[..., 3]           # (R, 2)
-    tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
-    shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
     Hc = H[:, None] + 0 * center
-    # the dihedrals r2-r1-center-r3 and r2-r1-center-H together
-    two = 0 * r3[..., None] + ops.longs([0, 0], pos)
-    last_atom = ops.vwhere(ops.bools([True, False], pos), r3[..., None] + 0 * two, Hc[..., None] + 0 * two)
-    both = ops.dihedral(pos, r2[..., None] + two, r1[..., None] + two, center[..., None] + two, last_atom)
-    tc = ops.reflect(ops.wrap(both[..., 0]))
-    check = ops.vwhere(tcs, ops.value(tc), 0.0 * ops.value(tc))
-    tcd = ops.abs(tc) / deg
-    tshift = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
-    shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
-    shift2 = ops.where(tcs, shift, shift2)
-    ang2 = ops.angle(pos, r1, center, Hc)
-    c2 = ops.maximum(ops.cos(shift - ang2), ops.cos(shift2 - ang2))
-    keep = keep & (ops.value(c2) > 0.0).all(-1)
-    tcorr = ops.wrap(both[..., 1])
-    flip = ~tcs2 | (ops.vabs(ops.value(tcorr)) / deg > 90.0)
-    tcorr = ops.where(flip, ops.reflect(tcorr), tcorr)
-    minus, plus = ops.cos(ops.wrap(tshift - tcorr)), ops.cos(ops.wrap(-tshift - tcorr))
-    tcos = ops.where(check < 0, minus, ops.where(check > 0, plus, ops.maximum(minus, plus)))
-    tcos = ops.where(zero_t, 0.0, tcos)
-    tcos = ops.where(one_t, 1.0, tcos)
-    # the acceptor side takes the magnitude, the donor side must not be negative
-    keep = keep & (ops.value(tcos)[:, 0] >= 0.0)
-    tcos = ops.where(last, ops.abs(tcos), tcos)
+    if torsion:
+        c2, tcos = _hb_smooth_torsion(ops, pos, center, r1, r2, r3, Hc, flags, shifts, last)
+        keep = keep & (ops.value(c2) > 0.0).all(-1) & (ops.value(tcos)[:, 0] >= 0.0)
+    else:
+        tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
+        shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
+        # the dihedrals r2-r1-center-r3 and r2-r1-center-H together
+        two = 0 * r3[..., None] + ops.longs([0, 0], pos)
+        last_atom = ops.vwhere(ops.bools([True, False], pos), r3[..., None] + 0 * two, Hc[..., None] + 0 * two)
+        both = ops.dihedral(pos, r2[..., None] + two, r1[..., None] + two, center[..., None] + two, last_atom)
+        tc = ops.reflect(ops.wrap(both[..., 0]))
+        check = ops.vwhere(tcs, ops.value(tc), 0.0 * ops.value(tc))
+        tcd = ops.abs(tc) / deg
+        tshift = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
+        shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
+        shift2 = ops.where(tcs, shift, shift2)
+        ang2 = ops.angle(pos, r1, center, Hc)
+        c2 = ops.maximum(ops.cos(shift - ang2), ops.cos(shift2 - ang2))
+        keep = keep & (ops.value(c2) > 0.0).all(-1)
+        tcorr = ops.wrap(both[..., 1])
+        flip = ~tcs2 | (ops.vabs(ops.value(tcorr)) / deg > 90.0)
+        tcorr = ops.where(flip, ops.reflect(tcorr), tcorr)
+        minus, plus = ops.cos(ops.wrap(tshift - tcorr)), ops.cos(ops.wrap(-tshift - tcorr))
+        tcos = ops.where(check < 0, minus, ops.where(check > 0, plus, ops.maximum(minus, plus)))
+        tcos = ops.where(zero_t, 0.0, tcos)
+        tcos = ops.where(one_t, 1.0, tcos)
+        # the acceptor side takes the magnitude, the donor side must not be negative
+        keep = keep & (ops.value(tcos)[:, 0] >= 0.0)
+        tcos = ops.where(last, ops.abs(tcos), tcos)
     hartree_kcal = 27.211386245988 * 23.060547830619029
     pa, ph, pb = ops.take(pos, A), ops.take(pos, H), ops.take(pos, B)
     ha, hb = ops.norm(ph - pa), ops.norm(ph - pb)
@@ -1165,7 +1264,7 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
 
 
 def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Optional[Tensor] = None,
-              smooth: bool = False) -> Tensor:
+              smooth: bool = False, torsion: bool = False) -> Tensor:
     """PM7 hydrogen-bond correction, per hydrogen atom (kcal/mol).
 
     The third-generation correction of Korth (J. Chem. Theory Comput. 6, 3808,
@@ -1193,37 +1292,47 @@ def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: O
     pair against its bonding radius), the energy is the weighted mean over
     the choices, with weights that are products of switches.
     All switches are the quintic smoothstep (continuous second derivatives).
+
+    ``torsion`` makes the lone-pair and torsion factors smooth as well: each
+    absolute value and sign test in them is rounded within 0.1 (radians, or
+    the sine), dihedrals are used as computed (not set to zero near zero),
+    the values that depend on a dihedral go over to those of a degenerate
+    dihedral as one of its outer atoms comes within 0.1 Angstrom of the axis,
+    and the sine of the lone-pair angle uses the hydrogen's distance from the
+    axis, rounded within 0.1 Angstrom. The energy is unchanged outside these
+    windows and at exactly planar or linear arrangements.
     """
     if torch.jit.is_scripting():
         c: Optional[List[float]] = None
         if constants is not None:
             c = [float(constants[0]), float(constants[1]), float(constants[2])]
-        e = pm7_hbond_energy(TorchOps(), z, pos, tables, c, smooth)
+        e = pm7_hbond_energy(TorchOps(), z, pos, tables, c, smooth, torsion)
         return e if e is not None else pos.new_zeros(len(z))
     if constants is None:
-        return _on_host(0, z, pos, tables, None, smooth)
-    return _host_hbond(z, pos, tables, constants, smooth)
+        return _on_host(0, z, pos, tables, None, smooth, torsion)
+    return _host_hbond(z, pos, tables, constants, smooth, torsion)
 
 
 @torch.jit.unused
 def _host_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Tensor,
-                smooth: bool = False) -> Tensor:
+                smooth: bool = False, torsion: bool = False) -> Tensor:
     """:func:`pm7_hbond` with ``constants`` on the host tape."""
     if not constants.requires_grad:
-        return _on_host(0, z, pos, tables, constants.tolist(), smooth)
+        return _on_host(0, z, pos, tables, constants.tolist(), smooth, torsion)
     # the energy is linear in the constants: one evaluation per constant at unit value
-    unit = [_on_host(0, z, pos, tables, [1.0 if j == i else 0.0 for j in range(3)], smooth) for i in range(3)]
+    unit = [_on_host(0, z, pos, tables, [1.0 if j == i else 0.0 for j in range(3)], smooth, torsion)
+            for i in range(3)]
     c = constants.to(pos.dtype)
     return c[0] * unit[0] + c[1] * unit[1] + c[2] * unit[2]
 
 
 @torch.jit.unused
 def _on_host(kind: int, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
-             constants: Optional[List[float]] = None, smooth: bool = False) -> Tensor:
+             constants: Optional[List[float]] = None, smooth: bool = False, torsion: bool = False) -> Tensor:
     """A term on the host tape (see :func:`~.tape.host_term`): 0 PM7 hydrogen bonds (with ``constants``, smooth
-    or not), 1 H4, 2 H-H repulsion."""
+    or not, smooth torsions or not), 1 H4, 2 H-H repulsion."""
     if kind == 0:
-        return host_term(lambda ops, p: pm7_hbond_energy(ops, z, p, tables, constants, smooth), pos)
+        return host_term(lambda ops, p: pm7_hbond_energy(ops, z, p, tables, constants, smooth, torsion), pos)
     energy = (pm7_hbond_energy, h4_energy, lambda ops, z_, p, t_: hh_energy(ops, z_, p))[kind]
     return host_term(lambda ops, p: energy(ops, z, p, tables), pos)
 
@@ -1491,12 +1600,13 @@ def hh_repulsion(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor
 def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor],
                           peptide_barrier: float, yne: Optional[Tensor] = None,
                           dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
-                          smooth_yne: bool = False, smooth_hbond: bool = False) -> Tensor:
+                          smooth_yne: bool = False, smooth_hbond: bool = False,
+                          smooth_torsion: bool = False) -> Tensor:
     """The corrections of one molecule per atom (kcal/mol) of a method (``kind``: 0 PM3, 1 PM6, 2 PM7,
     3 PM6-ORG without its D3 term); ``yne``, ``dispersion`` and ``hbond`` the constants of
     :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's);
-    ``smooth_yne`` the smooth switch of :func:`yne_correction`, ``smooth_hbond`` the smooth form of
-    :func:`pm7_hbond`."""
+    ``smooth_yne`` the smooth switch of :func:`yne_correction`, ``smooth_hbond`` and ``smooth_torsion`` the
+    smooth forms of :func:`pm7_hbond`."""
     if kind == 0:
         return peptide_torsion(z, p, peptide_barrier)
     bonds = bond_topology(z, p, tables)
@@ -1507,7 +1617,7 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
     if kind == 2:
         out = out + si_o_h_correction(z, p, bonds)
         out = out + pm7_dispersion(z, p, bonds, tables, constants=dispersion) \
-            + pm7_hbond(z, p, tables, hbond, smooth_hbond)
+            + pm7_hbond(z, p, tables, hbond, smooth_hbond, smooth_torsion)
     if kind == 3:
         out = out + h4_hbond(z, p, tables) + hh_repulsion(z, p, tables)
     return out
@@ -1516,7 +1626,8 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
 def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n_struct: int,
                       tables: Dict[str, Tensor], peptide_barrier: float, yne: Optional[Tensor] = None,
                       dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
-                      smooth_yne: bool = False, smooth_hbond: bool = False) -> Tensor:
+                      smooth_yne: bool = False, smooth_hbond: bool = False,
+                      smooth_torsion: bool = False) -> Tensor:
     """:func:`structure_corrections` of every structure of a batch, per atom."""
     out = pos.new_zeros(pos.shape[0])
     for b in range(n_struct):
@@ -1528,5 +1639,6 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
         for i in ids:
             zb.append(z_all[i])
         out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier, yne,
-                                                                dispersion, hbond, smooth_yne, smooth_hbond))
+                                                                dispersion, hbond, smooth_yne, smooth_hbond,
+                                                                smooth_torsion))
     return out

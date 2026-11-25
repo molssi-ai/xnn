@@ -254,6 +254,10 @@ class _TapeOps:
         return x.tape.op(np.cos(x.v), lambda g: x._acc(-g * np.sin(x.v)))
 
     @staticmethod
+    def sin(x: Node) -> Node:
+        return x.tape.op(np.sin(x.v), lambda g: x._acc(g * np.cos(x.v)))
+
+    @staticmethod
     def acos(x: Node) -> Node:
         return x.tape.op(np.arccos(x.v), lambda g: x._acc(-g / np.sqrt(1.0 - x.v * x.v)))
 
@@ -444,6 +448,9 @@ class TorchOps:
 
     def cos(self, x: Tensor) -> Tensor:
         return torch.cos(x)
+
+    def sin(self, x: Tensor) -> Tensor:
+        return torch.sin(x)
 
     def acos(self, x: Tensor) -> Tensor:
         return torch.acos(x)

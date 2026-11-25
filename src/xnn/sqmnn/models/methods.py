@@ -57,11 +57,13 @@ def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
         ids = torch.stack([data.atomic_numbers.long(), data.batch.long()]).cpu()
         out = batch_corrections(model.correction_kind, ids[0].tolist(), parts[0].view(pos.shape), ids[1],
                                 data.num_graphs, correction_tables(torch.device("cpu")), model.peptide_barrier,
-                                *parts[1:], model.yne_switch == "smooth", model.hbond_switch == "smooth")
+                                *parts[1:], model.yne_switch == "smooth", model.hbond_switch == "smooth",
+                                model.hbond_torsion == "smooth")
         return out.to(pos.device)
     return batch_corrections(model.correction_kind, data.atomic_numbers.tolist(), pos, data.batch, data.num_graphs,
                              correction_tables(pos.device), model.peptide_barrier, *constants,
-                             model.yne_switch == "smooth", model.hbond_switch == "smooth")
+                             model.yne_switch == "smooth", model.hbond_switch == "smooth",
+                             model.hbond_torsion == "smooth")
 
 
 @register_model("pm3")
