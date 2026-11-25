@@ -156,44 +156,56 @@ class _Interaction(nn.Module, FastPathModule):
         """
         src, dst = edge_index[0], edge_index[1]
         n = a.shape[0]
-        dr_in = dr
         x = self.phi_a(a)
         # a bias-free radial layer takes the envelope through its input (one product for all blocks)
         e = self.phi_rbf(rbf) * cut.unsqueeze(-1) if self.rbf_bias else self.phi_rbf(rbf)
         m = gather_rows(x, dst) * gather_rows(x, src) * e
         a = a + scatter_sum(m, dst, n)
-        if self.latent_force:
-            force = self.phi_F(m) * direction                                # F_ij (E, 3)
-            latent = latent + scatter_sum(force, dst, n)
+        if self.fast_active and not torch.jit.is_scripting():
+            f, dr, latent = self._features_fast(a, f, dr, latent, m, direction, edge_index, first)
         else:
-            force = direction
-        fast = self.fast_active and not torch.jit.is_scripting()
-        carry = not self.displacement and not first
-        if fast:
-            f = f + self._edge_sum(n, src, dst, self.phi_f(m), force,
-                                   self.phi_p(m) if carry else None, f if carry else None)
-        else:
+            if self.latent_force:
+                force = self.phi_F(m) * direction                                # F_ij (E, 3)
+                latent = latent + scatter_sum(force, dst, n)
+            else:
+                force = direction
             vec = self.phi_f(m).unsqueeze(1) * force.unsqueeze(-1)             # (E, 3, F)
-            if carry:
+            if not self.displacement and not first:
                 vec = vec + self.phi_p(m).unsqueeze(1) * gather_rows(f, src)
             f = f + scatter_sum(vec, dst, n)
+            if self.displacement:
+                dr_new = self.phi_r(a).unsqueeze(1) * f
+                if not first:
+                    dr_new = dr_new + scatter_sum(self.phi_rj(m).unsqueeze(1) * gather_rows(dr, src), dst, n)
+                dr = dr_new
         if self.displacement:
-            dr = self.phi_r(a).unsqueeze(1) * f
-            if not first:
-                if fast:
-                    dr = dr + self._edge_sum(n, src, dst, None, None, self.phi_rj(m), dr_in)
-                else:
-                    dr = dr + scatter_sum(self.phi_rj(m).unsqueeze(1) * gather_rows(dr_in, src), dst, n)
             a = a - self.phi_u(a) * (f * dr).sum(dim=1)
         else:
             a = a + (f * self.mix(f)).sum(dim=1)
         return self.norm(a), f, dr, latent
 
     @torch.jit.unused
-    def _edge_sum(self, n: int, src: Tensor, dst: Tensor, c1: Optional[Tensor], u: Optional[Tensor],
-                  c2: Optional[Tensor], v: Optional[Tensor]) -> Tensor:
+    def _features_fast(self, a: Tensor, f: Tensor, dr: Tensor, latent: Tensor, m: Tensor, direction: Tensor,
+                       edge_index: Tensor, first: bool) -> Tuple[Tensor, Tensor, Tensor]:
+        """The force and displacement features (and latent forces) with the fused edge sums."""
         from xnn.gnn.fast.newtonnet_kernels import edge_sum
-        return edge_sum(n, src, dst, c1, u, c2, v)
+        src, dst = edge_index[0], edge_index[1]
+        n = a.shape[0]
+        carry = None if first else (self.phi_rj if self.displacement else self.phi_p)
+        c_f = self.phi_f(m)
+        c_x = carry(m) if carry is not None else None
+        if self.latent_force:
+            force = self.phi_F(m) * direction
+            latent = latent + scatter_sum(force, dst, n)
+        else:
+            force = direction
+        if self.displacement:
+            f = f + edge_sum(n, src, dst, c_f, force)
+            dr_new = self.phi_r(a).unsqueeze(1) * f
+            if c_x is not None:
+                dr_new = dr_new + edge_sum(n, src, dst, None, None, c_x, dr)
+            return f, dr_new, latent
+        return f + edge_sum(n, src, dst, c_f, force, c_x, f if c_x is not None else None), dr, latent
 
 
 @register_model("newtonnet")

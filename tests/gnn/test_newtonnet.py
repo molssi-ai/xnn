@@ -740,3 +740,31 @@ def test_auto_crossover_per_mode(monkeypatch):
                 model(batch)
                 expected = (name == "AUTO_POLICY_TRAINING") == training
                 assert all(b.fast_active == expected for b in model.interactions)
+
+
+def _adapter_parity(device, dtype, tol):
+    """With LoRA adapters on the networks the fast path still
+    gives the reference numbers."""
+    from xnn.common.finetune import inject_lora
+
+    for kw in ({}, {"latent_force": True, "displacement": True}):
+        model = _small(**kw)
+        inject_lora(model, rank=2)
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if "lora" in name:
+                    p.normal_(std=0.1)
+        model = model.to(device, dtype).eval()
+        graph = _graph(n=7, seed=5, periodic=True).to(device)
+        graph.pos, graph.cell = graph.pos.to(dtype), graph.cell.to(dtype)
+        _compare(_fast_outputs(model, graph, False), _fast_outputs(model, graph, True), tol)
+
+
+def test_fast_path_with_adapters_interpreted(interpreted):
+    _adapter_parity("cpu", torch.float64, 1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_fast_path_with_adapters():
+    pytest.importorskip("triton")
+    _adapter_parity("cuda", torch.float64, 1e-12)
