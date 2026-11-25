@@ -16,6 +16,7 @@ import hashlib
 import os
 import shutil
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -117,28 +118,31 @@ def download_file(url: str, dest: Path, md5: Optional[str] = None,
         return dest
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    req = urllib.request.Request(url, headers={"User-Agent": "xnn"})
-    with urllib.request.urlopen(req) as resp, open(tmp, "wb") as f:
-        total = int(resp.headers.get("Content-Length", 0))
-        bar = tqdm(total=total or None, unit="B", unit_scale=True,
-                   unit_divisor=1024, desc=dest.name, disable=quiet,
-                   leave=False)
-        with bar:
-            while True:
-                block = resp.read(chunk)
-                if not block:
-                    break
-                f.write(block)
-                bar.update(len(block))
-
-    if md5 is not None:
-        got = md5sum(tmp)
-        if got != md5:
-            tmp.unlink(missing_ok=True)
-            raise ValueError(
-                f"MD5 mismatch for {dest.name}: expected {md5}, got {got}")
-    tmp.replace(dest)
+    # a temporary file of this call alone, next to the destination: processes fetching the same file at
+    # once each write their own and the last atomic rename wins
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "xnn"})
+        with open(tmp, "xb") as f, urllib.request.urlopen(req) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            bar = tqdm(total=total or None, unit="B", unit_scale=True,
+                       unit_divisor=1024, desc=dest.name, disable=quiet,
+                       leave=False)
+            with bar:
+                while True:
+                    block = resp.read(chunk)
+                    if not block:
+                        break
+                    f.write(block)
+                    bar.update(len(block))
+        if md5 is not None:
+            got = md5sum(tmp)
+            if got != md5:
+                raise ValueError(
+                    f"MD5 mismatch for {dest.name}: expected {md5}, got {got}")
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return dest
 
 

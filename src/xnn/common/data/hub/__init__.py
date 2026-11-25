@@ -26,9 +26,11 @@ from . import (
     argon_md,  # noqa: F401
     ethanol_response,  # noqa: F401
     gmtkn55,  # noqa: F401
+    h2_combustion,  # noqa: F401
     hdnnp4g,  # noqa: F401
     lode_dimers,  # noqa: F401
     materials_project,  # noqa: F401
+    md17_ccsd,  # noqa: F401
     noncovalent,  # noqa: F401
     oc20,  # noqa: F401
     qm7,  # noqa: F401
