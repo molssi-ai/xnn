@@ -1348,8 +1348,10 @@ the license that applies to them.
   integrals. Both can be trained, see :ref:`howto-hessians`.
 - To fit ionization potentials, give structures an ``ionization_potential``
   label (eV) and set ``ionization_weight`` in ``optim``. Dipoles known
-  without a direction go in a ``dipole_magnitude`` label, with
+  without a direction go in a ``dipole_magnitude`` label (e Angstrom), with
   ``dipole_magnitude_weight``.
+- Their parameter gradients are exact. Their derivatives with respect to the
+  positions need ``position_response=True``.
 - Hessians and their parameter gradients are exact, see
   :ref:`howto-hessians`.
 

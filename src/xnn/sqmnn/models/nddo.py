@@ -348,8 +348,9 @@ class NDDO(InteratomicPotential):
     position_response : bool, optional
         Make the SCF density a function of the positions as well, so that
         second derivatives of the energy (Hessians) and their parameter
-        gradients are exact; default ``False`` (forces need only the density
-        itself). :func:`xnn.common.models.hessian` and
+        gradients are exact, as are the position derivatives of the HOMO
+        energy, ionization potential, charges and dipole; default ``False``
+        (forces need only the density itself). :func:`xnn.common.models.hessian` and
         :func:`~xnn.common.models.hessian_vector_product` switch it on for
         their own evaluations.
     max_iter, tol_density, tol_energy : optional

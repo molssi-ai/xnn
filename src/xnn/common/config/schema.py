@@ -198,8 +198,8 @@ class OptimConfig:
         Weight of the polarizability-tensor term (PaiNN). Defaults to ``0.0``.
     dipole_magnitude_weight : float
         Weight of the dipole-magnitude term: the length of the predicted
-        dipole against ``dipole_magnitude`` labels (dipoles known without a
-        direction). Defaults to ``0.0``.
+        dipole against ``dipole_magnitude`` labels in e Angstrom (dipoles known
+        without a direction). Defaults to ``0.0``.
     ionization_weight : float
         Weight of the ionization-potential term: the ``ionization_potential``
         output (the semiempirical methods: minus the HOMO energy) against
@@ -304,7 +304,7 @@ class OptimConfig:
     stress_weight: float = 0.0         # > 0 enables stress training (periodic)
     dipole_weight: float = 0.0         # > 0 trains a dipole head on dipole labels
     polarizability_weight: float = 0.0  # > 0 trains a polarizability head (PaiNN)
-    dipole_magnitude_weight: float = 0.0  # > 0 trains the dipole's length on dipole_magnitude labels
+    dipole_magnitude_weight: float = 0.0  # > 0 trains the dipole's length on dipole_magnitude labels (e A)
     ionization_weight: float = 0.0     # > 0 trains the ionization potential on ionization_potential labels (eV)
     charge_weight: float = 0.0         # > 0 trains the predicted partial charges on charges labels
     les_dipole_weight: float = 0.0     # > 0 trains the LES latent dipole on dipole labels
