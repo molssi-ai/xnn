@@ -258,6 +258,39 @@ Optional heads predict dipole moments and polarizability tensors, trained with
 ``configs/model/painn.yaml`` lists every option with its default, and the
 paper's settings.
 
+NewtonNet
+=========
+:class:`~xnn.gnn.models.newtonnet.NewtonNet` (`THGLab/NewtonNet
+<https://github.com/THGLab/NewtonNet>`_) is the Newtonian message passing
+network of `Haghighatlari et al., Digital Discovery 1, 333 (2022)
+<https://doi.org/10.1039/D2DD00008C>`_. Each atom carries invariant features
+and force vectors built from the directions to its neighbors. Its defaults are
+those of the authors' current code. The paper's model adds latent forces and
+displacement features.
+
+.. code-block:: yaml
+
+   model:
+     name: newtonnet
+     cutoff: 5.0
+     n_features: 128
+     n_interactions: 3
+     n_rbf: 20
+     latent_force: true          # The paper's latent forces
+     displacement: true          # The paper's displacement features
+   optim:
+     force_weight: 50.0
+     latent_force_weight: 1.0    # Aligns the latent forces with the force labels
+
+- ``latent_force_weight`` trains the direction of the latent forces, as in the
+  paper's loss. It needs ``latent_force: true``.
+- ``direct_forces: true`` predicts forces without taking the energy gradient.
+  Such a model cannot be exported to TorchScript.
+- With ``direct_forces: true``, :func:`~xnn.common.models.hessian` returns the
+  force constants of the predicted forces instead of the energy Hessian.
+- ``configs/model/newtonnet.yaml`` lists every option with its default, and the
+  paper's settings.
+
 TensorNet
 =========
 :class:`~xnn.gnn.models.tensornet.TensorNet` (`torchmd/torchmd-net
@@ -1289,7 +1322,9 @@ the self-consistent field.
    model = PM6(trainable=["BETAS", "BETAP", "ALPB"])  # Refit by gradient descent
 
 ``energy`` is the heat of formation in eV and the outputs also include
-``heat_of_formation`` (kcal/mol), ``charges`` and ``dipole``. The methods handle
+``heat_of_formation`` (kcal/mol), ``charges``, ``dipole``, ``homo_energy`` (the
+energy of the highest occupied orbital, eV) and ``ionization_potential`` (its
+negative, Koopmans' theorem). The methods handle
 molecules only. The published parameters are downloaded from the MOPAC sources
 on first use, with a ``LICENSE.txt`` beside them and a one-time warning about
 the license that applies to them.
@@ -1301,10 +1336,22 @@ the license that applies to them.
   parameter file.
 - ``correction_constants`` sets the values of these constants, and
   ``yne_switch="smooth"`` gives the acetylenic term a switch with smooth
-  Hessians, and ``yne_switch="off"`` removes it.
+  Hessians, and ``yne_switch="off"`` removes it. ``hbond_switch="smooth"``
+  removes the jumps of PM7's hydrogen-bond term, and ``hbond_torsion="smooth"``
+  its kinks.
+- ``correction_constants={"HH_SHORT": [A, b, R_c]}`` adds a short-range H-H
+  term, ``A exp(-b (R - R_c)^2)`` switched off between 1.1 and 1.4 Angstrom.
+  It is not part of any published method. ``trainable=["HH_SHORT"]`` also
+  switches it on.
 - ``bond_order_terms`` adds an energy that switches on with the bond order of
   chosen element pairs, and ``resonance_overlap`` rescales the p resonance
   integrals. Both can be trained, see :ref:`howto-hessians`.
+- To fit ionization potentials, give structures an ``ionization_potential``
+  label (eV) and set ``ionization_weight`` in ``optim``. Dipoles known
+  without a direction go in a ``dipole_magnitude`` label (e Angstrom), with
+  ``dipole_magnitude_weight``.
+- Their parameter gradients are exact. Their derivatives with respect to the
+  positions need ``position_response=True``.
 - Hessians and their parameter gradients are exact, see
   :ref:`howto-hessians`.
 

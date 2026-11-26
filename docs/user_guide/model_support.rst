@@ -58,6 +58,13 @@ and is at least as fast, for evaluation and for a training step.
      - |Y|
      - |Y|
      - |Y|
+   * - NewtonNet
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
+     - |Y|
    * - TensorNet
      - |Y|
      - |Y|

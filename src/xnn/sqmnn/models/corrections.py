@@ -190,10 +190,10 @@ def _np_farthest_of(dh: np.ndarray, cands: np.ndarray) -> np.ndarray:
     return np.where(valid.any(-1), cands[rows, np.arange(cands.shape[1])[None, :], pos], -1)
 
 
-def _np_pm7_hbond_tables(z: Sequence[int], x: np.ndarray):
+def _np_pm7_hbond_tables(z: Sequence[int], x: np.ndarray, smooth: bool = False):
     """:func:`_pm7_hbond_tables` of the host array ``x`` as host arrays, the form of an eager model."""
     D = _distances(x)
-    t = _np_hbond_triples(z, x, D, 1.4, 7.0)
+    t = _np_hbond_triples(z, x, D, 1.4, 8.0 if smooth else 7.0)
     if len(t) == 0:
         return None
     zz = np.asarray(z)
@@ -221,7 +221,14 @@ def _np_pm7_hbond_tables(z: Sequence[int], x: np.ndarray):
     r2 = np.where(many, far[..., 1], np.where(k == 2, np.where(L[..., 1] != far[..., 0], L[..., 1], L[..., 0]),
                                               np.where(one, b1, side)))
     r3 = np.where(many, far[..., 2], side)
-    keep = ~((na == B[:, None]).any(-1) | common.any((1, 2))) & (np.minimum(np.minimum(r1, r2), r3) >= 0).all(-1)
+    # an end without bonded atoms has no frame (its lone-pair angle is undefined): PM7 drops the bond
+    keep = ~((na == B[:, None]).any(-1) | common.any((1, 2))) & (np.minimum(np.minimum(r1, r2), r3) >= 0).all(-1) \
+        & (r1 != C).all(-1)
+    if smooth:
+        arrays = (zz, t, D, rz, L, k, full, keep, np.stack([r1, r2, r3], -1), dhc > D[Hc, r1])
+        out = _hb_smooth_tables(list(z), *[torch.from_numpy(np.ascontiguousarray(v)) for v in arrays],
+                                correction_tables(torch.device("cpu")))
+        return None if out is None else {key: v.numpy() for key, v in out.items()}
     if not keep.any():
         return None
     zc = zz[C]
@@ -412,6 +419,38 @@ DISPERSION = (2.286419, 15.450118, 1.226593)
 #: The PM7 hydrogen-bond constants: the scales of N and O ends (kcal/mol Angstrom^2 / Hartree) and the energy of
 #: the short-range O...O term (kcal/mol).
 HBOND = (-0.171271 * 0.529177210903 ** 2, -0.098822 * 0.529177210903 ** 2, 2.5)
+#: The short-range H-H correction (not part of a published method): its height (kcal/mol), width factor
+#: (1/Angstrom^2) and centre (Angstrom); these values give H2 its experimental bond length, heat of formation and
+#: harmonic frequency with the PM7 parameters.
+HH_SHORT = (32.28, 10.29, 0.780)
+
+
+def hh_short_correction(z: List[int], pos: Tensor, constants: Tensor) -> Tensor:
+    """``A exp(-b (R - R_c)^2) S(R)`` of every H-H pair (``constants`` ``A, b, R_c``, see :data:`HH_SHORT`),
+    ``S`` the quintic switch from 1 below 1.1 to 0 above 1.4 Angstrom, so that no nonbonded H...H contact feels
+    it; per atom, half to each hydrogen (kcal/mol), differentiable in the positions and the constants."""
+    out = pos.new_zeros(len(z))
+    hyd: List[int] = []
+    for i in range(len(z)):
+        if z[i] == 1:
+            hyd.append(i)
+    if len(hyd) < 2:
+        return out
+    h = torch.tensor(hyd, dtype=torch.long, device=pos.device)
+    iu = torch.triu_indices(len(hyd), len(hyd), 1, device=pos.device)
+    a, b = h[iu[0]], h[iu[1]]
+    d = pos.detach()[a] - pos.detach()[b]
+    near = (d * d).sum(-1) < 1.96
+    a, b = a[near], b[near]
+    if a.shape[0] == 0:
+        return out
+    v = pos[a] - pos[b]
+    r = torch.sqrt((v * v).sum(-1))
+    c = constants.to(pos.dtype)
+    t = ((r - 1.1) / 0.3).clamp(0.0, 1.0)
+    switch = 1.0 - t * t * t * (10.0 + t * (6.0 * t - 15.0))
+    e = c[0] * torch.exp(-c[1] * (r - c[2]) * (r - c[2])) * switch
+    return out.index_add(0, a, 0.5 * e).index_add(0, b, 0.5 * e)
 
 
 def yne_correction(z: List[int], pos: Tensor, bonds: List[List[int]], yne: Optional[Tensor] = None,
@@ -688,14 +727,16 @@ def _farthest_of(dh: Tensor, cands: Tensor) -> Tensor:
     return torch.where(valid.any(-1), cands.gather(-1, pos).squeeze(-1), torch.full_like(pos.squeeze(-1), -1))
 
 
-def _pm7_hbond_tables(z: List[int], x: Tensor, tables: Dict[str, Tensor]) -> Optional[Dict[str, Tensor]]:
+def _pm7_hbond_tables(z: List[int], x: Tensor, tables: Dict[str, Tensor],
+                      smooth: bool = False) -> Optional[Dict[str, Tensor]]:
     """The candidate PM7 hydrogen bonds of the positions ``x`` as tables (``None`` if none): atoms ``A, H, B``
     ``(R, 3)``; per end (donor and acceptor side, second axis) the atoms ``center, r1, r2, r3`` ``(R, 2, 4)``
     (MOPAC's DH+ reference atoms), the flags ``tcs, tcs2, zero_t, one_t`` ``(R, 2, 4)`` and the shifts ``shift,
-    shift2, tshift`` ``(R, 2, 3)``; the scale ``s_c`` and the O...O flag ``(R,)``."""
+    shift2, tshift`` ``(R, 2, 3)``; the scale ``s_c`` and the O...O flag ``(R,)``. With ``smooth`` the rows are
+    the configurations of :func:`_hb_smooth_tables`."""
     device = x.device
     D = distances(x)
-    t = _hbond_candidates(z, x, D, 1.4, 7.0, [7, 8])
+    t = _hbond_candidates(z, x, D, 1.4, 8.0 if smooth else 7.0, [7, 8])
     if t.shape[0] == 0:
         return None
     zz = torch.tensor(z, dtype=torch.long, device=device)
@@ -725,43 +766,462 @@ def _pm7_hbond_tables(z: List[int], x: Tensor, tables: Dict[str, Tensor]) -> Opt
     r2 = torch.where(many, far[..., 1], torch.where(
         k == 2, torch.where(L[..., 1] != far[..., 0], L[..., 1], L[..., 0]), torch.where(one, b1, side)))
     r3 = torch.where(many, far[..., 2], side)
+    # an end without bonded atoms has no frame (its lone-pair angle is undefined): PM7 drops the bond
     keep = ~((na == B[:, None]).any(-1) | common.any(-1).any(-1)) & \
-        (torch.minimum(torch.minimum(r1, r2), r3) >= 0).all(-1)
+        (torch.minimum(torch.minimum(r1, r2), r3) >= 0).all(-1) & (r1 != C).all(-1)
+    r = torch.stack([r1, r2, r3], -1)
+    zero_t = dhc > D[Hc, r1]
+    if smooth:
+        return _hb_smooth_tables(z, zz, t, D, rz, L, k, full, keep, r, zero_t, tables)
     if not bool(keep.any()):
         return None
+    rows = keep.nonzero().squeeze(-1)
+    return _hb_assemble(zz, t, rows, r[rows], k[rows], zero_t[rows], tables)
+
+
+def _hb_assemble(zz: Tensor, t: Tensor, rows: Tensor, r: Tensor, k: Tensor, zero_t: Tensor,
+                 tables: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    """The tables of :func:`_pm7_hbond_tables` for the candidates ``rows`` of ``t`` with, per end, the reference
+    atoms ``r1, r2, r3`` ``r``, the length ``k`` of the bonded list and the zero-torsion comparison ``zero_t``."""
+    device = t.device
+    ahb = t[rows]
+    A, H, B = ahb[:, 0], ahb[:, 1], ahb[:, 2]
+    C, Hc = torch.stack([A, B], 1), torch.stack([H, H], 1)
+    r1, r2, r3 = r[..., 0], r[..., 1], r[..., 2]
     zc = zz[C]
-    oxygen, nitrogen = zc == 8, zc == 7
+    oxygen, nitrogen, one = zc == 8, zc == 7, k == 1
     tcs2 = oxygen & one
     zero = torch.zeros_like(k)
     # the kind of end, an index into the rows of the angles
     kind = torch.where(oxygen, torch.where(one, zero + 1, zero + 2),
                        torch.where(nitrogen, torch.where(k == 2, zero + 3, zero + 4), zero))
-    atoms = torch.stack([C, r1, r2, r3], -1)
-    flags = torch.stack([kind == 4, tcs2, (dhc > D[Hc, r1]) & tcs2, (r2 == r3) | (Hc == r3)], -1)
-    A, B = A[keep], B[keep]
     scale = tables["hb_scale"].to(device)[zz]
     out: Dict[str, Tensor] = {
-        "ahb": t[keep], "atoms": atoms[keep], "flags": flags[keep],
-        "shifts": tables["hb_angles"].to(device)[kind[keep]],
+        "ahb": ahb, "atoms": torch.stack([C, r1, r2, r3], -1),
+        "flags": torch.stack([kind == 4, tcs2, zero_t & tcs2, (r2 == r3) | (Hc == r3)], -1),
+        "shifts": tables["hb_angles"].to(device)[kind],
         "s_c": 0.5 * (scale[A] + scale[B]), "oo": (zz[A] == 8) & (zz[B] == 8),
         "n_n": (zz[A] == 7).to(torch.float64) + (zz[B] == 7).to(torch.float64)}
     return out
 
 
+def _hb_open(D: Tensor, rz: Tensor, zz: Tensor, t: Tensor, L: Tensor, k: Tensor, full: Tensor) -> Tensor:
+    """Which candidates ``t`` have a choice of the smooth PM7 term inside its switch ``(T,)``: an atom pair of
+    an end (or of the one neighbor of an end with one bond) within 0.10 Angstrom of its bonding radius, two
+    neighbors of an end (``L``, ``k`` of them) within 0.05 Angstrom in their distances from the hydrogen, and for
+    an end with one bond the two farthest atoms of its neighbor's list or (oxygen) the end and that neighbor."""
+    rho = rz[:, None] + rz[None, :]
+    edge = (rho - D).abs() < 0.1
+    edge.fill_diagonal_(False)
+    edge = edge.any(1)
+    C = torch.stack([t[:, 0], t[:, 2]], 1)
+    H = t[:, 1]
+    out = edge[C]
+    valid = L >= 0
+    dh = D[H[:, None, None], L.clamp(min=0)]
+    pair = valid[..., :, None] & valid[..., None, :] & \
+        ~torch.eye(L.shape[-1], dtype=torch.bool, device=L.device)
+    close = ((dh[..., :, None] - dh[..., None, :]).abs() < 0.05) & pair
+    out = out | ((k >= 2) & close.any(-1).any(-1))
+    one = k == 1
+    if bool(one.any()):
+        L0 = L[..., 0].clamp(min=0)
+        second = full[L0]
+        ds = torch.where(second >= 0, D[H[:, None, None], second.clamp(min=0)], torch.full_like(dh[..., :1], -1.0))
+        tied = torch.zeros_like(one)
+        if second.shape[-1] >= 2:
+            top = ds.topk(2, -1).values
+            tied = (top[..., 1] >= 0.0) & (top[..., 0] - top[..., 1] < 0.05)
+        zero_t = (zz[C] == 8) & ((D[H[:, None], C] - D[H[:, None], L0]).abs() < 0.05)
+        out = out | (one & (edge[L0] | tied | zero_t))
+    return out.any(-1)
+
+
+def _hb_near_lists(D: Tensor, rz: Tensor) -> List[List[int]]:
+    """Per atom, the atoms within 0.10 Angstrom of their bonding radius or closer, in index order."""
+    close = rz[:, None] + rz[None, :] - D > -0.1
+    close.fill_diagonal_(False)
+    out = _empty_lists(D.shape[0])
+    for p in torch.jit.annotate(List[List[int]], close.nonzero().tolist()):
+        out[p[0]].append(p[1])
+    return out
+
+
+def _hb_list(c: int, rz: List[float], D: Tensor, cache: Dict[int, List[float]], keys: Dict[int, int], bits: int,
+             cap: int, near: List[List[int]]) -> List[int]:
+    """The bonded list of atom ``c`` with the memberships of the open pairs ``keys`` set by ``bits``: at most
+    ``cap`` atoms, the shortest (the higher index first among equal lengths); ``near`` from
+    :func:`_hb_near_lists`."""
+    row = _row(D, cache, c)
+    n = len(row)
+    members: List[int] = []
+    for j in near[c]:
+        key = min(c, j) * n + max(c, j)
+        if key in keys:
+            inside = (bits >> keys[key]) & 1 == 1
+        else:
+            inside = row[j] < rz[c] + rz[j]
+        if inside:
+            members.append(j)
+    while len(members) > cap:
+        worst = 0
+        for i in range(1, len(members)):
+            a, b = members[i], members[worst]
+            if row[a] > row[b] or (row[a] == row[b] and a < b):
+                worst = i
+        members.pop(worst)
+    return members
+
+
+def _permutations(k: int) -> List[List[int]]:
+    """All orders of ``0 .. k-1``."""
+    out: List[List[int]] = [torch.jit.annotate(List[int], [])]
+    for i in range(k):
+        grown: List[List[int]] = []
+        for p in out:
+            for s in range(len(p) + 1):
+                grown.append(p[:s] + [i] + p[s:])
+        out = grown
+    return out
+
+
+def _hb_end(c: int, h: int, members: List[int], z: List[int], rz: List[float], D: Tensor,
+            cache: Dict[int, List[float]], keys: Dict[int, int], bits: int,
+            near: List[List[int]]) -> Tuple[List[List[int]], List[List[List[int]]]]:
+    """The choices of the end ``c`` with the bonded list ``members``: per choice ``r1, r2, r3, k, zero_t`` and
+    its switch factors (see :func:`_hb_configurations`)."""
+    rowh = _row(D, cache, h)
+    n = len(rowh)
+    key = min(c, h) * n + max(c, h)
+    near_h = ((bits >> keys[key]) & 1 == 1) if key in keys else rowh[c] < rz[c] + rz[h]
+    side = h if near_h else c
+    k = len(members)
+    picks: List[List[int]] = []
+    facs: List[List[List[int]]] = []
+    if k >= 2:
+        # the orders of the neighbors by distance from the hydrogen, the farthest first
+        for perm in _permutations(k):
+            f: List[List[int]] = []
+            ok = True
+            for u in range(k):
+                for v in range(u + 1, k):
+                    i, j = members[perm[u]], members[perm[v]]
+                    gap = rowh[i] - rowh[j]
+                    if gap <= -0.05:
+                        ok = False
+                    elif gap < 0.05:
+                        f.append([1, h, i, h, j])
+            if ok:
+                picks.append([members[perm[0]], members[perm[1]], members[perm[2]] if k >= 3 else side, k])
+                facs.append(f)
+    elif k == 1:
+        # the farthest atom from the hydrogen in the list of the one neighbor
+        m = members[0]
+        second = _hb_list(m, rz, D, cache, keys, bits, n, near)
+        for j in second:
+            fs: List[List[int]] = []
+            ok = True
+            for i in second:
+                if i != j:
+                    gap = rowh[j] - rowh[i]
+                    if gap <= -0.05:
+                        ok = False
+                    elif gap < 0.05:
+                        fs.append([1, h, j, h, i])
+            if ok:
+                picks.append([m, j, side, 1])
+                facs.append(fs)
+    else:
+        picks.append([side, side, side, 0])
+        facs.append(torch.jit.annotate(List[List[int]], []))
+    out: List[List[int]] = []
+    out_f: List[List[List[int]]] = []
+    for i in range(len(picks)):
+        p, fp = picks[i], facs[i]
+        if z[c] != 8 or k != 1:
+            out.append(p + [0])
+            out_f.append(fp)
+            continue
+        # the zero-torsion flag of an oxygen end with one bond: the end farther from the hydrogen than r1
+        gap = rowh[c] - rowh[p[0]]
+        if gap > -0.05:
+            out.append(p + [1])
+            out_f.append(fp + [[1, h, c, h, p[0]]] if gap < 0.05 else fp)
+        if gap < 0.05:
+            out.append(p + [0])
+            out_f.append(fp + [[1, h, p[0], h, c]] if gap > -0.05 else fp)
+    return out, out_f
+
+
+def _hb_configurations(a: int, h: int, b: int, z: List[int], rz: List[float], D: Tensor,
+                       cache: Dict[int, List[float]],
+                       near: List[List[int]]) -> Tuple[List[List[int]], List[List[List[int]]]]:
+    """The configurations of the hydrogen bond ``a-h...b`` of the smooth PM7 term: per configuration ``r1, r2,
+    r3, k, zero_t`` of each end and whether it is dropped (11 numbers), and its switch factors ``[kind, p, q,
+    r, s]``, kind 1 for ``d(p, q) > d(r, s)`` (half-width 0.05 Angstrom), 2 for ``p, q`` within their bonding
+    radius and 3 for not (half-width 0.10 Angstrom); ``near`` from :func:`_hb_near_lists`."""
+    n = len(z)
+    keys: Dict[int, int] = {}
+    pairs: List[List[int]] = []
+    for c in [a, b]:
+        row = _row(D, cache, c)
+        sure = 0
+        for j in near[c]:
+            if rz[c] + rz[j] - row[j] >= 0.1:
+                sure += 1
+        # the pairs of an end, and of its neighbors when it may have one bond
+        shells = [c]
+        if sure <= 1:
+            shells = shells + near[c]
+        for m in shells:
+            rowm = _row(D, cache, m)
+            for j in near[m]:
+                key = min(m, j) * n + max(m, j)
+                if rz[m] + rz[j] - rowm[j] < 0.1 and key not in keys:
+                    keys[key] = len(pairs)
+                    pairs.append([min(m, j), max(m, j)])
+    if len(pairs) > 10:
+        raise RuntimeError("more than 10 bonding radii in their switches around one hydrogen bond")
+    rows: List[List[int]] = []
+    factors: List[List[List[int]]] = []
+    for bits in range(1 << len(pairs)):
+        base: List[List[int]] = []
+        for p in range(len(pairs)):
+            base.append([2 if (bits >> p) & 1 == 1 else 3, pairs[p][0], pairs[p][1], pairs[p][0], pairs[p][1]])
+        la = _hb_list(a, rz, D, cache, keys, bits, 4, near)
+        lb = _hb_list(b, rz, D, cache, keys, bits, 4, near)
+        dead = b in la
+        for j in la:
+            if j != h and j in lb:
+                dead = True
+        ea, fa = _hb_end(a, h, la, z, rz, D, cache, keys, bits, near)
+        eb, fb = _hb_end(b, h, lb, z, rz, D, cache, keys, bits, near)
+        for i in range(len(ea)):
+            for j in range(len(eb)):
+                frameless = ea[i][0] == a or eb[j][0] == b
+                rows.append(ea[i] + eb[j] + [1 if dead or frameless else 0])
+                factors.append(base + fa[i] + fb[j])
+    return rows, factors
+
+
+def _hb_factor_values(f: Tensor, rz: Tensor) -> Tuple[Tensor, Tensor]:
+    """The atoms ``p, q, r, s`` and the values ``a1, a2, c, w`` of switch factors ``[kind, p, q, r, s]`` (see
+    :func:`_hb_configurations`; kind 0 is one): the factor is ``S((a1 d(p, q) + a2 d(r, s) + c + w) / 2w)``."""
+    kind, atoms = f[..., 0], f[..., 1:]
+    rho = rz[atoms[..., 0]] + rz[atoms[..., 1]]
+    one, nil = torch.ones_like(rho), torch.zeros_like(rho)
+    a1 = torch.where(kind == 2, -one, torch.where(kind == 0, nil, one))
+    a2 = torch.where(kind == 1, -one, nil)
+    c = torch.where(kind == 2, rho, torch.where(kind == 3, -rho, torch.where(kind == 0, one, nil)))
+    w = torch.where(kind == 1, one * 0.05, one * 0.1)
+    return atoms, torch.stack([a1, a2, c, w], -1)
+
+
+def _hb_smooth_tables(z: List[int], zz: Tensor, t: Tensor, D: Tensor, rz: Tensor, L: Tensor, k: Tensor,
+                      full: Tensor, keep: Tensor, r: Tensor, zero_t: Tensor,
+                      tables: Dict[str, Tensor]) -> Optional[Dict[str, Tensor]]:
+    """The tables of the smooth PM7 term from the choices of PM7 for the candidates ``t`` (``keep``, the reference
+    atoms ``r`` and ``zero_t``, from the bonded lists ``L`` of the ends, their lengths ``k`` and the uncapped
+    lists ``full``): one row per candidate kept by PM7 without a choice inside its switch, and the configurations
+    of :func:`_hb_configurations` of the others. Added to :func:`_hb_assemble`'s: the bond of each row ``bond``,
+    whether it takes part ``live`` and its switch factors ``fac_atoms`` ``(R, K, 4)``, ``fac_values``."""
+    device = t.device
+    opened = _hb_open(D, rz, zz, t, L, k, full)
+    rows = (keep & ~opened).nonzero().squeeze(-1)
+    rr, kk, zt = r[rows], k[rows], zero_t[rows]
+    live = torch.ones_like(rows, dtype=torch.bool)
+    tl = torch.jit.annotate(List[List[int]], t.tolist())
+    rzl = torch.jit.annotate(List[float], rz.tolist())
+    cache: Dict[int, List[float]] = {}
+    bonds: List[int] = []
+    configs: List[List[int]] = []
+    factors: List[List[List[int]]] = []
+    open_rows = torch.jit.annotate(List[int], opened.nonzero().squeeze(-1).tolist())
+    near = _hb_near_lists(D, rz) if len(open_rows) > 0 else _empty_lists(0)
+    for u in open_rows:
+        cfg, fac = _hb_configurations(tl[u][0], tl[u][1], tl[u][2], z, rzl, D, cache, near)
+        # a bond without a configuration that takes part has no energy
+        takes_part = False
+        for c in cfg:
+            takes_part = takes_part or c[10] == 0
+        if not takes_part:
+            continue
+        for i in range(len(cfg)):
+            bonds.append(u)
+            configs.append(cfg[i])
+            factors.append(fac[i])
+    width = 0
+    for f in factors:
+        width = max(width, len(f))
+    A, H = t[rows, 0], t[rows, 1]
+    fac_int = torch.stack([torch.zeros_like(A), A, H, A, H], -1)[:, None, :].expand(rows.shape[0], width, 5)
+    if len(bonds) > 0:
+        flat: List[List[int]] = []
+        for i in range(len(bonds)):
+            u = bonds[i]
+            unit = [0, tl[u][0], tl[u][1], tl[u][0], tl[u][1]]
+            for j in range(width):
+                flat.append(factors[i][j] if j < len(factors[i]) else unit)
+        cfg_t = torch.tensor(configs, dtype=torch.long, device=device)
+        rows = torch.cat([rows, torch.tensor(bonds, dtype=torch.long, device=device)])
+        rr = torch.cat([rr, torch.stack([cfg_t[:, 0:3], cfg_t[:, 5:8]], 1)])
+        kk = torch.cat([kk, torch.stack([cfg_t[:, 3], cfg_t[:, 8]], 1)])
+        zt = torch.cat([zt, torch.stack([cfg_t[:, 4], cfg_t[:, 9]], 1) == 1])
+        live = torch.cat([live, cfg_t[:, 10] == 0])
+        fac_int = torch.cat([fac_int, torch.tensor(flat, dtype=torch.long, device=device).view(len(bonds), width, 5)])
+    if rows.shape[0] == 0:
+        return None
+    out = _hb_assemble(zz, t, rows, rr, kk, zt, tables)
+    # the bonds numbered from 0
+    used = torch.zeros(t.shape[0], dtype=torch.long, device=device)
+    used[rows] = 1
+    out["bond"] = (torch.cumsum(used, 0) - 1)[rows]
+    out["live"] = live
+    out["fac_atoms"], out["fac_values"] = _hb_factor_values(fac_int, rz)
+    return out
+
+
+def _hb_step(ops: TorchOps, x: Tensor) -> Tensor:
+    """The quintic smoothstep ``S(x)``: 0 below 0, ``10x^3 - 15x^4 + 6x^5`` between, 1 above 1 (``C^2``)."""
+    t = ops.clamp(x, 0.0, 1.0)
+    return t * t * t * (10.0 + t * (6.0 * t - 15.0))
+
+
+def _hb_weights(ops: TorchOps, pos: Tensor, fa: Tensor, fv: Tensor) -> Tensor:
+    """The weights of configurations ``(R,)``: the products of their switch factors (see
+    :func:`_hb_factor_values`)."""
+    d1 = ops.norm(ops.take(pos, fa[..., 0]) - ops.take(pos, fa[..., 1]))
+    d2 = ops.norm(ops.take(pos, fa[..., 2]) - ops.take(pos, fa[..., 3]))
+    w = fv[..., 3]
+    f = _hb_step(ops, (fv[..., 0] * d1 + fv[..., 1] * d2 + fv[..., 2] + w) / (2.0 * w))
+    out = f[:, 0]
+    for i in range(1, fa.shape[1]):
+        out = out * f[:, i]
+    return out
+
+
+def _hb_soft_abs(ops: TorchOps, y: Tensor, d: float) -> Tensor:
+    """``|y|`` with a C2 rounding below ``d``: ``d P(y^2 / d^2)``, ``P(q) = 15/8 q - 5/4 q^2 + 3/8 q^3``, an even
+    polynomial (0 at 0, curvature 3.75 / d) that meets ``|y|`` with two derivatives at ``|y| = d``."""
+    q = y * y / (d * d)
+    return ops.where(ops.value(q) < 1.0, d * q * (15.0 / 8.0 - q * (5.0 / 4.0 - q * (3.0 / 8.0))), ops.abs(y))
+
+
+def _hb_soft_norm(ops: TorchOps, v: Tensor, d: float) -> Tensor:
+    """The length of the vectors ``v`` with the rounding of :func:`_hb_soft_abs` (smooth at ``v = 0``)."""
+    vv = ops.sum(v * v)
+    q = vv / (d * d)
+    return ops.where(ops.value(q) < 1.0, d * q * (15.0 / 8.0 - q * (5.0 / 4.0 - q * (3.0 / 8.0))),
+                     ops.sqrt(ops.clamp(vv, d * d)))
+
+
+def _hb_torsion(ops: TorchOps, pos: Tensor, i: Tensor, j: Tensor, k: Tensor,
+                l: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Dihedrals ``i-j-k-l`` in ``(-pi, pi]`` (no rounding to 0 near 0), whether they are degenerate (a projection
+    of ``i`` or ``l`` perpendicular to the ``j-k`` axis shorter than 1e-6 Angstrom), the lever weights
+    ``S(rho_i / 0.1) S(rho_l / 0.1)`` of the two projections' lengths (Angstrom), and the projection of ``l``."""
+    pj, pk = ops.take(pos, j), ops.take(pos, k)
+    b0, b1, b2 = ops.take(pos, i) - pj, pk - pj, ops.take(pos, l) - pk
+    axis = b1 / ops.norm(b1)[..., None]
+    v = b0 - ops.sum(b0 * axis)[..., None] * axis
+    w = b2 - ops.sum(b2 * axis)[..., None] * axis
+    vv, ww = ops.sum(v * v), ops.sum(w * w)
+    flat = (ops.value(vv) < 1e-12) | (ops.value(ww) < 1e-12)
+    x = ops.sum(v * w)
+    y = ops.sum(ops.cross(axis, v) * w)
+    phi = ops.atan2(ops.where(flat, 0.0, y), ops.where(flat, 1.0, x))
+    lam = _hb_step(ops, ops.sqrt(ops.clamp(vv, 1e-300)) / 0.1) * _hb_step(ops, ops.sqrt(ops.clamp(ww, 1e-300)) / 0.1)
+    return phi, flat, lam, w
+
+
+def _hb_torsion_factors(ops: TorchOps, s: Tensor, tp: Tensor, abs_sin_s: Tensor,
+                        wp: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """The torsion factors of the ends at the reflected torsions ``tp``: the soft maximum of the two lone-pair
+    alternatives (ends without the tcs flag) and its soft magnitude (their acceptors), and for tcs ends the
+    blend by ``wp`` of the alternatives (donors) and of their soft magnitudes (acceptors)."""
+    minus, plus = ops.cos(ops.wrap(s - tp)), ops.cos(ops.wrap(-s - tp))
+    other = 0.5 * (minus + plus) + abs_sin_s * _hb_soft_abs(ops, ops.sin(tp), 0.1)
+    donor = wp * plus + (1.0 - wp) * minus
+    acceptor = wp * _hb_soft_abs(ops, plus, 0.1) + (1.0 - wp) * _hb_soft_abs(ops, minus, 0.1)
+    return other, _hb_soft_abs(ops, other, 0.1), donor, acceptor
+
+
+def _hb_smooth_torsion(ops: TorchOps, pos: Tensor, center: Tensor, r1: Tensor, r2: Tensor, r3: Tensor, Hc: Tensor,
+                       flags: Tensor, shifts: Tensor, last: Tensor) -> Tuple[Tensor, Tensor]:
+    """The lone-pair factors ``c2`` and torsion factors ``tcos`` ``(R, 2)`` of the ends with smooth torsions (see
+    :func:`pm7_hbond`): every absolute value and sign test of PM7's form rounded within 0.1 (rad or sine), no
+    rounding of dihedrals to 0, the dihedral-dependent values blended toward their values for a degenerate
+    dihedral as an outer atom approaches the axis (within 0.1 Angstrom), and the sine of the angle at the end from
+    the rounded distance of the hydrogen from the axis."""
+    pi = 3.141592653589793
+    deg = pi / 180.0
+    tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
+    shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
+    tau, flat1, lam1, _ = _hb_torsion(ops, pos, r2, r1, center, r3)
+    t, flat2, lam2, rho_h = _hb_torsion(ops, pos, r2, r1, center, Hc)
+    # the magnitude of tc (rounded at 0 and pi) and the weight of PM7's "plus" alternative for tcs ends
+    tc = ops.reflect(tau)
+    abs_tc = ops.where(ops.vabs(ops.value(tc)) <= 0.5 * pi, _hb_soft_abs(ops, tc, 0.1),
+                       pi - _hb_soft_abs(ops, tau, 0.1))
+    abs_tc = ops.where(flat1, pi, lam1 * abs_tc + (1.0 - lam1) * pi)
+    wp = _hb_step(ops, (ops.sin(tc) + 0.1) / 0.2)
+    wp = ops.where(flat1, 1.0, lam1 * wp + (1.0 - lam1))
+    tcd = abs_tc / deg
+    s = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
+    shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
+    shift2 = ops.where(tcs, shift, shift2)
+    # c2: the larger of the two lone-pair cosines, as their mean and half their difference
+    cos_a = ops.cos_angle(pos, r1, center, Hc)
+    sin_a = _hb_soft_norm(ops, rho_h, 0.1) / ops.norm(ops.take(pos, Hc) - ops.take(pos, center))
+    mid, half = 0.5 * (shift + shift2), 0.5 * (shift - shift2)
+    c2 = 0.5 * ((ops.cos(shift) + ops.cos(shift2)) * cos_a + (ops.sin(shift) + ops.sin(shift2)) * sin_a) \
+        + ops.abs(ops.sin(half)) * _hb_soft_abs(ops, sin_a * ops.cos(mid) - cos_a * ops.sin(mid), 0.1)
+    # the torsion factors at the torsion and at a degenerate one (t = 0), blended by the lever weight
+    flip = ~tcs2 | (ops.vabs(ops.value(t)) / deg > 90.0)
+    tp = ops.where(flip, ops.reflect(t), t)
+    tp0 = 0.0 * tp + ops.vwhere(tcs2, 0.0 * tshift, 0.0 * tshift + pi)
+    abs_sin_s = ops.abs(ops.sin(s))
+    at_t = _hb_torsion_factors(ops, s, tp, abs_sin_s, wp)
+    at_0 = _hb_torsion_factors(ops, s, tp0, abs_sin_s, wp)
+    other = ops.where(flat2, at_0[0], lam2 * at_t[0] + (1.0 - lam2) * at_0[0])
+    other_acc = ops.where(flat2, at_0[1], lam2 * at_t[1] + (1.0 - lam2) * at_0[1])
+    donor = ops.where(flat2, at_0[2], lam2 * at_t[2] + (1.0 - lam2) * at_0[2])
+    acceptor = ops.where(flat2, at_0[3], lam2 * at_t[3] + (1.0 - lam2) * at_0[3])
+    tcos = ops.where(tcs, ops.where(last, acceptor, donor), ops.where(last, other_acc, other))
+    tcos = ops.where(zero_t, 0.0, tcos)
+    tcos = ops.where(one_t, 1.0, tcos)
+    return c2, tcos
+
+
 def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
-                     constants: Optional[List[float]] = None) -> Optional[Tensor]:
+                     constants: Optional[List[float]] = None, smooth: bool = False,
+                     torsion: bool = False) -> Optional[Tensor]:
     """The PM7 hydrogen-bond energies per atom (a term of :func:`~.tape.host_term`; ``None`` without bonds),
-    with the ``constants`` of :data:`HBOND` when given."""
+    with the ``constants`` of :data:`HBOND` when given; ``smooth`` and ``torsion`` the forms of
+    :func:`pm7_hbond`."""
     deg = math.pi / 180.0
     x = ops.host(pos)
-    t = _pm7_hbond_tables(z, x, tables) if torch.jit.is_scripting() else _host_tables(0, z, x, ops.host_arrays)
+    t = _pm7_hbond_tables(z, x, tables, smooth) if torch.jit.is_scripting() \
+        else _host_tables(0, z, x, ops.host_arrays, smooth)
     if t is None:
         return None
     ahb, atoms, flags = ops.array(t["ahb"], pos), ops.array(t["atoms"], pos), ops.array(t["flags"], pos)
     shifts, s_c, oo = ops.array(t["shifts"], pos), ops.array(t["s_c"], pos), ops.array(t["oo"], pos)
+    n_n = ops.array(t["n_n"], pos)
+    share: Optional[Tensor] = None
+    if smooth:
+        # each configuration's share of its bond: its weight over the sum of the bond's weights
+        bond, fa = ops.array(t["bond"], pos), ops.array(t["fac_atoms"], pos)
+        if fa.shape[1] > 0:
+            w = _hb_weights(ops, pos, fa, ops.array(t["fac_values"], pos))
+            share = w / ops.take(ops.index_add(int(bond.max()) + 1, bond, w), bond)
+        live = ops.nonzero(ops.array(t["live"], pos))
+        ahb, atoms, flags, shifts = ahb[live], atoms[live], flags[live], shifts[live]
+        s_c, oo, n_n = s_c[live], oo[live], n_n[live]
+        if share is not None:
+            share = ops.take(share, live)
     oo_energy = 2.5
     if constants is not None:
-        n_n = ops.array(t["n_n"], pos)
         s_c = 0.5 * (constants[0] * n_n + constants[1] * (2.0 - n_n))
         oo_energy = constants[2]
     last = ops.bools([False, True], pos)
@@ -769,46 +1229,65 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     cos_hb = -ops.cos_angle(pos, A, H, B)
     keep = ops.value(cos_hb) > 0.0
     center, r1, r2, r3 = atoms[..., 0], atoms[..., 1], atoms[..., 2], atoms[..., 3]           # (R, 2)
-    tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
-    shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
     Hc = H[:, None] + 0 * center
-    # the dihedrals r2-r1-center-r3 and r2-r1-center-H together
-    two = 0 * r3[..., None] + ops.longs([0, 0], pos)
-    last_atom = ops.vwhere(ops.bools([True, False], pos), r3[..., None] + 0 * two, Hc[..., None] + 0 * two)
-    both = ops.dihedral(pos, r2[..., None] + two, r1[..., None] + two, center[..., None] + two, last_atom)
-    tc = ops.reflect(ops.wrap(both[..., 0]))
-    check = ops.vwhere(tcs, ops.value(tc), 0.0 * ops.value(tc))
-    tcd = ops.abs(tc) / deg
-    tshift = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
-    shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
-    shift2 = ops.where(tcs, shift, shift2)
-    ang2 = ops.angle(pos, r1, center, Hc)
-    c2 = ops.maximum(ops.cos(shift - ang2), ops.cos(shift2 - ang2))
-    keep = keep & (ops.value(c2) > 0.0).all(-1)
-    tcorr = ops.wrap(both[..., 1])
-    flip = ~tcs2 | (ops.vabs(ops.value(tcorr)) / deg > 90.0)
-    tcorr = ops.where(flip, ops.reflect(tcorr), tcorr)
-    minus, plus = ops.cos(ops.wrap(tshift - tcorr)), ops.cos(ops.wrap(-tshift - tcorr))
-    tcos = ops.where(check < 0, minus, ops.where(check > 0, plus, ops.maximum(minus, plus)))
-    tcos = ops.where(zero_t, 0.0, tcos)
-    tcos = ops.where(one_t, 1.0, tcos)
-    # the acceptor side takes the magnitude, the donor side must not be negative
-    keep = keep & (ops.value(tcos)[:, 0] >= 0.0)
-    tcos = ops.where(last, ops.abs(tcos), tcos)
+    if torsion:
+        c2, tcos = _hb_smooth_torsion(ops, pos, center, r1, r2, r3, Hc, flags, shifts, last)
+        keep = keep & (ops.value(c2) > 0.0).all(-1) & (ops.value(tcos)[:, 0] >= 0.0)
+    else:
+        tcs, tcs2, zero_t, one_t = flags[..., 0], flags[..., 1], flags[..., 2], flags[..., 3]
+        shift, shift2, tshift = shifts[..., 0], shifts[..., 1], shifts[..., 2]
+        # the dihedrals r2-r1-center-r3 and r2-r1-center-H together
+        two = 0 * r3[..., None] + ops.longs([0, 0], pos)
+        last_atom = ops.vwhere(ops.bools([True, False], pos), r3[..., None] + 0 * two, Hc[..., None] + 0 * two)
+        both = ops.dihedral(pos, r2[..., None] + two, r1[..., None] + two, center[..., None] + two, last_atom)
+        tc = ops.reflect(ops.wrap(both[..., 0]))
+        check = ops.vwhere(tcs, ops.value(tc), 0.0 * ops.value(tc))
+        tcd = ops.abs(tc) / deg
+        tshift = ops.where(tcs, tshift + ((54.74 - tcd) / 54.74 * 35.26) * deg, tshift)
+        shift = ops.where(tcs, shift - ((54.74 - tcd) / 54.74 * 19.48) * deg, shift)
+        shift2 = ops.where(tcs, shift, shift2)
+        ang2 = ops.angle(pos, r1, center, Hc)
+        c2 = ops.maximum(ops.cos(shift - ang2), ops.cos(shift2 - ang2))
+        keep = keep & (ops.value(c2) > 0.0).all(-1)
+        tcorr = ops.wrap(both[..., 1])
+        flip = ~tcs2 | (ops.vabs(ops.value(tcorr)) / deg > 90.0)
+        tcorr = ops.where(flip, ops.reflect(tcorr), tcorr)
+        minus, plus = ops.cos(ops.wrap(tshift - tcorr)), ops.cos(ops.wrap(-tshift - tcorr))
+        tcos = ops.where(check < 0, minus, ops.where(check > 0, plus, ops.maximum(minus, plus)))
+        tcos = ops.where(zero_t, 0.0, tcos)
+        tcos = ops.where(one_t, 1.0, tcos)
+        # the acceptor side takes the magnitude, the donor side must not be negative
+        keep = keep & (ops.value(tcos)[:, 0] >= 0.0)
+        tcos = ops.where(last, ops.abs(tcos), tcos)
     hartree_kcal = 27.211386245988 * 23.060547830619029
     pa, ph, pb = ops.take(pos, A), ops.take(pos, H), ops.take(pos, B)
     ha, hb = ops.norm(ph - pa), ops.norm(ph - pb)
     xc = ops.minimum(ha, hb)
-    damping = ops.where(ops.vabs(ops.value(ha) - ops.value(hb)) > 0.5,
-                        1.0 - 1.0 / (1.0 + ops.exp(-60.0 * (xc / 1.2 - 1.0))), 1.0)
+    asym = 1.0 - 1.0 / (1.0 + ops.exp(-60.0 * (xc / 1.2 - 1.0)))
+    if smooth:
+        on = _hb_step(ops, (ops.abs(ha - hb) - 0.45) / 0.1)
+        damping = on * asym + (1.0 - on)
+    else:
+        damping = ops.where(ops.vabs(ops.value(ha) - ops.value(hb)) > 0.5, asym, 1.0)
     rab = ops.norm(pa - pb)
     damping = damping / (1.0 + ops.exp(-100.0 * (rab / 2.4 - 1.0)))
     damping = damping * (1.0 - 1.0 / (1.0 + ops.exp(-10.0 * (rab / 7.0 - 1.0))))
     prod = c2[:, 0] * tcos[:, 0] * c2[:, 1] * tcos[:, 1]
     cos2 = cos_hb * cos_hb
     e = s_c / (rab * rab) * cos2 * (1.0 - (1.0 - prod) * (1.0 - prod)) * hartree_kcal * damping
-    short = ops.clamp(rab - 2.67, 0.0)
-    e = e - ops.where(oo, oo_energy * ops.exp(-80.0 * (short * short)) * (cos2 * cos2), 0.0)
+    if smooth:
+        x_oo = rab - 2.67
+        on = _hb_step(ops, (x_oo + 0.05) / 0.1)
+        g_oo = on * ops.exp(-80.0 * (x_oo * x_oo)) + (1.0 - on)
+    else:
+        short = ops.clamp(rab - 2.67, 0.0)
+        g_oo = ops.exp(-80.0 * (short * short))
+    e = e - ops.where(oo, oo_energy * g_oo * (cos2 * cos2), 0.0)
+    if smooth:
+        # the search ends at 8 Angstrom, where the energy has gone to zero from 7 Angstrom on
+        e = e * (1.0 - _hb_step(ops, rab - 7.0))
+        if share is not None:
+            e = e * share
     # only the bonds that take part enter the sum (and its derivatives)
     kept = ops.nonzero(keep)
     if len(kept) == 0:
@@ -816,7 +1295,8 @@ def pm7_hbond_energy(ops: TorchOps, z: List[int], pos: Tensor, tables: Dict[str,
     return ops.index_add(len(z), H[kept], e[kept])
 
 
-def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Optional[Tensor] = None) -> Tensor:
+def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Optional[Tensor] = None,
+              smooth: bool = False, torsion: bool = False) -> Tensor:
     """PM7 hydrogen-bond correction, per hydrogen atom (kcal/mol).
 
     The third-generation correction of Korth (J. Chem. Theory Comput. 6, 3808,
@@ -834,36 +1314,57 @@ def pm7_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: O
     :func:`~.tape.host_term`). ``constants`` (see :data:`HBOND`) replace the
     scales of the ends and the energy of the O...O term, differentiably when
     they require gradients.
+
+    ``smooth`` removes the term's jumps and kinks with switches that leave
+    every value outside them unchanged: the search reaches 8 Angstrom and the
+    energy goes to zero from 7 to 8 Angstrom; the O...O term starts within
+    0.05 Angstrom of 2.67 Angstrom and the damping branch within 0.05
+    Angstrom of its 0.5 Angstrom test; and where a choice of reference atoms
+    compares two distances within 0.05 Angstrom (0.10 Angstrom for an atom
+    pair against its bonding radius), the energy is the weighted mean over
+    the choices, with weights that are products of switches.
+    All switches are the quintic smoothstep (continuous second derivatives).
+
+    ``torsion`` makes the lone-pair and torsion factors smooth as well: each
+    absolute value and sign test in them is rounded within 0.1 (radians, or
+    the sine), dihedrals are used as computed (not set to zero near zero),
+    the values that depend on a dihedral go over to those of a degenerate
+    dihedral as one of its outer atoms comes within 0.1 Angstrom of the axis,
+    and the sine of the lone-pair angle uses the hydrogen's distance from the
+    axis, rounded within 0.1 Angstrom. The energy is unchanged outside these
+    windows and at exactly planar or linear arrangements.
     """
     if torch.jit.is_scripting():
         c: Optional[List[float]] = None
         if constants is not None:
             c = [float(constants[0]), float(constants[1]), float(constants[2])]
-        e = pm7_hbond_energy(TorchOps(), z, pos, tables, c)
+        e = pm7_hbond_energy(TorchOps(), z, pos, tables, c, smooth, torsion)
         return e if e is not None else pos.new_zeros(len(z))
     if constants is None:
-        return _on_host(0, z, pos, tables)
-    return _host_hbond(z, pos, tables, constants)
+        return _on_host(0, z, pos, tables, None, smooth, torsion)
+    return _host_hbond(z, pos, tables, constants, smooth, torsion)
 
 
 @torch.jit.unused
-def _host_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Tensor) -> Tensor:
+def _host_hbond(z: List[int], pos: Tensor, tables: Dict[str, Tensor], constants: Tensor,
+                smooth: bool = False, torsion: bool = False) -> Tensor:
     """:func:`pm7_hbond` with ``constants`` on the host tape."""
     if not constants.requires_grad:
-        return _on_host(0, z, pos, tables, constants.tolist())
+        return _on_host(0, z, pos, tables, constants.tolist(), smooth, torsion)
     # the energy is linear in the constants: one evaluation per constant at unit value
-    unit = [_on_host(0, z, pos, tables, [1.0 if j == i else 0.0 for j in range(3)]) for i in range(3)]
+    unit = [_on_host(0, z, pos, tables, [1.0 if j == i else 0.0 for j in range(3)], smooth, torsion)
+            for i in range(3)]
     c = constants.to(pos.dtype)
     return c[0] * unit[0] + c[1] * unit[1] + c[2] * unit[2]
 
 
 @torch.jit.unused
 def _on_host(kind: int, z: List[int], pos: Tensor, tables: Dict[str, Tensor],
-             constants: Optional[List[float]] = None) -> Tensor:
-    """A term on the host tape (see :func:`~.tape.host_term`): 0 PM7 hydrogen bonds (with ``constants``), 1 H4,
-    2 H-H repulsion."""
+             constants: Optional[List[float]] = None, smooth: bool = False, torsion: bool = False) -> Tensor:
+    """A term on the host tape (see :func:`~.tape.host_term`): 0 PM7 hydrogen bonds (with ``constants``, smooth
+    or not, smooth torsions or not), 1 H4, 2 H-H repulsion."""
     if kind == 0:
-        return host_term(lambda ops, p: pm7_hbond_energy(ops, z, p, tables, constants), pos)
+        return host_term(lambda ops, p: pm7_hbond_energy(ops, z, p, tables, constants, smooth, torsion), pos)
     energy = (pm7_hbond_energy, h4_energy, lambda ops, z_, p, t_: hh_energy(ops, z_, p))[kind]
     return host_term(lambda ops, p: energy(ops, z, p, tables), pos)
 
@@ -966,16 +1467,17 @@ def _np_h4_tables(z: Sequence[int], x: np.ndarray):
 
 
 @torch.jit.unused
-def _host_tables(kind: int, z: List[int], x: Tensor, numpy_out: bool) -> Optional[Dict[str, Tensor]]:
+def _host_tables(kind: int, z: List[int], x: Tensor, numpy_out: bool,
+                 smooth: bool = False) -> Optional[Dict[str, Tensor]]:
     """The tables of a hydrogen-bond term (0 PM7, 1 H4) from the host (NumPy) topology searches, the form of an
     eager model: NumPy arrays for the tape (``numpy_out``), else tensors on the device of ``x``. The tape's
     search is handed, by atoms and exact positions, to the PyTorch form of the same evaluation's second
-    derivatives (taken once)."""
+    derivatives (taken once). ``smooth`` selects the smooth PM7 tables."""
     xn = x.detach().to("cpu", torch.float64).numpy()
-    key = (kind, tuple(z), xn.tobytes())
+    key = (kind, smooth, tuple(z), xn.tobytes())
     t = None if numpy_out else _TABLE_CACHE.pop(key, None)
     if t is None:
-        t = (_np_pm7_hbond_tables, _np_h4_tables)[kind](list(z), xn)
+        t = _np_pm7_hbond_tables(list(z), xn, smooth) if kind == 0 else _np_h4_tables(list(z), xn)
     if numpy_out:
         _TABLE_CACHE[key] = t
         while len(_TABLE_CACHE) > 4:
@@ -1130,11 +1632,25 @@ def hh_repulsion(z: List[int], pos: Tensor, tables: Dict[str, Tensor]) -> Tensor
 def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor],
                           peptide_barrier: float, yne: Optional[Tensor] = None,
                           dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
-                          smooth_yne: bool = False) -> Tensor:
+                          smooth_yne: bool = False, smooth_hbond: bool = False,
+                          smooth_torsion: bool = False, hh_short: Optional[Tensor] = None) -> Tensor:
     """The corrections of one molecule per atom (kcal/mol) of a method (``kind``: 0 PM3, 1 PM6, 2 PM7,
     3 PM6-ORG without its D3 term); ``yne``, ``dispersion`` and ``hbond`` the constants of
     :func:`yne_correction`, :func:`pm7_dispersion` and :func:`pm7_hbond` (default: the method's);
-    ``smooth_yne`` the smooth switch of :func:`yne_correction`."""
+    ``smooth_yne`` the smooth switch of :func:`yne_correction`, ``smooth_hbond`` and ``smooth_torsion`` the
+    smooth forms of :func:`pm7_hbond`; ``hh_short`` the constants of :func:`hh_short_correction`, which is added
+    when they are given."""
+    out = _method_corrections(kind, z, p, tables, peptide_barrier, yne, dispersion, hbond, smooth_yne, smooth_hbond,
+                              smooth_torsion)
+    if hh_short is not None:
+        out = out + hh_short_correction(z, p, hh_short)
+    return out
+
+
+def _method_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, Tensor], peptide_barrier: float,
+                        yne: Optional[Tensor], dispersion: Optional[Tensor], hbond: Optional[Tensor],
+                        smooth_yne: bool, smooth_hbond: bool, smooth_torsion: bool) -> Tensor:
+    """The corrections of the published method ``kind`` (see :func:`structure_corrections`)."""
     if kind == 0:
         return peptide_torsion(z, p, peptide_barrier)
     bonds = bond_topology(z, p, tables)
@@ -1144,7 +1660,8 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
         out = out + nsp2_correction(z, p, bonds)
     if kind == 2:
         out = out + si_o_h_correction(z, p, bonds)
-        out = out + pm7_dispersion(z, p, bonds, tables, constants=dispersion) + pm7_hbond(z, p, tables, hbond)
+        out = out + pm7_dispersion(z, p, bonds, tables, constants=dispersion) \
+            + pm7_hbond(z, p, tables, hbond, smooth_hbond, smooth_torsion)
     if kind == 3:
         out = out + h4_hbond(z, p, tables) + hh_repulsion(z, p, tables)
     return out
@@ -1153,7 +1670,8 @@ def structure_corrections(kind: int, z: List[int], p: Tensor, tables: Dict[str, 
 def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n_struct: int,
                       tables: Dict[str, Tensor], peptide_barrier: float, yne: Optional[Tensor] = None,
                       dispersion: Optional[Tensor] = None, hbond: Optional[Tensor] = None,
-                      smooth_yne: bool = False) -> Tensor:
+                      smooth_yne: bool = False, smooth_hbond: bool = False,
+                      smooth_torsion: bool = False, hh_short: Optional[Tensor] = None) -> Tensor:
     """:func:`structure_corrections` of every structure of a batch, per atom."""
     out = pos.new_zeros(pos.shape[0])
     for b in range(n_struct):
@@ -1165,5 +1683,6 @@ def batch_corrections(kind: int, z_all: List[int], pos: Tensor, batch: Tensor, n
         for i in ids:
             zb.append(z_all[i])
         out = out.index_add(0, idx, structure_corrections(kind, zb, pos[idx], tables, peptide_barrier, yne,
-                                                                dispersion, hbond, smooth_yne))
+                                                                dispersion, hbond, smooth_yne, smooth_hbond,
+                                                                smooth_torsion, hh_short))
     return out

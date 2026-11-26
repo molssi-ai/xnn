@@ -60,9 +60,12 @@ training configuration in YAML format, with the default values for each section.
      stress_weight: 0.0
      dipole_weight: 0.0         # Dipole / polarizability labels (PaiNN; PhysNet, AIMNet2 dipoles)
      polarizability_weight: 0.0
+     dipole_magnitude_weight: 0.0  # Dipole magnitudes without a direction (dipole_magnitude labels)
+     ionization_weight: 0.0     # Ionization potentials (ionization_potential labels, eV)
      charge_weight: 0.0         # Partial-charge labels (HDNNP 3G / 4G; any model with charges)
      les_dipole_weight: 0.0     # LES latent dipole against dipole labels
      les_charge_weight: 0.0     # LES latent charges against charges labels
+     latent_force_weight: 0.0   # Direction of NewtonNet's latent forces against forces labels
      property_weight: 0.0       # Property labels per structure (MEGNet, CGCNN), not divided by the atom count
      reaction_weight: 0.0       # Reaction energies of a ReactionSet given to the trainer
      reaction_batch_size: 16    # Reactions per training step

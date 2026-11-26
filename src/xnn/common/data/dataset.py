@@ -35,7 +35,8 @@ def structure_to_graph(
         ``pbc`` ``(3,)``, ``energy`` (scalar), ``forces`` ``(N, 3)``,
         ``stress`` ``(3, 3)``, ``dipole`` ``(3,)`` (the molecular dipole
         moment; ``dipole_moment`` is a synonym), ``polarizability``
-        ``(3, 3)``, ``charges`` ``(N,)`` (reference partial charges, the
+        ``(3, 3)``, ``dipole_magnitude`` (scalar, a dipole moment without a
+        direction), ``ionization_potential`` (scalar, eV), ``charges`` ``(N,)`` (reference partial charges, the
         targets of the HDNNP charge networks), ``total_charge`` (scalar net
         charge; the key ``charge`` is accepted as a synonym), ``fragment_charges``
         ``(N,)`` (the net charge of the fragment each atom belongs to, for the
@@ -150,6 +151,10 @@ def structure_to_graph(
         stress=t(s["stress"]).reshape(1, 3, 3) if s.get("stress") is not None else None,
         dipole=t(dipole).reshape(1, 3) if dipole is not None else None,
         polarizability=t(alpha).reshape(1, 3, 3) if alpha is not None else None,
+        dipole_magnitude=(t([s["dipole_magnitude"]]).reshape(1)
+                          if s.get("dipole_magnitude") is not None else None),
+        ionization_potential=(t([s["ionization_potential"]]).reshape(1)
+                              if s.get("ionization_potential") is not None else None),
         charges=t(s["charges"]).reshape(n) if s.get("charges") is not None else None,
         fragment_charges=(t(s["fragment_charges"]).reshape(n)
                           if s.get("fragment_charges") is not None else None),
@@ -383,11 +388,11 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
       periodic flag (its edges carry no image shift, so every edge keeps its
       length, and its stress is zero);
     * structures with and without energy, force, stress, dipole,
-      polarizability, partial-charge or property labels: the missing ones are
-      zeros, and ``energy_mask`` / ``forces_mask`` / ``stress_mask`` /
-      ``dipole_mask`` / ``polarizability_mask`` / ``charges_mask`` /
-      ``properties_mask`` (per structure) mark the labelled ones for the loss
-      and the metrics;
+      polarizability, dipole-magnitude, ionization-potential, partial-charge or
+      property labels: the missing ones are zeros, and the masks
+      (``energy_mask``, ``forces_mask``, ``dipole_magnitude_mask`` and the
+      others, per structure) mark the labelled ones for the loss and the
+      metrics;
     * structures with and without ``state`` (missing = label 0 or zero
       features);
     * ordered structures and structures with disordered sites: every site
@@ -414,6 +419,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     cells, pbcs = [], []
     energies, forces, stresses, charges, mults, weights = [], [], [], [], [], []
     dipoles, alphas, d_masks, p_masks = [], [], [], []
+    scalars = {k: ([], []) for k in ("dipole_magnitude", "ionization_potential")}
     atom_charges, ac_masks = [], []
     heads = []
     props, pr_masks, states = [], [], []
@@ -430,6 +436,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     has_s = any(g.stress is not None for g in graphs)
     has_d = any(g.dipole is not None for g in graphs)
     has_p = any(g.polarizability is not None for g in graphs)
+    has_sc = {k: any(getattr(g, k) is not None for g in graphs) for k in scalars}
     has_ac = any(g.charges is not None for g in graphs)
     has_q = any(g.total_charge is not None for g in graphs)
     has_fc = any(g.fragment_charges is not None for g in graphs)
@@ -488,6 +495,11 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
             alphas.append(g.polarizability if g.polarizability is not None
                           else torch.zeros((b, 3, 3), dtype=dtype, device=device))
             p_masks.append(label_mask(g, g.polarizability, g.polarizability_mask))
+        for k, (values, masks) in scalars.items():
+            if has_sc[k]:
+                v = getattr(g, k)
+                values.append(v if v is not None else torch.zeros(b, dtype=dtype, device=device))
+                masks.append(label_mask(g, v, getattr(g, k + "_mask")))
         if has_ac:
             atom_charges.append(g.charges if g.charges is not None
                                 else torch.zeros(g.pos.shape[0], dtype=dtype, device=device))
@@ -532,6 +544,7 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
     s_mask = torch.cat(s_masks, 0) if has_s else None
     d_mask = torch.cat(d_masks, 0) if has_d else None
     p_mask = torch.cat(p_masks, 0) if has_p else None
+    sc_masks = {k: torch.cat(m, 0) if has_sc[k] else None for k, (_, m) in scalars.items()}
     ac_mask = torch.cat(ac_masks, 0) if has_ac else None
     fc_mask = torch.cat(fc_masks, 0) if has_fc else None
     pr_mask = torch.cat(pr_masks, 0) if prop_like is not None else None
@@ -556,6 +569,15 @@ def collate(graphs: list[AtomicGraph]) -> AtomicGraph:
         polarizability=torch.cat(alphas, 0) if has_p else None,
         dipole_mask=None if d_mask is None or bool(d_mask.all()) else d_mask,
         polarizability_mask=None if p_mask is None or bool(p_mask.all()) else p_mask,
+        dipole_magnitude=(torch.cat(scalars["dipole_magnitude"][0], 0) if has_sc["dipole_magnitude"]
+                          else None),
+        ionization_potential=(torch.cat(scalars["ionization_potential"][0], 0)
+                              if has_sc["ionization_potential"] else None),
+        dipole_magnitude_mask=(None if sc_masks["dipole_magnitude"] is None
+                               or bool(sc_masks["dipole_magnitude"].all()) else sc_masks["dipole_magnitude"]),
+        ionization_potential_mask=(None if sc_masks["ionization_potential"] is None
+                                   or bool(sc_masks["ionization_potential"].all())
+                                   else sc_masks["ionization_potential"]),
         charges=torch.cat(atom_charges, 0) if has_ac else None,
         charges_mask=None if ac_mask is None or bool(ac_mask.all()) else ac_mask,
         fragment_charges=torch.cat(frag_charges, 0) if has_fc else None,

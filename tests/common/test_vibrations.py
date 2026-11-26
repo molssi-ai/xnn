@@ -214,3 +214,28 @@ def test_hessians_that_cannot_be_differentiated_once_more_refuse_create_graph():
     hessian(model, _graph(*BENT))
     with pytest.raises(NotImplementedError, match="create_graph=False"):
         hessian_vector_product(model, _graph(*BENT), torch.ones(3, 3, dtype=torch.float64), create_graph=True)
+
+
+class _DirectForces(torch.nn.Module):
+    """A stand-in for a model with direct forces that ignore the positions."""
+
+    direct_forces = True
+
+    def __init__(self, trainable):
+        super().__init__()
+        self.value = torch.nn.Parameter(torch.ones(3, dtype=torch.float64), requires_grad=trainable)
+
+    def forward(self, data):
+        n = data.pos.shape[0]
+        return {"energy": data.pos.new_zeros(1), "forces": self.value.expand(n, 3) * 1.0}
+
+
+@pytest.mark.parametrize("trainable", [True, False])
+def test_direct_forces_independent_of_positions_have_zero_force_constants(trainable):
+    """Direct forces that do not depend on the positions give zero Hessians and Hessian-vector products."""
+    from xnn.common.models import hessian, hessian_vector_product
+
+    g = structure_to_graph({"pos": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], "atomic_numbers": [1, 1]}, 3.0)
+    model = _DirectForces(trainable)
+    assert float(hessian(model, g)[0].abs().max()) == 0.0
+    assert float(hessian_vector_product(model, g, torch.ones(2, 3, dtype=torch.float64)).abs().max()) == 0.0

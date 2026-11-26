@@ -136,8 +136,10 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
            d_t: float = 0.0, charge_weight: float = 0.0,
            counts: Optional[dict] = None, les_dipole_weight: float = 0.0,
            les_charge_weight: float = 0.0, sync: bool = True,
-           property_weight: float = 0.0, parts: Optional[dict] = None) -> tuple[Tensor, dict[str, float]]:
-    """The weighted energy, force, stress, dipole, polarizability, charge and property
+           property_weight: float = 0.0, parts: Optional[dict] = None,
+           latent_force_weight: float = 0.0, dipole_magnitude_weight: float = 0.0,
+           ionization_weight: float = 0.0) -> tuple[Tensor, dict[str, float]]:
+    """The weighted energy, force, stress, dipole, polarizability, charge, latent-force and property
     terms over the structures weighted by ``w``.
 
     Parameters
@@ -238,6 +240,33 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
             if counts is not None:
                 counts[key + "_mse"] = (_count(err, w_t, sync), weight)
 
+    # scalar labels of molecules: the magnitude of the dipole (labels without a direction) and the ionization
+    # potential, per-structure means over the labelled structures
+    for key, label, weight in (("dipole_magnitude", "dipole_magnitude", dipole_magnitude_weight),
+                               ("ionization", "ionization_potential", ionization_weight)):
+        target = getattr(data, label, None)
+        source = "dipole" if key == "dipole_magnitude" else "ionization_potential"
+        if target is None or weight <= 0 or source not in pred:
+            continue
+        w_t = _masked(w, getattr(data, label + "_mask", None), pred[source])
+        if present(w_t):
+            if key == "dipole_magnitude":
+                # the length of the predicted dipole; a zero dipole has length 0 and no gradient
+                mu2 = (pred["dipole"] * pred["dipole"]).sum(-1)
+                nonzero = mu2 > 0
+                value_t = torch.where(nonzero, torch.sqrt(torch.where(nonzero, mu2, torch.ones_like(mu2))),
+                                      torch.zeros_like(mu2))
+            else:
+                value_t = pred[source]
+            err = _residual_sq(value_t - target.to(value_t.dtype), d_t)
+            t_loss = _mean(err, w_t, sync)
+            loss = loss + weight * t_loss
+            logs[key + "_mse"] = value(t_loss)
+            if parts is not None:
+                parts[key + "_mse"] = weight * t_loss
+            if counts is not None:
+                counts[key + "_mse"] = (_count(err, w_t, sync), weight)
+
     # per-atom partial charges (the charge networks of the 3G / 4G HDNNPs, the
     # LES latent charges), averaged over the atoms of the labelled structures
     # like the forces
@@ -256,6 +285,27 @@ def _terms(pred: dict[str, Tensor], data: AtomicGraph, w: Optional[Tensor],
                 parts[name] = weight * q_loss
             if counts is not None:
                 counts[name] = (_count(err, w_atom, sync), weight)
+
+    # the direction of the latent forces (NewtonNet): 1 - cos of the angle to the reference force of
+    # every atom, averaged over the atoms like the force term
+    if data.forces is not None and latent_force_weight > 0 and "latent_forces" in pred:
+        lat = pred["latent_forces"]
+        w_l = _masked(w, getattr(data, "forces_mask", None), lat, getattr(data, "force_weight", None))
+        w_atom = None if w_l is None else w_l[data.batch]
+        if present(w_atom):
+            ref = data.forces.to(lat.dtype)
+            # a zero latent or reference force (an isolated atom) counts as 1, with no gradient
+            norms = (lat * lat).sum(-1) * (ref * ref).sum(-1)
+            ok = norms > torch.finfo(lat.dtype).tiny
+            safe = torch.where(ok, norms, torch.ones_like(norms))
+            err = 1.0 - torch.where(ok, (lat * ref).sum(-1) / safe.sqrt(), torch.zeros_like(norms))
+            l_loss = _mean(err, w_atom, sync)
+            loss = loss + latent_force_weight * l_loss
+            logs["latent_force_dir"] = value(l_loss)
+            if parts is not None:
+                parts["latent_force_dir"] = latent_force_weight * l_loss
+            if counts is not None:
+                counts["latent_force_dir"] = (_count(err, w_atom, sync), latent_force_weight)
 
     # intensive per-structure targets (MEGNet): the plain mean over the labelled
     # structures and the components of each, with no division by the atom count
@@ -283,6 +333,9 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
                   les_dipole_weight: float = 0.0,
                   les_charge_weight: float = 0.0,
                   property_weight: float = 0.0,
+                  latent_force_weight: float = 0.0,
+                  dipole_magnitude_weight: float = 0.0,
+                  ionization_weight: float = 0.0,
                   huber_delta: float = 0.0,
                   huber_delta_energy: Optional[float] = None,
                   huber_delta_forces: Optional[float] = None,
@@ -317,6 +370,11 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
       atoms like the force term (the charge networks of the 3G and 4G
       HDNNPs, and any model with a ``"charges"`` output). It takes the global
       ``huber_delta`` and is not weighted per head.
+    - Dipole magnitude and ionization potential (``dipole_magnitude_weight``
+      / ``ionization_weight`` > 0): the squared error of the length of the
+      predicted ``dipole`` against ``data.dipole_magnitude``, and of the
+      predicted ``ionization_potential`` against
+      ``data.ionization_potential``, averaged over the labelled structures.
     - LES charges and dipole (``les_charge_weight`` / ``les_dipole_weight``
       > 0): the same two terms for the ``les_charges`` and ``les_dipole``
       outputs of :class:`~xnn.common.models.les.LatentEwald`, against the
@@ -417,6 +475,18 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
     property_weight : float, optional
         Weight of the property term (``data.properties`` against the
         ``"properties"`` prediction). Default ``0.0``.
+    latent_force_weight : float, optional
+        Weight of the force-direction term of NewtonNet: the mean over the atoms of
+        ``1 - cos`` of the angle between the ``"latent_forces"`` prediction and ``data.forces``.
+        Default ``0.0``.
+    dipole_magnitude_weight : float, optional
+        Weight of the dipole-magnitude term: the length of the ``"dipole"``
+        prediction against ``data.dipole_magnitude``, for dipoles known
+        without a direction. Default ``0.0``.
+    ionization_weight : float, optional
+        Weight of the ionization-potential term: the
+        ``"ionization_potential"`` prediction against
+        ``data.ionization_potential`` (eV). Default ``0.0``.
     huber_delta : float, optional
         Default crossover from quadratic to linear for every term. ``0.0``
         (the default) means plain squared error throughout.
@@ -452,7 +522,8 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         to the detached total plus, for each included term, its detached value
         under ``"energy_mse"``, ``"force_mse"``, ``"stress_mse"``,
         ``"dipole_mse"``, ``"polarizability_mse"``, ``"charge_mse"``,
-        ``"les_dipole_mse"`` and/or ``"les_charge_mse"`` (with a
+        ``"les_dipole_mse"``, ``"les_charge_mse"``, ``"dipole_magnitude_mse"``,
+        ``"ionization_mse"`` and/or ``"latent_force_dir"`` (with a
         ``"<head>/"`` prefix per head in a multi-head batch). Those keys keep
         their names when Huber tails are on, where they hold the Huber value
         rather than a mean square.
@@ -468,7 +539,9 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         loss, logs = _terms(pred, data, data.weight, energy_weight, force_weight, stress_weight,
                             d_e, d_f, d_s, dipole_weight, polarizability_weight, huber_delta,
                             charge_weight, counts, les_dipole_weight, les_charge_weight, sync=False,
-                            property_weight=property_weight, parts=parts)
+                            property_weight=property_weight, parts=parts,
+                            latent_force_weight=latent_force_weight,
+                            dipole_magnitude_weight=dipole_magnitude_weight, ionization_weight=ionization_weight)
         logs["loss"] = loss.detach()
         return loss, logs
 
@@ -482,7 +555,9 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         loss, logs = _terms(pred, data, data.weight, w_e, w_f, w_s, d_e, d_f, d_s,
                             dipole_weight, polarizability_weight, huber_delta,
                             charge_weight, part_counts, les_dipole_weight,
-                            les_charge_weight, property_weight=property_weight, parts=parts)
+                            les_charge_weight, property_weight=property_weight, parts=parts,
+                            latent_force_weight=latent_force_weight,
+                            dipole_magnitude_weight=dipole_magnitude_weight, ionization_weight=ionization_weight)
         if heads and head_names is not None:
             # one head of a multi-head run: log under its name, like mixed batches
             name = _name(heads[0])
@@ -507,7 +582,10 @@ def weighted_loss(pred: dict[str, Tensor], data: AtomicGraph,
         part, part_logs = _terms(pred, data, w, w_e, w_f, w_s, d_e, d_f, d_s,
                                  dipole_weight, polarizability_weight, huber_delta,
                                  charge_weight, part_counts, les_dipole_weight,
-                                 les_charge_weight, property_weight=property_weight)
+                                 les_charge_weight, property_weight=property_weight,
+                                 latent_force_weight=latent_force_weight,
+                                 dipole_magnitude_weight=dipole_magnitude_weight,
+                                 ionization_weight=ionization_weight)
         loss = loss + part
         name = _name(h)
         logs.update({f"{name}/{k}": v for k, v in part_logs.items()})
@@ -523,6 +601,7 @@ LOSS_TERMS = {"energy_mse": "energy_weight", "force_mse": "force_weight", "stres
               "dipole_mse": "dipole_weight", "polarizability_mse": "polarizability_weight",
               "charge_mse": "charge_weight", "les_dipole_mse": "les_dipole_weight",
               "les_charge_mse": "les_charge_weight", "property_mse": "property_weight",
+              "dipole_magnitude_mse": "dipole_magnitude_weight", "ionization_mse": "ionization_weight",
               "reaction_mse": "reaction_weight"}
 
 

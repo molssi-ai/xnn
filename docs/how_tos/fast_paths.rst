@@ -14,7 +14,8 @@ Currently, the fast paths exist for the message phase and the symmetric
 contraction of MACE and NequIP (where we use `cuEquivariance
 <https://github.com/NVIDIA/cuEquivariance>`_), the equivariant linear layers,
 element self-connections and radial networks of MACE, the continuous-filter
-convolution of SchNet, the message block of PaiNN, the embedding and interaction layers of
+convolution of SchNet, the message block of PaiNN, the edge sums of the force and
+displacement features of NewtonNet, the embedding and interaction layers of
 TensorNet (and of QET's TensorNet trunk), the blocks and readouts of MEGNet, the network of CGCNN up to the pooling, the shell convolutions of AIMNet2, the neighbor sums of GemNet's
 bilinear layers, the triplet sums of DimeNet and DimeNet++, the tensor products
 of Allegro, the edge-basis sums and ``Ar`` messages of CACE, the pair sums of
@@ -81,6 +82,8 @@ training, and store them as minimum edge counts (atom counts for LES):
   :data:`xnn.gnn.fast.schnet.AUTO_POLICY_TRAINING`
 - PaiNN: :data:`xnn.gnn.fast.painn.AUTO_POLICY`,
   :data:`xnn.gnn.fast.painn.AUTO_POLICY_TRAINING`
+- NewtonNet: :data:`xnn.gnn.fast.newtonnet.AUTO_POLICY`,
+  :data:`xnn.gnn.fast.newtonnet.AUTO_POLICY_TRAINING`
 - TensorNet and QET: :data:`xnn.gnn.fast.tensornet.AUTO_POLICY`,
   :data:`xnn.gnn.fast.tensornet.AUTO_POLICY_TRAINING`
 - MEGNet: :data:`xnn.gnn.fast.megnet.AUTO_POLICY`,
@@ -230,7 +233,8 @@ What to expect from fast implementations
   ``use_fast`` alone never changes the numbers.
 - **Training.** Every fast path with a Fast-Path (Training) mark in
   :ref:`model-support` is twice differentiable, so force training runs
-  through it. The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet,
+  through it. The NewtonNet kernels are differentiable to any order, so Hessians
+  run through them too. The MACE, NequIP, LES, SchNet, PaiNN, TensorNet, AIMNet2, GemNet,
   DimeNet, Allegro and CACE fast paths also take LoRA adapters. The three-body kernels of D3 and D4 are twice
   differentiable on a GPU, stress included, so force training runs through
   them. With trainable damping parameters (``s9``, ``a1``, ``a2``), the
@@ -244,7 +248,8 @@ What to expect from fast implementations
   (:func:`~xnn.gnn.models.set_recompute_radial` sets it per model; ``True``
   helps on small GPUs). For PaiNN this needs about a third of the memory of an
   evaluation for 25 to 60 % more time. The SchNet, PaiNN and TensorNet kernels
-  need about half the memory of their reference counterparts, the AIMNet2 kernels
+  need about half the memory of their reference counterparts, the NewtonNet kernels
+  about three quarters, the AIMNet2 kernels
   a quarter to three quarters, the Allegro kernels a half to two thirds, the CACE
   kernels under half, the DimeNet kernels a tenth to two fifths and the DimeNet++
   kernels about half from a hundred atoms on. The LES fast path

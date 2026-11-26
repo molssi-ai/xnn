@@ -1,4 +1,4 @@
-"""Graph-network models: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, QET, MEGNet and CGCNN
+"""Graph-network models: SchNet, DimeNet, DimeNet++, GemNet, PaiNN, NewtonNet, TensorNet, QET, MEGNet and CGCNN
 (plain PyTorch) and the E(3)-equivariant NequIP / MACE / Allegro / CACE / AIMNet2 (e3nn)."""
 import warnings
 
@@ -8,6 +8,7 @@ from .dimenet import DimeNet, DimeNetPP, directed_triplets
 from .gemnet import GemNet
 from .megnet import MEGNet
 from .megnet_foundation import FOUNDATION_MODELS as MEGNET_FOUNDATION_MODELS
+from .newtonnet import NewtonNet
 from .painn import GatedEquivariantBlock, PaiNN
 from .qet import QET
 from .qet_foundation import FOUNDATION_MODELS as QET_FOUNDATION_MODELS
@@ -15,11 +16,11 @@ from .schnet import SchNet
 from .tensornet import TensorNet
 from .tensornet_foundation import FOUNDATION_MODELS as TENSORNET_FOUNDATION_MODELS
 
-__all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "GemNet", "PaiNN",
+__all__ = ["SchNet", "DimeNet", "DimeNetPP", "directed_triplets", "GemNet", "PaiNN", "NewtonNet",
            "GatedEquivariantBlock", "TensorNet", "TENSORNET_FOUNDATION_MODELS", "QET",
            "QET_FOUNDATION_MODELS", "MEGNet", "MEGNET_FOUNDATION_MODELS", "CGCNN", "CGCNN_FOUNDATION_MODELS"]
 
-# the equivariant models need e3nn; without it SchNet, DimeNet, GemNet, PaiNN, MEGNet, CGCNN,
+# the equivariant models need e3nn; without it SchNet, DimeNet, GemNet, PaiNN, NewtonNet, MEGNet, CGCNN,
 # TensorNet and QET alone are registered. Catch Exception, not just ImportError: e3nn does real work at
 # import time (it loads its Wigner constants with torch.load) and can fail in
 # other ways

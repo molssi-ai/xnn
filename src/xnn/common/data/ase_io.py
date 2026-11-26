@@ -72,6 +72,8 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
         ``"energy"``, ``"forces"``, ``"stress"``, ``"dipole"`` (from
         ``atoms.info["dipole"]`` or ``atoms.info["dipole_moment"]``),
         ``"polarizability"`` (from ``atoms.info["polarizability"]``),
+        ``"dipole_magnitude"`` and ``"ionization_potential"`` (from the
+        ``atoms.info`` keys of the same names),
         ``"total_charge"`` (from
         ``atoms.info["total_charge"]`` or ``atoms.info["charge"]``),
         ``"charges"`` (from ``atoms.arrays["charges"]``, reference partial
@@ -116,6 +118,9 @@ def atoms_to_structure(atoms, energy_key: str = "energy",
             break
     if "polarizability" in atoms.info:
         d["polarizability"] = np.asarray(atoms.info["polarizability"], dtype=float).reshape(3, 3)
+    for key in ("dipole_magnitude", "ionization_potential"):
+        if key in atoms.info:
+            d[key] = float(atoms.info[key])
     for key in ("total_charge", "charge"):
         if key in atoms.info:
             d["total_charge"] = float(atoms.info[key])

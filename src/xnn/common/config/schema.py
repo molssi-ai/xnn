@@ -196,6 +196,14 @@ class OptimConfig:
         ``0.0``.
     polarizability_weight : float
         Weight of the polarizability-tensor term (PaiNN). Defaults to ``0.0``.
+    dipole_magnitude_weight : float
+        Weight of the dipole-magnitude term: the length of the predicted
+        dipole against ``dipole_magnitude`` labels in e Angstrom (dipoles known
+        without a direction). Defaults to ``0.0``.
+    ionization_weight : float
+        Weight of the ionization-potential term: the ``ionization_potential``
+        output (the semiempirical methods: minus the HOMO energy) against
+        ``ionization_potential`` labels (eV). Defaults to ``0.0``.
     charge_weight : float
         Weight of the per-atom partial-charge term, for models with a
         ``charges`` output (the 3G / 4G HDNNP charge networks, PhysNet,
@@ -207,6 +215,10 @@ class OptimConfig:
     les_charge_weight : float
         Weight of the LES charge term: ``les_charges`` against the
         ``charges`` labels. Defaults to ``0.0``.
+    latent_force_weight : float
+        Weight of the force-direction term of NewtonNet (eq 23 of the paper):
+        ``1 - cos`` of the angle between the ``latent_forces`` output and the
+        ``forces`` labels. Defaults to ``0.0``.
     property_weight : float
         Weight of the property term: the ``properties`` output of a property
         model (MEGNet) against the ``properties`` labels, without division by
@@ -292,9 +304,12 @@ class OptimConfig:
     stress_weight: float = 0.0         # > 0 enables stress training (periodic)
     dipole_weight: float = 0.0         # > 0 trains a dipole head on dipole labels
     polarizability_weight: float = 0.0  # > 0 trains a polarizability head (PaiNN)
+    dipole_magnitude_weight: float = 0.0  # > 0 trains the dipole's length on dipole_magnitude labels (e A)
+    ionization_weight: float = 0.0     # > 0 trains the ionization potential on ionization_potential labels (eV)
     charge_weight: float = 0.0         # > 0 trains the predicted partial charges on charges labels
     les_dipole_weight: float = 0.0     # > 0 trains the LES latent dipole on dipole labels
     les_charge_weight: float = 0.0     # > 0 trains the LES latent charges on charges labels
+    latent_force_weight: float = 0.0   # > 0 trains the direction of NewtonNet's latent forces on forces labels
     property_weight: float = 0.0       # > 0 trains a property model (MEGNet) on properties labels
     reaction_weight: float = 0.0       # > 0 trains on reaction energies (a ReactionSet given to the trainer)
     reaction_batch_size: int = 16      # reactions per training step

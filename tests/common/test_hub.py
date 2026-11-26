@@ -1019,3 +1019,141 @@ def test_oc20_splits_and_dataset(fake_oc20, tmp_path):
     assert isinstance(ds, AtomicDataset)
     with pytest.raises(ValueError):
         load_dataset("oc20", cache_dir=tmp_path, energy="free")
+
+
+def test_download_file_concurrent_fetches(tmp_path, monkeypatch):
+    """Two fetches of the same file at once (another process starting while the first still writes) both
+    finish, the file holds the payload and no temporary file is left; a failed fetch leaves nothing."""
+    import io
+
+    from xnn.common.data.hub import _download
+
+    payload = b"x" * 5000
+    dest = tmp_path / "cache" / "data.npz"
+    started = []
+
+    class Response(io.BytesIO):
+        headers = {"Content-Length": str(len(payload))}
+
+        def read(self, n=-1):
+            if not started:
+                started.append(True)
+                # a second fetch of the same file begins while this one is half written
+                assert _download.download_file("https://example.org/data.npz", dest, quiet=True) == dest
+            return super().read(n)
+
+    monkeypatch.setattr(_download.urllib.request, "urlopen", lambda req: Response(payload))
+    assert _download.download_file("https://example.org/data.npz", dest, quiet=True, chunk=1000) == dest
+    assert dest.read_bytes() == payload
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["data.npz"]
+
+    def broken(req):
+        raise OSError("network down")
+
+    monkeypatch.setattr(_download.urllib.request, "urlopen", broken)
+    with pytest.raises(OSError):
+        _download.download_file("https://example.org/data.npz", tmp_path / "other.npz", quiet=True)
+    assert not list(tmp_path.glob("other.npz*"))
+    monkeypatch.setattr(_download.urllib.request, "urlopen", lambda req: Response(payload))
+    with pytest.raises(ValueError, match="MD5 mismatch"):
+        _download.download_file("https://example.org/data.npz", tmp_path / "third.npz", md5="0" * 32, quiet=True)
+    assert not list(tmp_path.glob("third.npz*"))
+
+
+def _zip(path, members):
+    """A zip archive with ``members`` (name -> npz arrays or bytes)."""
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as z:
+        for name, content in members.items():
+            if isinstance(content, dict):
+                buf = io.BytesIO()
+                np.savez(buf, **content)
+                content = buf.getvalue()
+            z.writestr(name, content)
+    return path
+
+
+def _fake_archive(monkeypatch, module, archive):
+    def fake_download(url, dest, md5=None, quiet=False, chunk=1 << 20):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(archive.read_bytes())
+        return dest
+    monkeypatch.setattr(module, "download_file", fake_download)
+
+
+def test_md17_ccsd_builder(tmp_path, monkeypatch):
+    """The sGDML coupled-cluster sets: fixed train and test files, units, truncation and argument checks."""
+    from xnn.common.data.hub import md17_ccsd
+
+    rng = np.random.default_rng(0)
+
+    def arrays(n):
+        return {"R": rng.normal(size=(n, 9, 3)), "z": np.array([6, 6, 8, 1, 1, 1, 1, 1, 1]),
+                "E": rng.normal(size=(n, 1)) - 97000.0, "F": rng.normal(size=(n, 9, 3))}
+
+    train, test = arrays(6), arrays(4)
+    archive = _zip(tmp_path / "src.zip", {"ethanol_ccsd_t-train.npz": train, "ethanol_ccsd_t-test.npz": test,
+                                         "__MACOSX/._ethanol_ccsd_t-train.npz": b"x"})
+    _fake_archive(monkeypatch, md17_ccsd, archive)
+    cache = tmp_path / "cache"
+    splits = load_dataset("md17_ccsd", molecule="Ethanol", cache_dir=cache)
+    assert len(splits["train"]) == 6 and len(splits["test"]) == 4
+    s = splits["test"][2]
+    assert s["energy"] == pytest.approx(float(test["E"][2, 0]) * KCAL)
+    assert np.allclose(s["forces"], test["F"][2] * KCAL) and np.allclose(s["pos"], test["R"][2])
+    kcal = load_dataset("md17_ccsd", molecule="ethanol", split="train", units="kcal/mol", n_train=3, cache_dir=cache)
+    assert len(kcal) == 3 and kcal[0]["energy"] == pytest.approx(float(train["E"][0, 0]))
+    ds = load_dataset("md17_ccsd", molecule="ethanol", split="test", cutoff=5.0, cache_dir=cache)
+    assert isinstance(ds, AtomicDataset) and len(ds) == 4
+    assert "md17_ccsd" in list_datasets()
+    for kwargs, match in (({}, "molecule"), ({"molecule": "uracil"}, "molecule"),
+                          ({"molecule": "ethanol", "units": "hartree"}, "units"),
+                          ({"molecule": "ethanol", "split": "val"}, "split")):
+        with pytest.raises(ValueError, match=match):
+            load_dataset("md17_ccsd", cache_dir=cache, **kwargs)
+
+
+def test_h2_combustion_builder(tmp_path, monkeypatch):
+    """The hydrogen combustion channels: padded arrays unpacked per structure, the 16 default channels,
+    channel 12 from both branches, sources, units and argument checks."""
+    from xnn.common.data.hub import h2_combustion
+
+    rng = np.random.default_rng(1)
+
+    def arrays(n, atoms, label):
+        return {"R": rng.normal(size=(n, 6, 3)), "Z": np.tile([8, 1, 1, 8, 1, 1], (n, 1)),
+                "N": np.full((n, 1), atoms), "E": rng.normal(size=(n, 1)) - 100.0, "F": rng.normal(size=(n, 6, 3)),
+                "RXN": np.array([label] * n)}
+
+    folder = "H2COMBUSTION_DATA-main-2/"
+    members = {}
+    for r in h2_combustion.REACTIONS:
+        if r == "12":
+            members.update({folder + "12a_irc.npz": arrays(2, 4, "12a"), folder + "12b_irc.npz": arrays(3, 4, "12b"),
+                            folder + "12_aimd.npz": arrays(4, 4, "12"), folder + "12_nm.npz": arrays(1, 4, "12")})
+        else:
+            for source, n in (("irc", 2), ("aimd", 3), ("nm", 1)):
+                members[folder + f"{r}_{source}.npz"] = arrays(n, 3, r)
+    members[folder + "05_irc.npz"] = arrays(5, 2, "05")
+    members["__MACOSX/" + folder + "._01_irc.npz"] = b"x"
+    archive = _zip(tmp_path / "src.zip", members)
+    _fake_archive(monkeypatch, h2_combustion, archive)
+    cache = tmp_path / "cache"
+    data = load_dataset("h2_combustion", cache_dir=cache)
+    assert sorted(data) == sorted(h2_combustion.REACTIONS)
+    assert len(data["03"]) == 6 and len(data["12"]) == 10
+    s = data["03"][0]
+    assert s["pos"].shape == (3, 3) and list(s["atomic_numbers"]) == [8, 1, 1] and s["forces"].shape == (3, 3)
+    irc = load_dataset("h2_combustion", split="05", units="kcal/mol", cache_dir=cache)
+    assert len(irc) == 5 and irc[0]["pos"].shape == (2, 3)
+    assert abs(irc[0]["energy"]) > 50                 # kcal/mol kept
+    only = load_dataset("h2_combustion", reactions=["12", "04"], sources=["irc"], cache_dir=cache)
+    assert len(only["12"]) == 5 and len(only["04"]) == 2
+    assert data["03"][0]["energy"] == pytest.approx(
+        load_dataset("h2_combustion", split="03", units="kcal/mol", cache_dir=cache)[0]["energy"] * KCAL)
+    for kwargs, match in (({"units": "hartree"}, "units"), ({"sources": ["md"]}, "sources"),
+                          ({"reactions": ["99"]}, "reactions")):
+        with pytest.raises(ValueError, match=match):
+            load_dataset("h2_combustion", cache_dir=cache, **kwargs)

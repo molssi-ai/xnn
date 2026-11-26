@@ -126,7 +126,7 @@ The geometric message passing paper
 (`Gasteiger et al., Adv. Neural Inf. Process. Syst. 34, 6790 (2021)
 <https://proceedings.neurips.cc/paper/2021/hash/35cf8659cfcb13224cbd47863a34fc58-Abstract.html>`_)
 checked with untrained models: the three bases, triplets and quadruplets,
-what the dihedral angle adds, the variance scaling of Fig. 3, smoothness at
+what the dihedral angle adds, the variance scaling, smoothness at
 both cutoffs, direct versus conservative forces and the cost of the variants.
 Then GemNet-T, -Q and -dT trained on rMD17 ethanol, with NVE energy
 conservation.
@@ -144,9 +144,9 @@ The equivariant message passing paper
 (`Schütt et al., Proc. Mach. Learn. Res. 139, 9377 (2021)
 <https://proceedings.mlr.press/v139/schutt21a.html>`_): the architecture and its
 claims checked with untrained models, the MD17
-experiments and ablations of Tables III and IV, the rotational profile of
-substituted ferrocene at short cutoffs (Fig. 4), and the infrared and Raman
-spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
+experiments and ablations, the rotational profile of
+substituted ferrocene at short cutoffs, and the infrared and Raman
+spectra of ethanol from classical and ring-polymer dynamics.
 
 .. example-toctree::
    :caption: PaiNN (gnn)
@@ -155,6 +155,23 @@ spectra of ethanol from classical and ring-polymer dynamics (Fig. 5).
    PaiNN on MD17: energies and forces from 1000 structures, and the ablations <nb/examples/gnn/painn/painn_md17>
    Propagation of directional information: the substituted ferrocene rotation <nb/examples/gnn/painn/painn_ferrocene>
    Infrared and Raman spectra of ethanol from classical and ring-polymer dynamics <nb/examples/gnn/painn/painn_spectra>
+
+NewtonNet (gnn)
+===============
+
+The Newtonian message passing paper
+(`Haghighatlari et al., Digital Discovery 1, 333 (2022)
+<https://doi.org/10.1039/D2DD00008C>`_): Newton's third law for the latent
+forces, equivariance and smoothness checked with untrained models, the MD17
+experiments with and without the latent-force loss, the coupled-cluster MD17
+data and the hydrogen combustion learning curve.
+
+.. example-toctree::
+   :caption: NewtonNet (gnn)
+
+   NewtonNet from the paper: latent forces, equivariance and smoothness <nb/examples/gnn/newtonnet/newtonnet_paper_checks>
+   NewtonNet on MD17: energies and forces from 950 structures, and the latent-force loss <nb/examples/gnn/newtonnet/newtonnet_md17>
+   NewtonNet at the coupled-cluster level and on hydrogen combustion <nb/examples/gnn/newtonnet/newtonnet_ccsd_combustion>
 
 TensorNet (gnn)
 ===============
@@ -228,7 +245,7 @@ The QM7 experiment of the spherical CNN paper
 (`Cohen et al., Int. Conf. Learn. Represent. (2018)
 <https://arxiv.org/abs/1801.10130>`_): atomization energies from the potentials
 of the atoms sampled on spheres,
-with the Table 3 network and the DeepSet readout, and the rotation
+with the paper's network and the DeepSet readout, and the rotation
 invariance of the energy.
 
 .. example-toctree::
@@ -307,11 +324,11 @@ ET (trfnn)
 
 The equivariant transformer paper
 (`Thölke and De Fabritiis, Int. Conf. Learn. Represent. (2022)
-<https://arxiv.org/abs/2202.02541>`_): the sizes of Tables 4 and 6, the
+<https://arxiv.org/abs/2202.02541>`_): the model sizes, the
 attention weights of section 3.1, equivariance, and the cutoff discontinuity
 that TorchMD-Net 2.0 (`Pelaez et al., J. Chem. Theory Comput. 20, 4076 (2024)
 <https://doi.org/10.1021/acs.jctc.4c00253>`_) removed. Then the MD17 protocol of
-Table 2 on rMD17 aspirin, with and without the fix.
+the paper on rMD17 aspirin, with and without the fix.
 
 .. example-toctree::
    :caption: ET (trfnn)
@@ -324,7 +341,7 @@ Equiformer (trfnn)
 
 The equivariant graph attention paper
 (`Liao and Smidt, Int. Conf. Learn. Represent. (2023)
-<https://arxiv.org/abs/2206.11990>`_): the sizes of Table 6 and section E.1,
+<https://arxiv.org/abs/2206.11990>`_): the model sizes of section E.1,
 the irreps and tensor-product paths, SE(3) against E(3) under reflections, the
 cost of the attention variants and the cutoff. Then the MD17 protocol on rMD17
 aspirin, with and without the smooth cutoff.
@@ -339,7 +356,7 @@ EquiformerV2 (trfnn)
 ====================
 
 The EquiformerV2 paper (`Liao et al., Int. Conf. Learn. Represent. (2024)
-<https://arxiv.org/abs/2306.12059>`_): the sizes of Tables 8 and 13, the eSCN
+<https://arxiv.org/abs/2306.12059>`_): the model sizes, the eSCN
 edge frames, the sphere sampling, forces through the frames and liquid argon.
 Then Equiformer and EquiformerV2 on a QM9 subset, and EquiformerV2 on OC20 S2EF
 with conservative and direct forces.
@@ -366,10 +383,9 @@ SpookyNet (hybnn)
 The SpookyNet paper (`Unke et al., Nat. Commun. 12, 7273 (2021)
 <https://doi.org/10.1038/s41467-021-27504-0>`_): the building blocks
 checked with untrained models and the published example model, the
-electronic-state surfaces of Ag3+ / Ag3- and singlet / triplet CH2 (Fig. 4),
-the dissociation of diatomics with and without nonlocal interactions
-(Fig. 5), the 4G-HDNNP charge-transfer benchmarks (Table 1) and MD17
-(Table 3).
+electronic-state surfaces of Ag3+ / Ag3- and singlet / triplet CH2,
+the dissociation of diatomics with and without nonlocal interactions,
+the 4G-HDNNP charge-transfer benchmarks and MD17.
 
 .. example-toctree::
    :caption: SpookyNet (hybnn)
@@ -411,7 +427,7 @@ scan.
 OPLS / L-OPLS (ffnn)
 ====================
 
-Table 1 of the OPLS-AA paper (`Jorgensen et al., J. Am. Chem. Soc. 118, 11225
+The conformational energies of the OPLS-AA paper (`Jorgensen et al., J. Am. Chem. Soc. 118, 11225
 (1996) <https://doi.org/10.1021/ja9621760>`_)
 from relaxed dihedral scans, then the L-OPLS hexane torsion
 (`Siu et al., J. Chem. Theory Comput. 8, 1459 (2012)
@@ -421,13 +437,13 @@ the published coefficients.
 .. example-toctree::
    :caption: OPLS / L-OPLS (ffnn)
 
-   OPLS-AA conformational energetics: reproducing Table 1 of Jorgensen et al. (1996) <nb/examples/ffnn/opls/opls_conformational_energetics>
+   OPLS-AA conformational energetics: reproducing Jorgensen et al. (1996) <nb/examples/ffnn/opls/opls_conformational_energetics>
    L-OPLS, and refitting OPLS torsions by gradient descent <nb/examples/ffnn/opls/opls_lopls_torsion_refit>
 
 DREIDING (ffnn)
 ===============
 
-Tables XI and XII of the DREIDING paper (`Mayo et al., J. Phys. Chem. 94, 8897
+The rotational barriers of the DREIDING paper (`Mayo et al., J. Phys. Chem. 94, 8897
 (1990) <https://doi.org/10.1021/j100389a010>`_)
 from relaxed scans, then the generators
 refit on benzene and tested for transfer to naphthalene and toluene.
@@ -435,23 +451,23 @@ refit on benzene and tested for transfer to naphthalene and toluene.
 .. example-toctree::
    :caption: DREIDING (ffnn)
 
-   DREIDING conformational energetics: reproducing Tables XI and XII of the 1990 paper <nb/examples/ffnn/dreiding/dreiding_conformational_energetics>
+   DREIDING conformational energetics: reproducing the 1990 paper's rotational barriers <nb/examples/ffnn/dreiding/dreiding_conformational_energetics>
    Retraining DREIDING: refitting the generators, and testing whether they transfer <nb/examples/ffnn/dreiding/dreiding_refit_aromatics>
 
 AMBER (ffnn)
 ============
 
-Tables 3, 4 and 11 and the dipeptide maps of Figure 2 of the ff94 paper
+The conformational energies and the dipeptide maps of the ff94 paper
 (`Cornell et al., J. Am. Chem. Soc. 117, 5179 (1995)
-<https://doi.org/10.1021/ja00124a002>`_) from relaxed scans, the normal modes of
-Tables 6 and 7 from the autograd Hessian,
+<https://doi.org/10.1021/ja00124a002>`_) from relaxed scans, its normal modes
+from the autograd Hessian,
 then the backbone torsions refit by gradient descent.
 
 .. example-toctree::
    :caption: AMBER (ffnn)
 
-   AMBER ff94 conformational energetics: reproducing Tables 3, 4 and 11 and Figure 2 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_conformational_energetics>
-   AMBER ff94 normal modes: reproducing Tables 6 and 7 of Cornell et al. (1995) <nb/examples/ffnn/amber/amber_normal_modes>
+   AMBER ff94 conformational energetics and dipeptide maps: reproducing Cornell et al. (1995) <nb/examples/ffnn/amber/amber_conformational_energetics>
+   AMBER ff94 normal modes: reproducing Cornell et al. (1995) <nb/examples/ffnn/amber/amber_normal_modes>
    Refitting the AMBER backbone torsions by gradient descent <nb/examples/ffnn/amber/amber_backbone_refit>
 
 CHARMM22 (ffnn)
@@ -467,8 +483,8 @@ refit by gradient descent.
 .. example-toctree::
    :caption: CHARMM22 (ffnn)
 
-   CHARMM22 backbone energetics: reproducing Tables 1, 2, 7, 9, 10 and 11 and Figure 2 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_backbone_energetics>
-   CHARMM22 normal modes: reproducing Tables 3 and 8 of MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_normal_modes>
+   CHARMM22 backbone energetics and dipeptide map: reproducing MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_backbone_energetics>
+   CHARMM22 normal modes: reproducing MacKerell et al. (1998) <nb/examples/ffnn/charmm/charmm_normal_modes>
    Refitting the CHARMM22 backbone torsions by gradient descent <nb/examples/ffnn/charmm/charmm_backbone_refit>
 
 AMOEBA and HIPPO (ffnn)
@@ -561,6 +577,7 @@ reference (:ref:`fidelity`), ending with a weight transplant.
    DimeNet and DimeNet++ against the authors' TensorFlow implementation, including the published QM9 model <nb/fidelity_checks/gnn/dimenet/dimenet_verification>
    GemNet against the reference implementation, including the published weights <nb/fidelity_checks/gnn/gemnet/gemnet_verification>
    PaiNN, block by block: the paper's equations, the reference implementation, speed and memory <nb/fidelity_checks/gnn/painn/painn_verification>
+   NewtonNet, block by block: the authors' code, the paper's equations, speed and memory <nb/fidelity_checks/gnn/newtonnet/newtonnet_verification>
    QET against MatGL: the published MatPES potential, charged cells and an applied potential <nb/fidelity_checks/gnn/qet/qet_verification>
    CGCNN against the authors' code: the crystal graph, one convolution, training mode and the eight published models <nb/fidelity_checks/gnn/cgcnn/cgcnn_verification>
    SpookyNet, block by block: the paper's equations and the reference implementation <nb/fidelity_checks/hybnn/spookynet/spookynet_verification>
@@ -614,6 +631,7 @@ gradients and timings.
    GFN0-xTB, GFN1-xTB and GFN2-xTB fast path: parity with the reference <nb/parity_checks/sqmnn/xtb/gfn_xtb_parity>
    SchNet fast path: parity with the reference <nb/parity_checks/gnn/schnet/schnet_parity>
    PaiNN fast path: parity with the reference <nb/parity_checks/gnn/painn/painn_parity>
+   NewtonNet fast path: parity with the reference <nb/parity_checks/gnn/newtonnet/newtonnet_parity>
    DimeNet and DimeNet++ fast path: parity with the reference <nb/parity_checks/gnn/dimenet/dimenet_parity>
    GemNet fast path: parity with the reference <nb/parity_checks/gnn/gemnet/gemnet_parity>
    TensorNet fast path: parity with the reference <nb/parity_checks/gnn/tensornet/tensornet_parity>

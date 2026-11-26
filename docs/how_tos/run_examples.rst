@@ -61,7 +61,7 @@ For example, MACE has ``examples/gnn/mace/``, ``fidelity_checks/gnn/mace/`` and
     - PaiNN checks its paper, reproduces its MD17 tables, the ferrocene rotation
       profiles and the ethanol IR and Raman spectra.
     - TensorNet checks its paper, trains on rMD17 aspirin, and compares its 0, 1
-      and 2 layer models with ET on a QM9 subset (TorchMD-Net 2.0 Table 1).
+      and 2 layer models with ET on a QM9 subset, as in TorchMD-Net 2.0.
 - ``trfnn/et`` checks the ET paper (sizes, attention weights, the cutoff fix of
   TorchMD-Net 2.0) and trains ET on rMD17 aspirin.
 - ``trfnn/equiformer`` checks the Equiformer paper (sizes, reflections, the

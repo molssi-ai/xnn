@@ -5,9 +5,10 @@ symmetric contraction of MACE have a fused GPU implementation next to their
 reference one; :class:`~xnn.common.models.fast.FastPathModule` explains the
 contract and ``use_fast`` the choice. :data:`AUTO_POLICY` holds the measured
 size above which ``use_fast="auto"`` takes the kernels. The fused continuous-filter
-convolution of SchNet and the fused message block of PaiNN (Triton kernels) live in
-:mod:`xnn.gnn.fast.schnet` and :mod:`xnn.gnn.fast.painn`. The equivariant linear maps and
-the element self-connection of MACE have plain-PyTorch fast paths in :mod:`xnn.gnn.fast.linear`.
+convolution of SchNet, the fused message block of PaiNN and the fused edge sums of NewtonNet
+(Triton kernels) live in :mod:`xnn.gnn.fast.schnet`, :mod:`xnn.gnn.fast.painn` and
+:mod:`xnn.gnn.fast.newtonnet`. The equivariant linear maps and the element self-connection
+of MACE have plain-PyTorch fast paths in :mod:`xnn.gnn.fast.linear`.
 """
 from xnn.common.models.fast import AutoPolicy
 

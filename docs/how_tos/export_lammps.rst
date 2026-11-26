@@ -4,7 +4,7 @@
 Export to LAMMPS and TorchScript
 **********************************
 
-SchNet, DimeNet, DimeNet++, GemNet, PaiNN, TensorNet, NequIP, MACE, Allegro,
+SchNet, DimeNet, DimeNet++, GemNet, PaiNN, NewtonNet, TensorNet, NequIP, MACE, Allegro,
 CACE, AIMNet2, ANI, PhysNet, HDNNP, QRNN, ET, Equiformer, EquiformerV2, BAMBOO,
 SpookyNet, GFN-FF and PM3 / PM6 / PM6-ORG / PM7 export to a self-contained
 TorchScript file that needs nothing but ``libtorch`` or ``torch.jit.load``: no
