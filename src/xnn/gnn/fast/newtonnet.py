@@ -14,13 +14,19 @@ import torch
 
 from xnn.common.models.fast import AutoPolicy
 
-#: Edge counts above which ``use_fast="auto"`` takes the kernels in evaluation mode (energy and forces). Small
-#: graphs are bound by kernel launches, where the reference's fewer operations win.
-AUTO_POLICY = AutoPolicy(default_min_edges=30_000, default_min_edges_float64=30_000)
+#: Edge counts above which ``use_fast="auto"`` takes the kernels in evaluation mode (energy and forces), per GPU
+#: model (a substring of the device name) and precision; other GPUs use the defaults. Small graphs are bound by
+#: kernel launches, where the reference's fewer operations win; on slower GPUs the kernels win earlier.
+AUTO_POLICY = AutoPolicy(
+    min_edges={"T4": 4_000, "V100": 25_000, "A30": 5_000, "L40S": 18_000},
+    min_edges_float64={"T4": 0, "V100": 9_000, "A30": 5_000, "L40S": 5_000},
+    default_min_edges=30_000, default_min_edges_float64=30_000)
 
-#: The same for training mode (a step with a force loss, second derivatives included); the float64 reference
-#: is slower there, so the kernels win earlier.
-AUTO_POLICY_TRAINING = AutoPolicy(default_min_edges=30_000, default_min_edges_float64=15_000)
+#: The same for training mode (a step with a force loss, second derivatives included).
+AUTO_POLICY_TRAINING = AutoPolicy(
+    min_edges={"T4": 4_000, "V100": 18_000, "A30": 5_000, "L40S": 18_000},
+    min_edges_float64={"T4": 0, "V100": 7_000, "A30": 5_000, "L40S": 0},
+    default_min_edges=30_000, default_min_edges_float64=15_000)
 
 
 def supported(device: torch.device, dtype: torch.dtype) -> bool:

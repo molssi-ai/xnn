@@ -768,3 +768,51 @@ def test_fast_path_with_adapters_interpreted(interpreted):
 def test_fast_path_with_adapters():
     pytest.importorskip("triton")
     _adapter_parity("cuda", torch.float64, 1e-12)
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_hessians(direct):
+    """``hessian`` is the energy Hessian, or with direct forces the symmetrized force constants -dF/dx of the
+    predicted forces; ``hessian_vector_product`` multiplies by the same matrix, differentiably."""
+    from xnn.common.models import hessian, hessian_vector_product
+
+    model = _small(direct_forces=direct).eval()
+    s = _structure(4, seed=6)
+    g = structure_to_graph(s, 5.0)
+    pos0 = torch.as_tensor(s["pos"]).reshape(-1)
+
+    def graph_at(p):
+        gg = structure_to_graph(s, 5.0)
+        gg.pos = p.reshape(-1, 3)
+        return gg
+
+    if direct:
+        def minus_forces(p):
+            return -ForceStressOutput(model)(graph_at(p))["forces"].reshape(-1)
+        jac = torch.autograd.functional.jacobian(minus_forces, pos0)
+        ref = 0.5 * (jac + jac.T)
+        assert (jac - jac.T).abs().max() > 1e-6            # direct forces are not conservative
+    else:
+        ref = torch.autograd.functional.hessian(lambda p: model(graph_at(p))["energy"].sum(), pos0)
+    H = hessian(ForceStressOutput(model), g)[0]
+    assert torch.allclose(H, ref, atol=1e-10)
+    v = torch.randn(4, 3)
+    hv = hessian_vector_product(model, g, v)
+    assert torch.allclose(hv.reshape(-1), ref @ v.reshape(-1), atol=1e-10)
+    hv2 = hessian_vector_product(model, g, torch.stack([v, 2 * v]), create_graph=True)
+    assert torch.allclose(hv2[1], 2 * hv, atol=1e-10)
+    hv2.sum().backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
+def test_direct_force_hessians_without_neighbors():
+    """Direct forces that do not depend on the positions (isolated atoms) give zero force constants, with
+    trainable and with frozen weights."""
+    from xnn.common.models import hessian, hessian_vector_product
+
+    model = _small(direct_forces=True).eval()
+    g = structure_to_graph({"pos": [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]], "atomic_numbers": [8, 1]}, 5.0)
+    for trainable in (True, False):
+        model.requires_grad_(trainable)
+        assert float(hessian(model, g)[0].abs().max()) == 0.0
+        assert float(hessian_vector_product(model, g, torch.ones(2, 3)).abs().max()) == 0.0

@@ -286,6 +286,8 @@ displacement features.
   paper's loss. It needs ``latent_force: true``.
 - ``direct_forces: true`` predicts forces without taking the energy gradient.
   Such a model cannot be exported to TorchScript.
+- With ``direct_forces: true``, :func:`~xnn.common.models.hessian` returns the
+  force constants of the predicted forces instead of the energy Hessian.
 - ``configs/model/newtonnet.yaml`` lists every option with its default, and the
   paper's settings.
 

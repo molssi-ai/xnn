@@ -70,7 +70,8 @@ def exact_curvature(model: nn.Module) -> Iterator[nn.Module]:
 
 
 def _energy_gradient(model: nn.Module, data: AtomicGraph, create_graph: bool = False):
-    """The positions (a leaf requiring gradients) and the energy gradient with its graph."""
+    """The positions (a leaf requiring gradients), the energy gradient with its graph, and whether that gradient
+    is minus the forces a model predicts directly (whose derivatives need not be symmetric)."""
     while isinstance(model, ForceStressOutput):
         model = model.model
     if create_graph and getattr(model, "differentiable_hessian", True) is False:
@@ -79,7 +80,7 @@ def _energy_gradient(model: nn.Module, data: AtomicGraph, create_graph: bool = F
     own = getattr(model, "energy_gradient", None)
     if callable(own):
         # a model that forms a gradient with exact derivatives itself (the tight-binding methods)
-        return own(data, create_graph)
+        return (*own(data, create_graph), False)
     approximate = sorted({type(m).__name__ for m in model.modules()
                           if getattr(m, "exact_second_derivatives", True) is False})
     if approximate:
@@ -88,11 +89,17 @@ def _energy_gradient(model: nn.Module, data: AtomicGraph, create_graph: bool = F
     pos = data.pos if data.pos.requires_grad else data.pos.detach().requires_grad_(True)
     graph = dataclasses.replace(data, pos=pos)
     with torch.enable_grad(), exact_curvature(model):
-        energy = model(graph)["energy"]
+        out = model(graph)
+        if getattr(model, "direct_forces", False):
+            # direct forces: the force constants are the derivatives of the forces the model predicts, not the
+            # curvature of an energy they do not follow
+            forces = out["forces"]
+            return pos, (-forces if forces.requires_grad else None), True
+        energy = out["energy"]
         grad = None
         if energy.requires_grad:
             (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=True, allow_unused=True)
-    return pos, grad
+    return pos, grad, False
 
 
 def _directional(pos: Tensor, grad: Optional[Tensor], v: Tensor, create_graph: bool, retain_graph: bool) -> Tensor:
@@ -103,6 +110,19 @@ def _directional(pos: Tensor, grad: Optional[Tensor], v: Tensor, create_graph: b
         (hv,) = torch.autograd.grad(grad, pos, v.to(grad.dtype), create_graph=create_graph,
                                     retain_graph=retain_graph, allow_unused=True)
     return hv if hv is not None else torch.zeros_like(pos)
+
+
+def _forward_directional(pos: Tensor, grad: Optional[Tensor], v: Tensor, create_graph: bool) -> Tensor:
+    """The derivative of ``grad`` along ``v`` as a forward product, ``J v`` (``_directional`` gives ``J^T v``)."""
+    if grad is None or not grad.requires_grad:
+        return torch.zeros_like(pos)
+    with torch.enable_grad():
+        w = torch.zeros_like(grad, requires_grad=True)
+        (jtw,) = torch.autograd.grad(grad, pos, w, create_graph=True, retain_graph=True, allow_unused=True)
+        if jtw is None:
+            return torch.zeros_like(pos)
+        (jv,) = torch.autograd.grad(jtw, w, v.to(jtw.dtype), create_graph=create_graph, retain_graph=True)
+    return jv
 
 
 def hessian_vector_product(model: nn.Module, data: AtomicGraph, v: Tensor, create_graph: bool = False) -> Tensor:
@@ -126,7 +146,9 @@ def hessian_vector_product(model: nn.Module, data: AtomicGraph, v: Tensor, creat
     -------
     Tensor
         ``H v`` of the shape of ``v``, in eV / Angstrom^2 times the unit of
-        ``v``; the structures of a batch do not couple.
+        ``v``; the structures of a batch do not couple. For a model that predicts
+        forces directly, ``H`` is the symmetrized force-constant matrix of those
+        forces (see :func:`hessian`).
 
     Examples
     --------
@@ -136,11 +158,17 @@ def hessian_vector_product(model: nn.Module, data: AtomicGraph, v: Tensor, creat
         hu = hessian_vector_product(model, graph, u, create_graph=True)
         curvatures = (u * hu).sum((1, 2))
     """
-    pos, grad = _energy_gradient(model, data, create_graph)
+    pos, grad, direct = _energy_gradient(model, data, create_graph)
+
+    def product(u, retain):
+        if not direct:
+            return _directional(pos, grad, u, create_graph, retain)
+        return 0.5 * (_directional(pos, grad, u, create_graph, True) + _forward_directional(pos, grad, u, create_graph))
+
     if v.dim() == 2:
-        return _directional(pos, grad, v, create_graph, create_graph)
+        return product(v, create_graph)
     k = v.shape[0]
-    return torch.stack([_directional(pos, grad, v[i], create_graph, create_graph or i < k - 1) for i in range(k)])
+    return torch.stack([product(v[i], create_graph or i < k - 1) for i in range(k)])
 
 
 def hessian(model: nn.Module, data: AtomicGraph, create_graph: bool = False) -> List[Tensor]:
@@ -161,9 +189,10 @@ def hessian(model: nn.Module, data: AtomicGraph, create_graph: bool = False) -> 
     list of Tensor
         One ``(3 n, 3 n)`` matrix per structure in eV / Angstrom^2, rows and
         columns ordered atom by atom (``x``, ``y``, ``z`` of the first atom
-        first).
+        first). For a model that predicts forces directly (``direct_forces``), it
+        is the force-constant matrix ``-dF/dx`` of those forces, symmetrized.
     """
-    pos, grad = _energy_gradient(model, data, create_graph)
+    pos, grad, direct = _energy_gradient(model, data, create_graph)
     batch, n_struct = data.batch, data.num_graphs
     counts = torch.bincount(batch, minlength=n_struct)
     start = torch.cumsum(counts, 0) - counts
@@ -181,7 +210,8 @@ def hessian(model: nn.Module, data: AtomicGraph, create_graph: bool = False) -> 
     for b in range(n_struct):
         idx = (batch == b).nonzero().flatten()
         cols = [columns[k].index_select(0, idx).reshape(-1) for k in range(3 * idx.numel())]
-        out.append(torch.stack(cols, 1) if cols else pos.new_zeros(0, 0))
+        h = torch.stack(cols, 1) if cols else pos.new_zeros(0, 0)
+        out.append(0.5 * (h + h.T) if direct else h)
     return out
 
 
