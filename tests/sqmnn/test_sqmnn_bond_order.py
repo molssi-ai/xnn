@@ -514,7 +514,7 @@ def test_stand_in_graph_dispatch(monkeypatch, cyano_terms):
     P, n_occ, weight, filled, blocks = scf.scf_start(guess, n_alpha, n_beta, uhf, None)
     loop = scf.SCFLoop(layout, H.detach(), W1p, W2p, n_occ, weight, uhf, 8, filled, blocks, True, bo)
     loop.start(P)
-    stand_in = types.SimpleNamespace(loop=loop, check=H.new_zeros(2), host=None, host_check=H.new_zeros(2),
+    stand_in = types.SimpleNamespace(loop=loop, check=H.new_zeros(3), host=None, host_check=H.new_zeros(3),
                                      dE_kept=loop.dE.clone())
     stand_in.run = lambda stage: (scf.SCFGraphs._occupy_commit(stand_in) if stage == "occupy_commit"
                                   else getattr(loop, stage)())
@@ -527,12 +527,12 @@ def test_stand_in_graph_dispatch(monkeypatch, cyano_terms):
 
 
 def _stand_in_loop(changes):
-    """A loop whose iterations report the given largest density changes (and no energy change)."""
+    """A loop whose iterations report the given largest density changes (no energy change, no orbital gradient)."""
     seq = iter(changes)
-    loop = types.SimpleNamespace(diis=types.SimpleNamespace(reset=lambda: None))
-    for name in ("fock_step", "diagonalize", "occupy", "commit"):
+    loop = types.SimpleNamespace(diis=types.SimpleNamespace(reset=lambda: None), schedule=None)
+    for name in ("fock_step", "diagonalize", "occupy", "commit", "settle"):
         setattr(loop, name, lambda *a: None)
-    loop.changes = lambda: [next(seq), 0.0]
+    loop.changes = lambda: [next(seq), 0.0, 0.0]
     return loop
 
 

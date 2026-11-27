@@ -1354,6 +1354,13 @@ the license that applies to them.
   positions need ``position_response=True``.
 - Hessians and their parameter gradients are exact, see
   :ref:`howto-hessians`.
+- Each structure of a batch gets the result it would get alone. Only the
+  structures that need them get the extra SCF starts of ``scf_starts``, and
+  each structure stops iterating once it has converged.
+- In a fit that evaluates the same batches at every step, set
+  ``density_cache`` to the number of batches. Each batch then starts its SCF
+  from its own last solution, which needs far fewer iterations than a cold
+  start.
 
 Tight-binding methods: GFN0-xTB, GFN1-xTB, GFN2-xTB
 ===================================================

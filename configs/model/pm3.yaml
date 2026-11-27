@@ -7,8 +7,10 @@ corrections: true         # the method's post-SCF and molecular-mechanics correc
 response: auto            # exact SCF response in the parameter gradients: auto (training), always, never
 position_response: false  # the SCF density also follows the positions: exact Hessians and their parameter gradients (hessian functions switch it on themselves)
 max_iter: 300             # SCF iteration limit
-tol_density: 1.0e-9       # SCF convergence: largest density change
+tol_density: 1.0e-9       # SCF convergence: largest density change (the orbital gradient must also fall below 1e4 times this, eV)
 tol_energy: 1.0e-10       # SCF convergence: energy change (eV)
+reuse_density: true       # start the SCF from the previous solution of a batch with the same atoms, charges and spins whose atoms moved by at most 0.3 Angstrom
+density_cache: 1          # batches whose SCF solutions are kept for reuse_density; in a fit, the number of batches lets each start from its own last solution
 restart_gap: 6.5          # the extra SCF starts of a cold start run when the first run did not converge or its HOMO-LUMO gap is below this (eV)
 search_starts: 0          # further SCF runs of a cold start from perturbed initial densities; the lowest solution is kept (about 6 find hard ground states at 4-6 times the cost)
 correction_constants: {}  # values of correction constants, also where trainable groups start, e.g. {HH_SHORT: [32.28, 10.29, 0.78]} adds a short-range H-H term (kcal/mol, 1/Angstrom^2, Angstrom)

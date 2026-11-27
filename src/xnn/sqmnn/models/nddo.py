@@ -97,12 +97,17 @@ from .scf import (
     SCFDensity,
     SCFGraphCache,
     _per_device,
+    empty_result,
     homo_orbitals,
     lowest,
-    needs_restart,
+    put_structures,
+    restart_mask,
+    restrict,
     run_scf,
     search_guess,
     search_schedule,
+    take_structures,
+    unrestricted_form,
 )
 from .twocenter import pair_tables
 
@@ -122,6 +127,9 @@ PADDED_CAPACITY = 512
 #: Bucket sizes per doubling of a size above 4 (a power of two): 4 means sizes 4, 5, 6, 7, 8 times a power of two
 #: (at most a quarter of padding), 2 means 2, 3, 4 times a power of two (fewer buckets, at most half of padding).
 BUCKET_SPACING = 2
+#: Whether a cold batch of closed and open shells solves its closed shells restricted, apart from the open shells,
+#: per device type (fewer operations; on a GPU a second, smaller run costs more than it saves).
+SPLIT_SPINS = {"cpu": True, "cuda": False}
 _CORRECTION_CONSTANTS = {"YNE": YNE, "DISP": DISPERSION, "HBOND": HBOND, "HH_SHORT": HH_SHORT}
 # the trainable values of the bond-order and resonance-overlap terms
 _TERM_GROUPS = ("BOND_ORDER", "BOND_ORDER_WINDOW", "BOND_ORDER_CUTOFF", "RESONANCE_OVERLAP")
@@ -354,7 +362,9 @@ class NDDO(InteratomicPotential):
         :func:`~xnn.common.models.hessian_vector_product` switch it on for
         their own evaluations.
     max_iter, tol_density, tol_energy : optional
-        SCF iteration limit and convergence thresholds (density, eV).
+        SCF iteration limit and convergence thresholds (density, eV). A
+        converged structure also has an orbital gradient (largest element of
+        ``F P - P F``) below ``1e4 tol_density`` (eV).
     corrections : bool, optional
         Include the method's post-SCF and molecular-mechanics corrections
         (default ``True``; switching them off reproduces MOPAC's ``NOMM`` and
@@ -364,6 +374,11 @@ class NDDO(InteratomicPotential):
         batch has the same atoms, charges and spins and no atom moved by more
         than :attr:`warm_start_distance` (a step of a geometry optimization or
         of molecular dynamics); default ``True``. Other batches start cold.
+    density_cache : int, optional
+        Batches whose converged SCF solutions are kept for ``reuse_density``,
+        the most recent ones (default 1, the previous call's). In a fit that
+        evaluates the same batches at every step, the number of batches lets
+        each start from its own last solution.
     scf_starts : sequence of (float, int), optional
         SCF runs of a cold start, as (initial Fermi temperature in eV,
         annealing iterations); the lowest-energy solution of each structure
@@ -372,11 +387,14 @@ class NDDO(InteratomicPotential):
         single run can settle in an excited aufbau state (cumulenes, ketenes,
         strained rings).
     restart_gap : float, optional
-        The runs after the first of ``scf_starts`` take place when the batch
-        is unrestricted, a structure's first run did not converge, or its
-        first solution has a HOMO-LUMO gap below this (eV); default 6.5
+        The runs after the first of ``scf_starts`` take place for the
+        structures that are open shells, whose first run did not converge, or
+        whose first solution has a HOMO-LUMO gap below this (eV); default 6.5
         (excited closed-shell solutions have gaps of 3-6 eV).
-        ``float("inf")`` runs them always.
+        ``float("inf")`` runs them always. Every structure also stops
+        iterating at its own convergence, so a structure gets the result it
+        gets alone (:data:`SPLIT_SPINS`: closed shells of a batch with open
+        shells run restricted apart).
     search_starts : int, optional
         Further SCF runs of a cold start from perturbed initial densities,
         alternately random orbital occupations (the two spins apart,
@@ -417,7 +435,7 @@ class NDDO(InteratomicPotential):
                  trainable: Sequence[str] = (), unrestricted: bool = False,
                  response: str = "auto", max_iter: int = 300, tol_density: float = 1e-9,
                  tol_energy: float = 1e-10, corrections: bool = True,
-                 reuse_density: bool = True,
+                 reuse_density: bool = True, density_cache: int = 1,
                  scf_starts: Sequence = ((0.0, 0), (1.0, 80), (2.0, 25)), restart_gap: float = 6.5,
                  search_starts: int = 0, use_fast="auto", position_response: bool = False,
                  yne_switch: str = "polynomial", hbond_switch: str = "sharp", hbond_torsion: str = "sharp",
@@ -450,6 +468,9 @@ class NDDO(InteratomicPotential):
         self.use_corrections = bool(corrections)
         self.last_scf = None
         self.reuse_density = bool(reuse_density)
+        if int(density_cache) < 1:
+            raise ValueError("density_cache must be at least 1")
+        self.density_cache = int(density_cache)
         self.scf_starts = tuple((float(kt), int(n)) for kt, n in scf_starts)
         self.restart_gap = float(restart_gap)
         self.search_starts = int(search_starts)
@@ -459,8 +480,8 @@ class NDDO(InteratomicPotential):
         self._plans = _PlanCache()
         self._padded = _PlanCache()
         self._bucket_elements: tuple = ()
-        self._scf_key = None
-        self._scf_pos = None
+        # the converged SCF solutions and positions of the recent batches, by composition and spins
+        self._warm = _PlanCache()
         self._q_cache = {}
         # the pairs of the bond-order term per batch composition (see _bond_order_pairs)
         self._bo_pairs = _PlanCache()
@@ -905,6 +926,8 @@ class NDDO(InteratomicPotential):
             return graph or None
         if not inputs[0].is_cuda or self._graph_cache() is None or holder.uses <= CAPTURE_AFTER:
             return None
+        if not self._scf_graphs.room():
+            return None                             # the graphs held take the memory allowed (tried again later)
 
         def work():
             with torch.enable_grad():
@@ -916,11 +939,60 @@ class NDDO(InteratomicPotential):
         if synchronizes(work):
             holder.graphs[kind] = False
             return None
-        graph = GraphedFunction(fn, inputs)
+        graph = self._scf_graphs.charged(lambda: GraphedFunction(fn, inputs))
         holder.graphs[kind] = graph
         if kind[0] == "eval":
             holder.q_ref = q
         return graph
+
+    def _capture_second(self, graph: Optional[GraphedFunction]) -> None:
+        """The graphs of a build's differentiable derivatives where they were asked for and memory allows."""
+        if graph is None or not graph.wants_second:
+            return
+        if self._scf_graphs.room():
+            self._scf_graphs.charged(graph.capture_second, graph)
+        else:
+            graph.wants_second = False              # asked again by its next launched derivative
+
+    def _cold_scf(self, layout: Layout, H: Tensor, W1: Tensor, W2: Tensor, n_alpha: Tensor, n_beta: Tensor,
+                  uhf: bool, open_shell: Tensor, guess: Tensor, bond_order: Optional[BondOrder], graph_cache,
+                  graph_key: tuple):
+        """The SCF of a cold start: the first of :attr:`scf_starts`, the others for the structures that need them
+        (:func:`~.scf.restart_mask`; ``open_shell`` marks the open shells), then any :attr:`search_starts`; per
+        structure the lowest solution."""
+        def start(lay, h, w1, w2, na, nb, g, bo, kt, steps, cache, key, spin=None, schedule=None):
+            return run_scf(lay, h, w1, w2, na, nb, uhf, g, self.max_iter, self.tol_density, self.tol_energy,
+                           smearing=kt, smear_steps=steps, spin_guess=spin, graph_cache=cache, graph_key=key,
+                           bond_order=bo, schedule=schedule)
+        full = (layout, H, W1, W2, n_alpha, n_beta, guess, bond_order)
+        result = start(*full, *self.scf_starts[0], graph_cache, graph_key)
+        # the other runs where the first may have settled in an excited aufbau state: all of them in one batch,
+        # the structures that need them once per schedule
+        if len(self.scf_starts) > 1:
+            need = restart_mask(result, open_shell, self.restart_gap)
+            if bool(need.any()):
+                idx = need.nonzero().squeeze(-1)
+                starts = self.scf_starts[1:]
+                m = int(idx.numel())
+                rep = idx.repeat(len(starts))
+                sub, H_s, W1_s, W2_s, bo_s = restrict(layout, rep, H, W1, W2, bond_order)
+                kt0 = torch.cat([H.new_full([m], kt) for kt, _ in starts])
+                steps = torch.cat([torch.full([m], n, dtype=torch.long, device=H.device) for _, n in starts])
+                both = start(sub, H_s, W1_s, W2_s, n_alpha[rep], n_beta[rep], guess[rep], bo_s,
+                             max(kt for kt, _ in starts), max(n for _, n in starts), None, (),
+                             schedule=(kt0, steps))
+                runs = [take_structures(both, torch.arange(j * m, (j + 1) * m, device=H.device))
+                        for j in range(len(starts))]
+                result = put_structures(result, lowest([take_structures(result, idx)] + runs), idx)
+        if self.search_starts:
+            results = [result]
+            for i in range(self.search_starts):
+                kicked, spin = search_guess(guess, layout, n_alpha, n_beta, uhf, i)
+                kt, steps = search_schedule(i)
+                results.append(start(layout, H, W1, W2, n_alpha, n_beta, kicked, bond_order, kt, steps,
+                                     graph_cache, graph_key, spin))
+            result = lowest(results)
+        return result
 
     def _use_response(self) -> bool:
         if self.response == "never":
@@ -937,7 +1009,7 @@ class NDDO(InteratomicPotential):
         Options in ``cfg.extra``: ``parameters`` (set name or file),
         ``trainable`` (list of groups), ``unrestricted``, ``response``,
         ``max_iter``, ``tol_density``, ``tol_energy``, ``corrections``,
-        ``reuse_density``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``,
+        ``reuse_density``, ``density_cache``, ``scf_starts``, ``restart_gap``, ``search_starts``, ``use_fast``,
         ``position_response``, ``yne_switch``, ``hbond_switch``, ``hbond_torsion``, ``correction_constants``,
         ``bond_order_terms``,
         ``bond_order_cutoff``, ``resonance_overlap``.
@@ -947,7 +1019,7 @@ class NDDO(InteratomicPotential):
 
         extra = model_options(cfg)
         keys = ("parameters", "trainable", "unrestricted", "response", "max_iter",
-                "tol_density", "tol_energy", "corrections", "reuse_density", "scf_starts",
+                "tol_density", "tol_energy", "corrections", "reuse_density", "density_cache", "scf_starts",
                 "restart_gap", "search_starts", "use_fast", "position_response", "yne_switch", "hbond_switch",
                 "hbond_torsion", "correction_constants", "bond_order_terms", "bond_order_cutoff", "resonance_overlap")
         return cls(**{k: extra[k] for k in keys if k in extra})
@@ -1076,8 +1148,7 @@ class NDDO(InteratomicPotential):
             W2, r_pair, gab, H, W1, e_core_pair = replay(graph, [pos_w, *kap_in, *ptens])
         else:
             W2, r_pair, gab, H, W1, e_core_pair = integrals(pos_w, q, kap=kappa)
-        if graph is not None and graph.wants_second:
-            graph.capture_second()
+        self._capture_second(graph)
         if padded is not None:
             e_core_pair = e_core_pair * padded.pair_real
 
@@ -1098,35 +1169,39 @@ class NDDO(InteratomicPotential):
         key = composition + (tuple(spins[0]), tuple(spins[1]), uhf, holder.key if padded is not None else None)
         # the SCF and response graphs of a bucket replay for every batch of it
         graph_key = holder.key if padded is not None else key
-        warm = (self.reuse_density and self.last_scf is not None and self._scf_key == key
-                and float((pos.detach() - self._scf_pos).norm(dim=-1).max()) <= self.warm_start_distance)
+        kept = self._warm.get(key) if self.reuse_density else None
+        warm = (kept is not None
+                and float((pos.detach() - kept[1]).norm(dim=-1).max()) <= self.warm_start_distance)
         if warm:
-            last = self.last_scf.densities
+            last = kept[0].densities
             guess = last.sum(0) if uhf else last[0]
-        if warm:
             result = run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter,
                              self.tol_density, self.tol_energy, smear_steps=0,
-                             spin_guess=self.last_scf.densities if uhf else None,
-                             graph_cache=self._graph_cache(), graph_key=graph_key, orbitals=self.last_scf.orbitals,
-                             occupations=self.last_scf.occupations, bond_order=bo_scf)
+                             spin_guess=last if uhf else None,
+                             graph_cache=self._graph_cache(), graph_key=graph_key, orbitals=kept[0].orbitals,
+                             occupations=kept[0].occupations, bond_order=bo_scf)
         else:
-            def start(kt, steps):
-                return run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, self.max_iter, self.tol_density,
-                               self.tol_energy, smearing=kt, smear_steps=steps, graph_cache=self._graph_cache(),
-                               graph_key=graph_key, bond_order=bo_scf)
-            results = [start(*self.scf_starts[0])]
-            # the other runs where the first may have settled in an excited aufbau state
-            if len(self.scf_starts) > 1 and needs_restart(results[0], uhf, self.restart_gap):
-                results += [start(kt, steps) for kt, steps in self.scf_starts[1:]]
-            for i in range(self.search_starts):
-                kicked, spin = search_guess(guess, layout, n_alpha, n_beta, uhf, i)
-                kt, steps = search_schedule(i)
-                results.append(run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, kicked, self.max_iter,
-                                       self.tol_density, self.tol_energy, smearing=kt, smear_steps=steps,
-                                       spin_guess=spin, graph_cache=self._graph_cache(), graph_key=graph_key,
-                                       bond_order=bo_scf))
-            result = lowest(results)
-        self.last_scf, self._scf_key, self._scf_pos = result, key, pos.detach().clone()
+            open_shell = (n_alpha != n_beta) | self.unrestricted
+            if (uhf and not self.unrestricted and not bool(open_shell.all())
+                    and bool(_per_device(SPLIT_SPINS, device))):
+                # closed shells restricted, open shells unrestricted; the closed shells' solutions in the
+                # unrestricted form (the equal-spin solution an unrestricted run of them reaches)
+                result = None
+                for part, spin in ((~open_shell, False), (open_shell, True)):
+                    idx = part.nonzero().squeeze(-1)
+                    sub, H_s, W1_s, W2_s, bo_s = restrict(layout, idx, H, W1, W2, bo_scf)
+                    r = unrestricted_form(self._cold_scf(sub, H_s, W1_s, W2_s, n_alpha[idx], n_beta[idx], spin,
+                                                         open_shell[idx], guess[idx], bo_s, None, ()))
+                    result = put_structures(empty_result(n_struct, r) if result is None else result, r, idx)
+            else:
+                result = self._cold_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, open_shell, guess, bo_scf,
+                                        self._graph_cache(), graph_key)
+        self.last_scf = result
+        if self.reuse_density:
+            self._warm.pop(key, None)
+            self._warm[key] = (result, pos.detach().clone())         # most recent last
+            while len(self._warm) > self.density_cache:
+                self._warm.pop(next(iter(self._warm)))
         # the bond-order term at the positions (its energy, and the density's response where exact)
         bo = bo_at(pos_w)
         if exact:
@@ -1187,8 +1262,7 @@ class NDDO(InteratomicPotential):
         post = (self._build_graph(holder, "outputs_uhf" if uhf else "outputs", outputs_fn, q, inputs)
                 if graph is not None else None)
         values = replay(post, inputs) if post is not None else outputs_fn(*inputs)
-        if post is not None and post.wants_second:
-            post.capture_second()
+        self._capture_second(post)
         out = dict(zip(_ENERGY_KEYS + ("charges", "dipole", "homo_energy"), values))
         # Koopmans' ionization potential
         out["ionization_potential"] = -out["homo_energy"]

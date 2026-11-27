@@ -202,3 +202,37 @@ def test_bucket_graphs_take_each_batchs_electrons():
                _outputs(ref, _graph(system, charge, device="cuda")), 1e-8)
     # the first water batch has a bucket of its own (nitrogen comes in with NH2+); the other seven share one
     assert sorted(b.uses for b in fast._plans.values()) == [1, 7] and fast._scf_graphs.entries
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_launched_gpu_path_matches_the_cpu():
+    """Launched on a GPU (eigenvalue problems of batches on the device, the corrections on the host), PM7 gives
+    the CPU's energies, forces and force-loss gradients, those of the correction constants included."""
+    dimer = (np.vstack([WATER[0], WATER[0] + [0.15, -2.24, -1.82]]), WATER[1] * 2)
+    groups = ["USS", "BETAS", "DISP", "HBOND"]
+    settings = dict(tol_density=1e-12, tol_energy=1e-13, reuse_density=False, use_fast=False,
+                    hbond_switch="smooth")
+    gpu = PM7(trainable=groups, **settings).cuda()
+    cpu = PM7(trainable=groups, **settings)
+
+    def data(device):
+        return collate([_graph(dimer, device=device), _graph(FORMAMIDE, device=device),
+                        _graph(METHYL, mult=2.0, device=device)])
+    _close(_outputs(gpu, data("cuda"), True), _outputs(cpu, data("cpu"), True), 1e-9)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_fast_path_without_graph_memory_runs_launched():
+    """With no memory allowed for graphs the fast path captures nothing and gives the reference's numbers; with
+    the default share its captures are charged to the model."""
+    settings = dict(tol_density=1e-12, tol_energy=1e-13)
+    none = PM7(trainable=["USS"], **settings).cuda()
+    none._scf_graphs.memory = 0.0
+    full = PM7(trainable=["USS"], **settings).cuda()
+    ref = PM7(trainable=["USS"], use_fast=False, **settings).cuda()
+    for _ in range(5):
+        expected = _outputs(ref, _batch("cuda"), True)
+        _close(_outputs(none, _batch("cuda"), True), expected, 1e-8)
+        _close(_outputs(full, _batch("cuda"), True), expected, 1e-8)
+    assert not none._scf_graphs.entries and not any(g for b in none._plans.values() for g in b.graphs.values())
+    assert full._scf_graphs.entries and sum(full._scf_graphs.held.values()) > 0

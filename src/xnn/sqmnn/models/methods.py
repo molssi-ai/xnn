@@ -51,9 +51,9 @@ def _corrections(model, data: AtomicGraph, pos: Tensor) -> Tensor:
     names = ("YNE", "DISP", "HBOND") + (("HH_SHORT",) if model.hh_short else ())
     constants = [model.correction_constants(name) for name in names]
     flags = (model.yne_switch == "smooth", model.hbond_switch == "smooth", model.hbond_torsion == "smooth")
-    if pos.is_cuda and model._graph_cache() is not None:
-        # on the fast path of a GPU the terms (small, with host searches per molecule) run on the host: the
-        # positions and constants go there in one copy, the per-atom result comes back in one (with derivatives)
+    if pos.is_cuda:
+        # on a GPU the terms (small, with host searches per molecule) run on the host: the positions and constants
+        # go there in one copy, the per-atom result comes back in one (with derivatives)
         flat = torch.cat([pos.reshape(-1)] + [c.to(pos.dtype) for c in constants]).cpu()
         parts = flat.split([pos.numel()] + [c.numel() for c in constants])
         ids = torch.stack([data.atomic_numbers.long(), data.batch.long()]).cpu()

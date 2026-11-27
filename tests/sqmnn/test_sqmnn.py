@@ -598,6 +598,25 @@ def test_density_reuse_gives_same_energy():
     assert model.last_scf.iterations == fresh.last_scf.iterations
 
 
+def test_density_cache_keeps_each_batch():
+    """With ``density_cache`` each kept batch restarts from its own last solution (the cold start's energy in
+    fewer iterations); one slot keeps only the previous call's."""
+    (pos, z), water = FORMAMIDE, _graph(*WATER)
+    cold = PM7(reuse_density=False)
+    e_cold = float(cold(_graph(pos + 1e-3, z))["energy"][0])
+    assert not cold._warm
+    for size, warm in ((2, True), (1, False)):
+        model = PM7(density_cache=size)
+        model(_graph(pos, z))
+        model(water)
+        e = float(model(_graph(pos + 1e-3, z))["energy"][0])
+        assert e == pytest.approx(e_cold, abs=1e-9) and len(model._warm) == size
+        assert (model.last_scf.iterations < cold.last_scf.iterations) == warm
+    with pytest.raises(ValueError, match="density_cache"):
+        PM7(density_cache=0)
+    assert build_model(ModelConfig(name="pm7", cutoff=0.1, extra={"density_cache": 3})).density_cache == 3
+
+
 @pytest.mark.parametrize("cls,group,z", [(PM3, "BETAP", 8), (PM6, "ZS", 1), (PM7, "GSS", 7),
                                          (PM6ORG, "PAR", 3)])
 def test_parameter_gradients_through_scf_response(cls, group, z):

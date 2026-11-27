@@ -8,6 +8,7 @@ function are partial derivatives in each input; the safety nets of the iteration
 check after orbital rotations) reach the ground state; and the caches of a model start empty in its copies.
 """
 import copy
+import gc
 import pickle
 import types
 import warnings
@@ -47,9 +48,9 @@ def _graph(pos, z, charge=0.0, mult=None):
     return structure_to_graph(s, 0.1)
 
 
-def _scf_raw_inputs(monkeypatch, graph):
-    """The inputs of a model's SCF of ``graph``: layout, core Hamiltonian, one- and two-center integrals,
-    electrons of each spin, whether unrestricted, and the initial density."""
+def _scf_raw_inputs(monkeypatch, graph, **options):
+    """The inputs of a model's SCF of ``graph`` (its first run): layout, core Hamiltonian, one- and two-center
+    integrals, electrons of each spin, whether unrestricted, and the initial density."""
     calls = []
 
     def record(*args, **kwargs):
@@ -57,14 +58,14 @@ def _scf_raw_inputs(monkeypatch, graph):
         return scf.run_scf(*args, **kwargs)
     with monkeypatch.context() as m:
         m.setattr(nddo, "run_scf", record)
-        PM6(reuse_density=False)(graph)
+        PM6(reuse_density=False, **options)(graph)
     layout, H, W1, W2, n_alpha, n_beta, uhf, guess = calls[0][:8]
     return layout, H.detach(), W1.detach(), W2.detach(), n_alpha, n_beta, uhf, guess
 
 
-def _scf_inputs(monkeypatch, graph):
+def _scf_inputs(monkeypatch, graph, **options):
     """:func:`_scf_raw_inputs` with the integrals packed."""
-    layout, H, W1, W2, *rest = _scf_raw_inputs(monkeypatch, graph)
+    layout, H, W1, W2, *rest = _scf_raw_inputs(monkeypatch, graph, **options)
     return (layout, H, scf.pack_one_center(W1), scf.pack_pairs(layout, W2), *rest)
 
 
@@ -92,7 +93,9 @@ def test_static_loop_and_stage_dispatch_match_launched_loop(monkeypatch, molecul
     converges to the launched loop's solution and keeps its buffers (closed shells and a batch with an open
     shell)."""
     graph = collate([_graph(*mol, mult=mult) for mol, mult in molecules])
-    layout, H, W1, W2, n_alpha, n_beta, uhf, guess = _scf_inputs(monkeypatch, graph)
+    # a batch with an open shell as one unrestricted run (a mixed batch otherwise runs its closed shells apart)
+    layout, H, W1, W2, n_alpha, n_beta, uhf, guess = _scf_inputs(monkeypatch, graph,
+                                                                 unrestricted=len(molecules) > 1)
     assert uhf == (len(molecules) > 1)
     settings = (300, 1e-10, 1e-11)
     ref = scf.scf_solve(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, *settings, 8, 2.0, 5, None, 0.05, 0)
@@ -103,7 +106,7 @@ def test_static_loop_and_stage_dispatch_match_launched_loop(monkeypatch, molecul
     # the dispatch of SCFGraphs (the merged end of an iteration included) on launched stages; with host buffers
     # the next Fock step runs ahead of the changes' read
     host = tuple(torch.empty_like(x) for x in (loop.Fx, loop.eps, loop.C_new)) if ahead else None
-    stand_in = types.SimpleNamespace(loop=loop, check=H.new_zeros(2), host=host, host_check=H.new_zeros(2),
+    stand_in = types.SimpleNamespace(loop=loop, check=H.new_zeros(3), host=host, host_check=H.new_zeros(3),
                                      dE_kept=loop.dE.clone())
     stand_in.run = lambda stage: (scf.SCFGraphs._occupy_commit(stand_in) if stage == "occupy_commit"
                                   else getattr(loop, stage)())
@@ -342,7 +345,7 @@ def test_unconverged_first_run_restarts(monkeypatch):
     calls.clear()
     monkeypatch.setattr(nddo, "run_scf", partial(counted, fail_first=True))
     out = PM6(reuse_density=False)(g)
-    assert len(calls) == 3 and bool(out["scf_converged"].all())
+    assert len(calls) == 2 and bool(out["scf_converged"].all())          # the further starts in one run
 
 
 def test_run_stopped_while_annealing_is_not_converged():
@@ -428,18 +431,110 @@ def test_exported_potential_runs_the_search_starts(tmp_path):
     assert abs(float(out["energy"]) - float(ref["energy"].sum())) < 1e-9
 
 
-def test_caches_start_empty_in_copies():
+class _Graphs:
+    def __init__(self, key):
+        self.key = key
+
+    def __eq__(self, other):
+        return isinstance(other, _Graphs) and other.key == self.key
+
+    __hash__ = object.__hash__
+
+
+def _fake_gpu(monkeypatch, total=1000):
+    """The CUDA memory queries of the graph cache on a CPU: a device of ``total`` bytes, the allocated count in
+    the returned list."""
+    used = [0]
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: types.SimpleNamespace(total_memory=total))
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *args: used[0])
+    return used
+
+
+def test_host_eigh_only_for_one_or_two_small_matrices():
+    """A GPU hands one or two small eigenvalue problems to the host and solves batches itself."""
+    assert scf._host_eigh(200) and scf._host_eigh(100, 2)
+    assert not scf._host_eigh(201) and not scf._host_eigh(101, 2) and not scf._host_eigh(12, 3)
+
+
+def test_graph_memory_budget(monkeypatch):
+    """No capture starts while the graphs held take the cache's share of the device memory; it resumes once
+    evicted graphs are released, and charges to one owner add up."""
+    used = _fake_gpu(monkeypatch)
+    cache = scf.SCFGraphCache(capacity=8, memory=0.25)
+
+    def build(key, size):
+        def make():
+            used[0] += size
+            return _Graphs(key)
+        return make
+    for _ in range(scf.CAPTURE_AFTER):
+        assert cache.get("a", build("a", 300)) is None
+    held = cache.get("a", build("a", 300))
+    assert sum(cache.held.values()) == 300 and not cache.room()
+    for _ in range(scf.CAPTURE_AFTER + 1):
+        assert cache.get("b", build("b", 10)) is None
+    cache.entries.clear()
+    del held
+    gc.collect()
+    assert cache.room() and cache.get("b", build("b", 10)) == _Graphs("b")
+    owner = _Graphs("build")
+
+    def capture():
+        used[0] += 40
+        return True
+    assert cache.charged(capture, owner) and cache.charged(capture, owner) and cache.held[owner] == 80
+    restored = pickle.loads(pickle.dumps(cache))
+    assert restored.memory == 0.25 and not restored.held and not restored.entries
+    old = scf.SCFGraphCache.__new__(scf.SCFGraphCache)
+    old.__setstate__({"capacity": 3, "entries": {}, "seen": {}})
+    assert old.capacity == 3 and old.memory == scf.GRAPH_MEMORY
+
+
+def test_second_order_captures_wait_for_memory(monkeypatch):
+    """A build graph is captured, and records its differentiable derivatives, only where the model's graphs leave
+    memory (asked again later otherwise)."""
+    _fake_gpu(monkeypatch)
+    model = PM6()
+    calls = []
+
+    class Graph:
+        wants_second = True
+
+        def capture_second(self):
+            calls.append(1)
+            return True
+    graph = Graph()
+    model._scf_graphs.memory = 0.0
+    model._capture_second(graph)
+    assert graph.wants_second is False and not calls
+    model._capture_second(graph)
+    graph.wants_second = True
+    model._scf_graphs.memory = 1.0
+    model._capture_second(graph)
+    model._capture_second(None)
+    assert calls == [1] and graph in model._scf_graphs.held
+    # nor does a build graph start while the memory is taken
+    holder = nddo._Bucket(("bucket",))
+    holder.uses = scf.CAPTURE_AFTER + 1
+    model._scf_graphs.memory = 0.0
+    on_gpu = types.SimpleNamespace(is_cuda=True, requires_grad=False)
+    assert model._build_graph(holder, "eval", None, {}, [on_gpu]) is None and not holder.graphs
+
+
+def test_caches_start_empty_in_copies(monkeypatch):
     """The SCF graph cache captures a composition after it recurs and keeps the most recent ones; the caches of a
     model (plans, graphs) start empty in its copies and pickles."""
+    _fake_gpu(monkeypatch)
     cache = scf.SCFGraphCache(capacity=2)
     built = []
 
     def build(key):
-        return lambda: built.append(key) or ("graphs", key)
+        return lambda: built.append(key) or _Graphs(key)
     for _ in range(scf.CAPTURE_AFTER):
         assert cache.get("a", build("a")) is None
-    assert cache.get("a", build("a")) == ("graphs", "a")
-    assert cache.get("a", build("a")) == ("graphs", "a") and built == ["a"]
+    assert cache.get("a", build("a")) == _Graphs("a")
+    assert cache.get("a", build("a")) == _Graphs("a") and built == ["a"]
     for key in "bcdef":
         for _ in range(scf.CAPTURE_AFTER + 1):
             cache.get(key, build(key))
@@ -491,3 +586,114 @@ def test_launched_derivatives_of_a_graphed_function_are_partial():
     h = graphed._launched_hvp(graph, [a, b], [cot], [cc, torch.zeros(2)])
     # gradients of <cc, cot b> in a (partial: 0), b (cot cc) and cot (b cc)
     assert torch.allclose(h[0], torch.zeros(2)) and torch.allclose(h[1], cot * cc) and torch.allclose(h[2], b * cc)
+
+
+def _recorded_runs(monkeypatch):
+    """The SCF runs of NDDO models as (structures, unrestricted, smeared iterations)."""
+    runs = []
+    plain = nddo.run_scf
+
+    def run(layout, H, *args, **kwargs):
+        runs.append((int(H.shape[0]), bool(args[4]), kwargs.get("smear_steps")))
+        return plain(layout, H, *args, **kwargs)
+    monkeypatch.setattr(nddo, "run_scf", run)
+    return runs
+
+
+@pytest.mark.parametrize("split", [True, False])
+def test_restarts_and_spin_forms_per_structure(monkeypatch, split):
+    """A cold batch gives each structure its own result: only the structures whose first run calls for them
+    (FCCH's excited solution, the methyl radical) get the further starts, with closed shells restricted apart
+    from the open shells where the device splits them, else in one unrestricted run; with a bond-order term."""
+    monkeypatch.setitem(nddo.SPLIT_SPINS, "cpu", split)
+    settings = dict(reuse_density=False, tol_density=1e-11, tol_energy=1e-12,
+                    yne_switch="off", bond_order_terms={"C-C": [11.09, 2.2, 2.65]})
+    systems = [(FCCH, {}), (WATER, {}), (METHYL, {"mult": 2.0})]
+    alone = [float(PM7(**settings)(_graph(*s, **kw))["heat_of_formation"][0]) for s, kw in systems]
+    runs = _recorded_runs(monkeypatch)
+    out = PM7(**settings)(collate([_graph(*s, **kw) for s, kw in systems]))
+    assert out["heat_of_formation"].detach().numpy() == pytest.approx(alone, abs=1e-7)
+    assert bool(out["scf_converged"].all())
+    # the further starts of both schedules in one run (the structures once per schedule)
+    if split:
+        assert runs == [(2, False, 0), (2, False, 80), (1, True, 0), (2, True, 80)]
+    else:
+        assert runs == [(3, True, 0), (4, True, 80)]
+
+
+def test_converged_structures_keep_their_state(monkeypatch):
+    """In a batch, a structure stops at its own convergence: its density stays as it was while the others
+    iterate, and its result is that of the structure alone."""
+    settings = dict(reuse_density=False, scf_starts=((0.0, 0),), tol_density=1e-11, tol_energy=1e-12)
+    states = []
+    commit = scf.SCFLoop.commit
+
+    def tracked(self):
+        commit(self)
+        states.append((bool(self.active[0]), self.P[:, 0].clone()))
+    monkeypatch.setattr(scf.SCFLoop, "commit", tracked)
+    out = PM7(**settings)(collate([_graph(*WATER), _graph(*FCCH)]))
+    stopped = [P for active, P in states if not active]
+    assert stopped and len(stopped) < len(states) and all(torch.equal(P, stopped[0]) for P in stopped)
+    monkeypatch.setattr(scf.SCFLoop, "commit", commit)
+    water = PM7(**settings)(_graph(*WATER))
+    assert float(out["heat_of_formation"][0]) == pytest.approx(float(water["heat_of_formation"][0]), abs=1e-8)
+
+
+def test_restart_schedules_in_one_run(monkeypatch):
+    """Smearing schedules per structure in one batch reach the states of separate runs of each schedule."""
+    layout, H, W1, W2, n_alpha, n_beta, uhf, guess = _scf_raw_inputs(monkeypatch, _graph(*FCCH))
+    settings = (300, 1e-10, 1e-11)
+    alone = [scf.run_scf(layout, H, W1, W2, n_alpha, n_beta, uhf, guess, *settings, smearing=kt, smear_steps=n)
+             for kt, n in ((1.0, 80), (2.0, 25))]
+    rep = torch.tensor([0, 0])
+    sub, H2, W12, W22, _ = scf.restrict(layout, rep, H, W1, W2)
+    both = scf.run_scf(sub, H2, W12, W22, n_alpha[rep], n_beta[rep], uhf, guess[rep], *settings, smearing=2.0,
+                       smear_steps=80, schedule=(torch.tensor([1.0, 2.0]), torch.tensor([80, 25])))
+    expected = torch.cat([r.electronic for r in alone])
+    assert torch.allclose(both.electronic, expected, rtol=0.0, atol=1e-8) and bool(both.converged.all())
+
+
+def test_diis_rows_restart_their_history():
+    """The device form of DIIS forgets the history of the reset structures only: their extrapolations are those
+    of a fresh DIIS, the others' go on."""
+    rng = np.random.default_rng(1)
+    shape = [1, 4, 4]
+    data = [(torch.tensor(rng.normal(size=(2, *shape))), torch.tensor(rng.normal(size=(2, *shape))) * 0.5 ** k)
+            for k in range(6)]
+    kept = scf.DIIS(2, shape, 16, 4, torch.float64, torch.device("cpu"), True)
+    fresh = scf.DIIS(2, shape, 16, 4, torch.float64, torch.device("cpu"), True)
+    whole = scf.DIIS(2, shape, 16, 4, torch.float64, torch.device("cpu"), True)
+    for F, err in data[:3]:
+        kept.extrapolate(F, err)
+        whole.extrapolate(F, err)
+    kept.reset_rows(torch.tensor([True, False]))
+    for F, err in data[3:]:
+        out = kept.extrapolate(F, err)
+        assert torch.allclose(out[0], fresh.extrapolate(F, err)[0], rtol=1e-12, atol=1e-12)
+        assert torch.allclose(out[1], whole.extrapolate(F, err)[1], rtol=1e-12, atol=1e-12)
+
+
+def test_stagnant_iterations_are_not_converged(monkeypatch):
+    """A structure whose density and energy stop changing away from a stationary point is not converged: it
+    stays active and takes a plain Fock step, and a final density with a large orbital gradient is flagged."""
+    layout, H, W1, W2, n_alpha, n_beta, uhf, guess = _scf_inputs(monkeypatch, _graph(*FORMAMIDE))
+    P, n_occ, weight, filled, blocks = scf.scf_start(guess, n_alpha, n_beta, uhf, None)
+    loop = scf.SCFLoop(layout, H, W1, W2, n_occ, weight, uhf, 8, filled, blocks)
+    loop.start(P)
+    loop.settle(True, 1e-9, 1e-10)
+    loop.fock_step()
+    loop.diagonalize()
+    loop.occupy()
+    assert float(loop.dG.max()) > 1e-3                       # the guess is far from stationary
+    loop.dP.zero_()                                          # changes that vanish (a stagnant extrapolation)
+    loop.dE.zero_()
+    loop.commit()
+    assert bool(loop.stuck.all()) and bool(loop.active.all())
+    loop.fock_step()
+    assert torch.equal(loop.Fx, scf._fock_energy(layout, H, W1, W2, loop.P, uhf, None)[0])
+    loop.dP.zero_()
+    loop.dE.zero_()
+    result, _ = scf._converged(loop, layout, H, W1, W2, n_occ, weight, uhf, filled, blocks, 1, False, 0, 300,
+                               1e-9, 1e-10, 0.0)
+    assert not bool(result.converged.any())

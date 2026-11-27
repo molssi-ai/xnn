@@ -348,13 +348,18 @@ a second:
 
 .. code-block:: python
 
-   from xnn.sqmnn.models import PM7, nddo
+   from xnn.sqmnn.models import PM7, nddo, scf
 
+   scf.GRAPH_MEMORY = 0.3               # share of the GPU memory for graphs (before creating the model)
    model = PM7().to("cuda").eval()      # use_fast="auto": graphs from the third evaluation
    model.set_use_fast(False)            # always launched
    nddo.BUCKETS["cuda"] = False         # graphs per batch composition, without padding
 
-The eigenvalue problem runs between the replays. The results equal those of
+The graphs of one model take at most a fifth of the GPU memory by default.
+Buckets met after that run launched, with the same results.
+
+The eigenvalue problem runs between the replays. A batch of structures solves
+it on the GPU, and one or two small structures solve it on the host. The results equal those of
 launched evaluations up to round-off. In a molecular dynamics run or a geometry
 optimization on a GPU, each SCF starts from the previous step's orbitals and
 rotates them from its first iteration. That saves one diagonalization per step.

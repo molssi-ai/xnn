@@ -23,7 +23,8 @@ properties that depend on the density (dipole moments, charges, forces of
 force-trained parameters) have exact parameter gradients.
 """
 import warnings
-from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+import weakref
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -43,6 +44,7 @@ from .bond_order import (
     with_values,
 )
 from .bond_order import fock as bond_order_fock
+from .bond_order import index as bond_order_index
 from .bond_order import load as load_bond_order
 
 PAD_ENERGY = 1.0e4   # diagonal of the padding orbitals (eV)
@@ -65,18 +67,24 @@ CAPTURE_AFTER = 2
 STALL_PATIENCE = 40
 # the shift (eV) of the virtual orbitals in those iterations
 LEVEL_SHIFT = 1.0
+#: Fraction of a GPU's memory that the CUDA graphs of one model may hold (see :class:`SCFGraphCache`); compositions
+#: met when it is taken run launched.
+GRAPH_MEMORY = 0.2
 
 
-def _host_eigh(n: int) -> bool:
-    """Whether the eigenvalue problems of ``n`` basis functions on a GPU are solved on the host."""
-    return n <= 200
+def _host_eigh(n: int, count: int = 1) -> bool:
+    """Whether ``count`` eigenvalue problems of ``n`` basis functions on a GPU are solved on the host: one or two
+    small matrices (LAPACK, with the two transfers, is faster there than the GPU solver; a batch is not)."""
+    return count <= 2 and count * n <= 200
 
 
 def eigh(A: Tensor) -> Tuple[Tensor, Tensor]:
-    """``torch.linalg.eigh`` of symmetric matrices; on a GPU those of up to 200 basis functions on the host
-    (LAPACK, with the two transfers, is faster there than cusolver's solver of one matrix at a time; it is
-    never inside a CUDA graph)."""
-    if A.is_cuda and _host_eigh(A.shape[-1]):
+    """``torch.linalg.eigh`` of symmetric matrices; on a GPU one or two small ones on the host (see
+    :func:`_host_eigh`; never inside a CUDA graph)."""
+    count = 1
+    for d in A.shape[:-2]:
+        count *= d
+    if A.is_cuda and _host_eigh(A.shape[-1], count):
         e, v = torch.linalg.eigh(A.cpu())
         return e.to(A.device), v.to(A.device)
     return torch.linalg.eigh(A)
@@ -443,17 +451,23 @@ def _occupations(eps: Tensor, n_occ: Tensor, weight: float) -> Tensor:
 
 def _fermi_occupations(eps: Tensor, n_occ: Tensor, weight: float, kt: float) -> Tensor:
     """Fermi-Dirac occupations at temperature ``kt`` (eV) holding ``n_occ * weight`` electrons."""
+    return _fermi_occupations_at(eps, n_occ, weight, eps.new_full([eps.shape[1]], kt))
+
+
+def _fermi_occupations_at(eps: Tensor, n_occ: Tensor, weight: float, kt: Tensor) -> Tensor:
+    """:func:`_fermi_occupations` at a temperature ``kt`` ``(B,)`` (eV, positive) per structure."""
     target = n_occ.to(eps.dtype) * weight
     lo = eps.amin(-1) - 50.0 * kt - 1.0
     hi = eps.amax(-1) + 50.0 * kt + 1.0
+    t = kt[None, :, None]
     for _ in range(100):
         mu = 0.5 * (lo + hi)
-        f = weight * torch.sigmoid((mu.unsqueeze(-1) - eps) / kt)
+        f = weight * torch.sigmoid((mu.unsqueeze(-1) - eps) / t)
         more = f.sum(-1) > target
         hi = torch.where(more, mu, hi)
         lo = torch.where(more, lo, mu)
     mu = 0.5 * (lo + hi)
-    return weight * torch.sigmoid((mu.unsqueeze(-1) - eps) / kt)
+    return weight * torch.sigmoid((mu.unsqueeze(-1) - eps) / t)
 
 
 def _bmm(a: Tensor, b: Tensor) -> Tensor:
@@ -478,7 +492,8 @@ class DIIS:
     and their overlap matrix. With ``static`` the count stays on the device and the subspace is the whole ring
     with the empty slots decoupled (no host synchronization, fixed shapes: capturable in a CUDA graph; the form
     of every GPU run); otherwise the count is a host number and the subspace the filled slots. Both solve the
-    same equations."""
+    same equations. The device form keeps a count per structure, so that :meth:`reset_rows` can restart some.
+    """
 
     def __init__(self, nb: int, fock_shape: List[int], n_error: int, size: int, dtype: torch.dtype,
                  device: torch.device, static: bool = False):
@@ -488,9 +503,10 @@ class DIIS:
         self.focks = torch.zeros([nb, size] + fock_shape, dtype=dtype, device=device)
         self.errors = torch.zeros([nb, size, n_error], dtype=dtype, device=device)
         self.gram = torch.zeros([nb, size, size], dtype=dtype, device=device)
-        self.count = torch.zeros([], dtype=torch.long, device=device)
+        self.count = torch.zeros([nb], dtype=torch.long, device=device)
         self.eye = torch.eye(size, dtype=dtype, device=device)
         self.slots = torch.arange(size, device=device)
+        self.rows = torch.arange(nb, device=device)
 
     def reset(self) -> None:
         self.n = 0
@@ -499,6 +515,11 @@ class DIIS:
             self.gram.zero_()
             self.focks.zero_()
             self.errors.zero_()
+
+    def reset_rows(self, rows: Tensor) -> None:
+        """Forget the history of the structures ``rows`` (a mask; the device form)."""
+        self.count.masked_fill_(rows, 0)
+        self.gram.masked_fill_(rows[:, None, None], 0.0)
 
     def extrapolate(self, F: Tensor, err: Tensor) -> Tensor:
         if self.static:
@@ -528,21 +549,23 @@ class DIIS:
     def _static(self, F: Tensor, err: Tensor) -> Tensor:
         nb = F.shape[0]
         e = err.reshape(nb, -1)
-        slot = (self.count % self.size).reshape(1)
+        slot = self.count % self.size                                        # (B,)
         self.count.add_(1)
-        valid = self.slots < self.count                                      # the stored slots
-        self.errors.index_copy_(1, slot, e.unsqueeze(1))
-        self.focks.index_copy_(1, slot, F.unsqueeze(1))
+        valid = self.slots.unsqueeze(0) < self.count.unsqueeze(1)            # the stored slots (B, size)
+        at = torch.jit.annotate(List[Optional[Tensor]], [self.rows, slot])
+        self.errors.index_put_(at, e)
+        self.focks.index_put_(at, F)
         # the overlaps of the new error with the stored ones (the rest of the Gram matrix is kept)
         row = torch.where(valid, torch.bmm(self.errors, e.unsqueeze(-1)).squeeze(-1), 0.0)   # (B, size)
-        self.gram.index_copy_(1, slot, row.unsqueeze(1))
-        self.gram.index_copy_(2, slot, row.unsqueeze(2))
+        hit = self.slots.unsqueeze(0) == slot.unsqueeze(1)
+        gram = torch.where(hit.unsqueeze(-1), row.unsqueeze(1), self.gram)
+        self.gram.copy_(torch.where(hit.unsqueeze(1), row.unsqueeze(2), gram))
         pair = valid.unsqueeze(-1) & valid.unsqueeze(-2)
         scale = torch.where(valid, self.gram.diagonal(dim1=1, dim2=2).abs(), 0.0).amax(-1).clamp(min=1e-30)
         # min c^T B c with sum(c) = 1: c = B^-1 1 / (1^T B^-1 1), the solution of the bordered system; the slots
         # not yet filled are decoupled identity rows with a zero right-hand side
         Bm = torch.where(pair, self.gram / scale[:, None, None] + 1e-12 * self.eye, self.eye)
-        y, info = torch.linalg.solve_ex(Bm, valid.to(F.dtype).expand(nb, self.size))
+        y, info = torch.linalg.solve_ex(Bm, valid.to(F.dtype))
         c = y / y.sum(-1, keepdim=True)
         out = torch.bmm(c.unsqueeze(1), self.focks.reshape(nb, self.size, -1)).reshape(F.shape)
         use = (self.count >= 2) & (info == 0)
@@ -605,6 +628,18 @@ class SCFLoop:
         self.dP = H.new_zeros([B])
         self.dE = H.new_zeros([B])
         self.flag = torch.zeros([], dtype=torch.bool, device=H.device)
+        # the structures still iterating: one that converges (after the smeared iterations) keeps its state
+        self.active = torch.ones([B], dtype=torch.bool, device=H.device)
+        # whether converged structures stop (not during smeared iterations), and the tolerances (density, energy)
+        self.settling = torch.zeros([B], dtype=torch.bool, device=H.device)
+        self.tol = H.new_zeros([3])
+        # the largest orbital gradient (F P - P F) of every structure, and the structures whose density and energy
+        # stopped changing away from a stationary point (a stagnant extrapolation: they take a plain step)
+        self.dG = H.new_zeros([B])
+        self.stuck = torch.zeros([B], dtype=torch.bool, device=H.device)
+        # smearing per structure (initial temperatures, smeared iterations and their distinct counts); None: the
+        # run's own
+        self.schedule = torch.jit.annotate(Optional[Tuple[Tensor, Tensor, List[int]]], None)
         # the level shift of the virtual orbitals (eV): a stalled run's continuation, see solve_scf
         self.shift = 0.0
         # on a GPU the device-side form (that of the graphs), so that replays and launches compute the same numbers
@@ -624,7 +659,22 @@ class SCFLoop:
             self.C = self._put(self.C, C)
             self.occ = self._put(self.occ, occ)
         self.e_old.fill_(float("inf"))
+        self.active.fill_(True)
+        self.stuck.fill_(False)
         self.diis.reset()
+
+    def settle_rows(self, rows: Tensor) -> None:
+        """:meth:`settle` per structure (a mask; tolerances as set)."""
+        self.settling.copy_(rows)
+
+    def settle(self, on: bool, tol_density: float, tol_energy: float) -> None:
+        """Whether structures that meet the tolerances stop from the next commit on (in place: graphs read it);
+        the orbital gradient's tolerance is ``1e4 tol_density`` (eV)."""
+        self.tol.copy_(torch.cat([torch.full([1], tol_density, dtype=self.tol.dtype, device=self.tol.device),
+                                  torch.full([1], tol_energy, dtype=self.tol.dtype, device=self.tol.device),
+                                  torch.full([1], 1.0e4 * tol_density, dtype=self.tol.dtype,
+                                             device=self.tol.device)]))
+        self.settling.fill_(on)
 
     def fock_step(self) -> None:
         F, energy = _fock_energy(self.layout, self.H, self.W1, self.W2, self.P, self.unrestricted, self.bond_order)
@@ -634,10 +684,13 @@ class SCFLoop:
         # F and P are symmetric: P F = (F P)^T
         FP = _bmm(F, self.P)
         err = FP - FP.transpose(-1, -2)
-        self.Fx = self._put(self.Fx, self.diis.extrapolate(F.transpose(0, 1), err.transpose(0, 1)).transpose(0, 1))
+        grad = err.abs().amax(dim=(0, 2, 3))
+        self.dG = self._put(self.dG, torch.where(self.active, grad, torch.zeros_like(grad)))
+        Fx = self.diis.extrapolate(F.transpose(0, 1), err.transpose(0, 1)).transpose(0, 1)
+        self.Fx = self._put(self.Fx, torch.where(self.stuck[None, :, None, None], F, Fx))
         # changes within the round-off of the energy (16 units in its last place) count as none
         de = (energy - self.e_old).abs() - 3.552713678800501e-15 * energy.abs()
-        self.dE = self._put(self.dE, de.clamp(min=0.0))
+        self.dE = self._put(self.dE, torch.where(self.active, de.clamp(min=0.0), torch.zeros_like(de)))
         self.e_old.copy_(energy)
 
     def _changes(self, C: Tensor, occ: Tensor, m: Optional[int]) -> None:
@@ -645,7 +698,8 @@ class SCFLoop:
         self.C_new = self._put(self.C_new, C)
         self.occ_new = self._put(self.occ_new, occ)
         self.P_new = self._put(self.P_new, P_new)
-        self.dP = self._put(self.dP, (P_new - self.P).abs().amax(dim=(0, 2, 3)))
+        change = (P_new - self.P).abs().amax(dim=(0, 2, 3))
+        self.dP = self._put(self.dP, torch.where(self.active, change, torch.zeros_like(change)))
 
     def rotate_step(self) -> None:
         C, flag = _pseudo_diagonalize(self.Fx, self.C, self.occ > 0, self.blocks)
@@ -653,6 +707,15 @@ class SCFLoop:
         self._changes(C, self.occ, self.filled)
 
     def diagonalize(self) -> None:
+        if not self.static and not self.Fx.is_cuda:
+            # on a CPU only the structures still iterating (a GPU solves a batch at about the cost of one)
+            idx = self.active.nonzero().squeeze(-1)
+            if idx.numel() < self.active.numel():
+                if idx.numel() > 0:
+                    eps, C = eigh(self.Fx.index_select(1, idx))
+                    self.eps = self.eps.index_copy(1, idx, eps)
+                    self.C_new = self.C_new.index_copy(1, idx, C)
+                return
         eps, C = eigh(self.Fx)
         self.eps = self._put(self.eps, eps)
         self.C_new = self._put(self.C_new, C)
@@ -668,14 +731,29 @@ class SCFLoop:
             self.aufbau = occ
         self._changes(self.C_new, occ, self.filled)
 
+    def occupy_at(self, kt: Tensor) -> None:
+        """Fermi occupations at the temperatures ``kt`` ``(B,)`` where positive, aufbau ones elsewhere."""
+        smeared = kt > 0
+        fermi = _fermi_occupations_at(self.eps, self.n_occ, self.weight,
+                                      torch.where(smeared, kt, torch.ones_like(kt)))
+        occ = torch.where(smeared[None, :, None], fermi, _occupations(self.eps, self.n_occ, self.weight))
+        self._changes(self.C_new, occ, None)
+
     def commit(self) -> None:
-        self.P = self._put(self.P, self.P_new)
-        self.C = self._put(self.C, self.C_new)
-        self.occ = self._put(self.occ, self.occ_new)
+        a = self.active
+        self.P = self._put(self.P, torch.where(a[None, :, None, None], self.P_new, self.P))
+        self.C = self._put(self.C, torch.where(a[None, :, None, None], self.C_new, self.C))
+        self.occ = self._put(self.occ, torch.where(a[None, :, None], self.occ_new, self.occ))
+        # the structures converged in this iteration stop here; those whose density and energy no longer change
+        # while the orbital gradient stays take a plain step next
+        still = (self.dP < self.tol[0]) & (self.dE < self.tol[1]) & self.settling
+        done = still & (self.dG < self.tol[2])
+        self.stuck.copy_(still & ~done & a)
+        self.active.copy_(a & ~done)
 
     def changes(self) -> List[float]:
-        """The largest density and energy changes of the last iteration, on the host."""
-        return torch.jit.annotate(List[float], torch.stack([self.dP.max(), self.dE.max()]).tolist())
+        """The largest density and energy changes and orbital gradient of the last iteration, on the host."""
+        return torch.jit.annotate(List[float], torch.stack([self.dP.max(), self.dE.max(), self.dG.max()]).tolist())
 
 
 class SCFGraphs:
@@ -703,12 +781,12 @@ class SCFGraphs:
         self.loop = SCFLoop(self.layout if self.layout is not None else layout, self.H, self.W1, self.W2,
                             n_occ.clone(), weight, unrestricted, diis_size, filled, blocks, static=True,
                             bond_order=self.bond_order)
-        self.check = H.new_zeros([2])
-        self.host_check = torch.empty(2, dtype=H.dtype, pin_memory=True)
+        self.check = H.new_zeros([3])
+        self.host_check = torch.empty(3, dtype=H.dtype, pin_memory=True)
         # the energy changes of an iteration, kept when the next Fock step runs ahead (see _GraphedLoop)
         self.dE_kept = self.loop.dE.clone()
         self.host: Optional[Tuple[Tensor, Tensor, Tensor]] = None
-        if _host_eigh(H.shape[-1]):
+        if _host_eigh(H.shape[-1], self.loop.Fx.shape[0] * self.loop.Fx.shape[1]):
             self.host = tuple(torch.empty(x.shape, dtype=x.dtype, pin_memory=True)
                               for x in (self.loop.Fx, self.loop.eps, self.loop.C_new))
         stages = {stage: getattr(self.loop, stage) for stage in self.STAGES[:-1]}
@@ -732,7 +810,7 @@ class SCFGraphs:
     def _occupy_commit(self) -> None:
         self.loop.occupy()
         self.loop.commit()
-        self.check.copy_(torch.stack([self.loop.dP.max(), self.loop.dE.max()]))
+        self.check.copy_(torch.stack([self.loop.dP.max(), self.loop.dE.max(), self.loop.dG.max()]))
         self.dE_kept.copy_(self.loop.dE)
 
     def diagonalize(self, prefetched: bool = False) -> None:
@@ -786,12 +864,32 @@ class SCFGraphs:
 
 class SCFGraphCache:
     """:class:`SCFGraphs` per batch composition, captured after :data:`CAPTURE_AFTER` launched evaluations of a
-    composition and kept for the ``capacity`` most recent ones."""
+    composition and kept for the ``capacity`` most recent ones.
 
-    def __init__(self, capacity: int = 8):
+    It also keeps the account of the device memory taken by the captures of a model (its own entries and those
+    charged to it with :meth:`charged`): no new capture starts while they hold ``memory`` (a fraction of the
+    GPU's memory, :data:`GRAPH_MEMORY`); the memory of evicted graphs is free again once they are released.
+    """
+
+    def __init__(self, capacity: int = 8, memory: Optional[float] = None):
         self.capacity = capacity
+        self.memory = GRAPH_MEMORY if memory is None else memory
         self.entries: Dict[tuple, SCFGraphs] = {}
         self.seen: Dict[tuple, int] = {}
+        self.held: "weakref.WeakKeyDictionary[object, int]" = weakref.WeakKeyDictionary()
+
+    def room(self) -> bool:
+        """Whether the graphs held leave room for another capture on the current GPU."""
+        total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+        return sum(self.held.values()) < self.memory * total
+
+    def charged(self, work: Callable[[], object], owner: Optional[object] = None):
+        """``work()`` (a capture), with the device memory it takes charged to ``owner`` (else to its result)."""
+        before = torch.cuda.memory_allocated()
+        out = work()
+        target = out if owner is None else owner
+        self.held[target] = self.held.get(target, 0) + max(0, torch.cuda.memory_allocated() - before)
+        return out
 
     def get(self, key: tuple, build) -> Optional[SCFGraphs]:
         if key in self.entries:
@@ -802,9 +900,9 @@ class SCFGraphCache:
         self.seen[key] = self.seen.pop(key, 0) + 1
         while len(self.seen) > 2 * self.capacity:
             self.seen.pop(next(iter(self.seen)))
-        if self.seen[key] <= CAPTURE_AFTER:
+        if self.seen[key] <= CAPTURE_AFTER or not self.room():
             return None
-        graphs = build()
+        graphs = self.charged(build)
         self.entries[key] = graphs
         while len(self.entries) > self.capacity:
             self.entries.pop(next(iter(self.entries)))
@@ -816,10 +914,13 @@ class SCFGraphCache:
 
     # graphs belong to one process and device: copies and pickles of a model start with an empty cache
     def __getstate__(self):
-        return {"capacity": self.capacity, "entries": {}, "seen": {}}
+        return {"capacity": self.capacity, "memory": self.memory}
+
+    def __setstate__(self, state):
+        self.__init__(state["capacity"], state.get("memory"))
 
     def __deepcopy__(self, memo):
-        return SCFGraphCache(self.capacity)
+        return SCFGraphCache(self.capacity, self.memory)
 
 
 class _GraphedLoop:
@@ -895,7 +996,8 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
             smear_steps: int = 25, spin_guess: Optional[Tensor] = None,
             pseudo_diagonalization: Optional[float] = None, graph_cache: Optional[SCFGraphCache] = None,
             graph_key: tuple = (), orbitals: Optional[Tensor] = None,
-            occupations: Optional[Tensor] = None, bond_order: Optional[BondOrder] = None) -> SCFResult:
+            occupations: Optional[Tensor] = None, bond_order: Optional[BondOrder] = None,
+            schedule: Optional[Tuple[Tensor, Tensor]] = None) -> SCFResult:
     """Solve the SCF equations of a batch (no gradient tracking).
 
     Parameters
@@ -942,6 +1044,9 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
         iterations and with pseudo-diagonalization on, the iterations rotate them from the first one.
     bond_order : BondOrder, optional
         The pairs of the bond-order term (:mod:`~.bond_order`), whose energy and Fock matrices enter the SCF.
+    schedule : tuple of Tensor, optional
+        Smearing per structure, ``(smearing (B,), smear_steps (B,))``, in place of ``smearing`` and
+        ``smear_steps``: runs of several schedules in one batch.
 
     Returns
     -------
@@ -959,7 +1064,7 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
         if not (_per_device(WARM_ORBITALS, H.device) and smear_steps == 0 and rotate > 0.0):
             orbitals = occupations = None
         graphs = None
-        if graph_cache is not None and H.is_cuda and smear_steps == 0:
+        if graph_cache is not None and H.is_cuda and smear_steps == 0 and schedule is None:
             key = (graph_key, tuple(H.shape), H.dtype, unrestricted, diis_size, filled, tuple(blocks),
                    tuple(tuple(Wc.shape) for _, _, _, Wc, _ in W2p),
                    None if bond_order is None else (tuple(bond_order.gather.shape), bond_order.masked))
@@ -969,7 +1074,7 @@ def run_scf(layout: Layout, H: Tensor, W1: Tensor, W2: Union[Tensor, PackedPairs
             return scf_solve(layout, H, W1p, W2p, n_alpha, n_beta, unrestricted, guess, max_iter, tol_density,
                              tol_energy, diis_size, smearing, smear_steps, spin_guess, pseudo_diagonalization,
                              _per_device(PSEUDO_MIN_BASIS, H.device), orbitals, occupations, bond_order,
-                             STALL_PATIENCE, LEVEL_SHIFT)
+                             STALL_PATIENCE, LEVEL_SHIFT, schedule)
         graphs.load(H, W1p, W2p, P, orbitals, occupations, layout, n_occ, bond_order)
         return solve_scf(_GraphedLoop(graphs), layout, H, W1p, W2p, n_occ, weight, unrestricted, diis_size, filled,
                          blocks, max_iter, tol_density, tol_energy, smearing, smear_steps, rotate,
@@ -981,7 +1086,8 @@ def scf_solve(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs,
               diis_size: int, smearing: float, smear_steps: int, spin_guess: Optional[Tensor],
               pseudo_diagonalization: float, min_basis: int, orbitals: Optional[Tensor] = None,
               occupations: Optional[Tensor] = None, bond_order: Optional[BondOrder] = None,
-              patience: int = 40, shift: float = 1.0) -> SCFResult:
+              patience: int = 40, shift: float = 1.0,
+              schedule: Optional[Tuple[Tensor, Tensor]] = None) -> SCFResult:
     """:func:`run_scf` on packed integrals without graphs (detached inputs); pseudo-diagonalization from
     ``min_basis`` basis functions on, rotating the given ``orbitals`` (with their ``occupations``) from the
     first iteration where it is on and nothing is smeared; ``patience`` and ``shift`` as in :func:`solve_scf`
@@ -992,6 +1098,14 @@ def scf_solve(layout: Layout, H: Tensor, W1: Dict[str, Tensor], W2: PackedPairs,
     if smear_steps != 0 or rotate == 0.0:
         orbitals = occupations = None
     loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, False, bond_order)
+    if schedule is not None:
+        # smearing per structure: the device form of DIIS, whose history restarts per structure
+        steps = schedule[1].to(torch.long)
+        ends = torch.jit.annotate(List[int], torch.unique(steps).tolist())
+        loop.schedule = (schedule[0], steps, ends)
+        S, n = P.shape[0], H.shape[-1]
+        loop.diis = DIIS(H.shape[0], [S, n, n], S * n * n, diis_size, H.dtype, H.device, True)
+        smear_steps = max(ends)
     loop.start(P, orbitals, occupations)
     return solve_scf(loop, layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, max_iter,
                      tol_density, tol_energy, smearing, smear_steps, rotate,
@@ -1064,29 +1178,53 @@ def _iterate(loop: SCFLoop, max_iter: int, smear_steps: int, smearing: float, ro
     ``patience`` iterations after the smeared ones; 0 never). A loop ``seeded`` with orbitals rotates them from the
     first iteration."""
     it, have_orbitals, change, de_max, rotated = 0, seeded, 0.0 if seeded else float("inf"), float("inf"), False
+    dg_max, tol_gradient = float("inf"), 1.0e4 * tol_density
     best, best_it, stalled = float("inf"), 0, False
+    loop.settle(False, tol_density, tol_energy)
+    schedule = loop.schedule
+    ends = torch.jit.annotate(List[int], [])
+    if schedule is not None:
+        ends = schedule[2]
+        smear_steps = max(ends)
     while it < max_iter:
         it += 1
-        if it == smear_steps:
-            loop.diis.reset()       # forget the fractional-occupation history
+        kt_at = torch.jit.annotate(Optional[Tensor], None)
+        if schedule is not None:
+            kt0, steps = schedule[0], schedule[1]
+            for e in ends:
+                if it == e:
+                    loop.diis.reset_rows(steps == e)
+            loop.settle_rows(steps.clamp(min=1) <= it)
+            if it < smear_steps:
+                kt_at = torch.where(steps > it, kt0 * (1.0 - it / steps.clamp(min=1).to(kt0.dtype)),
+                                    torch.zeros_like(kt0))
+        else:
+            if it == smear_steps:
+                loop.diis.reset()       # forget the fractional-occupation history
+            if it == max(smear_steps, 1):
+                loop.settle(True, tol_density, tol_energy)
         loop.fock_step()
         kt = smearing * (1.0 - it / smear_steps) if it < smear_steps else 0.0
         rotated = False
         if kt == 0.0 and it > smear_steps and change < rotate and have_orbitals:
             loop.rotate_step()
             values = torch.jit.annotate(List[float], torch.stack([loop.dP.max(), loop.dE.max(),
-                                                                  loop.flag.to(loop.dP.dtype)]).tolist())
-            change, de_max = values[0], values[1]
+                                                                  loop.flag.to(loop.dP.dtype),
+                                                                  loop.dG.max()]).tolist())
+            change, de_max, dg_max = values[0], values[1], values[3]
             rotated = values[2] == 0.0
         if not rotated:
             loop.diagonalize()
-            loop.occupy(kt)
+            if kt_at is not None:
+                loop.occupy_at(kt_at)
+            else:
+                loop.occupy(kt)
             values = loop.changes()
-            change, de_max = values[0], values[1]
+            change, de_max, dg_max = values[0], values[1], values[2]
         loop.commit()
         have_orbitals = True
         # every structure is converged when the largest changes are below the thresholds
-        if change < tol_density and de_max < tol_energy and it >= smear_steps:
+        if change < tol_density and de_max < tol_energy and dg_max < tol_gradient and it >= smear_steps:
             break
         if patience > 0 and it > smear_steps:
             if change < best:
@@ -1118,16 +1256,21 @@ def solve_scf(loop: SCFLoop, layout: Layout, H: Tensor, W1: Dict[str, Tensor], W
                           loop.bond_order)
         shifted.shift = shift
         shifted.start(loop.P.clone())
+        shifted.active.copy_(loop.active)               # the converged structures stay as they are
         rest, rotated, _ = _iterate(shifted, max_iter - it, 0, smearing, 0.0, tol_density, tol_energy)
         loop, it, check = shifted, it + rest, 1.0
     result, P_aufbau = _converged(loop, layout, H, W1, W2, n_occ, weight, unrestricted, filled, blocks, it, rotated,
                                   smear_steps, max_iter, tol_density, tol_energy, check)
     if P_aufbau is None:
         return result
-    # a rotated solution with another occupation goes on with full diagonalizations
+    # a rotated solution with another occupation goes on with full diagonalizations (those structures, and the
+    # ones still iterating)
+    moved = (P_aufbau - result.densities).abs().amax(dim=(0, 2, 3)) > max(1e3 * tol_density, 1e-6)
+    still = loop.active | moved
     loop = SCFLoop(layout, H, W1, W2, n_occ, weight, unrestricted, diis_size, filled, blocks, False,
                    loop.bond_order)
-    loop.start(P_aufbau)
+    loop.start(torch.where(moved[None, :, None, None], P_aufbau, result.densities))
+    loop.active.copy_(still)
     rest, _, _ = _iterate(loop, max_iter - it, 0, smearing, 0.0, tol_density, tol_energy)
     result, _ = _converged(loop, layout, H, W1, W2, n_occ, weight, unrestricted, filled, blocks, rest, False, 0,
                            max_iter - it, tol_density, tol_energy, 0.0)
@@ -1147,6 +1290,9 @@ def _converged(loop: SCFLoop, layout: Layout, H: Tensor, W1: Dict[str, Tensor], 
         converged = torch.zeros_like(converged)
     P = loop.P.clone()
     F, e_el = _fock_energy(layout, H, W1, W2, P, unrestricted, loop.bond_order)
+    # and a stationary point: the orbital gradient of the final density
+    FP = _bmm(F, P)
+    converged = converged & ((FP - FP.transpose(-1, -2)).abs().amax(dim=(0, 2, 3)) < 1.0e4 * tol_density)
     # after rotations the converged orbitals separate the occupied and virtual spaces of F (to the SCF
     # tolerance): the eigenpairs from the two smaller blocks, a full diagonalization otherwise
     pairs = _block_eigenpairs(F, loop.C, blocks) if rotated and it < max_iter else None
@@ -1306,11 +1452,98 @@ def search_guess(guess: Tensor, layout: Layout, n_alpha: Tensor, n_beta: Tensor,
     return torch.diag_embed(a + b), torch.stack([torch.diag_embed(a), torch.diag_embed(b)])
 
 
+def restart_mask(first: SCFResult, open_shell: Tensor, restart_gap: float) -> Tensor:
+    """The structures ``(B,)`` whose cold start runs its further starts after ``first``: the open shells
+    (``open_shell``, those solved unrestricted), those not converged, and those with a frontier gap below
+    ``restart_gap`` (eV), where the first run may have settled in an excited aufbau state."""
+    return open_shell | (~first.converged) | (frontier_gap(first) < restart_gap)
+
+
 def needs_restart(first: SCFResult, unrestricted: bool, restart_gap: float) -> bool:
-    """Whether a cold start runs its further starts after ``first``: unrestricted, a structure not converged, or a
-    frontier gap below ``restart_gap`` (eV), where the first run may have settled in an excited aufbau state."""
-    return (unrestricted or not bool(first.converged.all())
-            or bool((frontier_gap(first) < restart_gap).any()))
+    """Whether a batch solved unrestricted, or any of its structures, needs the further starts
+    (:func:`restart_mask`)."""
+    return unrestricted or bool(restart_mask(first, torch.zeros_like(first.converged), restart_gap).any())
+
+
+def restrict(layout: Layout, idx: Tensor, H: Tensor, W1: Tensor, W2: Tensor,
+             bond_order: Optional[BondOrder] = None) -> Tuple[Layout, Tensor, Tensor, Tensor, Optional[BondOrder]]:
+    """The SCF inputs of the structures ``idx`` of a batch, in that order (a structure may come more than once):
+    their layout (same basis size), core Hamiltonians, one- and two-center integrals (``(N, ...)`` and
+    ``(P, ...)``) and bond-order pairs. Atoms without orbitals (the ghosts of a bucket) and their pairs are left
+    out."""
+    device = H.device
+    keep = (layout.ao < layout.n_basis).any(1)
+    struct = torch.where(keep, layout.atom_struct, torch.full_like(layout.atom_struct, -1))
+    # the position of every kept atom among the kept atoms of its structure
+    onehot = (struct.unsqueeze(1) == torch.arange(layout.n_struct, device=device).unsqueeze(0)).to(torch.long)
+    local = (onehot.cumsum(0) - onehot).gather(1, layout.atom_struct.clamp(min=0).unsqueeze(1)).squeeze(1)
+    pair_struct = torch.where(keep[layout.pair_a] & keep[layout.pair_b], layout.atom_struct[layout.pair_a],
+                              torch.full_like(layout.pair_a, -1))
+    atoms, owner, pairs, pa, pb = [], [], [], [], []
+    bo_rows, bo_a, bo_b = [], [], []
+    bo_struct = torch.full([0], -1, dtype=torch.long, device=device)
+    if bond_order is not None:
+        bo_struct = torch.where(keep[bond_order.atom_a] & keep[bond_order.atom_b], bond_order.struct,
+                                torch.full_like(bond_order.struct, -1))
+    offset = 0
+    for j, s in enumerate(torch.jit.annotate(List[int], idx.tolist())):
+        a = (struct == s).nonzero().squeeze(-1)
+        atoms.append(a)
+        owner.append(torch.full_like(a, j))
+        p = (pair_struct == s).nonzero().squeeze(-1)
+        pairs.append(p)
+        pa.append(offset + local[layout.pair_a[p]])
+        pb.append(offset + local[layout.pair_b[p]])
+        if bond_order is not None:
+            q = (bo_struct == s).nonzero().squeeze(-1)
+            bo_rows.append(q)
+            bo_a.append(offset + local[bond_order.atom_a[q]])
+            bo_b.append(offset + local[bond_order.atom_b[q]])
+        offset += int(a.numel())
+    atom_idx, pair_idx = torch.cat(atoms), torch.cat(pairs)
+    n_sub = int(idx.numel())
+    sub = Layout(n_sub, layout.n_basis, layout.k, torch.cat(owner), layout.ao[atom_idx], torch.cat(pa),
+                 torch.cat(pb), layout.valid[idx], layout.group_min_pairs)
+    bo: Optional[BondOrder] = None
+    if bond_order is not None:
+        rows = torch.cat(bo_rows)
+        if rows.numel() > 0:
+            bo = bond_order_index(sub.atom_struct, sub.ao, torch.cat(bo_a), torch.cat(bo_b), n_sub, layout.n_basis,
+                                  bond_order.coef[rows], bond_order.lower[rows], bond_order.width[rows])
+    return sub, H[idx], W1[atom_idx], W2[pair_idx], bo
+
+
+def take_structures(result: SCFResult, idx: Tensor) -> SCFResult:
+    """The structures ``idx`` of a result."""
+    return SCFResult(result.densities[:, idx], result.orbitals[:, idx], result.energies[:, idx],
+                     result.occupations[:, idx], result.iterations, result.converged[idx], result.electronic[idx])
+
+
+def put_structures(result: SCFResult, part: SCFResult, idx: Tensor) -> SCFResult:
+    """``result`` with the structures ``idx`` replaced by those of ``part`` (of the same spin form)."""
+    return SCFResult(result.densities.index_copy(1, idx, part.densities),
+                     result.orbitals.index_copy(1, idx, part.orbitals),
+                     result.energies.index_copy(1, idx, part.energies),
+                     result.occupations.index_copy(1, idx, part.occupations),
+                     max(result.iterations, part.iterations), result.converged.index_copy(0, idx, part.converged),
+                     result.electronic.index_copy(0, idx, part.electronic))
+
+
+def unrestricted_form(result: SCFResult) -> SCFResult:
+    """A closed-shell (RHF) result as the equal-spin solution of the unrestricted equations."""
+    if result.densities.shape[0] == 2:
+        return result
+    return SCFResult(torch.cat([0.5 * result.densities] * 2), torch.cat([result.orbitals] * 2),
+                     torch.cat([result.energies] * 2), torch.cat([0.5 * result.occupations] * 2),
+                     result.iterations, result.converged, result.electronic)
+
+
+def empty_result(B: int, like: SCFResult) -> SCFResult:
+    """A result of ``B`` structures of the shapes of ``like`` (filled by :func:`put_structures`)."""
+    S, n = like.densities.shape[0], like.densities.shape[-1]
+    z = like.densities.new_zeros([S, B, n, n])
+    e = like.energies.new_zeros([S, B, n])
+    return SCFResult(z, z.clone(), e, e.clone(), 0, like.converged.new_zeros([B]), like.electronic.new_zeros([B]))
 
 
 def lowest(results: List[SCFResult]) -> SCFResult:
